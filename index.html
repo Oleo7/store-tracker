@@ -2,8 +2,10 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Store Visits</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>Store Tracker</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -14,9 +16,62 @@
       min-height: 100vh;
     }
 
-    /* ── Views ── */
     .view { display: none; }
     .view.active { display: block; }
+
+    /* ── Loaders ── */
+    #app-loader {
+      position: fixed;
+      inset: 0;
+      background: #1a1a2e;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      z-index: 100;
+      gap: 16px;
+      transition: opacity 0.3s;
+    }
+    #app-loader.hidden {
+      opacity: 0;
+      pointer-events: none;
+    }
+    #app-loader h2 {
+      color: #fff;
+      font-size: 1.2rem;
+      font-weight: 700;
+    }
+    #app-loader p {
+      color: rgba(255,255,255,0.5);
+      font-size: 0.82rem;
+    }
+    .spinner {
+      width: 36px;
+      height: 36px;
+      border: 3px solid rgba(255,255,255,0.2);
+      border-top-color: #fff;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ── Detail overlay loader ── */
+    #detail-loader {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(240,242,245,0.85);
+      z-index: 50;
+      align-items: center;
+      justify-content: center;
+    }
+    #detail-loader.show {
+      display: flex;
+    }
+    #detail-loader .spinner {
+      border-color: rgba(26,26,46,0.2);
+      border-top-color: #1a1a2e;
+    }
 
     /* ── Header ── */
     .header {
@@ -30,8 +85,8 @@
       align-items: center;
       gap: 12px;
     }
-    .header-text h1  { font-size: 1.15rem; font-weight: 700; }
-    .header-text p   { font-size: 0.75rem; opacity: 0.6; margin-top: 2px; }
+    .header-text h1 { font-size: 1.15rem; font-weight: 700; }
+    .header-text p  { font-size: 0.75rem; opacity: 0.6; margin-top: 2px; }
 
     .back-btn {
       background: rgba(255,255,255,0.15);
@@ -46,41 +101,52 @@
     }
     .back-btn:active { opacity: 0.7; }
 
-    /* ── Filter bar ── */
-    .filters {
-      display: flex;
-      gap: 8px;
-      padding: 12px 16px;
-      overflow-x: auto;
+    /* ── Search + filter bar ── */
+    .toolbar {
+      padding: 10px 14px;
       background: #fff;
       border-bottom: 1px solid #e8eaf0;
       position: sticky;
       top: 58px;
       z-index: 9;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
     }
-    .filters::-webkit-scrollbar { display: none; }
-    .filter-btn {
-      white-space: nowrap;
-      padding: 6px 14px;
-      border-radius: 20px;
-      border: 1.5px solid #dde1ea;
-      background: #fff;
-      font-size: 0.8rem;
-      font-weight: 500;
-      cursor: pointer;
-      color: #555;
-      transition: all 0.15s;
+    .toolbar input[type="search"] {
+      width: 100%;
+      border: 1.5px solid #e8eaf0;
+      border-radius: 10px;
+      padding: 9px 14px;
+      font-size: 0.88rem;
+      font-family: inherit;
+      outline: none;
+      background: #f7f8fa;
     }
-    .filter-btn.active {
-      background: #1a1a2e;
-      color: #fff;
-      border-color: #1a1a2e;
-    }
+    .toolbar input[type="search"]:focus { border-color: #1a1a2e; background: #fff; }
 
-    /* ── Store list ── */
+    .dropdowns {
+      display: flex;
+      gap: 8px;
+    }
+    .dropdowns select {
+      flex: 1;
+      border: 1.5px solid #e8eaf0;
+      border-radius: 10px;
+      padding: 7px 10px;
+      font-size: 0.8rem;
+      font-family: inherit;
+      background: #f7f8fa;
+      color: #555;
+      outline: none;
+      cursor: pointer;
+    }
+    .dropdowns select:focus { border-color: #1a1a2e; }
+
+    /* ── Customer list ── */
     .list-body { padding: 12px 14px 40px; }
 
-    .store-card {
+    .customer-card {
       background: #fff;
       border-radius: 14px;
       padding: 14px 16px;
@@ -89,7 +155,7 @@
       cursor: pointer;
       transition: transform 0.1s;
     }
-    .store-card:active { transform: scale(0.985); }
+    .customer-card:active { transform: scale(0.985); }
 
     .card-top {
       display: flex;
@@ -97,21 +163,19 @@
       align-items: flex-start;
       gap: 8px;
     }
-    .store-name { font-size: 1rem; font-weight: 700; }
-    .store-area { font-size: 0.78rem; color: #777; margin-top: 2px; }
+    .customer-name { font-size: 1rem; font-weight: 700; }
+    .customer-sub  { font-size: 0.78rem; color: #777; margin-top: 2px; }
 
-    .badge {
+    .segment-badge {
       font-size: 0.7rem;
       font-weight: 600;
       padding: 3px 10px;
       border-radius: 20px;
       white-space: nowrap;
       flex-shrink: 0;
+      background: #e0e7ff;
+      color: #3730a3;
     }
-    .badge-Visited     { background: #d1fae5; color: #065f46; }
-    .badge-Follow-up   { background: #fef3c7; color: #92400e; }
-    .badge-Pending     { background: #e0e7ff; color: #3730a3; }
-    .badge-Not-visited { background: #fee2e2; color: #991b1b; }
 
     .card-meta {
       display: flex;
@@ -119,17 +183,8 @@
       margin-top: 10px;
       font-size: 0.75rem;
       color: #888;
+      flex-wrap: wrap;
     }
-    .card-meta span { display: flex; align-items: center; gap: 4px; }
-
-    .priority-dot {
-      width: 8px; height: 8px;
-      border-radius: 50%;
-      display: inline-block;
-    }
-    .priority-High   { background: #ef4444; }
-    .priority-Medium { background: #f59e0b; }
-    .priority-Low    { background: #6b7280; }
 
     .state-msg {
       text-align: center;
@@ -154,8 +209,8 @@
       align-items: flex-start;
       margin-bottom: 14px;
     }
-    .detail-store-name { font-size: 1.15rem; font-weight: 700; }
-    .detail-area       { font-size: 0.8rem; color: #777; margin-top: 3px; }
+    .detail-customer-name { font-size: 1.15rem; font-weight: 700; }
+    .detail-sub           { font-size: 0.8rem; color: #777; margin-top: 3px; }
 
     .info-row {
       display: flex;
@@ -164,74 +219,13 @@
       padding: 9px 0;
       border-top: 1px solid #f0f2f5;
       font-size: 0.84rem;
+      gap: 12px;
     }
-    .info-row .label { color: #888; }
+    .info-row .label { color: #888; flex-shrink: 0; }
+    .info-row .value { text-align: right; font-weight: 500; }
     .info-row a { color: #1a1a2e; text-decoration: none; font-weight: 600; }
 
-    .section-card {
-      background: #fff;
-      border-radius: 14px;
-      padding: 16px;
-      margin-bottom: 12px;
-      box-shadow: 0 1px 4px rgba(0,0,0,0.07);
-    }
-    .section-label {
-      font-size: 0.72rem;
-      font-weight: 700;
-      text-transform: uppercase;
-      letter-spacing: 0.06em;
-      color: #aaa;
-      margin-bottom: 10px;
-    }
-
-    .status-grid {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 8px;
-    }
-    .status-opt {
-      border: 2px solid #e8eaf0;
-      border-radius: 10px;
-      padding: 10px 8px;
-      text-align: center;
-      font-size: 0.82rem;
-      font-weight: 600;
-      cursor: pointer;
-      color: #555;
-      transition: all 0.15s;
-    }
-    .status-opt.selected {
-      border-color: #1a1a2e;
-      background: #1a1a2e;
-      color: #fff;
-    }
-
-    input[type="date"] {
-      width: 100%;
-      border: 1.5px solid #e8eaf0;
-      border-radius: 10px;
-      padding: 9px 12px;
-      font-size: 0.85rem;
-      font-family: inherit;
-      outline: none;
-    }
-    input[type="date"]:focus { border-color: #1a1a2e; }
-
-    textarea {
-      width: 100%;
-      border: 1.5px solid #e8eaf0;
-      border-radius: 10px;
-      padding: 10px 12px;
-      font-size: 0.85rem;
-      font-family: inherit;
-      resize: none;
-      outline: none;
-      transition: border-color 0.15s;
-      min-height: 100px;
-    }
-    textarea:focus { border-color: #1a1a2e; }
-
-    .save-btn {
+    .action-btn {
       width: 100%;
       background: #1a1a2e;
       color: #fff;
@@ -244,10 +238,88 @@
       transition: opacity 0.15s;
       margin-top: 4px;
     }
-    .save-btn:active  { opacity: 0.8; }
-    .save-btn:disabled { opacity: 0.5; cursor: default; }
+    .action-btn:active   { opacity: 0.8; }
+    .action-btn:disabled { opacity: 0.5; cursor: default; }
+    .action-btn.secondary {
+      background: #fff;
+      color: #1a1a2e;
+      border: 2px solid #1a1a2e;
+      margin-top: 10px;
+    }
 
-    /* ── Toast ── */
+    .form-field {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      margin-bottom: 14px;
+    }
+    .form-field label {
+      font-size: 0.75rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: #aaa;
+    }
+    .form-field input,
+    .form-field select,
+    .form-field textarea {
+      width: 100%;
+      border: 1.5px solid #e8eaf0;
+      border-radius: 10px;
+      padding: 9px 12px;
+      font-size: 16px;
+      font-family: inherit;
+      outline: none;
+      background: #fff;
+    }
+    .form-field input:focus,
+    .form-field select:focus,
+    .form-field textarea:focus { border-color: #1a1a2e; }
+    .form-field textarea { min-height: 80px; resize: none; }
+
+    /* ── Contact history ── */
+    .contact-item {
+      border-top: 1px solid #f0f2f5;
+      padding: 10px 0;
+      cursor: pointer;
+    }
+    .contact-item:first-child { border-top: none; }
+    .contact-summary {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+    }
+    .contact-summary .date { font-size: 0.82rem; font-weight: 600; color: #1a1a2e; }
+    .contact-summary .meta { font-size: 0.78rem; color: #888; }
+    .contact-summary .chevron { font-size: 0.7rem; color: #aaa; transition: transform 0.2s; }
+    .contact-item.expanded .chevron { transform: rotate(180deg); }
+    .contact-details {
+      display: none;
+      margin-top: 10px;
+      background: #f7f8fa;
+      border-radius: 10px;
+      padding: 10px 12px;
+    }
+    .contact-item.expanded .contact-details { display: block; }
+    .contact-detail-row {
+      display: flex;
+      justify-content: space-between;
+      font-size: 0.8rem;
+      padding: 4px 0;
+      gap: 12px;
+    }
+    .contact-detail-row .label { color: #888; flex-shrink: 0; }
+    .contact-detail-row .value { text-align: right; }
+    .contact-comment {
+      font-size: 0.8rem;
+      color: #444;
+      margin-top: 6px;
+      padding-top: 6px;
+      border-top: 1px solid #e8eaf0;
+      line-height: 1.5;
+    }
+
     .toast {
       position: fixed;
       bottom: 30px;
@@ -268,29 +340,154 @@
       opacity: 1;
       transform: translateX(-50%) translateY(0);
     }
+
+    /* ── Route mode button in header ── */
+    .route-mode-btn {
+      background: rgba(255,255,255,0.15);
+      border: none;
+      color: #fff;
+      border-radius: 10px;
+      padding: 7px 10px;
+      font-size: 0.78rem;
+      font-weight: 600;
+      cursor: pointer;
+      white-space: nowrap;
+      flex-shrink: 0;
+      font-family: inherit;
+    }
+    .route-mode-btn:active { opacity: 0.7; }
+
+    /* ── Route selection on customer cards ── */
+    .customer-card .check {
+      display: none;
+      width: 24px; height: 24px;
+      border-radius: 50%;
+      border: 2px solid #dde1ea;
+      align-items: center; justify-content: center;
+      flex-shrink: 0;
+      font-size: 1rem;
+      color: transparent;
+      transition: all 0.15s;
+    }
+    .route-mode .customer-card .check { display: flex; }
+    .route-mode .customer-card { cursor: pointer; }
+    .route-mode .customer-card.no-coords { opacity: 0.4; cursor: not-allowed; }
+    .customer-card.route-selected .check {
+      background: #22c55e;
+      border-color: #22c55e;
+      color: #fff;
+    }
+
+    /* ── Route action bar ── */
+    .route-action-bar {
+      position: fixed;
+      bottom: 0; left: 0; right: 0;
+      background: #fff;
+      border-top: 1px solid #e8eaf0;
+      padding: 10px 14px 20px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      z-index: 40;
+      box-shadow: 0 -2px 10px rgba(0,0,0,0.08);
+    }
+    .route-selected-count {
+      font-size: 0.82rem;
+      color: #888;
+      font-weight: 500;
+    }
+
+    #view-map .header { position: sticky; top: 0; z-index: 10; }
+
+    #view-map {
+      flex-direction: column;
+    }
+    #view-map.active { display: flex; height: 100vh; }
+    #map {
+      flex: 1;
+      min-height: 0;
+    }
+    .map-stop-list {
+      background: #fff;
+      border-top: 1px solid #e8eaf0;
+      padding: 12px 14px;
+      max-height: 35vh;
+      overflow-y: auto;
+      flex-shrink: 0;
+    }
+    .map-stop-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 7px 0;
+      border-top: 1px solid #f0f2f5;
+      font-size: 0.82rem;
+    }
+    .map-stop-item:first-child { border-top: none; }
+    .stop-num {
+      width: 22px; height: 22px;
+      background: #1a1a2e;
+      color: #fff;
+      border-radius: 50%;
+      font-size: 0.7rem;
+      font-weight: 700;
+      display: flex; align-items: center; justify-content: center;
+      flex-shrink: 0;
+    }
+    .stop-info .stop-name { font-weight: 600; }
+    .stop-info .stop-city { color: #888; font-size: 0.75rem; }
+    .map-summary {
+      font-size: 0.78rem;
+      color: #888;
+      text-align: center;
+      padding-bottom: 8px;
+      margin-bottom: 4px;
+      border-bottom: 1px solid #f0f2f5;
+    }
   </style>
 </head>
 <body>
+
+<!-- ═══════════════ LOADER ═══════════════ -->
+<div id="app-loader">
+  <div class="spinner"></div>
+  <h2>Store Tracker</h2>
+  <p>Loading stores...</p>
+</div>
+
+<div id="detail-loader"><div class="spinner"></div></div>
+<div class="toast" id="toast"></div>
 
 <!-- ═══════════════ LIST VIEW ═══════════════ -->
 <div class="view active" id="view-list">
   <div class="header">
     <div class="header-text">
-      <h1>Store Visits</h1>
-      <p id="subtitle">Loading stores...</p>
+      <h1 id="list-title">Stores</h1>
+      <p id="subtitle">Loading...</p>
+    </div>
+    <button class="route-mode-btn" id="route-mode-btn">&#128205; Plan Route</button>
+  </div>
+
+  <div class="toolbar">
+    <input type="search" id="search-input" placeholder="Search store..." />
+    <div class="dropdowns">
+      <select id="filter-segment"><option value="">All segments</option></select>
+      <select id="filter-responsible"><option value="">All responsible</option></select>
+      <select id="filter-city"><option value="">All cities</option></select>
     </div>
   </div>
 
-  <div class="filters" id="filters">
-    <button class="filter-btn active" data-filter="All">All</button>
-    <button class="filter-btn" data-filter="Visited">Visited</button>
-    <button class="filter-btn" data-filter="Follow-up">Follow-up</button>
-    <button class="filter-btn" data-filter="Pending">Pending</button>
-    <button class="filter-btn" data-filter="Not visited">Not visited</button>
+  <div class="list-body" id="customer-list">
+    <div class="state-msg">Loading...</div>
   </div>
 
-  <div class="list-body" id="store-list">
-    <div class="state-msg">Loading...</div>
+  <!-- Route mode action bar -->
+  <div class="route-action-bar" id="route-action-bar" style="display:none">
+    <div class="route-selected-count" id="route-selected-count">0 stores selected</div>
+    <div style="display:flex;gap:8px">
+      <button class="action-btn secondary" id="route-cancel-btn" style="margin:0;padding:10px 16px;font-size:0.85rem">Cancel</button>
+      <button class="action-btn" id="plan-route-btn" disabled style="margin:0;padding:10px 16px;font-size:0.85rem">Show Route</button>
+    </div>
   </div>
 </div>
 
@@ -300,225 +497,401 @@
     <button class="back-btn" id="back-btn">&#8592;</button>
     <div class="header-text">
       <h1 id="d-header-name"></h1>
-      <p id="d-header-area"></p>
+      <p id="d-header-city"></p>
     </div>
   </div>
 
   <div class="detail-body">
-
-    <!-- Store info -->
     <div class="detail-hero">
-      <div class="detail-hero-top">
-        <div>
-          <div class="detail-store-name" id="d-name"></div>
-          <div class="detail-area" id="d-area"></div>
-        </div>
-        <span class="badge" id="d-badge"></span>
+      <span id="d-city" style="display:none"></span>
+      <span id="d-name" style="display:none"></span>
+      <div class="info-row">
+        <span class="label">Segment</span>
+        <span class="value" id="d-segment">—</span>
       </div>
       <div class="info-row">
-        <span class="label">Contact</span>
-        <span id="d-contact">—</span>
+        <span class="label">Region</span>
+        <span class="value" id="d-region">—</span>
+      </div>
+      <div class="info-row">
+        <span class="label">Address</span>
+        <span class="value" id="d-address">—</span>
+      </div>
+      <div class="info-row">
+        <span class="label">Responsible</span>
+        <span class="value" id="d-responsible">—</span>
+      </div>
+      <div class="info-row">
+        <span class="label">Reference</span>
+        <span class="value" id="d-reference">—</span>
       </div>
       <div class="info-row">
         <span class="label">Phone</span>
         <a href="#" id="d-phone">—</a>
       </div>
       <div class="info-row">
-        <span class="label">Last visited</span>
-        <span id="d-last-visited">—</span>
+        <span class="label">Number of orders</span>
+        <span class="value" id="d-order-count">—</span>
+      </div>
+      <div class="info-row">
+        <span class="label">Total sales</span>
+        <span class="value" id="d-total-sales">—</span>
+      </div>
+      <div class="info-row">
+        <span class="label">Latest order</span>
+        <span class="value" id="d-latest-order">—</span>
       </div>
     </div>
 
-    <!-- Status -->
-    <div class="section-card">
-      <div class="section-label">Status</div>
-      <div class="status-grid">
-        <div class="status-opt" data-s="Visited">Visited</div>
-        <div class="status-opt" data-s="Follow-up">Follow-up</div>
-        <div class="status-opt" data-s="Pending">Pending</div>
-        <div class="status-opt" data-s="Not visited">Not visited</div>
-      </div>
+    <!-- Contact history -->
+    <div class="detail-hero" id="d-contact-section" style="display:none">
+      <div class="section-label" style="margin-bottom:10px">Visit History</div>
+      <div id="d-contact-list"></div>
     </div>
 
-    <!-- Next follow-up -->
-    <div class="section-card">
-      <div class="section-label">Next Follow-up</div>
-      <input type="date" id="d-followup" />
-    </div>
-
-    <!-- Notes -->
-    <div class="section-card">
-      <div class="section-label">Notes</div>
-      <textarea id="d-notes" placeholder="Add notes about this visit..."></textarea>
-    </div>
-
-    <button class="save-btn" id="save-btn">Save Changes</button>
-
+    <button class="action-btn" id="update-contact-btn">+ Log Visit</button>
   </div>
 </div>
 
-<div class="toast" id="toast"></div>
+<!-- ═══════════════ CONTACT FORM VIEW ═══════════════ -->
+<div class="view" id="view-form">
+  <div class="header">
+    <button class="back-btn" id="form-back-btn">&#8592;</button>
+    <div class="header-text">
+      <h1>Log Visit</h1>
+      <p id="form-header-customer"></p>
+    </div>
+  </div>
+
+  <div class="detail-body">
+    <div class="section-card">
+
+      <input type="hidden" id="f-date" />
+      <div class="form-field">
+        <label>Seller</label>
+        <input type="text" id="f-seller" placeholder="Your name" />
+      </div>
+      <div class="form-field">
+        <label>Contact Person</label>
+        <input type="text" id="f-contactPerson" placeholder="Name at store" />
+      </div>
+      <div class="form-field">
+        <label>Channel</label>
+        <select id="f-channel">
+          <option value="">Select...</option>
+          <option>Phone</option>
+          <option>Email</option>
+          <option>Visit</option>
+          <option>Meeting</option>
+          <option>Other</option>
+        </select>
+      </div>
+      <div class="form-field">
+        <label>Result</label>
+        <select id="f-result">
+          <option value="">Select...</option>
+          <option>Positive</option>
+          <option>Neutral</option>
+          <option>Negative</option>
+          <option>Follow-up needed</option>
+          <option>Order placed</option>
+        </select>
+      </div>
+      <div class="form-field">
+        <label>Comment</label>
+        <textarea id="f-comment" placeholder="Notes from the interaction..."></textarea>
+      </div>
+      <div class="form-field">
+        <label>Next Follow-up</label>
+        <input type="date" id="f-nextFollowUp" />
+      </div>
+      <div class="form-field">
+        <label>Order in Stockfiller</label>
+        <input type="text" id="f-orderInStockfiller" placeholder="" />
+      </div>
+
+    </div>
+
+    <button class="action-btn" id="form-save-btn">Log Visit</button>
+    <button class="action-btn secondary" id="form-cancel-btn">Cancel</button>
+  </div>
+</div>
+
+
+<!-- ═══════════════ MAP VIEW ═══════════════ -->
+<div class="view" id="view-map">
+  <div class="header">
+    <button class="back-btn" id="map-back-btn">&#8592;</button>
+    <div class="header-text">
+      <h1>Route</h1>
+      <p id="map-subtitle"></p>
+    </div>
+  </div>
+  <div id="map"></div>
+  <div class="map-stop-list" id="map-stop-list"></div>
+</div>
+
 
 <script>
   const API = "";
 
-  let stores = [];
-  let activeFilter = "All";
-  let currentStore = null;
+  let customers = [];
+  let searchQuery = "";
+  let currentCustomer = null;
 
-  // ── Load stores ──
-  async function loadStores() {
+  // ── Load customers ──
+  async function loadCustomers() {
     try {
-      const res = await fetch(`${API}/stores`);
-      stores = await res.json();
+      const res = await fetch(`${API}/customers`);
+      customers = await res.json();
+      buildDropdowns();
       renderList();
     } catch {
-      document.getElementById("store-list").innerHTML =
+      document.getElementById("customer-list").innerHTML =
         '<div class="state-msg">Could not connect to server.</div>';
+    } finally {
+      const loader = document.getElementById("app-loader");
+      loader.classList.add("hidden");
+      setTimeout(() => loader.remove(), 350);
     }
+  }
+
+  // ── Populate dropdowns from data ──
+  function buildDropdowns() {
+    const unique = (key) => [...new Set(customers.map(c => c[key]).filter(Boolean))].sort();
+
+    function populate(id, values) {
+      const sel = document.getElementById(id);
+      const first = sel.options[0];
+      sel.innerHTML = "";
+      sel.appendChild(first);
+      values.forEach(v => {
+        const opt = document.createElement("option");
+        opt.value = v;
+        opt.textContent = v;
+        sel.appendChild(opt);
+      });
+    }
+
+    populate("filter-segment",     unique("customerSegment"));
+    populate("filter-responsible", unique("customerResponsible"));
+    populate("filter-city",        unique("city"));
   }
 
   // ── Render list ──
   function renderList() {
-    const list = document.getElementById("store-list");
-    const filtered = activeFilter === "All"
-      ? stores
-      : stores.filter(s => s.status === activeFilter);
+    const list = document.getElementById("customer-list");
+    const q           = searchQuery.toLowerCase();
+    const segment     = document.getElementById("filter-segment").value;
+    const responsible = document.getElementById("filter-responsible").value;
+    const city        = document.getElementById("filter-city").value;
 
-    const visited = stores.filter(s => s.status === "Visited").length;
+    let filtered = customers;
+
+    if (q)           filtered = filtered.filter(c => c.customer.toLowerCase().includes(q));
+    if (segment)     filtered = filtered.filter(c => c.customerSegment === segment);
+    if (responsible) filtered = filtered.filter(c => c.customerResponsible === responsible);
+    if (city)        filtered = filtered.filter(c => c.city === city);
+
     document.getElementById("subtitle").textContent =
-      `${visited} of ${stores.length} visited`;
+      `${filtered.length} of ${customers.length} stores`;
 
     if (filtered.length === 0) {
-      list.innerHTML = '<div class="state-msg">No stores match this filter.</div>';
+      list.innerHTML = '<div class="state-msg">No stores match.</div>';
       return;
     }
 
-    list.innerHTML = filtered.map(s => `
-      <div class="store-card" data-row="${s.row}">
-        <div class="card-top">
-          <div>
-            <div class="store-name">${esc(s.store_name)}</div>
-            <div class="store-area">${esc(s.area)}</div>
+    const hasCoords = c => c.latitude && c.longitude;
+    list.innerHTML = filtered.map(c => {
+      const isSelected = selectedRouteRows.has(c.row);
+      return `
+        <div class="customer-card ${isSelected ? "route-selected" : ""} ${routeMode && !hasCoords(c) ? "no-coords" : ""}" data-row="${c.row}">
+          <div class="card-top">
+            <div class="check">${isSelected ? "✓" : ""}</div>
+            <div style="flex:1">
+              <div class="customer-name">${esc(c.customer)}</div>
+              <div class="customer-sub">${esc(c.city)}${c.region ? " &middot; " + esc(c.region) : ""}</div>
+            </div>
+            ${c.customerSegment ? `<span class="segment-badge">${esc(c.customerSegment)}</span>` : ""}
           </div>
-          <span class="badge badge-${s.status.replace(/ /g,'-')}">${esc(s.status)}</span>
-        </div>
-        <div class="card-meta">
-          <span>
-            <span class="priority-dot priority-${s.priority}"></span>
-            ${esc(s.priority)} priority
-          </span>
-          ${s.last_visited  ? `<span>Last: ${esc(s.last_visited)}</span>`  : ""}
-          ${s.next_followup ? `<span>Next: ${esc(s.next_followup)}</span>` : ""}
-        </div>
-      </div>
-    `).join("");
+          <div class="card-meta">
+            ${c.customerResponsible ? `<span>&#128100; ${esc(c.customerResponsible)}</span>` : ""}
+            ${c.phoneNumber ? `<span>&#128222; ${esc(c.phoneNumber)}</span>` : ""}
+          </div>
+        </div>`;
+    }).join("");
 
-    list.querySelectorAll(".store-card").forEach(card => {
-      card.addEventListener("click", () => openDetail(Number(card.dataset.row)));
+    list.querySelectorAll(".customer-card").forEach(card => {
+      card.addEventListener("click", () => {
+        const row = Number(card.dataset.row);
+        if (routeMode) {
+          toggleRouteSelection(row);
+        } else {
+          openDetail(row);
+        }
+      });
     });
   }
 
-  // ── Filters ──
-  document.getElementById("filters").addEventListener("click", e => {
-    const btn = e.target.closest(".filter-btn");
-    if (!btn) return;
-    document.querySelectorAll(".filter-btn").forEach(b => b.classList.remove("active"));
-    btn.classList.add("active");
-    activeFilter = btn.dataset.filter;
+  // ── Search & dropdowns ──
+  document.getElementById("search-input").addEventListener("input", e => {
+    searchQuery = e.target.value;
     renderList();
   });
+  ["filter-segment", "filter-responsible", "filter-city"].forEach(id => {
+    document.getElementById(id).addEventListener("change", renderList);
+  });
 
-  // ── Open detail page ──
-  function openDetail(row) {
-    currentStore = stores.find(s => s.row === row);
-    if (!currentStore) return;
+  // ── Render contact list ──
+  function renderContactList(contacts) {
+    const section = document.getElementById("d-contact-section");
+    if (!contacts || contacts.length === 0) {
+      section.style.display = "none";
+      return;
+    }
+    section.style.display = "block";
+    document.getElementById("d-contact-list").innerHTML = contacts.map((lc, i) => `
+      <div class="contact-item" data-index="${i}">
+        <div class="contact-summary">
+          <div>
+            <div class="date">${esc(lc.date)}</div>
+            <div class="meta">${esc(lc.seller)}${lc.channel ? " · " + esc(lc.channel) : ""}${lc.result ? " · " + esc(lc.result) : ""}</div>
+          </div>
+          <span class="chevron">&#9660;</span>
+        </div>
+        <div class="contact-details">
+          <div class="contact-detail-row"><span class="label">Seller</span><span class="value">${esc(lc.seller) || "—"}</span></div>
+          <div class="contact-detail-row"><span class="label">Channel</span><span class="value">${esc(lc.channel) || "—"}</span></div>
+          <div class="contact-detail-row"><span class="label">Result</span><span class="value">${esc(lc.result) || "—"}</span></div>
+          <div class="contact-detail-row"><span class="label">Contact person</span><span class="value">${esc(lc.contactPerson) || "—"}</span></div>
+          <div class="contact-detail-row"><span class="label">Next follow-up</span><span class="value">${esc(lc.nextFollowUp) || "—"}</span></div>
+          <div class="contact-detail-row"><span class="label">Order in Stockfiller</span><span class="value">${esc(lc.orderInStockfiller) || "—"}</span></div>
+          ${lc.comment
+            ? `<div class="contact-comment">${esc(lc.comment)}</div>`
+            : `<div class="contact-comment" style="color:#aaa">No comment</div>`}
+        </div>
+      </div>
+    `).join("");
+    document.querySelectorAll(".contact-item").forEach(item => {
+      item.addEventListener("click", () => item.classList.toggle("expanded"));
+    });
+  }
 
-    const s = currentStore;
-    document.getElementById("d-header-name").textContent = s.store_name;
-    document.getElementById("d-header-area").textContent = s.area;
-    document.getElementById("d-name").textContent = s.store_name;
-    document.getElementById("d-area").textContent = s.area;
+  // ── Fetch and render stats only (no spinner, no view switch) ──
+  async function refreshStats(c) {
+    try {
+      const res = await fetch(`${API}/customers/${encodeURIComponent(c.customer)}/stats`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const stats = await res.json();
+      applyStats(stats);
+    } catch (e) {
+      showToast("Could not refresh contact history.");
+    }
+  }
 
-    const badge = document.getElementById("d-badge");
-    badge.textContent = s.status;
-    badge.className = `badge badge-${s.status.replace(/ /g, '-')}`;
+  function applyStats(stats) {
+    document.getElementById("d-order-count").textContent = stats.order_count;
+    document.getElementById("d-total-sales").textContent =
+      stats.total_sales.toLocaleString("sv-SE", { minimumFractionDigits: 2 }) +
+      (stats.currency ? " " + stats.currency : "");
+    document.getElementById("d-latest-order").textContent = stats.latest_order_date;
+    renderContactList(stats.contacts);
+  }
 
-    document.getElementById("d-contact").textContent = s.contact || "—";
+  // ── Open detail ──
+  async function openDetail(row) {
+    const c = customers.find(c => c.row === row);
+    if (!c) return;
+    currentCustomer = c;
+
+    document.getElementById("detail-loader").classList.add("show");
+
+    let stats = null;
+    try {
+      const res = await fetch(`${API}/customers/${encodeURIComponent(c.customer)}/stats`);
+      stats = await res.json();
+    } catch {}
+
+    document.getElementById("detail-loader").classList.remove("show");
+
+    // Static fields
+    document.getElementById("d-header-name").textContent = c.customer;
+    document.getElementById("d-header-city").textContent = c.city;
+    document.getElementById("d-name").textContent = c.customer;
+    document.getElementById("d-city").textContent = [c.city, c.region].filter(Boolean).join(" · ");
+    document.getElementById("d-segment").textContent = c.customerSegment || "—";
+    document.getElementById("d-region").textContent = c.region || "—";
+    document.getElementById("d-address").textContent = c.address || "—";
+    document.getElementById("d-responsible").textContent = c.customerResponsible || "—";
+    document.getElementById("d-reference").textContent = c.customerReference || "—";
 
     const phoneEl = document.getElementById("d-phone");
-    if (s.phone) {
-      phoneEl.textContent = s.phone;
-      phoneEl.href = `tel:${s.phone}`;
+    phoneEl.textContent = c.phoneNumber || "—";
+    phoneEl.href = c.phoneNumber ? `tel:${c.phoneNumber}` : "#";
+
+    if (stats) {
+      applyStats(stats);
     } else {
-      phoneEl.textContent = "—";
-      phoneEl.href = "#";
+      document.getElementById("d-total-sales").textContent = "Error";
+      document.getElementById("d-latest-order").textContent = "Error";
+      document.getElementById("d-contact-section").style.display = "none";
     }
-
-    document.getElementById("d-last-visited").textContent = s.last_visited || "—";
-    document.getElementById("d-followup").value = s.next_followup || "";
-    document.getElementById("d-notes").value = s.notes || "";
-
-    document.querySelectorAll(".status-opt").forEach(opt => {
-      opt.classList.toggle("selected", opt.dataset.s === s.status);
-    });
 
     showView("detail");
   }
 
-  // ── Back button ──
-  document.getElementById("back-btn").addEventListener("click", () => {
-    currentStore = null;
-    showView("list");
+  // ── Back (detail → list) ──
+  document.getElementById("back-btn").addEventListener("click", () => showView("list"));
+
+  // ── Open contact form ──
+  document.getElementById("update-contact-btn").addEventListener("click", () => {
+    const today = new Date().toISOString().slice(0, 10);
+    document.getElementById("form-header-customer").textContent = currentCustomer.customer;
+    const now = new Date();
+    const pad = n => String(n).padStart(2, "0");
+    const datetime = `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}`;
+    document.getElementById("f-date").value = datetime;
+    document.getElementById("f-seller").value = "";
+    document.getElementById("f-contactPerson").value = "";
+    document.getElementById("f-channel").value = "";
+    document.getElementById("f-result").value = "";
+    document.getElementById("f-comment").value = "";
+    document.getElementById("f-nextFollowUp").value = "";
+    document.getElementById("f-orderInStockfiller").value = "";
+    showView("form");
   });
 
-  // ── Status options ──
-  document.querySelectorAll(".status-opt").forEach(opt => {
-    opt.addEventListener("click", () => {
-      document.querySelectorAll(".status-opt").forEach(o => o.classList.remove("selected"));
-      opt.classList.add("selected");
-    });
-  });
+  // ── Back (form → detail) ──
+  document.getElementById("form-back-btn").addEventListener("click", () => showView("detail"));
+  document.getElementById("form-cancel-btn").addEventListener("click", () => showView("detail"));
 
-  // ── Save ──
-  document.getElementById("save-btn").addEventListener("click", async () => {
-    if (!currentStore) return;
-    const btn = document.getElementById("save-btn");
-    const selectedStatus = document.querySelector(".status-opt.selected")?.dataset.s;
-
+  // ── Save contact ──
+  document.getElementById("form-save-btn").addEventListener("click", async () => {
+    const btn = document.getElementById("form-save-btn");
     const payload = {
-      status: selectedStatus,
-      notes: document.getElementById("d-notes").value,
-      next_followup: document.getElementById("d-followup").value,
+      date:               document.getElementById("f-date").value,
+      seller:             document.getElementById("f-seller").value,
+      contactPerson:      document.getElementById("f-contactPerson").value,
+      channel:            document.getElementById("f-channel").value,
+      result:             document.getElementById("f-result").value,
+      comment:            document.getElementById("f-comment").value,
+      nextFollowUp:       document.getElementById("f-nextFollowUp").value,
+      orderInStockfiller: document.getElementById("f-orderInStockfiller").value,
     };
 
     btn.disabled = true;
     btn.textContent = "Saving...";
 
     try {
-      const res = await fetch(`${API}/stores/${currentStore.row}`, {
+      const res = await fetch(`${API}/customers/${encodeURIComponent(currentCustomer.customer)}/contacts`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-      const data = await res.json();
-      if (data.ok) {
-        Object.assign(currentStore, {
-          status: payload.status,
-          notes: payload.notes,
-          next_followup: payload.next_followup,
-        });
-        if (payload.status === "Visited") {
-          currentStore.last_visited = new Date().toISOString().slice(0, 10);
-          document.getElementById("d-last-visited").textContent = currentStore.last_visited;
-        }
-        // Update badge on detail page
-        const badge = document.getElementById("d-badge");
-        badge.textContent = payload.status;
-        badge.className = `badge badge-${payload.status.replace(/ /g, '-')}`;
-
-        renderList();
-        showToast("Saved!");
+      if (res.ok) {
+        showToast("Contact saved!");
+        showView("detail");
+        refreshStats(currentCustomer);
       } else {
         showToast("Save failed. Try again.");
       }
@@ -526,7 +899,7 @@
       showToast("Network error. Try again.");
     } finally {
       btn.disabled = false;
-      btn.textContent = "Save Changes";
+      btn.textContent = "Log Visit";
     }
   });
 
@@ -550,7 +923,163 @@
     return (s || "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
   }
 
-  loadStores();
+  // ══════════════════════════════════════
+  // ROUTE PLANNER
+  // ══════════════════════════════════════
+
+  let selectedRouteRows = new Set();
+  let routeMode = false;
+  let leafletMap = null;
+  let routeLayer = null;
+
+  function enterRouteMode() {
+    routeMode = true;
+    selectedRouteRows.clear();
+    document.getElementById("list-title").textContent = "Plan Route";
+    document.getElementById("route-mode-btn").style.display = "none";
+    document.getElementById("route-action-bar").style.display = "flex";
+    document.getElementById("customer-list").classList.add("route-mode");
+    updateRouteCount();
+    renderList();
+  }
+
+  function exitRouteMode() {
+    routeMode = false;
+    selectedRouteRows.clear();
+    document.getElementById("list-title").textContent = "Stores";
+    document.getElementById("route-mode-btn").style.display = "";
+    document.getElementById("route-action-bar").style.display = "none";
+    document.getElementById("customer-list").classList.remove("route-mode");
+    renderList();
+  }
+
+  document.getElementById("route-mode-btn").addEventListener("click", enterRouteMode);
+  document.getElementById("route-cancel-btn").addEventListener("click", exitRouteMode);
+  document.getElementById("plan-route-btn").addEventListener("click", showRouteMap);
+
+  function toggleRouteSelection(row) {
+    const c = customers.find(c => c.row === row);
+    if (!c || !c.latitude || !c.longitude) return;
+    if (selectedRouteRows.has(row)) {
+      selectedRouteRows.delete(row);
+    } else {
+      if (selectedRouteRows.size >= 10) {
+        showToast("Maximum 10 stores");
+        return;
+      }
+      selectedRouteRows.add(row);
+    }
+    // Update just this card's selected state
+    const card = document.querySelector(`.customer-card[data-row="${row}"]`);
+    if (card) {
+      card.classList.toggle("route-selected", selectedRouteRows.has(row));
+      card.querySelector(".check").textContent = selectedRouteRows.has(row) ? "✓" : "";
+    }
+    updateRouteCount();
+  }
+
+  function updateRouteCount() {
+    const n = selectedRouteRows.size;
+    document.getElementById("route-selected-count").textContent =
+      `${n} store${n !== 1 ? "s" : ""} selected`;
+    document.getElementById("plan-route-btn").disabled = n < 2;
+  }
+
+  document.getElementById("map-back-btn").addEventListener("click", () => {
+    showView("list");
+  });
+
+  async function showRouteMap() {
+    const stops = [...selectedRouteRows]
+      .map(row => customers.find(c => c.row === row))
+      .filter(c => c && c.latitude && c.longitude);
+
+    if (stops.length < 2) {
+      showToast("Need at least 2 stores with coordinates");
+      return;
+    }
+
+    showView("map");
+
+    // Init map once
+    if (!leafletMap) {
+      leafletMap = L.map("map");
+      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        attribution: "© OpenStreetMap contributors"
+      }).addTo(leafletMap);
+    } else {
+      if (routeLayer) { leafletMap.removeLayer(routeLayer); routeLayer = null; }
+      leafletMap.eachLayer(layer => {
+        if (layer instanceof L.Marker) leafletMap.removeLayer(layer);
+      });
+    }
+
+    // Fetch optimized route from OSRM
+    const coords = stops.map(c => `${c.longitude},${c.latitude}`).join(";");
+    let orderedStops = stops;
+    let distanceKm = null;
+
+    try {
+      const url = `https://router.project-osrm.org/trip/v1/driving/${coords}?roundtrip=false&source=first&annotations=false&overview=full&geometries=geojson`;
+      const res = await fetch(url);
+      const data = await res.json();
+
+      if (data.code === "Ok") {
+        // wp.waypoint_index = position in optimized trip
+        // index in data.waypoints = position in original stops array
+        orderedStops = new Array(stops.length);
+        data.waypoints.forEach((wp, inputIdx) => {
+          orderedStops[wp.waypoint_index] = stops[inputIdx];
+        });
+
+        distanceKm = (data.trips[0].distance / 1000).toFixed(1);
+
+        // Draw route line
+        routeLayer = L.geoJSON(data.trips[0].geometry, {
+          style: { color: "#1a1a2e", weight: 4, opacity: 0.8 }
+        }).addTo(leafletMap);
+      }
+    } catch {}
+
+    // Add numbered markers
+    orderedStops.forEach((c, idx) => {
+      const icon = L.divIcon({
+        className: "",
+        html: `<div style="background:#1a1a2e;color:#fff;width:28px;height:28px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;border:2px solid #fff;box-shadow:0 2px 6px rgba(0,0,0,0.3)">${idx + 1}</div>`,
+        iconSize: [28, 28],
+        iconAnchor: [14, 14],
+      });
+      L.marker([c.latitude, c.longitude], { icon })
+        .addTo(leafletMap)
+        .bindPopup(`<b>${c.customer}</b><br>${c.city}`);
+    });
+
+    // Fit map to stops
+    const bounds = L.latLngBounds(orderedStops.map(c => [c.latitude, c.longitude]));
+    leafletMap.fitBounds(bounds, { padding: [40, 40] });
+    setTimeout(() => leafletMap.invalidateSize(), 100);
+
+    // Update subtitle and stop list
+    document.getElementById("map-subtitle").textContent =
+      distanceKm ? `${orderedStops.length} stops · ${distanceKm} km` : `${orderedStops.length} stops`;
+
+    document.getElementById("map-stop-list").innerHTML = `
+      ${distanceKm ? `<div class="map-summary">Optimized route · ${distanceKm} km total</div>` : ""}
+      ${orderedStops.map((c, idx) => `
+        <div class="map-stop-item">
+          <div class="stop-num">${idx + 1}</div>
+          <div class="stop-info">
+            <div class="stop-name">${esc(c.customer)}</div>
+            <div class="stop-city">${esc(c.city)}</div>
+          </div>
+        </div>
+      `).join("")}
+    `;
+  }
+
+  // ══════════════════════════════════════
+
+  loadCustomers();
 </script>
 </body>
 </html>
