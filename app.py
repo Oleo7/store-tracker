@@ -11,7 +11,6 @@ CORS(app)
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive",
 ]
 SHEET_ID = "1uWhuacNGdhfIfA9mQjI04fR23ZCa6rGeXrlyNLbxEwc"
 CREDS_FILE = "credentials.json"
