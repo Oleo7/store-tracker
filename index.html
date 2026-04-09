@@ -19,6 +19,49 @@
     .view { display: none; }
     .view.active { display: block; }
 
+    /* ── Login screen ── */
+    #login-screen {
+      position: fixed;
+      inset: 0;
+      background: #1a1a2e;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      z-index: 200;
+      gap: 16px;
+      padding: 32px;
+    }
+    #login-screen.hidden { display: none; }
+    #login-screen h2 { color: #fff; font-size: 1.4rem; font-weight: 700; }
+    #login-screen p { color: rgba(255,255,255,0.5); font-size: 0.85rem; }
+    #login-password {
+      width: 100%;
+      max-width: 320px;
+      padding: 14px 16px;
+      border-radius: 10px;
+      border: none;
+      font-size: 16px;
+      outline: none;
+    }
+    #login-btn {
+      width: 100%;
+      max-width: 320px;
+      padding: 14px;
+      background: #e8c547;
+      color: #1a1a2e;
+      border: none;
+      border-radius: 10px;
+      font-size: 1rem;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    #login-error {
+      color: #ff6b6b;
+      font-size: 0.85rem;
+      min-height: 20px;
+    }
+
     /* ── Loaders ── */
     #app-loader {
       position: fixed;
@@ -447,6 +490,15 @@
   </style>
 </head>
 <body>
+
+<!-- ═══════════════ LOGIN ═══════════════ -->
+<div id="login-screen">
+  <h2>Store Tracker</h2>
+  <p>Enter password to continue</p>
+  <input type="password" id="login-password" placeholder="Password" />
+  <div id="login-error"></div>
+  <button id="login-btn">Sign In</button>
+</div>
 
 <!-- ═══════════════ LOADER ═══════════════ -->
 <div id="app-loader">
@@ -1079,7 +1131,33 @@
 
   // ══════════════════════════════════════
 
-  loadCustomers();
+  // ── Login ──
+  const APP_PASSWORD = "storetracker2024";
+  const loginScreen = document.getElementById("login-screen");
+
+  function checkLogin() {
+    if (localStorage.getItem("st_auth") === APP_PASSWORD) {
+      loginScreen.classList.add("hidden");
+      loadCustomers();
+    }
+  }
+
+  document.getElementById("login-btn").addEventListener("click", () => {
+    const val = document.getElementById("login-password").value;
+    if (val === APP_PASSWORD) {
+      localStorage.setItem("st_auth", APP_PASSWORD);
+      loginScreen.classList.add("hidden");
+      loadCustomers();
+    } else {
+      document.getElementById("login-error").textContent = "Incorrect password";
+    }
+  });
+
+  document.getElementById("login-password").addEventListener("keydown", e => {
+    if (e.key === "Enter") document.getElementById("login-btn").click();
+  });
+
+  checkLogin();
 </script>
 </body>
 </html>
