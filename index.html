@@ -172,8 +172,12 @@
       display: flex;
       gap: 8px;
     }
-    .dropdowns select {
+    .ms-wrap {
       flex: 1;
+      position: relative;
+    }
+    .ms-btn {
+      width: 100%;
       border: 1.5px solid #e8eaf0;
       border-radius: 10px;
       padding: 7px 10px;
@@ -183,8 +187,43 @@
       color: #555;
       outline: none;
       cursor: pointer;
+      text-align: left;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
-    .dropdowns select:focus { border-color: #1a1a2e; }
+    .ms-btn.active-filter {
+      border-color: #1a1a2e;
+      background: #1a1a2e;
+      color: #fff;
+    }
+    .ms-panel {
+      display: none;
+      position: absolute;
+      top: calc(100% + 4px);
+      left: 0;
+      min-width: 100%;
+      background: #fff;
+      border: 1.5px solid #e8eaf0;
+      border-radius: 10px;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.1);
+      z-index: 50;
+      max-height: 220px;
+      overflow-y: auto;
+      padding: 6px 0;
+    }
+    .ms-panel.open { display: block; }
+    .ms-option {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 14px;
+      font-size: 0.82rem;
+      cursor: pointer;
+      user-select: none;
+    }
+    .ms-option:hover { background: #f7f8fa; }
+    .ms-option input[type="checkbox"] { accent-color: #1a1a2e; width: 15px; height: 15px; flex-shrink: 0; }
 
     /* ── Customer list ── */
     .list-body { padding: 12px 14px 40px; }
@@ -237,36 +276,161 @@
     }
 
     /* ── Detail view ── */
-    .detail-body { padding: 16px 16px 40px; }
+    .detail-body { padding: 12px 14px 40px; display: flex; flex-direction: column; gap: 10px; }
 
-    .detail-hero {
+    .detail-action-bar {
+      display: flex;
+      align-items: stretch;
+      gap: 8px;
+      margin-bottom: 2px;
+    }
+    .detail-action-bar .action-btn,
+    .detail-action-bar .action-btn.secondary {
+      flex: 1;
+      width: 0;
+      height: 44px;
+      margin-top: 0;
+      padding: 0 8px;
+      font-size: 0.85rem;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      border: 2px solid transparent;
+    }
+    .detail-action-bar .action-btn.secondary {
+      border-color: #1a1a2e;
+    }
+
+    .detail-section {
       background: #fff;
       border-radius: 14px;
-      padding: 16px;
-      margin-bottom: 12px;
+      padding: 14px 16px;
       box-shadow: 0 1px 4px rgba(0,0,0,0.07);
     }
-    .detail-hero-top {
-      display: flex;
-      justify-content: space-between;
-      align-items: flex-start;
-      margin-bottom: 14px;
+    .detail-section-title {
+      font-size: 0.75rem;
+      font-weight: 700;
+      color: #888;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      margin-bottom: 10px;
     }
-    .detail-customer-name { font-size: 1.15rem; font-weight: 700; }
-    .detail-sub           { font-size: 0.8rem; color: #777; margin-top: 3px; }
+
+    .tags-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      min-height: 24px;
+    }
+    .tag {
+      padding: 4px 10px;
+      border-radius: 20px;
+      font-size: 0.75rem;
+      font-weight: 600;
+    }
+    .tag-red    { background: #ffe0e0; color: #c0392b; }
+    .tag-orange { background: #ffecd6; color: #d35400; }
+    .tag-blue   { background: #e0eeff; color: #1a5fa8; }
+    .tag-green  { background: #e0f7e9; color: #1e8449; }
+
+    .overview-meta {
+      display: flex;
+      gap: 16px;
+      margin-top: 10px;
+    }
+    .overview-meta-item { flex: 1; }
+    .overview-meta-item .meta-label { font-size: 0.72rem; color: #888; margin-bottom: 2px; }
+    .overview-meta-item .meta-value { font-size: 0.85rem; font-weight: 600; }
+
+    .order-stats {
+      display: flex;
+      gap: 8px;
+    }
+    .order-stat { flex: 1; }
+    .order-stat .stat-label { font-size: 0.72rem; color: #888; margin-bottom: 3px; }
+    .order-stat .stat-value { font-size: 1.05rem; font-weight: 700; }
 
     .info-row {
       display: flex;
       justify-content: space-between;
       align-items: center;
-      padding: 9px 0;
+      padding: 8px 0;
       border-top: 1px solid #f0f2f5;
       font-size: 0.84rem;
       gap: 12px;
     }
+    .info-row:first-of-type { border-top: none; }
     .info-row .label { color: #888; flex-shrink: 0; }
     .info-row .value { text-align: right; font-weight: 500; }
-    .info-row a { color: #1a1a2e; text-decoration: none; font-weight: 600; }
+    .info-row a { color: #1a1a2e; text-decoration: none; font-weight: 500; }
+
+    .activity-row {
+      display: flex;
+      justify-content: space-between;
+      padding: 5px 0;
+      font-size: 0.84rem;
+      border-top: 1px solid #f0f2f5;
+    }
+    .activity-row:first-child { border-top: none; }
+    .activity-label { color: #888; }
+    .activity-value { font-weight: 500; text-align: right; }
+    .history-detail .activity-comment {
+      background: #ebebeb;
+    }
+    .activity-comment {
+      margin-top: 8px;
+      background: #f7f8fa;
+      border-radius: 8px;
+      padding: 8px 10px;
+      font-size: 0.82rem;
+      color: #444;
+    }
+
+    .history-item {
+      padding: 8px 0;
+      border-top: 1px solid #f0f2f5;
+      font-size: 0.82rem;
+      cursor: pointer;
+    }
+    .history-item:first-child { border-top: none; }
+    .history-summary {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .history-date { color: #888; flex-shrink: 0; min-width: 80px; }
+    .history-comment { color: #444; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .history-chevron { font-size: 0.7rem; color: #aaa; transition: transform 0.2s; flex-shrink: 0; }
+    .history-item.expanded .history-chevron { transform: rotate(180deg); }
+    .history-detail {
+      display: none;
+      margin-top: 8px;
+      background: #f7f8fa;
+      border-radius: 8px;
+      padding: 8px 10px;
+    }
+    .history-item.expanded .history-detail { display: block; }
+    .history-detail-row {
+      display: flex;
+      justify-content: space-between;
+      padding: 4px 0;
+      font-size: 0.82rem;
+      border-top: 1px solid #ebebeb;
+    }
+    .history-detail-row:first-child { border-top: none; }
+    .history-detail-row .label { color: #888; }
+    .history-detail-row .value { font-weight: 500; text-align: right; }
+    .show-more-btn {
+      width: 100%;
+      background: none;
+      border: none;
+      color: #1a1a2e;
+      font-size: 0.82rem;
+      font-weight: 600;
+      padding: 8px 0 0;
+      cursor: pointer;
+      text-align: center;
+    }
 
     .action-btn {
       width: 100%;
@@ -440,15 +604,15 @@
       font-weight: 500;
     }
 
-    #view-map .header { position: sticky; top: 0; z-index: 10; }
-
     #view-map {
       flex-direction: column;
     }
-    #view-map.active { display: flex; height: 100vh; }
+    #view-map.active { display: flex; height: 100vh; overflow: hidden; }
+    #view-map .header { flex-shrink: 0; z-index: 10; }
     #map {
       flex: 1;
       min-height: 0;
+      overflow: hidden;
     }
     .map-stop-list {
       background: #fff;
@@ -456,6 +620,7 @@
       padding: 12px 14px;
       max-height: 35vh;
       overflow-y: auto;
+      overscroll-behavior: contain;
       flex-shrink: 0;
     }
     .map-stop-item {
@@ -523,10 +688,34 @@
   <div class="toolbar">
     <input type="search" id="search-input" placeholder="Search store..." />
     <div class="dropdowns">
-      <select id="filter-segment"><option value="">All segments</option></select>
-      <select id="filter-responsible"><option value="">All responsible</option></select>
-      <select id="filter-city"><option value="">All cities</option></select>
+      <div class="ms-wrap" id="ms-wrap-segment">
+        <button class="ms-btn" id="ms-btn-segment">All segments</button>
+        <div class="ms-panel" id="ms-panel-segment"></div>
+      </div>
+      <div class="ms-wrap" id="ms-wrap-responsible">
+        <button class="ms-btn" id="ms-btn-responsible">All responsible</button>
+        <div class="ms-panel" id="ms-panel-responsible"></div>
+      </div>
+      <div class="ms-wrap" id="ms-wrap-city">
+        <button class="ms-btn" id="ms-btn-city">All cities</button>
+        <div class="ms-panel" id="ms-panel-city"></div>
+      </div>
     </div>
+    <div class="dropdowns">
+      <div class="ms-wrap" id="ms-wrap-missed">
+        <button class="ms-btn" id="ms-btn-missed">Uppföljning</button>
+        <div class="ms-panel" id="ms-panel-missed"></div>
+      </div>
+      <div class="ms-wrap" id="ms-wrap-risk">
+        <button class="ms-btn" id="ms-btn-risk">Risk</button>
+        <div class="ms-panel" id="ms-panel-risk"></div>
+      </div>
+      <div class="ms-wrap" id="ms-wrap-delivery" style="position:relative">
+        <button class="ms-btn" id="ms-btn-delivery">Leverans från</button>
+        <input type="date" id="filter-delivery-date" style="position:absolute;inset:0;opacity:0;width:100%;height:100%;cursor:pointer" />
+      </div>
+    </div>
+    <button id="clear-filters-btn" style="display:none;background:none;border:none;color:#e74c3c;font-size:0.8rem;font-weight:600;cursor:pointer;padding:2px 0 0;text-align:left;">✕ Rensa filter</button>
   </div>
 
   <div class="list-body" id="customer-list">
@@ -553,55 +742,85 @@
     </div>
   </div>
 
+  <span id="d-name" style="display:none"></span>
+
   <div class="detail-body">
-    <div class="detail-hero">
-      <span id="d-city" style="display:none"></span>
-      <span id="d-name" style="display:none"></span>
-      <div class="info-row">
-        <span class="label">Segment</span>
-        <span class="value" id="d-segment">—</span>
-      </div>
-      <div class="info-row">
-        <span class="label">Region</span>
-        <span class="value" id="d-region">—</span>
-      </div>
-      <div class="info-row">
-        <span class="label">Address</span>
-        <span class="value" id="d-address">—</span>
-      </div>
-      <div class="info-row">
-        <span class="label">Responsible</span>
-        <span class="value" id="d-responsible">—</span>
-      </div>
-      <div class="info-row">
-        <span class="label">Reference</span>
-        <span class="value" id="d-reference">—</span>
-      </div>
-      <div class="info-row">
-        <span class="label">Phone</span>
-        <a href="#" id="d-phone">—</a>
-      </div>
-      <div class="info-row">
-        <span class="label">Number of orders</span>
-        <span class="value" id="d-order-count">—</span>
-      </div>
-      <div class="info-row">
-        <span class="label">Total sales</span>
-        <span class="value" id="d-total-sales">—</span>
-      </div>
-      <div class="info-row">
-        <span class="label">Latest order</span>
-        <span class="value" id="d-latest-order">—</span>
+
+    <!-- Action buttons -->
+    <div class="detail-action-bar">
+      <button class="action-btn" id="update-contact-btn">Logga besök</button>
+      <button class="action-btn secondary" id="d-call-btn">Ring</button>
+      <button class="action-btn secondary" id="d-mail-btn">Mail</button>
+    </div>
+
+    <!-- Översikt -->
+    <div class="detail-section">
+      <div class="detail-section-title">Översikt</div>
+      <div class="tags-row" id="d-tags"></div>
+      <div class="overview-meta">
+        <div class="overview-meta-item">
+          <div class="meta-label">NÄSTA UPPFÖLJNING</div>
+          <div class="meta-value" id="d-next-followup">—</div>
+        </div>
+        <div class="overview-meta-item">
+          <div class="meta-label">SENAST KONTAKT</div>
+          <div class="meta-value" id="d-last-contact">—</div>
+        </div>
+        <div class="overview-meta-item">
+          <div class="meta-label">SENASTE RESULTAT</div>
+          <div class="meta-value" id="d-last-result">—</div>
+        </div>
       </div>
     </div>
 
-    <!-- Contact history -->
-    <div class="detail-hero" id="d-contact-section" style="display:none">
-      <div class="section-label" style="margin-bottom:10px">Visit History</div>
+    <!-- Orderstatus -->
+    <div class="detail-section">
+      <div class="detail-section-title">Orderstatus</div>
+      <div class="order-stats">
+        <div class="order-stat">
+          <div class="stat-label">ORDERVÄRDE TOTALT</div>
+          <div class="stat-value" id="d-total-sales">—</div>
+        </div>
+        <div class="order-stat">
+          <div class="stat-label">ANTAL LEVERANSER</div>
+          <div class="stat-value" id="d-order-count">—</div>
+        </div>
+        <div class="order-stat">
+          <div class="stat-label">SENAST LEVERANS</div>
+          <div class="stat-value" id="d-latest-order">—</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Kontaktuppgifter -->
+    <div class="detail-section">
+      <div class="detail-section-title">Kontaktuppgifter</div>
+      <div class="info-row"><span class="label">Telefon</span><a href="#" id="d-phone">—</a></div>
+      <div class="info-row"><span class="label">Email</span><a href="#" id="d-email">—</a></div>
+      <div class="info-row"><span class="label">Adress</span><span class="value" id="d-address">—</span></div>
+      <div class="info-row"><span class="label">Kontaktperson</span><span class="value" id="d-contactperson">—</span></div>
+    </div>
+
+    <!-- Senaste aktivitet -->
+    <div class="detail-section" id="d-latest-section" style="display:none">
+      <div class="detail-section-title">Senaste aktivitet</div>
+      <div class="activity-row"><span class="activity-label">Datum</span><span class="activity-value" id="d-act-date">—</span></div>
+      <div class="activity-row"><span class="activity-label">Säljare</span><span class="activity-value" id="d-act-seller">—</span></div>
+      <div class="activity-row"><span class="activity-label">Kanal</span><span class="activity-value" id="d-act-channel">—</span></div>
+      <div class="activity-row"><span class="activity-label">Resultat</span><span class="activity-value" id="d-act-result">—</span></div>
+      <div class="activity-row"><span class="activity-label">Kontaktperson</span><span class="activity-value" id="d-act-contactperson">—</span></div>
+      <div class="activity-row"><span class="activity-label">Nästa uppföljning</span><span class="activity-value" id="d-act-nextfollowup">—</span></div>
+      <div class="activity-row"><span class="activity-label">Order i Stockfiller</span><span class="activity-value" id="d-act-stockfiller">—</span></div>
+      <div class="activity-comment" id="d-act-comment" style="display:none"></div>
+    </div>
+
+    <!-- Historik -->
+    <div class="detail-section" id="d-contact-section" style="display:none">
+      <div class="detail-section-title" id="d-history-title">Historik</div>
       <div id="d-contact-list"></div>
+      <button class="show-more-btn" id="d-show-more" style="display:none">Visa fler ›</button>
     </div>
 
-    <button class="action-btn" id="update-contact-btn">+ Log Visit</button>
   </div>
 </div>
 
@@ -690,6 +909,8 @@
   let customers = [];
   let searchQuery = "";
   let currentCustomer = null;
+  let detailReturnView = "list";
+  let insights = {};
 
   // ── Load customers ──
   async function loadCustomers() {
@@ -698,6 +919,8 @@
       customers = await res.json();
       buildDropdowns();
       renderList();
+      // Load insights in background
+      loadInsights();
     } catch {
       document.getElementById("customer-list").innerHTML =
         '<div class="state-msg">Could not connect to server.</div>';
@@ -708,42 +931,138 @@
     }
   }
 
-  // ── Populate dropdowns from data ──
+  // ── Multi-select filter state ──
+  const filterState = { segment: new Set(), responsible: new Set(), city: new Set(), missed: new Set(), risk: new Set() };
+
+  async function loadInsights() {
+    try {
+      const res = await fetch(`${API}/customer-insights`);
+      insights = await res.json();
+      buildInsightDropdowns();
+      renderList();
+    } catch {}
+  }
+
+  function buildInsightDropdowns() {
+    setupMultiSelect("missed", "ms-btn-missed", "ms-panel-missed", ["Missad uppföljning", "OK"], "Uppföljning");
+    setupMultiSelect("risk",   "ms-btn-risk",   "ms-panel-risk",   ["FÖRLORAD?", "HÖG RISK", "RISK", "OK"], "Risk");
+  }
+
+  // ── Build multi-select dropdowns ──
   function buildDropdowns() {
     const unique = (key) => [...new Set(customers.map(c => c[key]).filter(Boolean))].sort();
-
-    function populate(id, values) {
-      const sel = document.getElementById(id);
-      const first = sel.options[0];
-      sel.innerHTML = "";
-      sel.appendChild(first);
-      values.forEach(v => {
-        const opt = document.createElement("option");
-        opt.value = v;
-        opt.textContent = v;
-        sel.appendChild(opt);
-      });
-    }
-
-    populate("filter-segment",     unique("customerSegment"));
-    populate("filter-responsible", unique("customerResponsible"));
-    populate("filter-city",        unique("city"));
+    setupMultiSelect("segment",     "ms-btn-segment",     "ms-panel-segment",     unique("customerSegment"),   "All segments");
+    setupMultiSelect("responsible", "ms-btn-responsible", "ms-panel-responsible", unique("customerResponsible"), "All responsible");
+    setupMultiSelect("city",        "ms-btn-city",        "ms-panel-city",        unique("city"),              "All cities");
   }
+
+  function setupMultiSelect(key, btnId, panelId, values, placeholder) {
+    const btn   = document.getElementById(btnId);
+    const panel = document.getElementById(panelId);
+
+    panel.innerHTML = values.map(v => `
+      <label class="ms-option">
+        <input type="checkbox" value="${esc(v)}" />
+        ${esc(v)}
+      </label>
+    `).join("");
+
+    panel.querySelectorAll("input[type=checkbox]").forEach(cb => {
+      cb.addEventListener("change", () => {
+        if (cb.checked) filterState[key].add(cb.value);
+        else filterState[key].delete(cb.value);
+        updateBtn(btn, filterState[key], placeholder);
+        renderList();
+      });
+    });
+
+    btn.addEventListener("click", e => {
+      e.stopPropagation();
+      document.querySelectorAll(".ms-panel.open").forEach(p => { if (p !== panel) p.classList.remove("open"); });
+      panel.classList.toggle("open");
+    });
+
+    panel.addEventListener("click", e => e.stopPropagation());
+  }
+
+  function updateBtn(btn, set, placeholder) {
+    if (set.size === 0) {
+      btn.textContent = placeholder;
+      btn.classList.remove("active-filter");
+    } else if (set.size === 1) {
+      btn.textContent = [...set][0];
+      btn.classList.add("active-filter");
+    } else {
+      btn.textContent = `${set.size} selected`;
+      btn.classList.add("active-filter");
+    }
+    updateClearBtn();
+  }
+
+  function updateClearBtn() {
+    const anyActive = Object.values(filterState).some(s => s.size > 0) || !!document.getElementById("filter-delivery-date").value;
+    document.getElementById("clear-filters-btn").style.display = anyActive ? "block" : "none";
+  }
+
+
+  // ── Delivery date filter ──
+  const deliveryBtn   = document.getElementById("ms-btn-delivery");
+  const deliveryPanel = document.getElementById("ms-panel-delivery");
+  const deliveryInput = document.getElementById("filter-delivery-date");
+
+  deliveryInput.addEventListener("change", () => {
+    const val = deliveryInput.value;
+    deliveryBtn.textContent = val ? val : "Leverans från";
+    deliveryBtn.classList.toggle("active-filter", !!val);
+    updateClearBtn();
+    renderList();
+  });
+
+  document.getElementById("clear-filters-btn").addEventListener("click", () => {
+    ["segment", "responsible", "city", "missed", "risk"].forEach(key => filterState[key].clear());
+    document.querySelectorAll(".ms-panel input[type=checkbox]").forEach(cb => cb.checked = false);
+    document.getElementById("ms-btn-segment").textContent = "All segments";
+    document.getElementById("ms-btn-responsible").textContent = "All responsible";
+    document.getElementById("ms-btn-city").textContent = "All cities";
+    document.querySelectorAll(".ms-btn").forEach(b => b.classList.remove("active-filter"));
+    document.getElementById("ms-btn-missed").textContent = "Uppföljning";
+    document.getElementById("ms-btn-risk").textContent = "Risk";
+    deliveryInput.value = "";
+    deliveryBtn.textContent = "Leverans från";
+    deliveryBtn.classList.remove("active-filter");
+    document.getElementById("clear-filters-btn").style.display = "none";
+    renderList();
+  });
+
+  document.addEventListener("click", () => {
+    document.querySelectorAll(".ms-panel.open").forEach(p => p.classList.remove("open"));
+  });
 
   // ── Render list ──
   function renderList() {
     const list = document.getElementById("customer-list");
-    const q           = searchQuery.toLowerCase();
-    const segment     = document.getElementById("filter-segment").value;
-    const responsible = document.getElementById("filter-responsible").value;
-    const city        = document.getElementById("filter-city").value;
+    const q = searchQuery.toLowerCase();
 
     let filtered = customers;
 
-    if (q)           filtered = filtered.filter(c => c.customer.toLowerCase().includes(q));
-    if (segment)     filtered = filtered.filter(c => c.customerSegment === segment);
-    if (responsible) filtered = filtered.filter(c => c.customerResponsible === responsible);
-    if (city)        filtered = filtered.filter(c => c.city === city);
+    if (q) filtered = filtered.filter(c => c.customer.toLowerCase().includes(q));
+    if (filterState.segment.size)     filtered = filtered.filter(c => filterState.segment.has(c.customerSegment));
+    if (filterState.responsible.size) filtered = filtered.filter(c => filterState.responsible.has(c.customerResponsible));
+    if (filterState.city.size)        filtered = filtered.filter(c => filterState.city.has(c.city));
+    if (filterState.missed.size) filtered = filtered.filter(c => {
+      const ins = insights[c.customer.toLowerCase()];
+      const val = ins?.missad_uppfoljning ? "Missad uppföljning" : "OK";
+      return filterState.missed.has(val);
+    });
+    if (filterState.risk.size) filtered = filtered.filter(c => {
+      const ins = insights[c.customer.toLowerCase()];
+      return filterState.risk.has(ins?.customer_risk || "");
+    });
+    const deliveryFrom = document.getElementById("filter-delivery-date").value;
+    if (deliveryFrom) filtered = filtered.filter(c => {
+      const ins = insights[c.customer.toLowerCase()];
+      return ins?.latest_delivery_date && ins.latest_delivery_date >= deliveryFrom;
+    });
 
     document.getElementById("subtitle").textContent =
       `${filtered.length} of ${customers.length} stores`;
@@ -762,14 +1081,25 @@
             <div class="check">${isSelected ? "✓" : ""}</div>
             <div style="flex:1">
               <div class="customer-name">${esc(c.customer)}</div>
-              <div class="customer-sub">${esc(c.city)}${c.region ? " &middot; " + esc(c.region) : ""}</div>
+              <div class="customer-sub">${esc(c.city)}</div>
             </div>
             ${c.customerSegment ? `<span class="segment-badge">${esc(c.customerSegment)}</span>` : ""}
           </div>
           <div class="card-meta">
             ${c.customerResponsible ? `<span>&#128100; ${esc(c.customerResponsible)}</span>` : ""}
-            ${c.phoneNumber ? `<span>&#128222; ${esc(c.phoneNumber)}</span>` : ""}
           </div>
+          ${(() => {
+            const ins = insights[c.customer.toLowerCase()];
+            if (!ins) return "";
+            const badges = [];
+            if (ins.missad_uppfoljning) badges.push(`<span class="tag tag-orange" style="font-size:0.68rem;padding:2px 7px">Missad uppföljning</span>`);
+            if (ins.customer_risk === "FÖRLORAD?") badges.push(`<span class="tag tag-red" style="font-size:0.68rem;padding:2px 7px">Förlorad?</span>`);
+            else if (ins.customer_risk === "HÖG RISK") badges.push(`<span class="tag tag-red" style="font-size:0.68rem;padding:2px 7px">Hög risk</span>`);
+            else if (ins.customer_risk === "RISK") badges.push(`<span class="tag tag-orange" style="font-size:0.68rem;padding:2px 7px">Risk</span>`);
+            if (ins.latest_delivery_date) badges.push(`<span class="tag tag-blue" style="font-size:0.68rem;padding:2px 7px">Leverans ${esc(ins.latest_delivery_date)}</span>`);
+            if (badges.length === 0) return "";
+            return `<div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:6px">${badges.join("")}</div>`;
+          })()}
         </div>`;
     }).join("");
 
@@ -779,6 +1109,7 @@
         if (routeMode) {
           toggleRouteSelection(row);
         } else {
+          detailReturnView = "list";
           openDetail(row);
         }
       });
@@ -790,44 +1121,111 @@
     searchQuery = e.target.value;
     renderList();
   });
-  ["filter-segment", "filter-responsible", "filter-city"].forEach(id => {
-    document.getElementById(id).addEventListener("change", renderList);
-  });
+
+  let allContacts = [];
+  let historyExpanded = false;
 
   // ── Render contact list ──
   function renderContactList(contacts) {
-    const section = document.getElementById("d-contact-section");
-    if (!contacts || contacts.length === 0) {
+    allContacts = contacts || [];
+    historyExpanded = false;
+    renderHistory();
+
+    // Senaste aktivitet
+    const latestSection = document.getElementById("d-latest-section");
+    if (allContacts.length > 0) {
+      const lc = allContacts[0];
+      latestSection.style.display = "block";
+      document.getElementById("d-act-date").textContent   = lc.date ? lc.date.slice(0, 10) : "—";
+      document.getElementById("d-act-seller").textContent = lc.seller || "—";
+      const commentEl = document.getElementById("d-act-comment");
+      if (lc.comment) { commentEl.textContent = lc.comment; commentEl.style.display = "block"; }
+      else { commentEl.style.display = "none"; }
+      document.getElementById("d-act-channel").textContent       = lc.channel       || "—";
+      document.getElementById("d-act-result").textContent        = lc.result        || "—";
+      document.getElementById("d-act-contactperson").textContent = lc.contactPerson      || "—";
+      document.getElementById("d-act-nextfollowup").textContent  = lc.nextFollowUp       || "—";
+      document.getElementById("d-act-stockfiller").textContent   = lc.orderInStockfiller || "—";
+      // Översikt meta
+      document.getElementById("d-last-contact").textContent = lc.date ? lc.date.slice(0, 10) : "—";
+      document.getElementById("d-last-result").textContent  = lc.result || "—";
+      document.getElementById("d-next-followup").textContent = lc.nextFollowUp || "—";
+
+      renderDetailTags();
+    } else {
+      latestSection.style.display = "none";
+      document.getElementById("d-last-contact").textContent = "—";
+      document.getElementById("d-last-result").textContent  = "—";
+      document.getElementById("d-next-followup").textContent = "—";
+      renderDetailTags();
+    }
+  }
+
+  function renderDetailTags() {
+    const ins = currentCustomer ? insights[currentCustomer.customer.toLowerCase()] : null;
+    const tags = [];
+    if (currentCustomer?.customerSegment) tags.push(`<span class="tag tag-blue">${esc(currentCustomer.customerSegment)}</span>`);
+    if (currentCustomer?.customerResponsible) tags.push(`<span class="tag tag-green">Ansvarig: ${esc(currentCustomer.customerResponsible)}</span>`);
+    if (ins) {
+      if (ins.missad_uppfoljning) tags.push(`<span class="tag tag-orange">Missad uppföljning</span>`);
+      if (ins.customer_risk === "FÖRLORAD?") tags.push(`<span class="tag tag-red">Förlorad?</span>`);
+      else if (ins.customer_risk === "HÖG RISK") tags.push(`<span class="tag tag-red">Hög risk</span>`);
+      else if (ins.customer_risk === "RISK") tags.push(`<span class="tag tag-orange">Risk</span>`);
+    }
+    document.getElementById("d-tags").innerHTML = tags.join("");
+  }
+
+  function renderHistory() {
+    const section  = document.getElementById("d-contact-section");
+    const list     = document.getElementById("d-contact-list");
+    const showMore = document.getElementById("d-show-more");
+    const title    = document.getElementById("d-history-title");
+
+    const historyContacts = allContacts.slice(1); // skip first — shown in Senaste aktivitet
+
+    if (historyContacts.length === 0) {
       section.style.display = "none";
       return;
     }
     section.style.display = "block";
-    document.getElementById("d-contact-list").innerHTML = contacts.map((lc, i) => `
-      <div class="contact-item" data-index="${i}">
-        <div class="contact-summary">
-          <div>
-            <div class="date">${esc(lc.date)}</div>
-            <div class="meta">${esc(lc.seller)}${lc.channel ? " · " + esc(lc.channel) : ""}${lc.result ? " · " + esc(lc.result) : ""}</div>
-          </div>
-          <span class="chevron">&#9660;</span>
+    title.textContent = `Historik (${historyContacts.length})`;
+
+    const visible = historyExpanded ? historyContacts : historyContacts.slice(0, 3);
+    list.innerHTML = visible.map((lc) => `
+      <div class="history-item">
+        <div class="history-summary">
+          <span class="history-date">${esc(lc.date ? lc.date.slice(0, 10) : "—")}</span>
+          <span class="history-comment">${esc(lc.result || "—")}</span>
+          <span class="history-chevron">&#9660;</span>
         </div>
-        <div class="contact-details">
-          <div class="contact-detail-row"><span class="label">Seller</span><span class="value">${esc(lc.seller) || "—"}</span></div>
-          <div class="contact-detail-row"><span class="label">Channel</span><span class="value">${esc(lc.channel) || "—"}</span></div>
-          <div class="contact-detail-row"><span class="label">Result</span><span class="value">${esc(lc.result) || "—"}</span></div>
-          <div class="contact-detail-row"><span class="label">Contact person</span><span class="value">${esc(lc.contactPerson) || "—"}</span></div>
-          <div class="contact-detail-row"><span class="label">Next follow-up</span><span class="value">${esc(lc.nextFollowUp) || "—"}</span></div>
-          <div class="contact-detail-row"><span class="label">Order in Stockfiller</span><span class="value">${esc(lc.orderInStockfiller) || "—"}</span></div>
-          ${lc.comment
-            ? `<div class="contact-comment">${esc(lc.comment)}</div>`
-            : `<div class="contact-comment" style="color:#aaa">No comment</div>`}
+        <div class="history-detail">
+          <div class="activity-row"><span class="activity-label">Säljare</span><span class="activity-value">${esc(lc.seller) || "—"}</span></div>
+          <div class="activity-row"><span class="activity-label">Kanal</span><span class="activity-value">${esc(lc.channel) || "—"}</span></div>
+          <div class="activity-row"><span class="activity-label">Resultat</span><span class="activity-value">${esc(lc.result) || "—"}</span></div>
+          <div class="activity-row"><span class="activity-label">Kontaktperson</span><span class="activity-value">${esc(lc.contactPerson) || "—"}</span></div>
+          <div class="activity-row"><span class="activity-label">Nästa uppföljning</span><span class="activity-value">${esc(lc.nextFollowUp) || "—"}</span></div>
+          <div class="activity-row"><span class="activity-label">Order i Stockfiller</span><span class="activity-value">${esc(lc.orderInStockfiller) || "—"}</span></div>
+          ${lc.comment ? `<div class="activity-comment">${esc(lc.comment)}</div>` : ""}
         </div>
       </div>
     `).join("");
-    document.querySelectorAll(".contact-item").forEach(item => {
+
+    if (historyContacts.length <= 3) {
+      showMore.style.display = "none";
+    } else {
+      showMore.style.display = "block";
+      showMore.textContent = historyExpanded ? "Dölj historik ›" : `Visa alla (${historyContacts.length}) ›`;
+    }
+
+    list.querySelectorAll(".history-item").forEach(item => {
       item.addEventListener("click", () => item.classList.toggle("expanded"));
     });
   }
+
+  document.getElementById("d-show-more").addEventListener("click", () => {
+    historyExpanded = !historyExpanded;
+    renderHistory();
+  });
 
   // ── Fetch and render stats only (no spinner, no view switch) ──
   async function refreshStats(c) {
@@ -866,34 +1264,41 @@
 
     document.getElementById("detail-loader").classList.remove("show");
 
-    // Static fields
+    // Header
     document.getElementById("d-header-name").textContent = c.customer;
     document.getElementById("d-header-city").textContent = c.city;
     document.getElementById("d-name").textContent = c.customer;
-    document.getElementById("d-city").textContent = [c.city, c.region].filter(Boolean).join(" · ");
-    document.getElementById("d-segment").textContent = c.customerSegment || "—";
-    document.getElementById("d-region").textContent = c.region || "—";
+
+    // Kontaktuppgifter
     document.getElementById("d-address").textContent = c.address || "—";
-    document.getElementById("d-responsible").textContent = c.customerResponsible || "—";
-    document.getElementById("d-reference").textContent = c.customerReference || "—";
+    document.getElementById("d-contactperson").textContent = c.contactPerson || "—";
 
     const phoneEl = document.getElementById("d-phone");
     phoneEl.textContent = c.phoneNumber || "—";
     phoneEl.href = c.phoneNumber ? `tel:${c.phoneNumber}` : "#";
 
+    const emailEl = document.getElementById("d-email");
+    emailEl.textContent = c.email || "—";
+    emailEl.href = c.email ? `mailto:${c.email}` : "#";
+
+    // Ring / Mail buttons
+    document.getElementById("d-call-btn").onclick = () => { if (c.phoneNumber) window.location.href = `tel:${c.phoneNumber}`; };
+    document.getElementById("d-mail-btn").onclick = () => { if (c.email) window.location.href = `mailto:${c.email}`; };
+
     if (stats) {
       applyStats(stats);
     } else {
-      document.getElementById("d-total-sales").textContent = "Error";
-      document.getElementById("d-latest-order").textContent = "Error";
+      document.getElementById("d-total-sales").textContent = "—";
+      document.getElementById("d-latest-order").textContent = "—";
       document.getElementById("d-contact-section").style.display = "none";
+      document.getElementById("d-latest-section").style.display = "none";
     }
 
     showView("detail");
   }
 
   // ── Back (detail → list) ──
-  document.getElementById("back-btn").addEventListener("click", () => showView("list"));
+  document.getElementById("back-btn").addEventListener("click", () => showView(detailReturnView));
 
   // ── Open contact form ──
   document.getElementById("update-contact-btn").addEventListener("click", () => {
@@ -930,6 +1335,12 @@
       nextFollowUp:       document.getElementById("f-nextFollowUp").value,
       orderInStockfiller: document.getElementById("f-orderInStockfiller").value,
     };
+
+    if (!payload.comment.trim()) {
+      showToast("Comment is required.");
+      document.getElementById("f-comment").focus();
+      return;
+    }
 
     btn.disabled = true;
     btn.textContent = "Saving...";
@@ -1118,7 +1529,7 @@
     document.getElementById("map-stop-list").innerHTML = `
       ${distanceKm ? `<div class="map-summary">Optimized route · ${distanceKm} km total</div>` : ""}
       ${orderedStops.map((c, idx) => `
-        <div class="map-stop-item">
+        <div class="map-stop-item" data-row="${c.row}" style="cursor:pointer">
           <div class="stop-num">${idx + 1}</div>
           <div class="stop-info">
             <div class="stop-name">${esc(c.customer)}</div>
@@ -1127,6 +1538,13 @@
         </div>
       `).join("")}
     `;
+
+    document.querySelectorAll(".map-stop-item").forEach(item => {
+      item.addEventListener("click", () => {
+        detailReturnView = "map";
+        openDetail(Number(item.dataset.row));
+      });
+    });
   }
 
   // ══════════════════════════════════════

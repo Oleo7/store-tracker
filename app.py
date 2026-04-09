@@ -3,7 +3,7 @@ from flask_cors import CORS
 import gspread
 from google.oauth2.service_account import Credentials
 from urllib.parse import unquote
-from datetime import datetime
+from datetime import datetime, date
 import os
 import json
 
@@ -15,7 +15,7 @@ SHEET_ID = "1uWhuacNGdhfIfA9mQjI04fR23ZCa6rGeXrlyNLbxEwc"
 CREDS_FILE = "credentials.json"
 
 CUSTOMER_COLUMNS = ["customer", "city", "region", "customerResponsible", "customerSegment",
-                    "customerReference", "address", "phoneNumber"]
+                    "customerReference", "address", "phoneNumber", "email", "contactPerson"]
 
 ORDER_COLUMNS = ["reference", "orderDate", "deliveryDate", "customer", "customerReference",
                  "buyerNumber", "customerNumber", "logisticsNumber", "address", "number",
@@ -52,9 +52,20 @@ def index():
 
 @app.route("/customers", methods=["GET"])
 def get_customers():
-    sheet = get_spreadsheet().worksheet("kundtabell")
+    spreadsheet = get_spreadsheet()
+    sheet = spreadsheet.worksheet("kundtabell")
     all_rows = sheet.get_all_values()
     headers = all_rows[0]
+
+    # Build latest nextFollowUp per customer from kundkontakter
+    contact_rows = rows_to_dicts(spreadsheet.worksheet("kundkontakter").get_all_values()[1:], CONTACT_COLUMNS)
+    latest_followup = {}
+    for c in contact_rows:
+        name = c["customer"].strip().lower()
+        nf = c["nextFollowUp"].strip()
+        if nf and (name not in latest_followup or nf > latest_followup[name]):
+            latest_followup[name] = nf
+
     customers = []
     for i, row in enumerate(all_rows[1:], start=2):
         padded = row + [""] * (len(headers) - len(row))
@@ -67,6 +78,7 @@ def get_customers():
                 return None
         customer["latitude"]  = parse_coord(d.get("latitude",  ""))
         customer["longitude"] = parse_coord(d.get("longitude", ""))
+        customer["nextFollowUp"] = latest_followup.get(customer["customer"].strip().lower(), "")
         customers.append({"row": i, **customer})
     return jsonify(customers)
 
@@ -103,7 +115,7 @@ def get_customer_stats(customer_name):
     # Contacts
     contact_rows = rows_to_dicts(spreadsheet.worksheet("kundkontakter").get_all_values()[1:], CONTACT_COLUMNS)
     contacts = [
-        {k: c[k] for k in ("date", "seller", "channel", "result", "comment", "contactPerson", "nextFollowUp", "orderInStockfiller")}
+        {k: c[k] for k in ("customer", "date", "seller", "channel", "result", "comment", "contactPerson", "nextFollowUp", "orderInStockfiller")}
         for c in contact_rows
         if c["customer"].strip().lower() == customer_name
     ]
@@ -116,6 +128,74 @@ def get_customer_stats(customer_name):
         "order_count": len(unique_references),
         "contacts": contacts,
     })
+
+
+@app.route("/customer-insights", methods=["GET"])
+def get_customer_insights():
+    spreadsheet = get_spreadsheet()
+    today = date.today()
+
+    # Latest nextFollowUp per customer
+    contact_rows = rows_to_dicts(spreadsheet.worksheet("kundkontakter").get_all_values()[1:], CONTACT_COLUMNS)
+    latest_followup = {}
+    for c in contact_rows:
+        name = c["customer"].strip().lower()
+        nf = c["nextFollowUp"].strip()
+        if nf and (name not in latest_followup or nf > latest_followup[name]):
+            latest_followup[name] = nf
+
+    # Latest order date and order count per customer
+    order_rows = rows_to_dicts(spreadsheet.worksheet("ordertabell").get_all_values()[1:], ORDER_COLUMNS)
+    latest_order = {}
+    latest_delivery = {}
+    order_count = {}
+    for o in order_rows:
+        name = o["customer"].strip().lower()
+        d = o["orderDate"].strip()
+        dd = o["deliveryDate"].strip()
+        ref = o["reference"].strip()
+        if d and (name not in latest_order or d > latest_order[name]):
+            latest_order[name] = d
+        if dd and (name not in latest_delivery or dd > latest_delivery[name]):
+            latest_delivery[name] = dd
+        if ref:
+            order_count[name] = order_count.get(name, 0) + 1
+
+    # Compute insights for all customers
+    all_names = set(latest_followup.keys()) | set(latest_order.keys()) | set(order_count.keys()) | set(latest_delivery.keys())
+    insights = {}
+    for name in all_names:
+        # missad_uppfoljning
+        nf = latest_followup.get(name, "")
+        missad = bool(nf and nf < today.isoformat())
+
+        # customer_risk
+        lo = latest_order.get(name, "")
+        count = order_count.get(name, 0)
+        if count == 0 or not lo:
+            risk = ""
+        else:
+            try:
+                lo_date = date.fromisoformat(lo[:10])
+                days = (today - lo_date).days
+                if days > 60:
+                    risk = "FÖRLORAD?"
+                elif days > 40:
+                    risk = "HÖG RISK"
+                elif days > 20:
+                    risk = "RISK"
+                else:
+                    risk = "OK"
+            except ValueError:
+                risk = ""
+
+        insights[name] = {
+            "missad_uppfoljning": missad,
+            "customer_risk": risk,
+            "latest_delivery_date": latest_delivery.get(name, ""),
+        }
+
+    return jsonify(insights)
 
 
 @app.route("/customers/<customer_name>/contacts", methods=["POST"])
