@@ -3,12 +3,9 @@ import logging
 import json
 import googlemaps
 import pandas as pd
-from tqdm import tqdm
 import gspread
 from google.oauth2.service_account import Credentials
 from gspread_dataframe import set_with_dataframe
-
-tqdm.pandas()
 
 logging.basicConfig(
     level=logging.INFO,
@@ -64,7 +61,7 @@ def main():
     enriched_cols = ["city_google", "address_google", "address_number_google",
                      "postal_code_google", "latitude_google", "longitude_google"]
     try:
-        enriched_sheet = spreadsheet.worksheet("customer_enriched")
+        enriched_sheet = spreadsheet.worksheet("customers_enriched")
         existing_df = pd.DataFrame(enriched_sheet.get_all_records())
         already_done = set(existing_df["customer"].dropna().unique()) if "customer" in existing_df.columns else set()
         log.info(f"Found {len(already_done)} already-enriched customers — skipping them")
@@ -83,20 +80,25 @@ def main():
 
     # Geocode new rows
     gmaps = googlemaps.Client(key=GOOGLE_MAPS_API_KEY)
-    needs_enrichment[enriched_cols] = needs_enrichment["customer"].progress_apply(
-        lambda x: pd.Series(get_location_info(x, gmaps))
-    )
+    total = len(needs_enrichment)
+    results = []
+    for i, (_, row) in enumerate(needs_enrichment.iterrows()):
+        results.append(get_location_info(row["customer"], gmaps))
+        if (i + 1) % 10 == 0 or (i + 1) == total:
+            log.info(f"Progress: {i + 1}/{total}")
+
+    needs_enrichment[enriched_cols] = pd.DataFrame(results, index=needs_enrichment.index)
 
     # Combine with existing enriched data and write back
     combined = pd.concat([existing_df, needs_enrichment], ignore_index=True)
 
     try:
-        enriched_sheet = spreadsheet.worksheet("customer_enriched")
+        enriched_sheet = spreadsheet.worksheet("customers_enriched")
     except gspread.WorksheetNotFound:
-        enriched_sheet = spreadsheet.add_worksheet(title="customer_enriched", rows=5000, cols=30)
+        enriched_sheet = spreadsheet.add_worksheet(title="customers_enriched", rows=5000, cols=30)
 
     set_with_dataframe(enriched_sheet, combined)
-    log.info(f"Done — wrote {len(combined)} total rows to 'customer_enriched'")
+    log.info(f"Done — wrote {len(combined)} total rows to 'customers_enriched'")
 
 
 if __name__ == "__main__":
