@@ -1,5 +1,6 @@
 import os
 import logging
+import json
 import googlemaps
 import pandas as pd
 from tqdm import tqdm
@@ -18,21 +19,19 @@ log = logging.getLogger(__name__)
 SHEET_KEY = os.environ["SHEET_KEY"]
 GOOGLE_MAPS_API_KEY = os.environ["GOOGLE_MAPS_API_KEY"]
 
-SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive"
-]
+SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 
 def get_location_info(store_name: str, gmaps: googlemaps.Client) -> tuple:
+    query = f"{store_name}, Sweden"
     try:
-        result = gmaps.geocode(store_name + ", Sweden")
+        result = gmaps.geocode(query)
     except Exception as e:
-        log.warning(f"Geocoding failed for '{store_name}': {e}")
+        log.warning(f"Geocoding failed for '{query}': {e}")
         return None, None, None, None, None, None
 
     if not result:
-        log.warning(f"No geocoding result for '{store_name}'")
+        log.warning(f"No geocoding result for '{query}'")
         return None, None, None, None, None, None
 
     r = result[0]
