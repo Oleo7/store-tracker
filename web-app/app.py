@@ -53,6 +53,14 @@ def index():
     return send_file("index.html")
 
 
+@app.route("/login", methods=["POST"])
+def login():
+    data = request.get_json()
+    if data.get("password") == os.environ.get("APP_PASSWORD"):
+        return jsonify({"ok": True})
+    return jsonify({"ok": False}), 401
+
+
 @app.route("/customers", methods=["GET"])
 def get_customers():
     spreadsheet = get_spreadsheet()

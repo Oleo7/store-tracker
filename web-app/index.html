@@ -1602,24 +1602,32 @@
   // ══════════════════════════════════════
 
   // ── Login ──
-  const APP_PASSWORD = "storetracker2024";
   const loginScreen = document.getElementById("login-screen");
 
   function checkLogin() {
-    if (localStorage.getItem("st_auth") === APP_PASSWORD) {
+    if (localStorage.getItem("st_auth") === "1") {
       loginScreen.classList.add("hidden");
       loadCustomers();
     }
   }
 
-  document.getElementById("login-btn").addEventListener("click", () => {
+  document.getElementById("login-btn").addEventListener("click", async () => {
     const val = document.getElementById("login-password").value;
-    if (val === APP_PASSWORD) {
-      localStorage.setItem("st_auth", APP_PASSWORD);
-      loginScreen.classList.add("hidden");
-      loadCustomers();
-    } else {
-      document.getElementById("login-error").textContent = "Fel lösenord";
+    try {
+      const res = await fetch(`${API}/login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password: val }),
+      });
+      if (res.ok) {
+        localStorage.setItem("st_auth", "1");
+        loginScreen.classList.add("hidden");
+        loadCustomers();
+      } else {
+        document.getElementById("login-error").textContent = "Fel lösenord";
+      }
+    } catch {
+      document.getElementById("login-error").textContent = "Kunde inte ansluta till servern";
     }
   });
 
