@@ -235,6 +235,10 @@ def add_contact(customer_name):
     return jsonify({"ok": True})
 
 
+@app.route("/config")
+def config():
+    return jsonify({"mapsApiKey": os.environ.get("GOOGLE_MAPS_API_KEY", "")})
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)

@@ -4,8 +4,6 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <title>Store Tracker</title>
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -1413,7 +1411,8 @@
 
   let selectedRouteRows = new Set();
   let routeMode = false;
-  let leafletMap = null;
+  let googleMap = null;
+  let mapMarkers = [];
   let mapStops = [];        // all stores shown on the map
   let routeInMapStops = []; // ordered selection for Google Maps route
 
@@ -1476,7 +1475,7 @@
   document.getElementById("map-gmaps-btn").addEventListener("click", openInGoogleMaps);
 
   // ── Show map with all selected stores (no route yet) ──
-  function showMapView() {
+  async function showMapView() {
     mapStops = [...selectedRouteRows]
       .map(row => customers.find(c => c.row === row))
       .filter(c => c && c.latitude && c.longitude);
@@ -1488,34 +1487,47 @@
 
     routeInMapStops = [];
     showView("map");
-    initLeaflet();
+    await initGoogleMap();
     renderMapMarkers();
     fitMapToBounds(mapStops);
     document.getElementById("map-subtitle").textContent = `${mapStops.length} butik${mapStops.length !== 1 ? "er" : ""}`;
     renderMapStopList();
   }
 
-  function initLeaflet() {
-    if (!leafletMap) {
-      leafletMap = L.map("map");
-      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-        attribution: "© OpenStreetMap contributors"
-      }).addTo(leafletMap);
+  async function initGoogleMap() {
+    if (!window.google) {
+      const res = await fetch("/config");
+      const { mapsApiKey } = await res.json();
+      await new Promise((resolve, reject) => {
+        const script = document.createElement("script");
+        script.src = `https://maps.googleapis.com/maps/api/js?key=${mapsApiKey}`;
+        script.onload = resolve;
+        script.onerror = reject;
+        document.head.appendChild(script);
+      });
+    }
+    if (!googleMap) {
+      googleMap = new google.maps.Map(document.getElementById("map"), {
+        zoom: 10,
+        center: { lat: 59.33, lng: 18.07 },
+        disableDefaultUI: true,
+        zoomControl: true,
+        gestureHandling: "greedy",
+      });
     } else {
       clearMapLayers();
     }
-    setTimeout(() => leafletMap.invalidateSize(), 100);
   }
 
   function clearMapLayers() {
-    leafletMap.eachLayer(layer => {
-      if (layer instanceof L.Marker) leafletMap.removeLayer(layer);
-    });
+    mapMarkers.forEach(m => m.setMap(null));
+    mapMarkers = [];
   }
 
   function fitMapToBounds(stops) {
-    const bounds = L.latLngBounds(stops.map(c => [c.latitude, c.longitude]));
-    leafletMap.fitBounds(bounds, { padding: [40, 40] });
+    const bounds = new google.maps.LatLngBounds();
+    stops.forEach(c => bounds.extend({ lat: c.latitude, lng: c.longitude }));
+    googleMap.fitBounds(bounds, 40);
   }
 
   function renderMapMarkers() {
@@ -1524,15 +1536,24 @@
       const inRoute = routeInMapStops.findIndex(r => r.row === c.row) !== -1;
       const bg = inRoute ? "#3b82f6" : "#6b7280";
       const size = inRoute ? 22 : 18;
-      const icon = L.divIcon({
-        className: "",
-        html: `<div style="background:${bg};width:${size}px;height:${size}px;border-radius:50%;border:2px solid #fff;box-shadow:0 2px 6px rgba(0,0,0,0.3)"></div>`,
-        iconSize: [size, size],
-        iconAnchor: [size / 2, size / 2],
+      const marker = new google.maps.Marker({
+        position: { lat: c.latitude, lng: c.longitude },
+        map: googleMap,
+        title: c.customer,
+        icon: {
+          path: google.maps.SymbolPath.CIRCLE,
+          scale: size / 2,
+          fillColor: bg,
+          fillOpacity: 1,
+          strokeColor: "#fff",
+          strokeWeight: 2,
+        },
       });
-      L.marker([c.latitude, c.longitude], { icon })
-        .addTo(leafletMap)
-        .bindPopup(`<b>${c.customer}</b><br>${c.city}`);
+      const infoWindow = new google.maps.InfoWindow({
+        content: `<b>${c.customer}</b><br>${c.city}`,
+      });
+      marker.addListener("click", () => infoWindow.open(googleMap, marker));
+      mapMarkers.push(marker);
     });
   }
 
