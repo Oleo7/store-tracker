@@ -7,6 +7,8 @@
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
 
+    html { background: #1a1a2e; }
+
     body {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       background: #f0f2f5;
@@ -125,6 +127,7 @@
       display: flex;
       align-items: center;
       gap: 12px;
+      transform: translateZ(0);
     }
     .header-text h1 { font-size: 1.15rem; font-weight: 700; }
     .header-text p  { font-size: 0.75rem; opacity: 0.6; margin-top: 2px; }
@@ -238,6 +241,8 @@
       border-radius: 0 0 20px 20px;
       transform: translateY(-100%);
       transition: transform 0.25s ease;
+      backface-visibility: hidden;
+      -webkit-backface-visibility: hidden;
     }
     .filter-modal.open { transform: translateY(0); }
     .filter-modal-header {
@@ -779,14 +784,6 @@
     <div class="state-msg">Laddar...</div>
   </div>
 
-  <!-- Route mode action bar -->
-  <div class="route-action-bar" id="route-action-bar" style="display:none">
-    <div class="route-selected-count" id="route-selected-count">0 butiker valda</div>
-    <div style="display:flex;gap:8px">
-      <button class="action-btn secondary" id="route-cancel-btn" style="margin:0;padding:10px 16px;font-size:0.85rem">Avbryt</button>
-      <button class="action-btn" id="plan-route-btn" disabled style="margin:0;padding:10px 16px;font-size:0.85rem">Visa karta</button>
-    </div>
-  </div>
 </div>
 
 <!-- ═══════════════ DETAIL VIEW ═══════════════ -->
@@ -816,7 +813,7 @@
       <div class="tags-row" id="d-tags"></div>
       <div class="overview-meta">
         <div class="overview-meta-item">
-          <div class="meta-label">NÄSTA UPPFÖLJNING</div>
+          <div class="meta-label">PLANERAD UPPFÖLJNING</div>
           <div class="meta-value" id="d-next-followup">—</div>
         </div>
         <div class="overview-meta-item">
@@ -851,10 +848,33 @@
 
     <!-- Kontaktuppgifter -->
     <div class="detail-section">
-      <div class="detail-section-title">Kontaktuppgifter</div>
-      <div class="info-row"><span class="label">Telefon</span><a href="#" id="d-phone">—</a></div>
-      <div class="info-row"><span class="label">Email</span><a href="#" id="d-email">—</a></div>
-      <div class="info-row"><span class="label">Adress</span><span class="value" id="d-address">—</span></div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+        <div class="detail-section-title" style="margin-bottom:0">Kontaktuppgifter</div>
+        <button id="contact-edit-btn" style="background:none;border:none;color:#1a1a2e;font-size:0.8rem;font-weight:600;cursor:pointer;padding:4px 0;font-family:inherit">Redigera</button>
+      </div>
+      <div id="contact-view-mode">
+        <div class="info-row"><span class="label">Telefon</span><a href="#" id="d-phone">—</a></div>
+        <div class="info-row"><span class="label">Email</span><a href="#" id="d-email">—</a></div>
+        <div class="info-row"><span class="label">Adress</span><span class="value" id="d-address">—</span></div>
+      </div>
+      <div id="contact-edit-mode" style="display:none">
+        <div class="form-field" style="margin-bottom:10px">
+          <label>Telefon</label>
+          <input type="tel" id="edit-phone" />
+        </div>
+        <div class="form-field" style="margin-bottom:10px">
+          <label>Email</label>
+          <input type="email" id="edit-email" />
+        </div>
+        <div class="form-field" style="margin-bottom:10px">
+          <label>Adress</label>
+          <input type="text" id="edit-address" />
+        </div>
+        <div style="display:flex;gap:8px;margin-top:4px">
+          <button class="action-btn" id="contact-save-btn" style="margin:0;flex:1;padding:10px">Spara</button>
+          <button class="action-btn secondary" id="contact-cancel-btn" style="margin:0;flex:1;padding:10px">Avbryt</button>
+        </div>
+      </div>
     </div>
 
     <!-- Senaste aktivitet -->
@@ -1065,6 +1085,7 @@
   }
 
   function openFilterModal(key) {
+    document.getElementById("filter-modal").style.visibility = "";
     _sheetKey = key;
     document.getElementById("filter-modal-title").textContent = _sheetLabels[key];
     const searchRow = document.getElementById("filter-modal-search");
@@ -1083,8 +1104,10 @@
   }
 
   function closeFilterModal() {
-    document.getElementById("filter-modal").classList.remove("open");
+    const modal = document.getElementById("filter-modal");
+    modal.classList.remove("open");
     document.getElementById("filter-backdrop").classList.remove("open");
+    setTimeout(() => { modal.style.visibility = "hidden"; }, 260);
   }
 
   document.getElementById("filter-modal-close").addEventListener("click", closeFilterModal);
@@ -1174,13 +1197,11 @@
       return;
     }
 
-    const hasCoords = c => c.latitude && c.longitude;
+    filteredCustomers = filtered;
     list.innerHTML = filtered.map(c => {
-      const isSelected = selectedRouteRows.has(c.row);
       return `
-        <div class="customer-card ${isSelected ? "route-selected" : ""} ${routeMode && !hasCoords(c) ? "no-coords" : ""}" data-row="${c.row}">
+        <div class="customer-card" data-row="${c.row}">
           <div class="card-top">
-            <div class="check">${isSelected ? "✓" : ""}</div>
             <div style="flex:1">
               <div class="customer-name">${esc(c.customer)}</div>
               <div class="customer-sub">${esc(c.city)}</div>
@@ -1207,13 +1228,8 @@
 
     list.querySelectorAll(".customer-card").forEach(card => {
       card.addEventListener("click", () => {
-        const row = Number(card.dataset.row);
-        if (routeMode) {
-          toggleRouteSelection(row);
-        } else {
-          detailReturnView = "list";
-          openDetail(row);
-        }
+        detailReturnView = "list";
+        openDetail(Number(card.dataset.row));
       });
     });
   }
@@ -1250,7 +1266,8 @@
       // Översikt meta
       document.getElementById("d-last-contact").textContent = lc.date_time ? lc.date_time.slice(0, 10) : "—";
       document.getElementById("d-last-result").textContent  = lc.result || "—";
-      document.getElementById("d-next-followup").textContent = lc.follow_up_date || "—";
+      const latestFollowUp = allContacts.map(c => c.follow_up_date).filter(Boolean).sort().reverse()[0] || "—";
+      document.getElementById("d-next-followup").textContent = latestFollowUp;
 
       renderDetailTags();
     } else {
@@ -1375,15 +1392,60 @@
 
     const phoneEl = document.getElementById("d-phone");
     phoneEl.textContent = c.phone || "—";
-    phoneEl.href = c.phone ? `tel:${c.phone}` : "#";
+    phoneEl.href = c.phone ? `tel:${c.phone.replace(/\s/g, "")}` : "#";
 
     const emailEl = document.getElementById("d-email");
     emailEl.textContent = c.email || "—";
     emailEl.href = c.email ? `mailto:${c.email}` : "#";
 
     // Ring / Mail buttons
-    document.getElementById("d-call-btn").onclick = () => { if (c.phone) window.location.href = `tel:${c.phone}`; };
+    document.getElementById("d-call-btn").onclick = () => { if (c.phone) window.location.href = `tel:${c.phone.replace(/\s/g, "")}`; };
     document.getElementById("d-mail-btn").onclick = () => { if (c.email) window.location.href = `mailto:${c.email}`; };
+
+    // Kontaktuppgifter edit
+    document.getElementById("contact-edit-mode").style.display = "none";
+    document.getElementById("contact-view-mode").style.display = "block";
+    document.getElementById("contact-edit-btn").onclick = () => {
+      document.getElementById("edit-phone").value   = c.phone   || "";
+      document.getElementById("edit-email").value   = c.email   || "";
+      document.getElementById("edit-address").value = c.address || "";
+      document.getElementById("contact-view-mode").style.display = "none";
+      document.getElementById("contact-edit-mode").style.display = "block";
+    };
+    document.getElementById("contact-cancel-btn").onclick = () => {
+      document.getElementById("contact-edit-mode").style.display = "none";
+      document.getElementById("contact-view-mode").style.display = "block";
+    };
+    document.getElementById("contact-save-btn").onclick = async () => {
+      const phone   = document.getElementById("edit-phone").value.trim();
+      const email   = document.getElementById("edit-email").value.trim();
+      const address = document.getElementById("edit-address").value.trim();
+      const btn = document.getElementById("contact-save-btn");
+      btn.disabled = true;
+      try {
+        const res = await fetch(`${API}/customers/${c.row}/contact`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ phone, email, address }),
+        });
+        if (!res.ok) throw new Error();
+        c.phone = phone;
+        c.email = email;
+        c.address = address;
+        document.getElementById("d-phone").textContent = phone || "—";
+        document.getElementById("d-phone").href = phone ? `tel:${phone.replace(/\s/g, "")}` : "#";
+        document.getElementById("d-email").textContent = email || "—";
+        document.getElementById("d-email").href = email ? `mailto:${email}` : "#";
+        document.getElementById("d-address").textContent = address || "—";
+        document.getElementById("contact-edit-mode").style.display = "none";
+        document.getElementById("contact-view-mode").style.display = "block";
+        showToast("Sparat!");
+      } catch {
+        showToast("Kunde inte spara");
+      } finally {
+        btn.disabled = false;
+      }
+    };
 
     if (stats) {
       applyStats(stats);
@@ -1490,64 +1552,13 @@
   // ROUTE PLANNER
   // ══════════════════════════════════════
 
-  let selectedRouteRows = new Set();
-  let routeMode = false;
+  let filteredCustomers = [];
   let googleMap = null;
   let mapMarkers = [];
   let mapStops = [];        // all stores shown on the map
-  let routeInMapStops = []; // ordered selection for Google Maps route
+  let routeInMapStops = []; // selection for Google Maps route
 
-  function enterRouteMode() {
-    routeMode = true;
-    selectedRouteRows.clear();
-    document.getElementById("list-title").textContent = "Välj butiker";
-    document.getElementById("route-mode-btn").style.display = "none";
-    document.getElementById("route-action-bar").style.display = "flex";
-    document.getElementById("customer-list").classList.add("route-mode");
-    updateRouteCount();
-    renderList();
-  }
-
-  function exitRouteMode() {
-    routeMode = false;
-    selectedRouteRows.clear();
-    document.getElementById("list-title").textContent = "Butiker";
-    document.getElementById("route-mode-btn").style.display = "";
-    document.getElementById("route-action-bar").style.display = "none";
-    document.getElementById("customer-list").classList.remove("route-mode");
-    renderList();
-  }
-
-  document.getElementById("route-mode-btn").addEventListener("click", enterRouteMode);
-  document.getElementById("route-cancel-btn").addEventListener("click", exitRouteMode);
-  document.getElementById("plan-route-btn").addEventListener("click", showMapView);
-
-  function toggleRouteSelection(row) {
-    const c = customers.find(c => c.row === row);
-    if (!c || !c.latitude || !c.longitude) return;
-    if (selectedRouteRows.has(row)) {
-      selectedRouteRows.delete(row);
-    } else {
-      if (selectedRouteRows.size >= 10) {
-        showToast("Maximum 10 butiker");
-        return;
-      }
-      selectedRouteRows.add(row);
-    }
-    const card = document.querySelector(`.customer-card[data-row="${row}"]`);
-    if (card) {
-      card.classList.toggle("route-selected", selectedRouteRows.has(row));
-      card.querySelector(".check").textContent = selectedRouteRows.has(row) ? "✓" : "";
-    }
-    updateRouteCount();
-  }
-
-  function updateRouteCount() {
-    const n = selectedRouteRows.size;
-    document.getElementById("route-selected-count").textContent =
-      `${n} butik${n !== 1 ? "er" : ""} vald${n !== 1 ? "a" : ""}`;
-    document.getElementById("plan-route-btn").disabled = n < 1;
-  }
+  document.getElementById("route-mode-btn").addEventListener("click", showMapView);
 
   document.getElementById("map-back-btn").addEventListener("click", () => {
     showView("list");
@@ -1557,12 +1568,11 @@
 
   // ── Show map with all selected stores (no route yet) ──
   async function showMapView() {
-    mapStops = [...selectedRouteRows]
-      .map(row => customers.find(c => c.row === row))
-      .filter(c => c && c.latitude && c.longitude);
+    const MAP_LIMIT = 30;
+    mapStops = filteredCustomers.filter(c => c.latitude && c.longitude).slice(0, MAP_LIMIT);
 
     if (mapStops.length < 1) {
-      showToast("Välj minst en butik med koordinater");
+      showToast("Inga butiker med koordinater i listan");
       return;
     }
 
@@ -1571,8 +1581,12 @@
     await initGoogleMap();
     renderMapMarkers();
     fitMapToBounds(mapStops);
-    document.getElementById("map-subtitle").textContent = `${mapStops.length} butik${mapStops.length !== 1 ? "er" : ""}`;
+    const total = filteredCustomers.filter(c => c.latitude && c.longitude).length;
+    document.getElementById("map-subtitle").textContent = total > MAP_LIMIT
+      ? `Visar ${MAP_LIMIT} av ${total} butiker — filtrera för färre`
+      : `${mapStops.length} butik${mapStops.length !== 1 ? "er" : ""}`;
     renderMapStopList();
+    showMyLocation();
   }
 
   async function initGoogleMap() {
@@ -1605,6 +1619,31 @@
     mapMarkers = [];
   }
 
+  let myLocationMarker = null;
+  let myPosition = null;
+
+  function showMyLocation() {
+    if (!navigator.geolocation) return;
+    navigator.geolocation.getCurrentPosition(pos => {
+      myPosition = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+      if (myLocationMarker) myLocationMarker.setMap(null);
+      myLocationMarker = new google.maps.Marker({
+        position: { lat: pos.coords.latitude, lng: pos.coords.longitude },
+        map: googleMap,
+        title: "Din position",
+        icon: {
+          path: google.maps.SymbolPath.CIRCLE,
+          scale: 8,
+          fillColor: "#4285f4",
+          fillOpacity: 1,
+          strokeColor: "#fff",
+          strokeWeight: 3,
+        },
+        zIndex: 999,
+      });
+    });
+  }
+
   function fitMapToBounds(stops) {
     const bounds = new google.maps.LatLngBounds();
     stops.forEach(c => bounds.extend({ lat: c.latitude, lng: c.longitude }));
@@ -1614,22 +1653,46 @@
   function renderMapMarkers() {
     clearMapLayers();
     mapStops.forEach(c => {
-      const inRoute = routeInMapStops.findIndex(r => r.row === c.row) !== -1;
+      const routeIdx = routeInMapStops.findIndex(r => r.row === c.row);
+      const inRoute  = routeIdx !== -1;
       const bg = inRoute ? "#3b82f6" : "#6b7280";
-      const size = inRoute ? 22 : 18;
-      const marker = new google.maps.Marker({
-        position: { lat: c.latitude, lng: c.longitude },
-        map: googleMap,
-        title: c.customer,
-        icon: {
-          path: google.maps.SymbolPath.CIRCLE,
-          scale: size / 2,
-          fillColor: bg,
-          fillOpacity: 1,
-          strokeColor: "#fff",
-          strokeWeight: 2,
-        },
-      });
+
+      let marker;
+      if (inRoute) {
+        marker = new google.maps.Marker({
+          position: { lat: c.latitude, lng: c.longitude },
+          map: googleMap,
+          title: c.customer,
+          label: {
+            text: String(routeIdx + 1),
+            color: "#fff",
+            fontSize: "11px",
+            fontWeight: "bold",
+          },
+          icon: {
+            path: google.maps.SymbolPath.CIRCLE,
+            scale: 11,
+            fillColor: bg,
+            fillOpacity: 1,
+            strokeColor: "#fff",
+            strokeWeight: 2,
+          },
+        });
+      } else {
+        marker = new google.maps.Marker({
+          position: { lat: c.latitude, lng: c.longitude },
+          map: googleMap,
+          title: c.customer,
+          icon: {
+            path: google.maps.SymbolPath.CIRCLE,
+            scale: 9,
+            fillColor: bg,
+            fillOpacity: 1,
+            strokeColor: "#fff",
+            strokeWeight: 2,
+          },
+        });
+      }
       marker.addListener("click", () => toggleMapStop(c.row));
       mapMarkers.push(marker);
     });
@@ -1654,18 +1717,19 @@
     document.getElementById("map-route-count").textContent =
       n === 0 ? "Välj butiker nedan för rutt"
               : `${n} butik${n !== 1 ? "er" : ""} vald${n !== 1 ? "a" : ""} för rutt`;
-    document.getElementById("map-gmaps-btn").disabled = mapStops.length < 1;
+    document.getElementById("map-gmaps-btn").disabled = routeInMapStops.length < 1;
   }
 
   function renderMapStopList() {
     document.getElementById("map-stop-list").innerHTML = mapStops.map(c => {
       const routeIdx = routeInMapStops.findIndex(r => r.row === c.row);
-      const inRoute = routeIdx !== -1;
-      const dotColor = inRoute ? "#3b82f6" : "#d1d5db";
-      const dot = `<div style="width:14px;height:14px;border-radius:50%;background:${dotColor};flex-shrink:0"></div>`;
+      const inRoute  = routeIdx !== -1;
+      const badge = inRoute
+        ? `<div style="width:22px;height:22px;border-radius:50%;background:#3b82f6;color:#fff;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0">${routeIdx + 1}</div>`
+        : `<div style="width:14px;height:14px;border-radius:50%;background:#d1d5db;flex-shrink:0;margin:0 4px"></div>`;
       return `
         <div class="map-stop-item${inRoute ? " route-selected" : ""}" data-row="${c.row}">
-          ${dot}
+          ${badge}
           <div class="stop-info" style="flex:1">
             <div class="stop-name">${esc(c.customer)}</div>
             <div class="stop-city">${esc(c.city)}</div>
@@ -1690,12 +1754,15 @@
 
 
   function openInGoogleMaps() {
-    if (mapStops.length < 1) return;
     const stops = routeInMapStops.length > 0 ? routeInMapStops : mapStops;
-    const destination = `${stops[stops.length - 1].latitude},${stops[stops.length - 1].longitude}`;
-    const waypoints = stops.slice(0, -1).map(c => `${c.latitude},${c.longitude}`).join("|");
-    const url = `https://www.google.com/maps/dir/?api=1&destination=${destination}${waypoints ? `&waypoints=${waypoints}` : ""}`;
-    window.open(url, "_blank");
+    if (stops.length < 1) return;
+    const dest      = stops[stops.length - 1];
+    const waypoints = stops.slice(0, -1);
+    const destParam = `${dest.latitude},${dest.longitude}`;
+    const wpParam   = waypoints.length > 0
+      ? `&waypoints=${waypoints.map(c => `${c.latitude},${c.longitude}`).join("|")}`
+      : "";
+    window.open(`https://www.google.com/maps/dir/?api=1&destination=${destParam}${wpParam}&travelmode=driving`, "_blank");
   }
 
   // ══════════════════════════════════════

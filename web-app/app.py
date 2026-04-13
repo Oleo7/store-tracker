@@ -185,15 +185,17 @@ def get_customer_insights():
         nf = latest_followup.get(name, "")
         missad = bool(nf and nf < today.isoformat())
 
-        # customer_risk
+        # customer_risk — based on most recent of order date or delivery date
         lo = latest_order.get(name, "")
+        ld_check = latest_delivery.get(name, "")
+        most_recent = max(lo, ld_check) if lo and ld_check else (lo or ld_check)
         count = order_count.get(name, 0)
-        if count == 0 or not lo:
+        if count == 0 or not most_recent:
             risk = ""
         else:
             try:
-                lo_date = date.fromisoformat(lo[:10])
-                days = (today - lo_date).days
+                recent_date = date.fromisoformat(most_recent[:10])
+                days = (today - recent_date).days
                 if days > 60:
                     risk = "FÖRLORAD?"
                 elif days > 40:
@@ -214,6 +216,19 @@ def get_customer_insights():
         }
 
     return jsonify(insights)
+
+
+@app.route("/customers/<int:row>/contact", methods=["PATCH"])
+def update_customer_contact(row):
+    data = request.get_json()
+    sheet = get_spreadsheet().worksheet("customers_enriched")
+    headers = sheet.row_values(1)
+    for field, col_name in [("phone", "phone"), ("email", "email"), ("address", "address_google")]:
+        if field in data:
+            if col_name in headers:
+                col_idx = headers.index(col_name) + 1
+                sheet.update_cell(row, col_idx, data[field])
+    return jsonify({"ok": True})
 
 
 @app.route("/customers/<customer_name>/contacts", methods=["POST"])
