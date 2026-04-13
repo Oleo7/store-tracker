@@ -166,62 +166,115 @@
     }
     .toolbar input[type="search"]:focus { border-color: #1a1a2e; background: #fff; }
 
-    .dropdowns {
+    /* ── Filter chip row ── */
+    .chip-row {
       display: flex;
+      flex-wrap: wrap;
       gap: 8px;
     }
-    .ms-wrap {
-      flex: 1;
-      position: relative;
-    }
-    .ms-btn {
-      width: 100%;
+    .chip {
+      flex-shrink: 0;
+      height: 32px;
+      padding: 0 14px;
       border: 1.5px solid #e8eaf0;
-      border-radius: 10px;
-      padding: 7px 10px;
+      border-radius: 20px;
       font-size: 0.8rem;
       font-family: inherit;
       background: #f7f8fa;
       color: #555;
-      outline: none;
       cursor: pointer;
-      text-align: left;
       white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
+      outline: none;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      transition: background 0.12s, border-color 0.12s, color 0.12s;
     }
-    .ms-btn.active-filter {
+    .chip.active {
       border-color: #1a1a2e;
       background: #1a1a2e;
       color: #fff;
     }
-    .ms-panel {
-      display: none;
-      position: absolute;
-      top: calc(100% + 4px);
-      left: 0;
-      min-width: 100%;
-      background: #fff;
-      border: 1.5px solid #e8eaf0;
-      border-radius: 10px;
-      box-shadow: 0 4px 16px rgba(0,0,0,0.1);
-      z-index: 50;
-      max-height: 220px;
-      overflow-y: auto;
-      padding: 6px 0;
+    .chip-clear {
+      color: #c0392b;
+      border-color: #fdd;
+      background: #fff5f5;
     }
-    .ms-panel.open { display: block; }
-    .ms-option {
+
+    /* ── Filter modal (top-anchored, keyboard-safe) ── */
+    .filter-backdrop {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.4);
+      z-index: 80;
+    }
+    .filter-backdrop.open { display: block; }
+    .filter-option {
       display: flex;
       align-items: center;
-      gap: 8px;
-      padding: 8px 14px;
-      font-size: 0.82rem;
+      gap: 14px;
+      padding: 12px 20px;
+      font-size: 0.88rem;
       cursor: pointer;
       user-select: none;
     }
-    .ms-option:hover { background: #f7f8fa; }
-    .ms-option input[type="checkbox"] { accent-color: #1a1a2e; width: 15px; height: 15px; flex-shrink: 0; }
+    .filter-option:active { background: #f7f8fa; }
+    .filter-option input[type=checkbox] {
+      width: 18px; height: 18px;
+      accent-color: #1a1a2e;
+      flex-shrink: 0;
+    }
+
+    /* ── Filter modal ── */
+    .filter-modal {
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      background: #fff;
+      z-index: 81;
+      display: flex;
+      flex-direction: column;
+      max-height: 75vh;
+      border-radius: 0 0 20px 20px;
+      transform: translateY(-100%);
+      transition: transform 0.25s ease;
+    }
+    .filter-modal.open { transform: translateY(0); }
+    .filter-modal-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 16px 20px 10px;
+      flex-shrink: 0;
+      border-bottom: 1px solid #f0f2f5;
+    }
+    .filter-modal-title { font-size: 0.95rem; font-weight: 700; }
+    .filter-modal-close {
+      background: none; border: none;
+      font-size: 1.1rem; color: #888;
+      cursor: pointer; padding: 4px 8px;
+      line-height: 1; font-family: inherit;
+    }
+    .filter-modal-search {
+      padding: 10px 16px 6px;
+      flex-shrink: 0;
+    }
+    .filter-modal-search input {
+      width: 100%;
+      border: 1.5px solid #e8eaf0;
+      border-radius: 10px;
+      padding: 9px 12px;
+      font-size: 16px;
+      font-family: inherit;
+      outline: none;
+      background: #f7f8fa;
+    }
+    .filter-modal-search input:focus { border-color: #1a1a2e; background: #fff; }
+    .filter-modal-body {
+      overflow-y: auto;
+      flex: 1;
+      padding: 6px 0 16px;
+    }
 
     /* ── Customer list ── */
     .list-body { padding: 12px 14px 40px; }
@@ -708,33 +761,18 @@
   </div>
 
   <div class="toolbar">
-    <input type="search" id="search-input" placeholder="Sök butik..." />
-    <div class="dropdowns">
-      <div class="ms-wrap" id="ms-wrap-segment">
-        <button class="ms-btn" id="ms-btn-segment">Alla segment</button>
-        <div class="ms-panel" id="ms-panel-segment"></div>
-      </div>
-      <div class="ms-wrap" id="ms-wrap-responsible">
-        <button class="ms-btn" id="ms-btn-responsible">Alla ansvariga</button>
-        <div class="ms-panel" id="ms-panel-responsible"></div>
-      </div>
-      <div class="ms-wrap" id="ms-wrap-city">
-        <button class="ms-btn" id="ms-btn-city">Alla städer</button>
-        <div class="ms-panel" id="ms-panel-city"></div>
-      </div>
+    <input type="search" id="search-input" placeholder="Sök butik eller stad..." />
+    <div class="chip-row">
+      <button class="chip" id="chip-missed">Uppföljning</button>
+      <button class="chip" id="chip-segment">Segment</button>
+      <button class="chip" id="chip-responsible">Ansvarig</button>
+      <button class="chip" id="chip-city">Stad</button>
+      <button class="chip" id="chip-risk">Risk</button>
+      <button class="chip" id="chip-delivery">Leverans</button>
     </div>
-    <div class="dropdowns">
-      <button class="ms-btn" id="ms-btn-missed">Missad uppföljning</button>
-      <div class="ms-wrap" id="ms-wrap-risk">
-        <button class="ms-btn" id="ms-btn-risk">Risk</button>
-        <div class="ms-panel" id="ms-panel-risk"></div>
-      </div>
-      <div class="ms-wrap" id="ms-wrap-delivery">
-        <button class="ms-btn" id="ms-btn-delivery">Senaste leverans</button>
-        <div class="ms-panel" id="ms-panel-delivery"></div>
-      </div>
+    <div id="clear-filters-row" style="display:none">
+      <button class="chip chip-clear" id="clear-filters-btn">✕ Rensa filter</button>
     </div>
-    <button id="clear-filters-btn" style="display:none;background:none;border:none;color:#e74c3c;font-size:0.8rem;font-weight:600;cursor:pointer;padding:2px 0 0;text-align:left;">✕ Rensa filter</button>
   </div>
 
   <div class="list-body" id="customer-list">
@@ -920,6 +958,19 @@
 </div>
 
 
+<!-- ═══════════════ FILTER MODAL ═══════════════ -->
+<div class="filter-backdrop" id="filter-backdrop"></div>
+<div class="filter-modal" id="filter-modal">
+  <div class="filter-modal-header">
+    <span class="filter-modal-title" id="filter-modal-title">Filter</span>
+    <button class="filter-modal-close" id="filter-modal-close">✕</button>
+  </div>
+  <div class="filter-modal-search" id="filter-modal-search" style="display:none">
+    <input type="search" id="filter-modal-input" placeholder="Sök stad..." />
+  </div>
+  <div class="filter-modal-body" id="filter-modal-body"></div>
+</div>
+
 <script>
   const API = "";
 
@@ -963,102 +1014,132 @@
     }
   }
 
-  document.getElementById("ms-btn-missed").addEventListener("click", () => {
+  // ── Filter chip: Missad uppföljning (toggle) ──
+  document.getElementById("chip-missed").addEventListener("click", () => {
     const active = filterState.missed.size > 0;
     if (active) filterState.missed.clear();
     else filterState.missed.add("Missad uppföljning");
-    document.getElementById("ms-btn-missed").classList.toggle("active-filter", !active);
+    document.getElementById("chip-missed").classList.toggle("active", !active);
     updateClearBtn();
     renderList();
   });
 
-  function buildInsightDropdowns() {
-    setupMultiSelect("risk",   "ms-btn-risk",   "ms-panel-risk",   ["FÖRLORAD?", "HÖG RISK", "RISK", "OK"], "Risk");
+  // ── Filter bottom sheet state ──
+  let _sheetKey = null;
+  const _sheetLabels = {
+    segment:     "Segment",
+    responsible: "Ansvarig",
+    city:        "Stad",
+    risk:        "Risk",
+    delivery:    "Leverans",
+  };
+  const _chipIds = {
+    segment:     "chip-segment",
+    responsible: "chip-responsible",
+    city:        "chip-city",
+    risk:        "chip-risk",
+    delivery:    "chip-delivery",
+  };
+  const _sheetValues = { segment: [], responsible: [], city: [], risk: [], delivery: [] };
 
-    const months = [...new Set(
-      Object.values(insights).map(i => i.latest_delivery_month).filter(Boolean)
-    )].sort().reverse();
-    setupMultiSelect("delivery", "ms-btn-delivery", "ms-panel-delivery", months, "Senaste leverans");
-  }
-
-  // ── Build multi-select dropdowns ──
-  function buildDropdowns() {
-    const unique = (key) => [...new Set(customers.map(c => c[key]).filter(Boolean))].sort();
-    setupMultiSelect("segment",     "ms-btn-segment",     "ms-panel-segment",     unique("customer_segment"),   "Alla segment");
-    setupMultiSelect("responsible", "ms-btn-responsible", "ms-panel-responsible", unique("sales_person"), "Alla ansvariga");
-    setupMultiSelect("city",        "ms-btn-city",        "ms-panel-city",        unique("city"),              "Alla städer");
-  }
-
-  const _multiSelectInit = new Set();
-
-  function setupMultiSelect(key, btnId, panelId, values, placeholder) {
-    const btn   = document.getElementById(btnId);
-    const panel = document.getElementById(panelId);
-
-    panel.innerHTML = values.map(v => `
-      <label class="ms-option">
-        <input type="checkbox" value="${esc(v)}" />
+  // ── Filter modal ──
+  function renderFilterOptions(q) {
+    const values = _sheetValues[_sheetKey];
+    const state  = filterState[_sheetKey];
+    const filtered = q ? values.filter(v => v.toLowerCase().includes(q.toLowerCase())) : values;
+    const body = document.getElementById("filter-modal-body");
+    body.innerHTML = filtered.map(v => `
+      <label class="filter-option">
+        <input type="checkbox" value="${esc(v)}" ${state.has(v) ? "checked" : ""} />
         ${esc(v)}
       </label>
     `).join("");
-
-    panel.querySelectorAll("input[type=checkbox]").forEach(cb => {
+    body.querySelectorAll("input[type=checkbox]").forEach(cb => {
       cb.addEventListener("change", () => {
-        if (cb.checked) filterState[key].add(cb.value);
-        else filterState[key].delete(cb.value);
-        updateBtn(btn, filterState[key], placeholder);
+        if (cb.checked) filterState[_sheetKey].add(cb.value);
+        else filterState[_sheetKey].delete(cb.value);
+        updateChip(_sheetKey);
         renderList();
       });
     });
-
-    if (!_multiSelectInit.has(btnId)) {
-      btn.addEventListener("click", e => {
-        e.stopPropagation();
-        document.querySelectorAll(".ms-panel.open").forEach(p => { if (p !== panel) p.classList.remove("open"); });
-        panel.classList.toggle("open");
-      });
-      panel.addEventListener("click", e => e.stopPropagation());
-      _multiSelectInit.add(btnId);
-    }
   }
 
-  function updateBtn(btn, set, placeholder) {
-    if (set.size === 0) {
-      btn.textContent = placeholder;
-      btn.classList.remove("active-filter");
-    } else if (set.size === 1) {
-      btn.textContent = [...set][0];
-      btn.classList.add("active-filter");
+  function openFilterModal(key) {
+    _sheetKey = key;
+    document.getElementById("filter-modal-title").textContent = _sheetLabels[key];
+    const searchRow = document.getElementById("filter-modal-search");
+    const input     = document.getElementById("filter-modal-input");
+    if (key === "city") {
+      searchRow.style.display = "block";
+      input.value = "";
+      renderFilterOptions("");
+      setTimeout(() => input.focus(), 300);
     } else {
-      btn.textContent = `${set.size} selected`;
-      btn.classList.add("active-filter");
+      searchRow.style.display = "none";
+      renderFilterOptions("");
+    }
+    document.getElementById("filter-modal").classList.add("open");
+    document.getElementById("filter-backdrop").classList.add("open");
+  }
+
+  function closeFilterModal() {
+    document.getElementById("filter-modal").classList.remove("open");
+    document.getElementById("filter-backdrop").classList.remove("open");
+  }
+
+  document.getElementById("filter-modal-close").addEventListener("click", closeFilterModal);
+  document.getElementById("filter-backdrop").addEventListener("click", closeFilterModal);
+  document.getElementById("filter-modal-input").addEventListener("input", e => renderFilterOptions(e.target.value));
+
+  Object.keys(_chipIds).forEach(key => {
+    document.getElementById(_chipIds[key]).addEventListener("click", () => openFilterModal(key));
+  });
+
+  function buildInsightDropdowns() {
+    _sheetValues.risk = ["FÖRLORAD?", "HÖG RISK", "RISK", "OK"];
+    _sheetValues.delivery = [...new Set(
+      Object.values(insights).map(i => i.latest_delivery_month).filter(Boolean)
+    )].sort().reverse();
+    updateChip("risk");
+    updateChip("delivery");
+  }
+
+  function buildDropdowns() {
+    const unique = (key) => [...new Set(customers.map(c => c[key]).filter(Boolean))].sort();
+    _sheetValues.segment     = unique("customer_segment");
+    _sheetValues.responsible = unique("sales_person");
+    _sheetValues.city        = unique("city");
+    updateChip("segment");
+    updateChip("responsible");
+    updateChip("city");
+  }
+
+  function updateChip(key) {
+    const chip = document.getElementById(_chipIds[key]);
+    if (!chip) return;
+    const set   = filterState[key];
+    const label = _sheetLabels[key];
+    if (set.size === 0) {
+      chip.textContent = label;
+      chip.classList.remove("active");
+    } else {
+      chip.textContent = `${label} · ${set.size}`;
+      chip.classList.add("active");
     }
     updateClearBtn();
   }
 
   function updateClearBtn() {
     const anyActive = Object.values(filterState).some(s => s.size > 0);
-    document.getElementById("clear-filters-btn").style.display = anyActive ? "block" : "none";
+    document.getElementById("clear-filters-row").style.display = anyActive ? "block" : "none";
   }
-
-
 
   document.getElementById("clear-filters-btn").addEventListener("click", () => {
     ["segment", "responsible", "city", "missed", "risk", "delivery"].forEach(key => filterState[key].clear());
-    document.querySelectorAll(".ms-panel input[type=checkbox]").forEach(cb => cb.checked = false);
-    document.getElementById("ms-btn-segment").textContent = "Alla segment";
-    document.getElementById("ms-btn-responsible").textContent = "Alla ansvariga";
-    document.getElementById("ms-btn-city").textContent = "Alla städer";
-    document.querySelectorAll(".ms-btn").forEach(b => b.classList.remove("active-filter"));
-    document.getElementById("ms-btn-missed").classList.remove("active-filter");
-    document.getElementById("ms-btn-risk").textContent = "Risk";
-    document.getElementById("ms-btn-delivery").textContent = "Senaste leverans";
-    document.getElementById("clear-filters-btn").style.display = "none";
+    Object.keys(_chipIds).forEach(key => updateChip(key));
+    document.getElementById("chip-missed").classList.remove("active");
+    document.getElementById("clear-filters-row").style.display = "none";
     renderList();
-  });
-
-  document.addEventListener("click", () => {
-    document.querySelectorAll(".ms-panel.open").forEach(p => p.classList.remove("open"));
   });
 
   // ── Render list ──
@@ -1068,7 +1149,7 @@
 
     let filtered = customers;
 
-    if (q) filtered = filtered.filter(c => c.customer.toLowerCase().includes(q));
+    if (q) filtered = filtered.filter(c => c.customer.toLowerCase().includes(q) || c.city.toLowerCase().includes(q));
     if (filterState.segment.size)     filtered = filtered.filter(c => filterState.segment.has(c.customer_segment));
     if (filterState.responsible.size) filtered = filtered.filter(c => filterState.responsible.has(c.sales_person));
     if (filterState.city.size)        filtered = filtered.filter(c => filterState.city.has(c.city));
@@ -1549,10 +1630,7 @@
           strokeWeight: 2,
         },
       });
-      const infoWindow = new google.maps.InfoWindow({
-        content: `<b>${c.customer}</b><br>${c.city}`,
-      });
-      marker.addListener("click", () => infoWindow.open(googleMap, marker));
+      marker.addListener("click", () => toggleMapStop(c.row));
       mapMarkers.push(marker);
     });
   }
