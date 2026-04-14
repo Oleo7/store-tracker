@@ -1718,10 +1718,7 @@
         zIndex: 999,
       });
       if (panToMe) googleMap.panTo(myPosition);
-    }, (err) => {
-      if (!panToMe) return;
-      showToast(`Fel ${err.code}: ${err.message}`);
-    }, { enableHighAccuracy: true, timeout: 10000 });
+    }, () => {}, { enableHighAccuracy: true, timeout: 10000 });
   }
 
   document.getElementById("map-locate-btn").addEventListener("click", () => showMyLocation(true));
