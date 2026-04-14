@@ -7,6 +7,7 @@ from datetime import datetime, date
 import os
 import json
 from dotenv import load_dotenv
+from requests.exceptions import ConnectionError as RequestsConnectionError
 
 load_dotenv()
 
@@ -16,9 +17,8 @@ CORS(app)
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 SHEET_ID = os.environ.get("SHEET_KEY", "")
 
-CUSTOMER_COLUMNS = ["customer", "region", "sales_person", "customer_segment",
-                    "customer_reference", "customer_number", "adress_number",
-                    "postal_code", "phone", "email"]
+CUSTOMER_COLUMNS = ["customer", "cancelled_flag", "sales_person", "customer_segment",
+                    "customer_reference", "customer_number", "phone", "email"]
 
 ORDER_COLUMNS = ["Reference", "Order date", "Delivery date", "Customer", "Customer Reference",
                  "Buyer number", "Customer number", "Logistics number", "Address", "Number",
@@ -32,12 +32,20 @@ CONTACT_COLUMNS = ["date_time", "sales_person", "customer", "contact_channel", "
 
 _spreadsheet_cache = None
 
-def get_spreadsheet():
+def get_spreadsheet(force_reconnect=False):
     global _spreadsheet_cache
-    if _spreadsheet_cache is None:
+    if _spreadsheet_cache is None or force_reconnect:
         creds = Credentials.from_service_account_info(json.loads(os.environ["GOOGLE_CREDENTIALS"]), scopes=SCOPES)
         _spreadsheet_cache = gspread.authorize(creds).open_by_key(SHEET_ID)
     return _spreadsheet_cache
+
+
+def get_spreadsheet_with_retry():
+    """Return spreadsheet, reconnecting once on stale-connection errors."""
+    try:
+        return get_spreadsheet()
+    except RequestsConnectionError:
+        return get_spreadsheet(force_reconnect=True)
 
 
 def rows_to_dicts(rows, columns):
@@ -63,7 +71,7 @@ def login():
 
 @app.route("/customers", methods=["GET"])
 def get_customers():
-    spreadsheet = get_spreadsheet()
+    spreadsheet = get_spreadsheet_with_retry()
     sheet = spreadsheet.worksheet("customers_enriched")
     all_rows = sheet.get_all_values()
     headers = all_rows[0]
@@ -92,8 +100,13 @@ def get_customers():
         customer["longitude"] = parse_coord(d.get("longitude_google") or d.get("longitude", ""))
         addr = d.get("address_google", "").strip()
         num  = d.get("address_number_google", "").strip()
+        customer["address_google"] = addr
+        customer["address_number_google"] = num
+        customer["city_google"] = d.get("city_google", "").strip()
+        customer["postal_code_google"] = d.get("postal_code_google", "").strip()
+        customer["region_google"] = d.get("region_google", "").strip()
         customer["address"] = f"{addr} {num}".strip()
-        customer["city"] = d.get("city_google", "").strip() or d.get("city", "")
+        customer["city"] = customer["city_google"] or d.get("city", "")
         customer["follow_up_date"] = latest_followup.get(customer["customer"].strip().lower(), "")
         customers.append({"row": i, **customer})
     return jsonify(customers)
@@ -102,7 +115,7 @@ def get_customers():
 @app.route("/customers/<customer_name>/stats", methods=["GET"])
 def get_customer_stats(customer_name):
     customer_name = unquote(customer_name).strip().lower()
-    spreadsheet = get_spreadsheet()
+    spreadsheet = get_spreadsheet_with_retry()
 
     # Orders
     order_rows = rows_to_dicts(spreadsheet.worksheet("order_rows").get_all_values()[1:], ORDER_COLUMNS)
@@ -148,7 +161,7 @@ def get_customer_stats(customer_name):
 
 @app.route("/customer-insights", methods=["GET"])
 def get_customer_insights():
-    spreadsheet = get_spreadsheet()
+    spreadsheet = get_spreadsheet_with_retry()
     today = date.today()
 
     # Latest follow_up_date per customer
@@ -221,13 +234,24 @@ def get_customer_insights():
 @app.route("/customers/<int:row>/contact", methods=["PATCH"])
 def update_customer_contact(row):
     data = request.get_json()
-    sheet = get_spreadsheet().worksheet("customers_enriched")
+    sheet = get_spreadsheet_with_retry().worksheet("customers_enriched")
     headers = sheet.row_values(1)
-    for field, col_name in [("phone", "phone"), ("email", "email"), ("address", "address_google")]:
+    fields = [
+        ("phone",                "phone"),
+        ("email",                "email"),
+        ("address_google",       "address_google"),
+        ("address_number_google","address_number_google"),
+        ("city_google",          "city_google"),
+        ("postal_code_google",   "postal_code_google"),
+        ("region_google",        "region_google"),
+    ]
+    for field, col_name in fields:
         if field in data:
             if col_name in headers:
                 col_idx = headers.index(col_name) + 1
                 sheet.update_cell(row, col_idx, data[field])
+    if "modified" in headers:
+        sheet.update_cell(row, headers.index("modified") + 1, True)
     return jsonify({"ok": True})
 
 
@@ -235,7 +259,7 @@ def update_customer_contact(row):
 def add_contact(customer_name):
     customer_name = unquote(customer_name)
     data = request.get_json()
-    sheet = get_spreadsheet().worksheet("sales_activities")
+    sheet = get_spreadsheet_with_retry().worksheet("sales_activities")
     row = [
         data.get("date_time", datetime.now().strftime("%Y-%m-%d %H:%M")),
         data.get("sales_person", ""),

@@ -663,6 +663,7 @@
 
     #view-map {
       flex-direction: column;
+      position: relative;
     }
     #view-map.active { display: flex; height: 100vh; height: 100dvh; overflow: hidden; }
     #view-map .header { flex-shrink: 0; z-index: 10; }
@@ -671,6 +672,26 @@
       min-height: 0;
       overflow: hidden;
     }
+    #map-locate-btn {
+      position: absolute;
+      top: calc(60px + 12px);
+      right: 12px;
+      z-index: 20;
+      width: 40px;
+      height: 40px;
+      border-radius: 8px;
+      border: none;
+      background: #fff;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.18);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1.1rem;
+      color: #1a1a2e;
+      transition: background 0.15s;
+    }
+    #map-locate-btn:active { background: #f0f2f5; }
     .map-stop-list {
       background: #fff;
       border-top: 1px solid #e8eaf0;
@@ -730,7 +751,6 @@
     .map-stop-detail-btn { background: none; border: none; color: #aab; font-size: 1.3rem; padding: 8px 12px; cursor: pointer; flex-shrink: 0; line-height: 1; }
     .map-stop-detail-btn:active { color: #1a1a2e; }
     .stop-num.route-start { background: #22c55e; }
-    .stop-num.route-stop  { background: #3b82f6; }
     .map-stop-item.route-selected { background: #f0f7ff; border-radius: 6px; padding-left: 4px; padding-right: 4px; }
   </style>
 </head>
@@ -772,6 +792,7 @@
       <button class="chip" id="chip-segment">Segment</button>
       <button class="chip" id="chip-responsible">Ansvarig</button>
       <button class="chip" id="chip-city">Stad</button>
+      <button class="chip" id="chip-region">Region</button>
       <button class="chip" id="chip-risk">Risk</button>
       <button class="chip" id="chip-delivery">Leverans</button>
     </div>
@@ -796,7 +817,6 @@
     </div>
   </div>
 
-  <span id="d-name" style="display:none"></span>
 
   <div class="detail-body">
 
@@ -867,8 +887,24 @@
           <input type="email" id="edit-email" />
         </div>
         <div class="form-field" style="margin-bottom:10px">
-          <label>Adress</label>
-          <input type="text" id="edit-address" />
+          <label>Gatuadress</label>
+          <input type="text" id="edit-address-google" />
+        </div>
+        <div class="form-field" style="margin-bottom:10px">
+          <label>Nummer</label>
+          <input type="text" id="edit-address-number-google" />
+        </div>
+        <div class="form-field" style="margin-bottom:10px">
+          <label>Stad</label>
+          <input type="text" id="edit-city-google" />
+        </div>
+        <div class="form-field" style="margin-bottom:10px">
+          <label>Postnummer</label>
+          <input type="text" id="edit-postal-code-google" />
+        </div>
+        <div class="form-field" style="margin-bottom:10px">
+          <label>Region</label>
+          <input type="text" id="edit-region-google" />
         </div>
         <div style="display:flex;gap:8px;margin-top:4px">
           <button class="action-btn" id="contact-save-btn" style="margin:0;flex:1;padding:10px">Spara</button>
@@ -910,7 +946,7 @@
   </div>
 
   <div class="detail-body">
-    <div class="section-card">
+    <div>
 
       <input type="hidden" id="f-date" />
       <div class="form-field">
@@ -970,6 +1006,7 @@
     </div>
   </div>
   <div id="map"></div>
+  <button id="map-locate-btn" title="Min position">&#x2316;</button>
   <div class="map-route-bar" id="map-route-bar">
     <span id="map-route-count">Välj butiker nedan för rutt</span>
     <button class="action-btn" id="map-gmaps-btn" disabled style="margin:0;padding:8px 14px;font-size:0.8rem">&#127758; Öppna i Google Maps</button>
@@ -1020,7 +1057,7 @@
   }
 
   // ── Multi-select filter state ──
-  const filterState = { segment: new Set(), responsible: new Set(), city: new Set(), missed: new Set(), risk: new Set(), delivery: new Set() };
+  const filterState = { segment: new Set(), responsible: new Set(), city: new Set(), region: new Set(), missed: new Set(), risk: new Set(), delivery: new Set() };
 
   async function loadInsights() {
     try {
@@ -1050,6 +1087,7 @@
     segment:     "Segment",
     responsible: "Ansvarig",
     city:        "Stad",
+    region:      "Region",
     risk:        "Risk",
     delivery:    "Leverans",
   };
@@ -1057,14 +1095,34 @@
     segment:     "chip-segment",
     responsible: "chip-responsible",
     city:        "chip-city",
+    region:      "chip-region",
     risk:        "chip-risk",
     delivery:    "chip-delivery",
   };
-  const _sheetValues = { segment: [], responsible: [], city: [], risk: [], delivery: [] };
+  const _sheetValues = { segment: [], responsible: [], city: [], region: [], risk: [], delivery: [] };
 
   // ── Filter modal ──
+  const _customerFieldMap = {
+    segment:     "customer_segment",
+    responsible: "sales_person",
+    city:        "city",
+    region:      "region_google",
+  };
+
+  function getAvailableValues(key) {
+    // Insight-based filters are not cascaded
+    if (key === "risk" || key === "delivery") return _sheetValues[key];
+    // Apply all active filters except the one being opened
+    let base = customers;
+    for (const [k, field] of Object.entries(_customerFieldMap)) {
+      if (k !== key && filterState[k].size)
+        base = base.filter(c => filterState[k].has(c[field]));
+    }
+    return [...new Set(base.map(c => c[_customerFieldMap[key]]).filter(Boolean))].sort();
+  }
+
   function renderFilterOptions(q) {
-    const values = _sheetValues[_sheetKey];
+    const values = getAvailableValues(_sheetKey);
     const state  = filterState[_sheetKey];
     const filtered = q ? values.filter(v => v.toLowerCase().includes(q.toLowerCase())) : values;
     const body = document.getElementById("filter-modal-body");
@@ -1090,7 +1148,7 @@
     document.getElementById("filter-modal-title").textContent = _sheetLabels[key];
     const searchRow = document.getElementById("filter-modal-search");
     const input     = document.getElementById("filter-modal-input");
-    if (key === "city") {
+    if (key === "city" || key === "region") {
       searchRow.style.display = "block";
       input.value = "";
       renderFilterOptions("");
@@ -1132,9 +1190,11 @@
     _sheetValues.segment     = unique("customer_segment");
     _sheetValues.responsible = unique("sales_person");
     _sheetValues.city        = unique("city");
+    _sheetValues.region      = unique("region_google");
     updateChip("segment");
     updateChip("responsible");
     updateChip("city");
+    updateChip("region");
   }
 
   function updateChip(key) {
@@ -1158,7 +1218,7 @@
   }
 
   document.getElementById("clear-filters-btn").addEventListener("click", () => {
-    ["segment", "responsible", "city", "missed", "risk", "delivery"].forEach(key => filterState[key].clear());
+    ["segment", "responsible", "city", "region", "missed", "risk", "delivery"].forEach(key => filterState[key].clear());
     Object.keys(_chipIds).forEach(key => updateChip(key));
     document.getElementById("chip-missed").classList.remove("active");
     document.getElementById("clear-filters-row").style.display = "none";
@@ -1176,6 +1236,7 @@
     if (filterState.segment.size)     filtered = filtered.filter(c => filterState.segment.has(c.customer_segment));
     if (filterState.responsible.size) filtered = filtered.filter(c => filterState.responsible.has(c.sales_person));
     if (filterState.city.size)        filtered = filtered.filter(c => filterState.city.has(c.city));
+    if (filterState.region.size)      filtered = filtered.filter(c => filterState.region.has(c.region_google));
     if (filterState.missed.size) filtered = filtered.filter(c => {
       const ins = insights[c.customer.toLowerCase()];
       return ins?.missad_uppfoljning;
@@ -1385,10 +1446,10 @@
     // Header
     document.getElementById("d-header-name").textContent = c.customer;
     document.getElementById("d-header-city").textContent = c.city;
-    document.getElementById("d-name").textContent = c.customer;
 
     // Kontaktuppgifter
-    document.getElementById("d-address").textContent = c.address || "—";
+    const fullAddr = [c.address_google, c.address_number_google, c.city_google].filter(Boolean).join(" ");
+    document.getElementById("d-address").textContent = fullAddr || "—";
 
     const phoneEl = document.getElementById("d-phone");
     phoneEl.textContent = c.phone || "—";
@@ -1406,9 +1467,13 @@
     document.getElementById("contact-edit-mode").style.display = "none";
     document.getElementById("contact-view-mode").style.display = "block";
     document.getElementById("contact-edit-btn").onclick = () => {
-      document.getElementById("edit-phone").value   = c.phone   || "";
-      document.getElementById("edit-email").value   = c.email   || "";
-      document.getElementById("edit-address").value = c.address || "";
+      document.getElementById("edit-phone").value                = c.phone                || "";
+      document.getElementById("edit-email").value                = c.email                || "";
+      document.getElementById("edit-address-google").value       = c.address_google       || "";
+      document.getElementById("edit-address-number-google").value = c.address_number_google || "";
+      document.getElementById("edit-city-google").value          = c.city_google          || "";
+      document.getElementById("edit-postal-code-google").value   = c.postal_code_google   || "";
+      document.getElementById("edit-region-google").value        = c.region_google        || "";
       document.getElementById("contact-view-mode").style.display = "none";
       document.getElementById("contact-edit-mode").style.display = "block";
     };
@@ -1417,26 +1482,35 @@
       document.getElementById("contact-view-mode").style.display = "block";
     };
     document.getElementById("contact-save-btn").onclick = async () => {
-      const phone   = document.getElementById("edit-phone").value.trim();
-      const email   = document.getElementById("edit-email").value.trim();
-      const address = document.getElementById("edit-address").value.trim();
+      const phone                 = document.getElementById("edit-phone").value.trim();
+      const email                 = document.getElementById("edit-email").value.trim();
+      const address_google        = document.getElementById("edit-address-google").value.trim();
+      const address_number_google = document.getElementById("edit-address-number-google").value.trim();
+      const city_google           = document.getElementById("edit-city-google").value.trim();
+      const postal_code_google    = document.getElementById("edit-postal-code-google").value.trim();
+      const region_google         = document.getElementById("edit-region-google").value.trim();
       const btn = document.getElementById("contact-save-btn");
       btn.disabled = true;
       try {
         const res = await fetch(`${API}/customers/${c.row}/contact`, {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ phone, email, address }),
+          body: JSON.stringify({ phone, email, address_google, address_number_google, city_google, postal_code_google, region_google }),
         });
         if (!res.ok) throw new Error();
         c.phone = phone;
         c.email = email;
-        c.address = address;
+        c.address_google = address_google;
+        c.address_number_google = address_number_google;
+        c.city_google = city_google;
+        c.postal_code_google = postal_code_google;
+        c.region_google = region_google;
+        const saved = [address_google, address_number_google, city_google].filter(Boolean).join(" ");
         document.getElementById("d-phone").textContent = phone || "—";
         document.getElementById("d-phone").href = phone ? `tel:${phone.replace(/\s/g, "")}` : "#";
         document.getElementById("d-email").textContent = email || "—";
         document.getElementById("d-email").href = email ? `mailto:${email}` : "#";
-        document.getElementById("d-address").textContent = address || "—";
+        document.getElementById("d-address").textContent = saved || "—";
         document.getElementById("contact-edit-mode").style.display = "none";
         document.getElementById("contact-view-mode").style.display = "block";
         showToast("Sparat!");
@@ -1464,7 +1538,6 @@
 
   // ── Open contact form ──
   document.getElementById("update-contact-btn").addEventListener("click", () => {
-    const today = new Date().toISOString().slice(0, 10);
     document.getElementById("form-header-customer").textContent = currentCustomer.customer;
     const now = new Date();
     const pad = n => String(n).padStart(2, "0");
@@ -1622,13 +1695,16 @@
   let myLocationMarker = null;
   let myPosition = null;
 
-  function showMyLocation() {
-    if (!navigator.geolocation) return;
+  function showMyLocation(panToMe = false) {
+    if (!navigator.geolocation) {
+      if (panToMe) showToast("GPS stöds inte av din webbläsare");
+      return;
+    }
     navigator.geolocation.getCurrentPosition(pos => {
       myPosition = { lat: pos.coords.latitude, lng: pos.coords.longitude };
       if (myLocationMarker) myLocationMarker.setMap(null);
       myLocationMarker = new google.maps.Marker({
-        position: { lat: pos.coords.latitude, lng: pos.coords.longitude },
+        position: myPosition,
         map: googleMap,
         title: "Din position",
         icon: {
@@ -1641,8 +1717,13 @@
         },
         zIndex: 999,
       });
+      if (panToMe) googleMap.panTo(myPosition);
+    }, () => {
+      if (panToMe) showToast("Kunde inte hämta din position");
     });
   }
+
+  document.getElementById("map-locate-btn").addEventListener("click", () => showMyLocation(true));
 
   function fitMapToBounds(stops) {
     const bounds = new google.maps.LatLngBounds();
@@ -1655,7 +1736,7 @@
     mapStops.forEach(c => {
       const routeIdx = routeInMapStops.findIndex(r => r.row === c.row);
       const inRoute  = routeIdx !== -1;
-      const bg = inRoute ? "#3b82f6" : "#6b7280";
+      const bg = inRoute ? "#22c55e" : "#6b7280";
 
       let marker;
       if (inRoute) {
@@ -1725,7 +1806,7 @@
       const routeIdx = routeInMapStops.findIndex(r => r.row === c.row);
       const inRoute  = routeIdx !== -1;
       const badge = inRoute
-        ? `<div style="width:22px;height:22px;border-radius:50%;background:#3b82f6;color:#fff;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0">${routeIdx + 1}</div>`
+        ? `<div style="width:22px;height:22px;border-radius:50%;background:#22c55e;color:#fff;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0">${routeIdx + 1}</div>`
         : `<div style="width:14px;height:14px;border-radius:50%;background:#d1d5db;flex-shrink:0;margin:0 4px"></div>`;
       return `
         <div class="map-stop-item${inRoute ? " route-selected" : ""}" data-row="${c.row}">
