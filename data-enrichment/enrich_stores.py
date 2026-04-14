@@ -94,7 +94,8 @@ def main():
 
     # Write coordinates as comma-decimal strings to avoid Swedish locale mangling periods
     for col in ["latitude_google", "longitude_google"]:
-        df[col] = df[col].apply(lambda x: str(x).replace(".", ",") if pd.notna(x) and x != 0 else "")
+        df[col] = df[col].apply(lambda x: f"{x:.7f}".replace(".", ",") if pd.notna(x) and x != 0 else "")
+        df[col] = df[col].astype(object)
 
     set_with_dataframe(enriched_sheet, df)
     log.info(f"Done — wrote {len(df)} total rows to 'customers_enriched'")
