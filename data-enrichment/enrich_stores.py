@@ -25,7 +25,7 @@ SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 def get_location_info(store_name: str, gmaps: googlemaps.Client) -> tuple:
     query = f"{store_name}, Sweden"
     try:
-        result = gmaps.geocode(query)
+        result = gmaps.geocode(query, language="sv")
     except Exception as e:
         log.warning(f"Geocoding failed for '{query}': {e}")
         return None, None, None, None, None, None, None
