@@ -1718,9 +1718,10 @@
         zIndex: 999,
       });
       if (panToMe) googleMap.panTo(myPosition);
-    }, () => {
-      if (panToMe) showToast("Kunde inte hämta din position");
-    });
+    }, (err) => {
+      if (!panToMe) return;
+      showToast(`Fel ${err.code}: ${err.message}`);
+    }, { enableHighAccuracy: true, timeout: 10000 });
   }
 
   document.getElementById("map-locate-btn").addEventListener("click", () => showMyLocation(true));

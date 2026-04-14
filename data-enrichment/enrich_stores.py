@@ -91,6 +91,11 @@ def main():
 
     # Merge back and write the full sheet
     df.update(needs_enrichment)
+
+    # Write coordinates as comma-decimal strings to avoid Swedish locale mangling periods
+    for col in ["latitude_google", "longitude_google"]:
+        df[col] = df[col].apply(lambda x: str(x).replace(".", ",") if pd.notna(x) and x != 0 else "")
+
     set_with_dataframe(enriched_sheet, df)
     log.info(f"Done — wrote {len(df)} total rows to 'customers_enriched'")
 
