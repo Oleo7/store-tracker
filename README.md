@@ -1,3 +1,12 @@
+# Ändringar lokalt
+python web-app/app.py
+
+# Deploy ändringar (skicka in i terminalen)
+git status --> se vilka filer som ändrats
+git add --> filen du vill lägga till
+git commit -m --> lagt till denna grejen inom "dsfndsjfn"
+git push --> skicka ändringarna till github
+
 # Store Tracker
 
 A mobile-friendly web app for sales reps to track store visits, built with Flask and Google Sheets as the backend.
