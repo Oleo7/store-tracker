@@ -6,6 +6,7 @@ from urllib.parse import unquote
 from datetime import datetime, date
 import os
 import json
+import requests
 from dotenv import load_dotenv
 from requests.exceptions import ConnectionError as RequestsConnectionError
 
@@ -245,14 +246,59 @@ def update_customer_contact(row):
         ("postal_code_google",   "postal_code_google"),
         ("region_google",        "region_google"),
     ]
+    address_fields = {"address_google", "address_number_google", "city_google", "postal_code_google", "region_google"}
+    address_changed = any(f in data for f in address_fields)
+
     for field, col_name in fields:
         if field in data:
             if col_name in headers:
                 col_idx = headers.index(col_name) + 1
                 sheet.update_cell(row, col_idx, data[field])
+
+    if address_changed:
+        # Clear coordinates first
+        for coord_col in ("latitude_google", "longitude_google"):
+            if coord_col in headers:
+                sheet.update_cell(row, headers.index(coord_col) + 1, "")
+
+        # Build full address from updated values + existing sheet values
+        existing = dict(zip(headers, sheet.row_values(row)))
+        def val(field):
+            return data.get(field, existing.get(field, "")).strip()
+
+        address_str = f"{val('address_google')} {val('address_number_google')}, {val('postal_code_google')} {val('city_google')}, Sweden".strip(", ")
+
+        new_lat = new_lng = None
+        api_key = os.environ.get("GOOGLE_MAPS_API_KEY", "")
+        if api_key and address_str:
+            try:
+                resp = requests.get(
+                    "https://maps.googleapis.com/maps/api/geocode/json",
+                    params={"address": address_str, "key": api_key, "language": "sv"},
+                    timeout=10,
+                )
+                geo = resp.json()
+                if geo.get("results"):
+                    loc = geo["results"][0]["geometry"]["location"]
+                    new_lat = loc["lat"]
+                    new_lng = loc["lng"]
+                    lat_str = f"{new_lat:.7f}".replace(".", ",")
+                    lng_str = f"{new_lng:.7f}".replace(".", ",")
+                    if "latitude_google" in headers:
+                        sheet.update_cell(row, headers.index("latitude_google") + 1, lat_str)
+                    if "longitude_google" in headers:
+                        sheet.update_cell(row, headers.index("longitude_google") + 1, lng_str)
+            except Exception:
+                pass
+
     if "modified" in headers:
         sheet.update_cell(row, headers.index("modified") + 1, True)
-    return jsonify({"ok": True})
+
+    result = {"ok": True}
+    if address_changed:
+        result["latitude"]  = new_lat
+        result["longitude"] = new_lng
+    return jsonify(result)
 
 
 @app.route("/customers/<customer_name>/contacts", methods=["POST"])

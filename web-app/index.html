@@ -1489,8 +1489,11 @@
       const city_google           = document.getElementById("edit-city-google").value.trim();
       const postal_code_google    = document.getElementById("edit-postal-code-google").value.trim();
       const region_google         = document.getElementById("edit-region-google").value.trim();
+      const addressChanged = [address_google, address_number_google, city_google, postal_code_google, region_google].join("|")
+        !== [c.address_google, c.address_number_google, c.city_google, c.postal_code_google, c.region_google].join("|");
       const btn = document.getElementById("contact-save-btn");
       btn.disabled = true;
+      btn.textContent = addressChanged ? "Uppdaterar koordinater…" : "Sparar…";
       try {
         const res = await fetch(`${API}/customers/${c.row}/contact`, {
           method: "PATCH",
@@ -1498,6 +1501,7 @@
           body: JSON.stringify({ phone, email, address_google, address_number_google, city_google, postal_code_google, region_google }),
         });
         if (!res.ok) throw new Error();
+        const saved_data = await res.json();
         c.phone = phone;
         c.email = email;
         c.address_google = address_google;
@@ -1505,6 +1509,10 @@
         c.city_google = city_google;
         c.postal_code_google = postal_code_google;
         c.region_google = region_google;
+        if ("latitude" in saved_data) {
+          c.latitude  = saved_data.latitude;
+          c.longitude = saved_data.longitude;
+        }
         const saved = [address_google, address_number_google, city_google].filter(Boolean).join(" ");
         document.getElementById("d-phone").textContent = phone || "—";
         document.getElementById("d-phone").href = phone ? `tel:${phone.replace(/\s/g, "")}` : "#";
@@ -1518,6 +1526,7 @@
         showToast("Kunde inte spara");
       } finally {
         btn.disabled = false;
+        btn.textContent = "Spara";
       }
     };
 
@@ -1641,7 +1650,7 @@
 
   // ── Show map with all selected stores (no route yet) ──
   async function showMapView() {
-    const MAP_LIMIT = 30;
+    const MAP_LIMIT = 50;
     mapStops = filteredCustomers.filter(c => c.latitude && c.longitude).slice(0, MAP_LIMIT);
 
     if (mapStops.length < 1) {
