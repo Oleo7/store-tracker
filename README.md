@@ -1,14 +1,15 @@
 # Synka GIT repo till lokalt (skicka in i terminalen)
+git status
 git pull origin master
 
 # Ändringar lokalt
 python web-app/app.py
 
 # Deploy ändringar (skicka in i terminalen)
-git status --> se vilka filer som ändrats
-git add --> filen du vill lägga till
-git commit -m --> fil att lägga till inom "" som t.ex. "README"
-git push --> skicka ändringarna till github
+git status         --> se vilka filer som ändrats
+git add            --> filen du vill lägga till: git add .\README.md
+git commit -m      --> fil att lägga till inom "": git commit -m ".\README.md"
+git push           --> skicka ändringarna till github
 
 # Store Tracker
 
