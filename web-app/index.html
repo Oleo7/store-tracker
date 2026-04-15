@@ -1507,6 +1507,7 @@
         c.address_google = address_google;
         c.address_number_google = address_number_google;
         c.city_google = city_google;
+        c.city = city_google;
         c.postal_code_google = postal_code_google;
         c.region_google = region_google;
         if ("latitude" in saved_data) {
@@ -1519,6 +1520,9 @@
         document.getElementById("d-email").textContent = email || "—";
         document.getElementById("d-email").href = email ? `mailto:${email}` : "#";
         document.getElementById("d-address").textContent = saved || "—";
+        document.getElementById("d-header-city").textContent = city_google;
+        const card = document.querySelector(`.customer-card[data-row="${c.row}"] .customer-sub`);
+        if (card) card.textContent = city_google;
         document.getElementById("contact-edit-mode").style.display = "none";
         document.getElementById("contact-view-mode").style.display = "block";
         showToast("Sparat!");
