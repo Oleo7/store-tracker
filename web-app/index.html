@@ -1654,7 +1654,7 @@
 
   // ── Show map with all selected stores (no route yet) ──
   async function showMapView() {
-    const MAP_LIMIT = 50;
+    const MAP_LIMIT = 150;
     mapStops = filteredCustomers.filter(c => c.latitude && c.longitude).slice(0, MAP_LIMIT);
 
     if (mapStops.length < 1) {
