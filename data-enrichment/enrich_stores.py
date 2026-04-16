@@ -22,6 +22,11 @@ GOOGLE_MAPS_API_KEY = os.environ["GOOGLE_MAPS_API_KEY"]
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 
+def parse_coordinate_column(series: pd.Series) -> pd.Series:
+    cleaned = series.fillna("").astype(str).str.strip().str.replace(",", ".", regex=False)
+    return pd.to_numeric(cleaned, errors="coerce")
+
+
 def get_location_info(store_name: str, gmaps: googlemaps.Client) -> tuple:
     query = f"{store_name}, Sweden"
     try:
@@ -62,8 +67,8 @@ def main():
     for col in ["city_google", "address_google", "address_number_google",
                 "postal_code_google", "region_google", "enriched", "modified"]:
         df[col] = df[col].astype(object)
-    df["latitude_google"]  = df["latitude_google"].astype(float)
-    df["longitude_google"] = df["longitude_google"].astype(float)
+    df["latitude_google"] = parse_coordinate_column(df["latitude_google"])
+    df["longitude_google"] = parse_coordinate_column(df["longitude_google"])
     log.info(f"Loaded {len(df)} rows")
 
     # Rows where enriched column is not True need processing
