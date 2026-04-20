@@ -431,6 +431,21 @@
     .order-stat { flex: 1; }
     .order-stat .stat-label { font-size: 0.72rem; color: #888; margin-bottom: 3px; }
     .order-stat .stat-value { font-size: 1.05rem; font-weight: 700; }
+    .overview-freezer {
+      margin-top: 12px;
+      padding-top: 10px;
+      border-top: 1px solid #f0f2f5;
+    }
+    .overview-freezer-label {
+      font-size: 0.72rem;
+      color: #888;
+      margin-bottom: 3px;
+    }
+    .overview-freezer-value {
+      font-size: 0.84rem;
+      font-weight: 600;
+      color: #1a1a2e;
+    }
 
     .competitor-grid {
       display: grid;
@@ -970,6 +985,10 @@
           <div class="meta-value" id="d-last-result">—</div>
         </div>
       </div>
+      <div class="overview-freezer">
+        <div class="overview-freezer-label">I FRYSDISKEN SENAST</div>
+        <div class="overview-freezer-value" id="d-freezer-latest">—</div>
+      </div>
     </div>
 
     <div class="detail-section">
@@ -979,28 +998,6 @@
           <span class="customer-note-count" id="customer-comment-count">0/50</span>
         </div>
         <input class="customer-note-input" id="customer-comment-input" type="text" maxlength="50" placeholder="Skriv en kort kundnotering" />
-      </div>
-    </div>
-
-    <div class="detail-section">
-      <div class="detail-section-title">I frysdisken</div>
-      <div class="competitor-grid">
-        <button class="competitor-toggle" data-competitor="Franui" type="button" aria-pressed="false">
-          <span class="competitor-box" aria-hidden="true"></span>
-          <span class="competitor-name">Franui</span>
-        </button>
-        <button class="competitor-toggle" data-competitor="Schufrulade" type="button" aria-pressed="false">
-          <span class="competitor-box" aria-hidden="true"></span>
-          <span class="competitor-name">Schufrulade</span>
-        </button>
-        <button class="competitor-toggle" data-competitor="Boujee" type="button" aria-pressed="false">
-          <span class="competitor-box" aria-hidden="true"></span>
-          <span class="competitor-name">Boujee</span>
-        </button>
-        <button class="competitor-toggle" data-competitor="polarbar" type="button" aria-pressed="false">
-          <span class="competitor-box" aria-hidden="true"></span>
-          <span class="competitor-name">Polarbär</span>
-        </button>
       </div>
     </div>
 
@@ -1136,6 +1133,27 @@
           <option>Order lagd</option>
         </select>
       </div>
+      <div class="detail-section" style="padding:12px 14px;margin-bottom:14px">
+        <div class="detail-section-title" style="margin-bottom:8px">I frysdisken</div>
+        <div class="competitor-grid">
+          <button class="competitor-toggle visit-competitor-toggle" data-competitor="Franui" type="button" aria-pressed="false">
+            <span class="competitor-box" aria-hidden="true"></span>
+            <span class="competitor-name">Franui</span>
+          </button>
+          <button class="competitor-toggle visit-competitor-toggle" data-competitor="Schufrulade" type="button" aria-pressed="false">
+            <span class="competitor-box" aria-hidden="true"></span>
+            <span class="competitor-name">Schufrulade</span>
+          </button>
+          <button class="competitor-toggle visit-competitor-toggle" data-competitor="Boujee" type="button" aria-pressed="false">
+            <span class="competitor-box" aria-hidden="true"></span>
+            <span class="competitor-name">Boujee</span>
+          </button>
+          <button class="competitor-toggle visit-competitor-toggle" data-competitor="polarbar" type="button" aria-pressed="false">
+            <span class="competitor-box" aria-hidden="true"></span>
+            <span class="competitor-name">Polarbär</span>
+          </button>
+        </div>
+      </div>
       <div class="form-field">
         <label>Kommentar</label>
         <textarea id="f-comment" placeholder="Anteckningar från mötet..."></textarea>
@@ -1187,14 +1205,15 @@
 
 <script>
   const API = "";
-  const COMPETITOR_FIELDS = ["Franui", "Schufrulade", "Boujee", "polarbar"];
+  const FREEZER_FIELDS = ["Franui", "Schufrulade", "Boujee", "polarbar"];
+  const FREEZER_LABELS = { Franui: "Franui", Schufrulade: "Schufrulade", Boujee: "Boujee", polarbar: "Polarbär" };
 
   let customers = [];
   let searchQuery = "";
   let currentCustomer = null;
   let detailReturnView = "list";
   let insights = {};
-  const competitorButtons = Array.from(document.querySelectorAll(".competitor-toggle"));
+  const visitCompetitorButtons = Array.from(document.querySelectorAll(".visit-competitor-toggle"));
   const customerCommentInput = document.getElementById("customer-comment-input");
   const customerCommentCount = document.getElementById("customer-comment-count");
 
@@ -1494,6 +1513,7 @@
       // Översikt meta
       document.getElementById("d-last-contact").textContent = lc.date_time ? lc.date_time.slice(0, 10) : "—";
       document.getElementById("d-last-result").textContent  = lc.result || "—";
+      document.getElementById("d-freezer-latest").textContent = getFreezerLabels(lc).join(", ") || "—";
       const latestFollowUp = allContacts.map(c => c.follow_up_date).filter(Boolean).sort().reverse()[0] || "—";
       document.getElementById("d-next-followup").textContent = latestFollowUp;
 
@@ -1502,6 +1522,7 @@
       latestSection.style.display = "none";
       document.getElementById("d-last-contact").textContent = "—";
       document.getElementById("d-last-result").textContent  = "—";
+      document.getElementById("d-freezer-latest").textContent = "—";
       document.getElementById("d-next-followup").textContent = "—";
       renderDetailTags();
     }
@@ -1525,18 +1546,22 @@
     return ["1", "true", "yes", "on"].includes(String(value || "").trim().toLowerCase());
   }
 
-  function syncCompetitorButtons(customer) {
-    competitorButtons.forEach(btn => {
+  function getFreezerLabels(source) {
+    return FREEZER_FIELDS.filter(field => isCheckedValue(source?.[field])).map(field => FREEZER_LABELS[field]);
+  }
+
+  function syncVisitCompetitorButtons(source) {
+    visitCompetitorButtons.forEach(btn => {
       const field = btn.dataset.competitor;
-      const active = isCheckedValue(customer?.[field]);
+      const active = isCheckedValue(source?.[field]);
       btn.classList.toggle("active", active);
       btn.setAttribute("aria-pressed", active ? "true" : "false");
-      btn.disabled = !customer;
+      btn.disabled = false;
     });
   }
 
-  function setCompetitorButtonsDisabled(disabled) {
-    competitorButtons.forEach(btn => btn.disabled = disabled);
+  function setVisitCompetitorButtonsDisabled(disabled) {
+    visitCompetitorButtons.forEach(btn => btn.disabled = disabled);
   }
 
   function setCustomerComment(value) {
@@ -1547,8 +1572,15 @@
   }
 
   function setCustomerNotesDisabled(disabled) {
-    setCompetitorButtonsDisabled(disabled);
     customerCommentInput.disabled = disabled;
+  }
+
+  function getVisitFreezerPayload() {
+    const payload = {};
+    visitCompetitorButtons.forEach(btn => {
+      payload[btn.dataset.competitor] = btn.classList.contains("active") ? "1" : "";
+    });
+    return payload;
   }
 
   async function saveCustomerDetailPatch(updates, rollback) {
@@ -1685,7 +1717,6 @@
     emailEl.textContent = c.email || "—";
     emailEl.href = c.email ? `mailto:${c.email}` : "#";
 
-    syncCompetitorButtons(c);
     setCustomerComment(c.comment || "");
 
     // Ring / Mail buttons
@@ -1768,6 +1799,7 @@
     } else {
       document.getElementById("d-total-sales").textContent = "—";
       document.getElementById("d-latest-order").textContent = "—";
+      document.getElementById("d-freezer-latest").textContent = "—";
       document.getElementById("d-contact-section").style.display = "none";
       document.getElementById("d-latest-section").style.display = "none";
     }
@@ -1775,22 +1807,16 @@
     showView("detail");
   }
 
-  competitorButtons.forEach(btn => {
-    btn.addEventListener("click", async () => {
-      if (!currentCustomer) return;
-
+  visitCompetitorButtons.forEach(btn => {
+    btn.addEventListener("click", () => {
       const field = btn.dataset.competitor;
-      if (!COMPETITOR_FIELDS.includes(field)) return;
-
-      const previousValue = currentCustomer[field] || "";
-      const nextValue = isCheckedValue(previousValue) ? "" : "1";
-
-      currentCustomer[field] = nextValue;
-      syncCompetitorButtons(currentCustomer);
-      await saveCustomerDetailPatch({ [field]: nextValue }, () => {
-        currentCustomer[field] = previousValue;
-        syncCompetitorButtons(currentCustomer);
+      const state = {};
+      visitCompetitorButtons.forEach(button => {
+        state[button.dataset.competitor] = button.classList.contains("active") ? "1" : "";
       });
+      if (!FREEZER_FIELDS.includes(field)) return;
+      state[field] = btn.classList.contains("active") ? "" : "1";
+      syncVisitCompetitorButtons(state);
     });
   });
 
@@ -1840,6 +1866,7 @@
     document.getElementById("f-result").value = "";
     document.getElementById("f-comment").value = "";
     document.getElementById("f-nextFollowUp").value = "";
+    syncVisitCompetitorButtons({});
     showView("form");
   });
 
@@ -1858,6 +1885,7 @@
       result:             document.getElementById("f-result").value,
       comment:            document.getElementById("f-comment").value,
       follow_up_date:     document.getElementById("f-nextFollowUp").value,
+      ...getVisitFreezerPayload(),
     };
 
     if (!payload.comment.trim()) {
@@ -1868,6 +1896,7 @@
 
     btn.disabled = true;
     btn.textContent = "Sparar...";
+    setVisitCompetitorButtonsDisabled(true);
 
     try {
       const res = await fetch(`${API}/customers/${encodeURIComponent(currentCustomer.customer)}/contacts`, {
@@ -1888,6 +1917,7 @@
     } finally {
       btn.disabled = false;
       btn.textContent = "Logga besök";
+      setVisitCompetitorButtonsDisabled(false);
     }
   });
 

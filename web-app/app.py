@@ -20,7 +20,7 @@ SHEET_ID = os.environ.get("SHEET_KEY", "")
 
 CUSTOMER_COLUMNS = ["customer", "cancelled_flag", "sales_person", "customer_segment",
                     "customer_reference", "customer_number", "phone", "email",
-                    "Franui", "Schufrulade", "Boujee", "polarbar", "comment"]
+                    "comment"]
 
 ORDER_COLUMNS = ["Reference", "Order date", "Delivery date", "Customer", "Customer Reference",
                  "Buyer number", "Customer number", "Logistics number", "Address", "Number",
@@ -29,7 +29,8 @@ ORDER_COLUMNS = ["Reference", "Order date", "Delivery date", "Customer", "Custom
                  "Total", "Currency", "Order Discount (Amount)", "Order Discount (%)", "Batch"]
 
 CONTACT_COLUMNS = ["date_time", "sales_person", "customer", "contact_channel", "result",
-                   "comment", "customer_contact_person", "follow_up_date"]
+                   "comment", "customer_contact_person", "follow_up_date",
+                   "Franui", "Schufrulade", "Boujee", "polarbar"]
 
 
 _spreadsheet_cache = None
@@ -160,7 +161,8 @@ def get_customer_stats(customer_name):
     # Contacts
     contact_rows = rows_to_dicts(spreadsheet.worksheet("sales_activities").get_all_values()[1:], CONTACT_COLUMNS)
     contacts = [
-        {k: c[k] for k in ("customer", "date_time", "sales_person", "contact_channel", "result", "comment", "customer_contact_person", "follow_up_date")}
+        {k: c[k] for k in ("customer", "date_time", "sales_person", "contact_channel", "result", "comment", "customer_contact_person", "follow_up_date",
+                           "Franui", "Schufrulade", "Boujee", "polarbar")}
         for c in contact_rows
         if c["customer"].strip().lower() == customer_name
     ]
@@ -261,10 +263,6 @@ def update_customer_contact(row):
         ("city_google",          "city_google"),
         ("postal_code_google",   "postal_code_google"),
         ("region_google",        "region_google"),
-        ("Franui",               "Franui"),
-        ("Schufrulade",          "Schufrulade"),
-        ("Boujee",               "Boujee"),
-        ("polarbar",             "polarbar"),
         ("comment",              "comment"),
     ]
     address_fields = {"address_google", "address_number_google", "city_google", "postal_code_google", "region_google"}
@@ -280,9 +278,7 @@ def update_customer_contact(row):
     for field, col_name in fields:
         if field in data:
             col_idx = headers.index(col_name) + 1
-            if col_name in {"Franui", "Schufrulade", "Boujee", "polarbar"}:
-                value = checkbox_to_sheet_value(data[field])
-            elif col_name == "comment":
+            if col_name == "comment":
                 value = text_to_sheet_value(data[field], max_length=50)
             else:
                 value = data[field]
@@ -339,16 +335,22 @@ def add_contact(customer_name):
     customer_name = unquote(customer_name)
     data = request.get_json()
     sheet = get_spreadsheet_with_retry().worksheet("sales_activities")
-    row = [
-        data.get("date_time", datetime.now().strftime("%Y-%m-%d %H:%M")),
-        data.get("sales_person", ""),
-        customer_name,
-        data.get("contact_channel", ""),
-        data.get("result", ""),
-        data.get("comment", ""),
-        data.get("customer_contact_person", ""),
-        data.get("follow_up_date", ""),
-    ]
+    headers = sheet.row_values(1)
+    row_data = {
+        "date_time": data.get("date_time", datetime.now().strftime("%Y-%m-%d %H:%M")),
+        "sales_person": data.get("sales_person", ""),
+        "customer": customer_name,
+        "contact_channel": data.get("contact_channel", ""),
+        "result": data.get("result", ""),
+        "comment": data.get("comment", ""),
+        "customer_contact_person": data.get("customer_contact_person", ""),
+        "follow_up_date": data.get("follow_up_date", ""),
+        "Franui": checkbox_to_sheet_value(data.get("Franui", "")),
+        "Schufrulade": checkbox_to_sheet_value(data.get("Schufrulade", "")),
+        "Boujee": checkbox_to_sheet_value(data.get("Boujee", "")),
+        "polarbar": checkbox_to_sheet_value(data.get("polarbar", "")),
+    }
+    row = [row_data.get(header, "") for header in headers]
     sheet.append_row(row)
     return jsonify({"ok": True})
 
