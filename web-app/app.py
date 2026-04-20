@@ -87,12 +87,16 @@ def get_customers():
     all_rows = sheet.get_all_values()
     headers = all_rows[0]
 
-    # Build latest follow_up_date per customer from sales_activities
+    # Build latest contact/follow_up_date per customer from sales_activities
     contact_rows = rows_to_dicts(spreadsheet.worksheet("sales_activities").get_all_values()[1:], CONTACT_COLUMNS)
+    latest_contact = {}
     latest_followup = {}
     for c in contact_rows:
         name = c["customer"].strip().lower()
+        dt = c["date_time"].strip()
         nf = c["follow_up_date"].strip()
+        if dt and (name not in latest_contact or dt > latest_contact[name]):
+            latest_contact[name] = dt
         if nf and (name not in latest_followup or nf > latest_followup[name]):
             latest_followup[name] = nf
 
@@ -118,6 +122,7 @@ def get_customers():
         customer["region_google"] = d.get("region_google", "").strip()
         customer["address"] = f"{addr} {num}".strip()
         customer["city"] = customer["city_google"] or d.get("city", "")
+        customer["latest_contact_date"] = latest_contact.get(customer["customer"].strip().lower(), "")[:10]
         customer["follow_up_date"] = latest_followup.get(customer["customer"].strip().lower(), "")
         customers.append({"row": i, **customer})
     return jsonify(customers)

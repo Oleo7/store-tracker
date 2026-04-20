@@ -2,8 +2,11 @@
 git status
 git pull origin master
 
-# Ändringar lokalt
-python web-app/app.py
+# Aktivera virtuell miljö och..
+# Testa ändringar lokalt
+.\.venv\Scripts\python.exe -m pip install -r .\web-app\requirements.txt
+.\.venv\Scripts\python.exe .\web-app\app.py
+
 
 # Deploy ändringar (skicka in i terminalen)
 git status         --> se vilka filer som ändrats

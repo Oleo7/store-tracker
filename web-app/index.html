@@ -301,6 +301,15 @@
       align-items: flex-start;
       gap: 8px;
     }
+    .card-side {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      gap: 8px;
+      flex-shrink: 0;
+      text-align: right;
+      min-width: 110px;
+    }
     .customer-name { font-size: 1rem; font-weight: 700; }
     .customer-sub  { font-size: 0.78rem; color: #777; margin-top: 2px; }
 
@@ -322,6 +331,23 @@
       font-size: 0.75rem;
       color: #888;
       flex-wrap: wrap;
+    }
+    .latest-contact-meta {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      gap: 2px;
+    }
+    .latest-contact-label {
+      font-size: 0.68rem;
+      color: #9aa1b1;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .latest-contact-value {
+      font-size: 0.78rem;
+      font-weight: 600;
+      color: #1a1a2e;
     }
 
     .state-msg {
@@ -1402,7 +1428,13 @@
               <div class="customer-name">${esc(c.customer)}</div>
               <div class="customer-sub">${esc(c.city)}</div>
             </div>
-            ${c.customer_segment ? `<span class="segment-badge">${esc(c.customer_segment)}</span>` : ""}
+            <div class="card-side">
+              ${c.customer_segment ? `<span class="segment-badge">${esc(c.customer_segment)}</span>` : ""}
+              <div class="latest-contact-meta">
+                <span class="latest-contact-label">Senaste kontakt</span>
+                <span class="latest-contact-value">${esc(c.latest_contact_date || "—")}</span>
+              </div>
+            </div>
           </div>
           <div class="card-meta">
             ${c.sales_person ? `<span>&#128100; ${esc(c.sales_person)}</span>` : ""}
