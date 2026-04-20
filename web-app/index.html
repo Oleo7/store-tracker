@@ -406,6 +406,105 @@
     .order-stat .stat-label { font-size: 0.72rem; color: #888; margin-bottom: 3px; }
     .order-stat .stat-value { font-size: 1.05rem; font-weight: 700; }
 
+    .competitor-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+      gap: 10px;
+    }
+    .competitor-toggle {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      width: 100%;
+      border: 1.5px solid #e8eaf0;
+      border-radius: 12px;
+      background: #f7f8fa;
+      color: #1a1a2e;
+      padding: 12px;
+      cursor: pointer;
+      font-family: inherit;
+      text-align: left;
+      transition: border-color 0.15s, background 0.15s, box-shadow 0.15s;
+    }
+    .competitor-toggle.active {
+      border-color: #1a1a2e;
+      background: #eef1ff;
+      box-shadow: inset 0 0 0 1px rgba(26,26,46,0.08);
+    }
+    .competitor-toggle:disabled {
+      opacity: 0.65;
+      cursor: default;
+    }
+    .competitor-box {
+      width: 20px;
+      height: 20px;
+      border: 2px solid #cfd5e3;
+      border-radius: 4px;
+      flex-shrink: 0;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      background: #fff;
+    }
+    .competitor-toggle.active .competitor-box {
+      background: #1a1a2e;
+      border-color: #1a1a2e;
+    }
+    .competitor-toggle.active .competitor-box::after {
+      content: "";
+      width: 6px;
+      height: 10px;
+      border: solid #fff;
+      border-width: 0 2px 2px 0;
+      transform: rotate(45deg);
+      margin-top: -2px;
+    }
+    .competitor-name {
+      font-size: 0.85rem;
+      font-weight: 600;
+    }
+    .customer-note-wrap {
+      margin-top: 12px;
+    }
+    .customer-note-label-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 6px;
+    }
+    .customer-note-label {
+      font-size: 0.74rem;
+      font-weight: 700;
+      color: #888;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+    .customer-note-count {
+      font-size: 0.74rem;
+      color: #888;
+    }
+    .customer-note-input {
+      width: 100%;
+      border: 1.5px solid #e8eaf0;
+      border-radius: 12px;
+      padding: 12px 14px;
+      font-size: 0.9rem;
+      font-family: inherit;
+      outline: none;
+      background: #f7f8fa;
+      color: #1a1a2e;
+      transition: border-color 0.15s, background 0.15s;
+    }
+    .customer-note-input:focus {
+      border-color: #1a1a2e;
+      background: #fff;
+    }
+    .customer-note-input:disabled {
+      opacity: 0.65;
+      cursor: default;
+    }
+
     .info-row {
       display: flex;
       justify-content: space-between;
@@ -847,6 +946,38 @@
       </div>
     </div>
 
+    <div class="detail-section">
+      <div class="detail-section-title">Kundkommentar</div>
+      <div class="customer-note-wrap" style="margin-top:0">
+        <div class="customer-note-label-row">
+          <span class="customer-note-count" id="customer-comment-count">0/50</span>
+        </div>
+        <input class="customer-note-input" id="customer-comment-input" type="text" maxlength="50" placeholder="Skriv en kort kundnotering" />
+      </div>
+    </div>
+
+    <div class="detail-section">
+      <div class="detail-section-title">I frysdisken</div>
+      <div class="competitor-grid">
+        <button class="competitor-toggle" data-competitor="Franui" type="button" aria-pressed="false">
+          <span class="competitor-box" aria-hidden="true"></span>
+          <span class="competitor-name">Franui</span>
+        </button>
+        <button class="competitor-toggle" data-competitor="Schufrulade" type="button" aria-pressed="false">
+          <span class="competitor-box" aria-hidden="true"></span>
+          <span class="competitor-name">Schufrulade</span>
+        </button>
+        <button class="competitor-toggle" data-competitor="Boujee" type="button" aria-pressed="false">
+          <span class="competitor-box" aria-hidden="true"></span>
+          <span class="competitor-name">Boujee</span>
+        </button>
+        <button class="competitor-toggle" data-competitor="polarbar" type="button" aria-pressed="false">
+          <span class="competitor-box" aria-hidden="true"></span>
+          <span class="competitor-name">Polarbär</span>
+        </button>
+      </div>
+    </div>
+
     <!-- Orderstatus -->
     <div class="detail-section">
       <div class="detail-section-title">Orderstatus</div>
@@ -1030,12 +1161,16 @@
 
 <script>
   const API = "";
+  const COMPETITOR_FIELDS = ["Franui", "Schufrulade", "Boujee", "polarbar"];
 
   let customers = [];
   let searchQuery = "";
   let currentCustomer = null;
   let detailReturnView = "list";
   let insights = {};
+  const competitorButtons = Array.from(document.querySelectorAll(".competitor-toggle"));
+  const customerCommentInput = document.getElementById("customer-comment-input");
+  const customerCommentCount = document.getElementById("customer-comment-count");
 
   // ── Load customers ──
   async function loadCustomers() {
@@ -1354,6 +1489,65 @@
     document.getElementById("d-tags").innerHTML = tags.join("");
   }
 
+  function isCheckedValue(value) {
+    return ["1", "true", "yes", "on"].includes(String(value || "").trim().toLowerCase());
+  }
+
+  function syncCompetitorButtons(customer) {
+    competitorButtons.forEach(btn => {
+      const field = btn.dataset.competitor;
+      const active = isCheckedValue(customer?.[field]);
+      btn.classList.toggle("active", active);
+      btn.setAttribute("aria-pressed", active ? "true" : "false");
+      btn.disabled = !customer;
+    });
+  }
+
+  function setCompetitorButtonsDisabled(disabled) {
+    competitorButtons.forEach(btn => btn.disabled = disabled);
+  }
+
+  function setCustomerComment(value) {
+    const safeValue = String(value || "").slice(0, 50);
+    customerCommentInput.value = safeValue;
+    customerCommentInput.dataset.savedValue = safeValue;
+    customerCommentCount.textContent = `${safeValue.length}/50`;
+  }
+
+  function setCustomerNotesDisabled(disabled) {
+    setCompetitorButtonsDisabled(disabled);
+    customerCommentInput.disabled = disabled;
+  }
+
+  async function saveCustomerDetailPatch(updates, rollback) {
+    if (!currentCustomer) return false;
+
+    setCustomerNotesDisabled(true);
+
+    try {
+      const res = await fetch(`${API}/customers/${currentCustomer.row}/contact`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(updates),
+      });
+
+      if (!res.ok) {
+        const errorData = await res.json().catch(() => null);
+        throw errorData || new Error();
+      }
+
+      showToast("Sparat!");
+      return true;
+    } catch (error) {
+      if (rollback) rollback();
+      const missing = Array.isArray(error?.missing_columns) ? error.missing_columns.join(", ") : "";
+      showToast(missing ? `Saknar kolumner: ${missing}` : "Kunde inte spara");
+      return false;
+    } finally {
+      setCustomerNotesDisabled(false);
+    }
+  }
+
   function renderHistory() {
     const section  = document.getElementById("d-contact-section");
     const list     = document.getElementById("d-contact-list");
@@ -1459,6 +1653,9 @@
     emailEl.textContent = c.email || "—";
     emailEl.href = c.email ? `mailto:${c.email}` : "#";
 
+    syncCompetitorButtons(c);
+    setCustomerComment(c.comment || "");
+
     // Ring / Mail buttons
     document.getElementById("d-call-btn").onclick = () => { if (c.phone) window.location.href = `tel:${c.phone.replace(/\s/g, "")}`; };
     document.getElementById("d-mail-btn").onclick = () => { if (c.email) window.location.href = `mailto:${c.email}`; };
@@ -1546,7 +1743,56 @@
     showView("detail");
   }
 
+  competitorButtons.forEach(btn => {
+    btn.addEventListener("click", async () => {
+      if (!currentCustomer) return;
+
+      const field = btn.dataset.competitor;
+      if (!COMPETITOR_FIELDS.includes(field)) return;
+
+      const previousValue = currentCustomer[field] || "";
+      const nextValue = isCheckedValue(previousValue) ? "" : "1";
+
+      currentCustomer[field] = nextValue;
+      syncCompetitorButtons(currentCustomer);
+      await saveCustomerDetailPatch({ [field]: nextValue }, () => {
+        currentCustomer[field] = previousValue;
+        syncCompetitorButtons(currentCustomer);
+      });
+    });
+  });
+
   // ── Back (detail → list) ──
+  customerCommentInput.addEventListener("input", () => {
+    customerCommentCount.textContent = `${customerCommentInput.value.length}/50`;
+  });
+
+  customerCommentInput.addEventListener("keydown", e => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      customerCommentInput.blur();
+    }
+  });
+
+  customerCommentInput.addEventListener("blur", async () => {
+    if (!currentCustomer) return;
+
+    const nextValue = customerCommentInput.value.trim().slice(0, 50);
+    const previousValue = customerCommentInput.dataset.savedValue || "";
+    if (nextValue === previousValue) return;
+
+    currentCustomer.comment = nextValue;
+    customerCommentInput.value = nextValue;
+    customerCommentCount.textContent = `${nextValue.length}/50`;
+
+    const saved = await saveCustomerDetailPatch({ comment: nextValue }, () => {
+      currentCustomer.comment = previousValue;
+      setCustomerComment(previousValue);
+    });
+
+    if (saved) setCustomerComment(nextValue);
+  });
+
   document.getElementById("back-btn").addEventListener("click", () => showView(detailReturnView));
 
   // ── Open contact form ──
