@@ -19,7 +19,8 @@ SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 SHEET_ID = os.environ.get("SHEET_KEY", "")
 
 CUSTOMER_COLUMNS = ["customer", "cancelled_flag", "sales_person", "customer_segment",
-                    "customer_reference", "customer_number", "phone", "email"]
+                    "customer_reference", "customer_number", "phone", "email",
+                    "Franui", "Schufrulade", "Boujee", "polarbar", "comment"]
 
 ORDER_COLUMNS = ["Reference", "Order date", "Delivery date", "Customer", "Customer Reference",
                  "Buyer number", "Customer number", "Logistics number", "Address", "Number",
@@ -32,6 +33,15 @@ CONTACT_COLUMNS = ["date_time", "sales_person", "customer", "contact_channel", "
 
 
 _spreadsheet_cache = None
+
+
+def checkbox_to_sheet_value(value):
+    return "1" if str(value).strip().lower() in {"1", "true", "yes", "on"} else ""
+
+
+def text_to_sheet_value(value, max_length=None):
+    text = str(value or "").strip()
+    return text[:max_length] if max_length is not None else text
 
 def get_spreadsheet(force_reconnect=False):
     global _spreadsheet_cache
@@ -237,6 +247,7 @@ def update_customer_contact(row):
     data = request.get_json()
     sheet = get_spreadsheet_with_retry().worksheet("customers_enriched")
     headers = sheet.row_values(1)
+    missing_columns = []
     fields = [
         ("phone",                "phone"),
         ("email",                "email"),
@@ -245,15 +256,32 @@ def update_customer_contact(row):
         ("city_google",          "city_google"),
         ("postal_code_google",   "postal_code_google"),
         ("region_google",        "region_google"),
+        ("Franui",               "Franui"),
+        ("Schufrulade",          "Schufrulade"),
+        ("Boujee",               "Boujee"),
+        ("polarbar",             "polarbar"),
+        ("comment",              "comment"),
     ]
     address_fields = {"address_google", "address_number_google", "city_google", "postal_code_google", "region_google"}
     address_changed = any(f in data for f in address_fields)
 
     for field, col_name in fields:
+        if field in data and col_name not in headers:
+            missing_columns.append(col_name)
+
+    if missing_columns:
+        return jsonify({"ok": False, "missing_columns": missing_columns}), 400
+
+    for field, col_name in fields:
         if field in data:
-            if col_name in headers:
-                col_idx = headers.index(col_name) + 1
-                sheet.update_cell(row, col_idx, data[field])
+            col_idx = headers.index(col_name) + 1
+            if col_name in {"Franui", "Schufrulade", "Boujee", "polarbar"}:
+                value = checkbox_to_sheet_value(data[field])
+            elif col_name == "comment":
+                value = text_to_sheet_value(data[field], max_length=50)
+            else:
+                value = data[field]
+            sheet.update_cell(row, col_idx, value)
 
     if address_changed:
         # Clear coordinates first
