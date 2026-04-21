@@ -1109,7 +1109,7 @@
       </div>
       <div class="form-field">
         <label>Kontaktperson</label>
-        <textarea id="f-contactPerson" placeholder="Namn på butiken" rows="1"></textarea>
+        <textarea id="f-contactPerson" placeholder="Namn på kontaktperson" rows="1"></textarea>
       </div>
       <div class="form-field">
         <label>Kanal</label>
@@ -1583,6 +1583,10 @@
     return payload;
   }
 
+  function getPrefilledSellerName() {
+    return String(currentCustomer?.sales_person || "").trim();
+  }
+
   async function saveCustomerDetailPatch(updates, rollback) {
     if (!currentCustomer) return false;
 
@@ -1860,7 +1864,7 @@
     const pad = n => String(n).padStart(2, "0");
     const datetime = `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}`;
     document.getElementById("f-date").value = datetime;
-    document.getElementById("f-seller").value = "";
+    document.getElementById("f-seller").value = getPrefilledSellerName();
     document.getElementById("f-contactPerson").value = "";
     document.getElementById("f-channel").value = "";
     document.getElementById("f-result").value = "";
