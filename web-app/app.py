@@ -3,7 +3,8 @@ from flask_cors import CORS
 import gspread
 from google.oauth2.service_account import Credentials
 from urllib.parse import unquote
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
+from collections import defaultdict
 import os
 import json
 import requests
@@ -66,6 +67,109 @@ def rows_to_dicts(rows, columns):
         padded = row + [""] * (len(columns) - len(row))
         result.append(dict(zip(columns, padded[:len(columns)])))
     return result
+
+
+def normalize_key(value):
+    return str(value or "").strip().lower()
+
+
+def parse_date_value(value):
+    text = str(value or "").strip()
+    if not text:
+        return None
+
+    normalized = text.replace("Z", "").replace("T", " ")
+    for fmt in ("%Y-%m-%d", "%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S",
+                "%Y/%m/%d", "%d/%m/%Y", "%d.%m.%Y"):
+        try:
+            return datetime.strptime(normalized[:len(datetime.now().strftime(fmt))], fmt).date()
+        except ValueError:
+            pass
+
+    try:
+        return datetime.fromisoformat(normalized).date()
+    except ValueError:
+        return None
+
+
+def parse_number_value(value, default=0.0):
+    text = str(value or "").strip()
+    if not text:
+        return default
+
+    cleaned = "".join(ch for ch in text if ch.isdigit() or ch in ",.-")
+    if cleaned in {"", "-", ".", ","}:
+        return default
+
+    if "," in cleaned and "." in cleaned:
+        if cleaned.rfind(",") > cleaned.rfind("."):
+            cleaned = cleaned.replace(".", "").replace(",", ".")
+        else:
+            cleaned = cleaned.replace(",", "")
+    else:
+        cleaned = cleaned.replace(",", ".")
+
+    try:
+        return float(cleaned)
+    except ValueError:
+        return default
+
+
+def week_start(day):
+    return day - timedelta(days=day.weekday())
+
+
+def week_key(day):
+    iso = day.isocalendar()
+    return f"{iso.year}-W{iso.week:02d}"
+
+
+def build_recent_weeks(today, count=5):
+    current_start = week_start(today)
+    weeks = []
+    for offset in range(count - 1, -1, -1):
+        start = current_start - timedelta(weeks=offset)
+        iso = start.isocalendar()
+        weeks.append({
+            "key": f"{iso.year}-W{iso.week:02d}",
+            "label": f"Vecka {iso.week}",
+            "start_date": start.isoformat(),
+            "end_date": (start + timedelta(days=6)).isoformat(),
+        })
+    return weeks
+
+
+def calculate_customer_risk(order_count, latest_order, latest_delivery, today):
+    most_recent = max(latest_order, latest_delivery) if latest_order and latest_delivery else (latest_order or latest_delivery)
+    if order_count == 0 or not most_recent:
+        return ""
+
+    days_since = (today - most_recent).days
+    if days_since >= 75:
+        return "Återaktivering krävs"
+    if days_since >= 60:
+        return "Hög risk"
+    if days_since >= 45:
+        return "Risk"
+    if days_since >= 30:
+        return "Bevaka"
+    return "Aktiv"
+
+
+def is_positive_contact(result):
+    text = str(result or "").strip().lower()
+    positive_results = ("positiv", "positivt", "order lagd!", "order lagd")
+    return any(phrase in text for phrase in positive_results)
+
+
+def segment_sort_key(segment):
+    text = str(segment or "").strip()
+    if not text:
+        return (99, "")
+    first = text[:1].upper()
+    if first in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
+        return (ord(first) - ord("A"), text.casefold())
+    return (50, text.casefold())
 
 
 @app.route("/")
@@ -227,14 +331,16 @@ def get_customer_insights():
             try:
                 recent_date = date.fromisoformat(most_recent[:10])
                 days = (today - recent_date).days
-                if days > 60:
-                    risk = "FÖRLORAD?"
-                elif days > 40:
-                    risk = "HÖG RISK"
-                elif days > 20:
-                    risk = "RISK"
+                if days >= 75:
+                    risk = "Återaktivering krävs"
+                elif days >= 60:
+                    risk = "Hög risk"
+                elif days >= 45:
+                    risk = "Risk"
+                elif days >= 30:
+                    risk = "Bevaka"
                 else:
-                    risk = "OK"
+                    risk = "Aktiv"
             except ValueError:
                 risk = ""
 
@@ -247,6 +353,205 @@ def get_customer_insights():
         }
 
     return jsonify(insights)
+
+
+@app.route("/followup-insights", methods=["GET"])
+def get_followup_insights():
+    spreadsheet = get_spreadsheet_with_retry()
+    today = date.today()
+    weeks = build_recent_weeks(today)
+    week_keys = {w["key"] for w in weeks}
+    current_week_key = weeks[-1]["key"]
+    previous_week_key = weeks[-2]["key"] if len(weeks) > 1 else ""
+    selected_responsible = request.args.get("responsible", "").strip()
+
+    customer_values = spreadsheet.worksheet("customers_enriched").get_all_values()
+    customer_headers = customer_values[0] if customer_values else []
+    customers_by_name = {}
+    for i, row in enumerate(customer_values[1:], start=2):
+        padded = row + [""] * (len(customer_headers) - len(row))
+        d = dict(zip(customer_headers, padded))
+        name = d.get("customer", "").strip()
+        if not name:
+            continue
+        customers_by_name[normalize_key(name)] = {
+            "row": i,
+            "customer": name,
+            "sales_person": d.get("sales_person", "").strip(),
+            "customer_segment": d.get("customer_segment", "").strip(),
+        }
+
+    contact_rows = rows_to_dicts(spreadsheet.worksheet("sales_activities").get_all_values()[1:], CONTACT_COLUMNS)
+    order_rows = rows_to_dicts(spreadsheet.worksheet("order_rows").get_all_values()[1:], ORDER_COLUMNS)
+
+    responsible_options = sorted({
+        c["sales_person"] for c in customers_by_name.values() if c["sales_person"]
+    })
+
+    def customer_belongs_to_selected(customer_name):
+        if not selected_responsible:
+            return True
+        customer = customers_by_name.get(normalize_key(customer_name))
+        return bool(customer and customer["sales_person"] == selected_responsible)
+
+    def contact_belongs_to_selected(contact):
+        return not selected_responsible or contact["sales_person"].strip() == selected_responsible
+
+    # DFP leaderboard is intentionally global and ignores the selected responsible filter.
+    # It sums Quantity for every order row by the customer's responsible salesperson.
+    dfp_counts = {w["key"]: defaultdict(float) for w in weeks}
+    for order in order_rows:
+        order_date = parse_date_value(order["Order date"])
+        if not order_date:
+            continue
+        key = week_key(order_date)
+        if key not in week_keys:
+            continue
+
+        customer = customers_by_name.get(normalize_key(order["Customer"]))
+        responsible = customer["sales_person"] if customer and customer["sales_person"] else "Okänd"
+        quantity = parse_number_value(order["Quantity"], default=0.0)
+        dfp_counts[key][responsible] += quantity
+
+    dfp_leaderboard = []
+    for w in weeks:
+        leaders = sorted(dfp_counts[w["key"]].items(), key=lambda item: (-item[1], item[0]))[:3]
+        dfp_leaderboard.append({
+            "week_key": w["key"],
+            "label": w["label"],
+            "leaders": [
+                {
+                    "rank": idx + 1,
+                    "sales_person": name,
+                    "dfp_count": int(count) if float(count).is_integer() else round(count, 1),
+                }
+                for idx, (name, count) in enumerate(leaders)
+            ],
+        })
+
+    contact_count_by_week = {w["key"]: 0 for w in weeks}
+    positive_count_by_week = {w["key"]: 0 for w in weeks}
+    contact_dates_by_customer = defaultdict(list)
+    latest_contact_for_risk = {}
+
+    for contact in contact_rows:
+        contact_date = parse_date_value(contact["date_time"])
+        if not contact_date:
+            continue
+
+        customer_key = normalize_key(contact["customer"])
+        if contact_belongs_to_selected(contact):
+            contact_dates_by_customer[customer_key].append(contact_date)
+            key = week_key(contact_date)
+            if key in week_keys:
+                contact_count_by_week[key] += 1
+                if is_positive_contact(contact["result"]):
+                    positive_count_by_week[key] += 1
+
+        if (not selected_responsible or contact_belongs_to_selected(contact)) and (
+            customer_key not in latest_contact_for_risk or contact_date > latest_contact_for_risk[customer_key]
+        ):
+            latest_contact_for_risk[customer_key] = contact_date
+
+    for dates in contact_dates_by_customer.values():
+        dates.sort()
+
+    current_contacts = contact_count_by_week.get(current_week_key, 0)
+    previous_contacts = contact_count_by_week.get(previous_week_key, 0)
+    if previous_contacts == 0:
+        contact_delta_percent = 100 if current_contacts > 0 else 0
+    else:
+        contact_delta_percent = round(((current_contacts - previous_contacts) / previous_contacts) * 100)
+
+    latest_order = {}
+    latest_delivery = {}
+    order_count_by_customer = defaultdict(int)
+    orders_after_contact_by_week = {w["key"]: set() for w in weeks}
+
+    for idx, order in enumerate(order_rows):
+        customer_key = normalize_key(order["Customer"])
+        order_date = parse_date_value(order["Order date"])
+        delivery_date = parse_date_value(order["Delivery date"])
+        ref = order["Reference"].strip() or f"row-{idx}"
+
+        if order_date:
+            if customer_key not in latest_order or order_date > latest_order[customer_key]:
+                latest_order[customer_key] = order_date
+        if delivery_date:
+            if customer_key not in latest_delivery or delivery_date > latest_delivery[customer_key]:
+                latest_delivery[customer_key] = delivery_date
+        if ref:
+            order_count_by_customer[customer_key] += 1
+
+        if not order_date or not customer_belongs_to_selected(order["Customer"]):
+            continue
+
+        key = week_key(order_date)
+        if key not in week_keys:
+            continue
+
+        prior_contacts = [d for d in contact_dates_by_customer.get(customer_key, []) if d <= order_date]
+        if not prior_contacts:
+            continue
+        latest_prior_contact = prior_contacts[-1]
+        if 0 <= (order_date - latest_prior_contact).days <= 10:
+            orders_after_contact_by_week[key].add(ref)
+
+    risk_customers = []
+    for customer_key, customer in customers_by_name.items():
+        if selected_responsible and customer["sales_person"] != selected_responsible:
+            continue
+
+        lo = latest_order.get(customer_key)
+        ld = latest_delivery.get(customer_key)
+        risk = calculate_customer_risk(order_count_by_customer.get(customer_key, 0), lo, ld, today)
+        if risk not in {"Bevaka", "Risk", "Hög risk", "Återaktivering krävs"}:
+            continue
+
+        latest_contact = latest_contact_for_risk.get(customer_key)
+        if latest_contact and lo and latest_contact >= lo:
+            continue
+
+        risk_customers.append({
+            "row": customer["row"],
+            "customer": customer["customer"],
+            "sales_person": customer["sales_person"],
+            "segment": customer["customer_segment"],
+            "risk_status": risk,
+            "latest_order_date": lo.isoformat() if lo else "",
+            "latest_contact_date": latest_contact.isoformat() if latest_contact else "",
+        })
+
+    risk_priority = {"Återaktivering krävs": 0, "Hög risk": 1, "Risk": 2, "Bevaka": 3}
+    risk_customers.sort(key=lambda c: (
+        segment_sort_key(c["segment"]),
+        risk_priority.get(c["risk_status"], 9),
+        c["latest_order_date"] or "9999-12-31",
+        c["customer"].casefold(),
+    ))
+
+    return jsonify({
+        "generated_at": datetime.now().isoformat(timespec="minutes"),
+        "selected_responsible": selected_responsible,
+        "responsible_options": responsible_options,
+        "weeks": weeks,
+        "dfp_leaderboard": dfp_leaderboard,
+        "contacts": {
+            "current_week_count": current_contacts,
+            "previous_week_count": previous_contacts,
+            "delta_percent": contact_delta_percent,
+            "delta_is_positive": current_contacts >= previous_contacts,
+            "positive_by_week": [
+                {"week_key": w["key"], "label": w["label"], "count": positive_count_by_week[w["key"]]}
+                for w in weeks
+            ],
+            "orders_after_contact_by_week": [
+                {"week_key": w["key"], "label": w["label"], "count": len(orders_after_contact_by_week[w["key"]])}
+                for w in weeks
+            ],
+        },
+        "risk_customers": risk_customers,
+    })
 
 
 @app.route("/customers/<int:row>/contact", methods=["PATCH"])

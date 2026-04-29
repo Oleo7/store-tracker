@@ -131,6 +131,13 @@
     }
     .header-text h1 { font-size: 1.15rem; font-weight: 700; }
     .header-text p  { font-size: 0.75rem; opacity: 0.6; margin-top: 2px; }
+    .header-text { flex: 1; min-width: 0; }
+    .header-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-shrink: 0;
+    }
 
     .back-btn {
       background: rgba(255,255,255,0.15);
@@ -412,6 +419,7 @@
     }
     .tag-red    { background: #ffe0e0; color: #c0392b; }
     .tag-orange { background: #ffecd6; color: #d35400; }
+    .tag-yellow { background: #fff4cf; color: #9a6a00; }
     .tag-blue   { background: #e0eeff; color: #1a5fa8; }
     .tag-green  { background: #e0f7e9; color: #1e8449; }
 
@@ -892,6 +900,211 @@
     .map-stop-detail-btn:active { color: #1a1a2e; }
     .stop-num.route-start { background: #22c55e; }
     .map-stop-item.route-selected { background: #f0f7ff; border-radius: 6px; padding-left: 4px; padding-right: 4px; }
+
+    /* ── Follow-up insights ── */
+    .insights-body {
+      padding: 12px 14px 40px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .insights-panel {
+      background: #fff;
+      border-radius: 14px;
+      padding: 14px;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.07);
+    }
+    .insights-panel-title {
+      font-size: 0.76rem;
+      font-weight: 800;
+      color: #777;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      margin-bottom: 10px;
+    }
+    .insights-filter-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 14px;
+    }
+    .insights-filter-row label {
+      font-size: 0.78rem;
+      font-weight: 700;
+      color: #777;
+      flex-shrink: 0;
+    }
+    .insights-select {
+      min-width: 0;
+      flex: 1;
+      border: 1.5px solid #e8eaf0;
+      border-radius: 10px;
+      background: #f7f8fa;
+      color: #1a1a2e;
+      font-family: inherit;
+      font-size: 0.88rem;
+      padding: 10px 12px;
+      outline: none;
+    }
+    .insights-select:focus {
+      border-color: #1a1a2e;
+      background: #fff;
+    }
+    .dfp-table-wrap {
+      overflow-x: auto;
+      border: 1px solid #eef0f5;
+      border-radius: 10px;
+    }
+    .dfp-table {
+      width: 100%;
+      min-width: 560px;
+      border-collapse: collapse;
+      font-size: 0.78rem;
+    }
+    .dfp-table th,
+    .dfp-table td {
+      padding: 9px 8px;
+      border-bottom: 1px solid #eef0f5;
+      text-align: left;
+      vertical-align: top;
+    }
+    .dfp-table th {
+      background: #f7f8fa;
+      color: #666;
+      font-weight: 800;
+      white-space: nowrap;
+    }
+    .dfp-table tr:last-child td { border-bottom: none; }
+    .dfp-rank-cell {
+      width: 44px;
+      color: #777;
+      font-weight: 800;
+    }
+    .dfp-name {
+      font-weight: 800;
+      color: #1a1a2e;
+      line-height: 1.25;
+    }
+    .dfp-count {
+      color: #777;
+      display: block;
+      margin-top: 2px;
+      white-space: nowrap;
+    }
+    .contacts-grid {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 10px;
+    }
+    .insights-kpi {
+      border: 1px solid #eef0f5;
+      border-radius: 12px;
+      padding: 12px;
+      background: #fbfcff;
+    }
+    .insights-kpi-value {
+      font-size: 1.85rem;
+      line-height: 1;
+      font-weight: 850;
+      color: #1a1a2e;
+    }
+    .insights-kpi-label {
+      margin-top: 4px;
+      font-size: 0.8rem;
+      color: #666;
+      font-weight: 650;
+    }
+    .insights-kpi-delta {
+      margin-top: 8px;
+      font-size: 0.82rem;
+      font-weight: 800;
+    }
+    .insights-kpi-delta.positive { color: #14804a; }
+    .insights-kpi-delta.negative { color: #c0392b; }
+    .chart-card {
+      border: 1px solid #eef0f5;
+      border-radius: 12px;
+      padding: 12px;
+      min-height: 150px;
+      background: #fff;
+    }
+    .chart-title {
+      font-size: 0.82rem;
+      font-weight: 800;
+      color: #1a1a2e;
+      margin-bottom: 8px;
+    }
+    .mini-chart svg {
+      width: 100%;
+      height: 108px;
+      display: block;
+    }
+    .chart-axis-label {
+      fill: #8a90a0;
+      font-size: 9px;
+      font-weight: 650;
+    }
+    .risk-list {
+      max-height: 440px;
+      overflow-y: auto;
+      overscroll-behavior: contain;
+      border: 1px solid #eef0f5;
+      border-radius: 10px;
+    }
+    .risk-item {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 11px 12px;
+      border-bottom: 1px solid #eef0f5;
+      cursor: pointer;
+      background: #fff;
+    }
+    .risk-item:last-child { border-bottom: none; }
+    .risk-item:active { background: #f7f8fa; }
+    .risk-customer {
+      font-size: 0.9rem;
+      font-weight: 800;
+      color: #1a1a2e;
+      margin-bottom: 4px;
+    }
+    .risk-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      align-items: center;
+    }
+    .risk-dates {
+      flex-shrink: 0;
+      text-align: right;
+      color: #777;
+      font-size: 0.75rem;
+      line-height: 1.45;
+      min-width: 92px;
+    }
+    .risk-status-pill {
+      border-radius: 999px;
+      padding: 3px 8px;
+      font-size: 0.68rem;
+      font-weight: 800;
+      white-space: nowrap;
+    }
+    .risk-status-pill.active { background: #e0f7e9; color: #1e8449; }
+    .risk-status-pill.watch { background: #fff4cf; color: #9a6a00; }
+    .risk-status-pill.medium { background: #ffecd6; color: #d35400; }
+    .risk-status-pill.high { background: #ffe0e0; color: #c0392b; }
+    .risk-status-pill.reactivate { background: #f8d7da; color: #8f1d1d; }
+
+    @media (min-width: 760px) {
+      .contacts-grid {
+        grid-template-columns: 0.85fr 1fr 1fr;
+      }
+      .insights-body {
+        max-width: 1100px;
+        margin: 0 auto;
+      }
+    }
   </style>
 </head>
 <body>
@@ -922,7 +1135,10 @@
       <h1 id="list-title">Butiker</h1>
       <p id="subtitle">Laddar...</p>
     </div>
-    <button class="route-mode-btn" id="route-mode-btn">&#128205; Visa karta</button>
+    <div class="header-actions">
+      <button class="route-mode-btn" id="insights-mode-btn">Insikter</button>
+      <button class="route-mode-btn" id="route-mode-btn">&#128205; Karta</button>
+    </div>
   </div>
 
   <div class="toolbar">
@@ -945,6 +1161,63 @@
     <div class="state-msg">Laddar...</div>
   </div>
 
+</div>
+
+<!-- ═══════════════ FOLLOW-UP INSIGHTS VIEW ═══════════════ -->
+<div class="view" id="view-insights">
+  <div class="header">
+    <button class="back-btn" id="insights-back-btn">&#8592;</button>
+    <div class="header-text">
+      <h1>Uppföljning</h1>
+      <p id="insights-subtitle">Laddar...</p>
+    </div>
+  </div>
+
+  <div class="insights-body">
+    <div class="insights-panel">
+      <div class="insights-filter-row">
+        <label for="insights-responsible">Ansvarig</label>
+        <select class="insights-select" id="insights-responsible">
+          <option value="">Alla ansvariga</option>
+        </select>
+      </div>
+
+      <div class="insights-panel-title">DFP-topplista (kunders ordrar per ansvarig)</div>
+      <div class="dfp-table-wrap">
+        <table class="dfp-table" id="dfp-leaderboard-table">
+          <tbody>
+            <tr><td>Laddar...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="insights-panel">
+      <div class="insights-panel-title">Kundkontakter</div>
+      <div class="contacts-grid">
+        <div class="insights-kpi">
+          <div class="insights-kpi-value" id="contact-kpi-value">0</div>
+          <div class="insights-kpi-label">kundkontakter</div>
+          <div class="insights-kpi-delta positive" id="contact-kpi-delta">0% vs förra veckan</div>
+        </div>
+        <div class="chart-card">
+          <div class="chart-title">Positiva dialoger</div>
+          <div class="mini-chart" id="positive-dialogue-chart"></div>
+        </div>
+        <div class="chart-card">
+          <div class="chart-title">Order inom 10 dagar efter kontakt</div>
+          <div class="mini-chart" id="orders-after-contact-chart"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="insights-panel">
+      <div class="insights-panel-title">Risk-kunder</div>
+      <div class="risk-list" id="risk-customer-list">
+        <div class="state-msg">Laddar...</div>
+      </div>
+    </div>
+  </div>
 </div>
 
 <!-- ═══════════════ DETAIL VIEW ═══════════════ -->
@@ -1213,6 +1486,8 @@
   let currentCustomer = null;
   let detailReturnView = "list";
   let insights = {};
+  let followupInsights = null;
+  let followupInsightsLoading = false;
   const visitCompetitorButtons = Array.from(document.querySelectorAll(".visit-competitor-toggle"));
   const customerCommentInput = document.getElementById("customer-comment-input");
   const customerCommentCount = document.getElementById("customer-comment-count");
@@ -1308,7 +1583,7 @@
     const body = document.getElementById("filter-modal-body");
     body.innerHTML = filtered.map(v => `
       <label class="filter-option">
-        <input type="checkbox" value="${esc(v)}" ${state.has(v) ? "checked" : ""} />
+        <input type="checkbox" value="${escAttr(v)}" ${state.has(v) ? "checked" : ""} />
         ${esc(v)}
       </label>
     `).join("");
@@ -1357,7 +1632,7 @@
   });
 
   function buildInsightDropdowns() {
-    _sheetValues.risk = ["FÖRLORAD?", "HÖG RISK", "RISK", "OK"];
+    _sheetValues.risk = ["Aktiv", "Bevaka", "Risk", "Hög risk", "Återaktivering krävs"];
     _sheetValues.delivery = [...new Set(
       Object.values(insights).map(i => i.latest_delivery_month).filter(Boolean)
     )].sort().reverse();
@@ -1375,6 +1650,29 @@
     updateChip("responsible");
     updateChip("city");
     updateChip("region");
+  }
+
+  function getRiskStatusClass(risk) {
+    return {
+      "Aktiv": "active",
+      "Bevaka": "watch",
+      "Risk": "medium",
+      "Hög risk": "high",
+      "Återaktivering krävs": "reactivate",
+    }[risk] || "";
+  }
+
+  function getRiskBadgeHtml(risk, style = "") {
+    const tagClass = {
+      "Aktiv": "tag-green",
+      "Bevaka": "tag-yellow",
+      "Risk": "tag-orange",
+      "Hög risk": "tag-red",
+      "Återaktivering krävs": "tag-red",
+    }[risk];
+    if (!tagClass) return "";
+    const styleAttr = style ? ` style="${style}"` : "";
+    return `<span class="tag ${tagClass}"${styleAttr}>${esc(risk)}</span>`;
   }
 
   function updateChip(key) {
@@ -1463,9 +1761,8 @@
             if (!ins) return "";
             const badges = [];
             if (ins.missad_uppfoljning) badges.push(`<span class="tag tag-orange" style="font-size:0.68rem;padding:2px 7px">Missad uppföljning</span>`);
-            if (ins.customer_risk === "FÖRLORAD?") badges.push(`<span class="tag tag-red" style="font-size:0.68rem;padding:2px 7px">Förlorad?</span>`);
-            else if (ins.customer_risk === "HÖG RISK") badges.push(`<span class="tag tag-red" style="font-size:0.68rem;padding:2px 7px">Hög risk</span>`);
-            else if (ins.customer_risk === "RISK") badges.push(`<span class="tag tag-orange" style="font-size:0.68rem;padding:2px 7px">Risk</span>`);
+            const riskBadge = getRiskBadgeHtml(ins.customer_risk, "font-size:0.68rem;padding:2px 7px");
+            if (riskBadge) badges.push(riskBadge);
             if (ins.latest_delivery_date) badges.push(`<span class="tag tag-blue" style="font-size:0.68rem;padding:2px 7px">Leverans ${esc(ins.latest_delivery_date)}</span>`);
             if (badges.length === 0) return "";
             return `<div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:6px">${badges.join("")}</div>`;
@@ -1535,9 +1832,8 @@
     if (currentCustomer?.sales_person) tags.push(`<span class="tag tag-green">Ansvarig: ${esc(currentCustomer.sales_person)}</span>`);
     if (ins) {
       if (ins.missad_uppfoljning) tags.push(`<span class="tag tag-orange">Missad uppföljning</span>`);
-      if (ins.customer_risk === "FÖRLORAD?") tags.push(`<span class="tag tag-red">Förlorad?</span>`);
-      else if (ins.customer_risk === "HÖG RISK") tags.push(`<span class="tag tag-red">Hög risk</span>`);
-      else if (ins.customer_risk === "RISK") tags.push(`<span class="tag tag-orange">Risk</span>`);
+      const riskBadge = getRiskBadgeHtml(ins.customer_risk);
+      if (riskBadge) tags.push(riskBadge);
     }
     document.getElementById("d-tags").innerHTML = tags.join("");
   }
@@ -1913,6 +2209,7 @@
         showView("detail");
         refreshStats(currentCustomer);
         loadInsights();
+        if (followupInsights) loadFollowupInsights(document.getElementById("insights-responsible").value);
       } else {
         showToast("Kunde inte spara. Försök igen.");
       }
@@ -1943,8 +2240,233 @@
 
   // ── Utils ──
   function esc(s) {
-    return (s || "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+    return String(s ?? "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
   }
+
+  function escAttr(s) {
+    return esc(s).replace(/"/g, "&quot;");
+  }
+
+  // ══════════════════════════════════════
+  // FOLLOW-UP INSIGHTS
+  // ══════════════════════════════════════
+
+  function openFollowupInsights() {
+    showView("insights");
+    loadFollowupInsights(document.getElementById("insights-responsible").value);
+  }
+
+  async function loadFollowupInsights(responsible = "") {
+    if (followupInsightsLoading) return;
+    followupInsightsLoading = true;
+    document.getElementById("insights-subtitle").textContent = "Laddar...";
+    document.getElementById("dfp-leaderboard-table").innerHTML = "<tbody><tr><td>Laddar...</td></tr></tbody>";
+    document.getElementById("risk-customer-list").innerHTML = '<div class="state-msg">Laddar...</div>';
+
+    try {
+      const query = responsible ? `?responsible=${encodeURIComponent(responsible)}` : "";
+      const res = await fetch(`${API}/followup-insights${query}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      followupInsights = await res.json();
+      renderFollowupInsights(followupInsights);
+    } catch {
+      document.getElementById("insights-subtitle").textContent = "Kunde inte ladda";
+      document.getElementById("dfp-leaderboard-table").innerHTML =
+        '<tbody><tr><td>Kunde inte ladda DFP-topplistan.</td></tr></tbody>';
+      document.getElementById("risk-customer-list").innerHTML =
+        '<div class="state-msg">Kunde inte ladda riskkunder.</div>';
+      showToast("Kunde inte ladda uppföljning.");
+    } finally {
+      followupInsightsLoading = false;
+    }
+  }
+
+  function renderFollowupInsights(data) {
+    renderResponsibleSelect(data);
+    renderDfpLeaderboard(data);
+    renderContactInsights(data.contacts);
+    renderRiskCustomers(data.risk_customers || []);
+
+    const selected = data.selected_responsible || "Alla ansvariga";
+    document.getElementById("insights-subtitle").textContent = selected;
+  }
+
+  function renderResponsibleSelect(data) {
+    const select = document.getElementById("insights-responsible");
+    const selected = data.selected_responsible || "";
+    const options = ['<option value="">Alla ansvariga</option>'].concat(
+      (data.responsible_options || []).map(name =>
+        `<option value="${escAttr(name)}">${esc(name)}</option>`
+      )
+    );
+    select.innerHTML = options.join("");
+    select.value = selected;
+  }
+
+  function renderDfpLeaderboard(data) {
+    const weeks = data.dfp_leaderboard || [];
+    const hasAny = weeks.some(week => (week.leaders || []).length > 0);
+    const table = document.getElementById("dfp-leaderboard-table");
+
+    if (!hasAny) {
+      table.innerHTML = '<tbody><tr><td>Ingen DFP-data för perioden.</td></tr></tbody>';
+      return;
+    }
+
+    const head = `
+      <thead>
+        <tr>
+          <th class="dfp-rank-cell">#</th>
+          ${weeks.map(week => `<th>${esc(week.label)}</th>`).join("")}
+        </tr>
+      </thead>
+    `;
+    const rows = [0, 1, 2].map(rankIdx => `
+      <tr>
+        <td class="dfp-rank-cell">${rankIdx + 1}</td>
+        ${weeks.map(week => {
+          const leader = (week.leaders || [])[rankIdx];
+          if (!leader) return '<td><span class="dfp-count">—</span></td>';
+          const crown = rankIdx === 0 ? " &#128081;" : "";
+          return `
+            <td>
+              <span class="dfp-name">${esc(leader.sales_person)}</span>
+              <span class="dfp-count">${leader.dfp_count} DFP${crown}</span>
+            </td>
+          `;
+        }).join("")}
+      </tr>
+    `).join("");
+
+    table.innerHTML = `${head}<tbody>${rows}</tbody>`;
+  }
+
+  function renderContactInsights(contacts) {
+    const data = contacts || {};
+    const current = data.current_week_count || 0;
+    const delta = data.delta_percent || 0;
+    const positive = data.delta_is_positive !== false;
+    const deltaEl = document.getElementById("contact-kpi-delta");
+
+    document.getElementById("contact-kpi-value").textContent = current;
+    deltaEl.textContent = `${delta > 0 ? "+" : ""}${delta}% vs förra veckan`;
+    deltaEl.classList.toggle("positive", positive);
+    deltaEl.classList.toggle("negative", !positive);
+
+    renderLineChart("positive-dialogue-chart", data.positive_by_week || []);
+    renderBarChart("orders-after-contact-chart", data.orders_after_contact_by_week || []);
+  }
+
+  function renderLineChart(elementId, points) {
+    const target = document.getElementById(elementId);
+    if (!points.length) {
+      target.innerHTML = '<div class="state-msg" style="padding:24px 0">Ingen data</div>';
+      return;
+    }
+
+    const width = 320;
+    const height = 108;
+    const padLeft = 26;
+    const padRight = 10;
+    const padTop = 10;
+    const padBottom = 24;
+    const plotWidth = width - padLeft - padRight;
+    const plotHeight = height - padTop - padBottom;
+    const maxValue = Math.max(1, ...points.map(p => Number(p.count || 0)));
+    const x = i => padLeft + (points.length === 1 ? plotWidth / 2 : (plotWidth / (points.length - 1)) * i);
+    const y = value => padTop + plotHeight - (Number(value || 0) / maxValue) * plotHeight;
+    const line = points.map((p, i) => `${x(i)},${y(p.count)}`).join(" ");
+    const area = `${padLeft},${padTop + plotHeight} ${line} ${padLeft + plotWidth},${padTop + plotHeight}`;
+
+    target.innerHTML = `
+      <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Positiva dialoger">
+        <polyline points="${area}" fill="rgba(34,197,94,0.12)" stroke="none"></polyline>
+        <polyline points="${line}" fill="none" stroke="#22c55e" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"></polyline>
+        ${points.map((p, i) => `<circle cx="${x(i)}" cy="${y(p.count)}" r="4" fill="#22c55e"></circle>`).join("")}
+        ${points.map((p, i) => `<text class="chart-axis-label" x="${x(i)}" y="${height - 7}" text-anchor="middle">${esc(p.label.replace("Vecka ", "V"))}</text>`).join("")}
+        <text class="chart-axis-label" x="4" y="${y(maxValue) + 4}">${maxValue}</text>
+        <text class="chart-axis-label" x="8" y="${padTop + plotHeight + 4}">0</text>
+      </svg>
+    `;
+  }
+
+  function renderBarChart(elementId, points) {
+    const target = document.getElementById(elementId);
+    if (!points.length) {
+      target.innerHTML = '<div class="state-msg" style="padding:24px 0">Ingen data</div>';
+      return;
+    }
+
+    const width = 320;
+    const height = 108;
+    const padLeft = 26;
+    const padRight = 10;
+    const padTop = 10;
+    const padBottom = 24;
+    const plotWidth = width - padLeft - padRight;
+    const plotHeight = height - padTop - padBottom;
+    const maxValue = Math.max(1, ...points.map(p => Number(p.count || 0)));
+    const slot = plotWidth / points.length;
+    const barWidth = Math.min(34, slot * 0.58);
+    const y = value => padTop + plotHeight - (Number(value || 0) / maxValue) * plotHeight;
+
+    target.innerHTML = `
+      <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Order inom 10 dagar">
+        ${points.map((p, i) => {
+          const value = Number(p.count || 0);
+          const barHeight = padTop + plotHeight - y(value);
+          const bx = padLeft + slot * i + (slot - barWidth) / 2;
+          const by = y(value);
+          return `
+            <rect x="${bx}" y="${by}" width="${barWidth}" height="${barHeight}" rx="5" fill="#3b82f6"></rect>
+            <text class="chart-axis-label" x="${bx + barWidth / 2}" y="${Math.max(9, by - 3)}" text-anchor="middle">${value}</text>
+            <text class="chart-axis-label" x="${bx + barWidth / 2}" y="${height - 7}" text-anchor="middle">${esc(p.label.replace("Vecka ", "V"))}</text>
+          `;
+        }).join("")}
+        <text class="chart-axis-label" x="8" y="${padTop + plotHeight + 4}">0</text>
+      </svg>
+    `;
+  }
+
+  function renderRiskCustomers(riskCustomers) {
+    const list = document.getElementById("risk-customer-list");
+    if (!riskCustomers.length) {
+      list.innerHTML = '<div class="state-msg">Inga riskkunder</div>';
+      return;
+    }
+
+    list.innerHTML = riskCustomers.map(c => {
+      const riskClass = getRiskStatusClass(c.risk_status);
+      return `
+        <div class="risk-item" data-row="${c.row}">
+          <div style="min-width:0">
+            <div class="risk-customer">${esc(c.customer)}</div>
+            <div class="risk-meta">
+              ${c.segment ? `<span class="segment-badge">${esc(c.segment)}</span>` : ""}
+              <span class="risk-status-pill ${riskClass}">${esc(c.risk_status)}</span>
+            </div>
+          </div>
+          <div class="risk-dates">
+            <div>Order ${esc(c.latest_order_date || "—")}</div>
+            <div>Kontakt ${esc(c.latest_contact_date || "—")}</div>
+          </div>
+        </div>
+      `;
+    }).join("");
+
+    list.querySelectorAll(".risk-item").forEach(item => {
+      item.addEventListener("click", () => {
+        detailReturnView = "insights";
+        openDetail(Number(item.dataset.row));
+      });
+    });
+  }
+
+  document.getElementById("insights-mode-btn").addEventListener("click", openFollowupInsights);
+  document.getElementById("insights-back-btn").addEventListener("click", () => showView("list"));
+  document.getElementById("insights-responsible").addEventListener("change", e => {
+    loadFollowupInsights(e.target.value);
+  });
 
   // ══════════════════════════════════════
   // ROUTE PLANNER
