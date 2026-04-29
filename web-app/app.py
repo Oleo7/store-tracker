@@ -549,8 +549,8 @@ def get_followup_insights():
             continue
 
         latest_contact = latest_contact_for_risk.get(customer_key)
-        if latest_contact and lo and latest_contact >= lo:
-            continue
+        #if latest_contact and lo and latest_contact >= lo:
+         #   continue
 
         risk_customers.append({
             "row": customer["row"],
@@ -562,11 +562,10 @@ def get_followup_insights():
             "latest_contact_date": format_date_value(latest_contact),
         })
 
-    risk_priority = {"Återaktivering krävs": 0, "Hög risk": 1, "Risk": 2, "Bevaka": 3}
+    risk_priority = {"Bevaka": 0, "Risk": 1, "Hög risk": 2, "Återaktivering krävs": 3}
     risk_customers.sort(key=lambda c: (
-        segment_sort_key(c["segment"]),
         risk_priority.get(c["risk_status"], 9),
-        c["latest_order_date"] or "9999-12-31",
+        segment_sort_key(c["segment"]),
         c["customer"].casefold(),
     ))
 
