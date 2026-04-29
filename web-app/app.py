@@ -559,6 +559,7 @@ def get_followup_insights():
             "segment": customer["customer_segment"],
             "risk_status": risk,
             "latest_order_date": format_date_value(lo),
+            "latest_delivery_date": format_date_value(ld),
             "latest_contact_date": format_date_value(latest_contact),
         })
 
