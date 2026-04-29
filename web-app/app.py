@@ -28,10 +28,14 @@ ORDER_COLUMNS = ["Reference", "Order date", "Delivery date", "Customer", "Custom
                  "Postal code", "City", "Country", "Phone number", "SKU", "Product", "Weight",
                  "Quantity", "Total weight", "Unit", "Total (Pre-discount)", "Product Discount",
                  "Total", "Currency", "Order Discount (Amount)", "Order Discount (%)", "Batch"]
+ORDER_REQUIRED_COLUMNS = ["Reference", "Order date", "Delivery date", "Customer",
+                          "Quantity", "Total", "Currency"]
 
 CONTACT_COLUMNS = ["date_time", "sales_person", "customer", "contact_channel", "result",
                    "comment", "customer_contact_person", "follow_up_date",
                    "Franui", "Schufrulade", "Boujee", "polarbar"]
+CONTACT_REQUIRED_COLUMNS = ["date_time", "sales_person", "customer", "contact_channel",
+                            "result", "comment", "customer_contact_person", "follow_up_date"]
 
 
 _spreadsheet_cache = None
@@ -61,12 +65,44 @@ def get_spreadsheet_with_retry():
         return get_spreadsheet(force_reconnect=True)
 
 
-def rows_to_dicts(rows, columns):
+def worksheet_to_dicts(worksheet, expected_columns=None, required_columns=None):
+    rows = worksheet.get_all_values()
+    if not rows:
+        return []
+
+    headers = [str(header).strip() for header in rows[0]]
+    required_columns = required_columns or []
+    missing_columns = [col for col in required_columns if col not in headers]
+    if missing_columns:
+        missing = ", ".join(missing_columns)
+        raise ValueError(f"Worksheet '{worksheet.title}' saknar obligatoriska kolumner: {missing}")
+
+    expected_columns = expected_columns or headers
     result = []
-    for row in rows:
-        padded = row + [""] * (len(columns) - len(row))
-        result.append(dict(zip(columns, padded[:len(columns)])))
+    for row in rows[1:]:
+        item = {col: "" for col in expected_columns}
+        for idx, header in enumerate(headers):
+            if not header:
+                continue
+            item[header] = row[idx] if idx < len(row) else ""
+        result.append(item)
     return result
+
+
+def get_order_rows(spreadsheet):
+    return worksheet_to_dicts(
+        spreadsheet.worksheet("order_rows"),
+        expected_columns=ORDER_COLUMNS,
+        required_columns=ORDER_REQUIRED_COLUMNS,
+    )
+
+
+def get_contact_rows(spreadsheet):
+    return worksheet_to_dicts(
+        spreadsheet.worksheet("sales_activities"),
+        expected_columns=CONTACT_COLUMNS,
+        required_columns=CONTACT_REQUIRED_COLUMNS,
+    )
 
 
 def normalize_key(value):
@@ -90,6 +126,16 @@ def parse_date_value(value):
         return datetime.fromisoformat(normalized).date()
     except ValueError:
         return None
+
+
+def format_date_value(value, fallback=""):
+    if isinstance(value, datetime):
+        parsed = value.date()
+    elif isinstance(value, date):
+        parsed = value
+    else:
+        parsed = parse_date_value(value)
+    return parsed.isoformat() if parsed else fallback
 
 
 def parse_number_value(value, default=0.0):
@@ -193,13 +239,13 @@ def get_customers():
     headers = all_rows[0]
 
     # Build latest contact/follow_up_date per customer from sales_activities
-    contact_rows = rows_to_dicts(spreadsheet.worksheet("sales_activities").get_all_values()[1:], CONTACT_COLUMNS)
+    contact_rows = get_contact_rows(spreadsheet)
     latest_contact = {}
     latest_followup = {}
     for c in contact_rows:
         name = c["customer"].strip().lower()
-        dt = c["date_time"].strip()
-        nf = c["follow_up_date"].strip()
+        dt = parse_date_value(c["date_time"])
+        nf = parse_date_value(c["follow_up_date"])
         if dt and (name not in latest_contact or dt > latest_contact[name]):
             latest_contact[name] = dt
         if nf and (name not in latest_followup or nf > latest_followup[name]):
@@ -227,8 +273,9 @@ def get_customers():
         customer["region_google"] = d.get("region_google", "").strip()
         customer["address"] = f"{addr} {num}".strip()
         customer["city"] = customer["city_google"] or d.get("city", "")
-        customer["latest_contact_date"] = latest_contact.get(customer["customer"].strip().lower(), "")[:10]
-        customer["follow_up_date"] = latest_followup.get(customer["customer"].strip().lower(), "")
+        customer_key = customer["customer"].strip().lower()
+        customer["latest_contact_date"] = format_date_value(latest_contact.get(customer_key))
+        customer["follow_up_date"] = format_date_value(latest_followup.get(customer_key))
         customers.append({"row": i, **customer})
     return jsonify(customers)
 
@@ -239,7 +286,7 @@ def get_customer_stats(customer_name):
     spreadsheet = get_spreadsheet_with_retry()
 
     # Orders
-    order_rows = rows_to_dicts(spreadsheet.worksheet("order_rows").get_all_values()[1:], ORDER_COLUMNS)
+    order_rows = get_order_rows(spreadsheet)
     total_sales = 0.0
     latest_order_date = None
     currency = ""
@@ -256,25 +303,31 @@ def get_customer_stats(customer_name):
             pass
         if not currency and o["Currency"].strip():
             currency = o["Currency"].strip()
-        d = o["Order date"].strip()
+        d = parse_date_value(o["Order date"])
         if d and (latest_order_date is None or d > latest_order_date):
             latest_order_date = d
         if o["Reference"].strip():
             unique_references.add(o["Reference"].strip())
 
     # Contacts
-    contact_rows = rows_to_dicts(spreadsheet.worksheet("sales_activities").get_all_values()[1:], CONTACT_COLUMNS)
-    contacts = [
-        {k: c[k] for k in ("customer", "date_time", "sales_person", "contact_channel", "result", "comment", "customer_contact_person", "follow_up_date",
-                           "Franui", "Schufrulade", "Boujee", "polarbar")}
-        for c in contact_rows
-        if c["customer"].strip().lower() == customer_name
-    ]
-    contacts.sort(key=lambda x: x["date_time"], reverse=True)
+    contact_rows = get_contact_rows(spreadsheet)
+    contacts = []
+    for c in contact_rows:
+        if c["customer"].strip().lower() != customer_name:
+            continue
+        contact = {k: c[k] for k in ("customer", "date_time", "sales_person", "contact_channel", "result", "comment", "customer_contact_person", "follow_up_date",
+                                     "Franui", "Schufrulade", "Boujee", "polarbar")}
+        contact["_sort_date"] = parse_date_value(c["date_time"]) or date.min
+        contact["date_time"] = format_date_value(c["date_time"])
+        contact["follow_up_date"] = format_date_value(c["follow_up_date"])
+        contacts.append(contact)
+    contacts.sort(key=lambda x: x["_sort_date"], reverse=True)
+    for contact in contacts:
+        contact.pop("_sort_date", None)
 
     return jsonify({
         "total_sales": round(total_sales, 2),
-        "latest_order_date": latest_order_date or "—",
+        "latest_order_date": format_date_value(latest_order_date, fallback="—"),
         "currency": currency,
         "order_count": len(unique_references),
         "contacts": contacts,
@@ -287,23 +340,23 @@ def get_customer_insights():
     today = date.today()
 
     # Latest follow_up_date per customer
-    contact_rows = rows_to_dicts(spreadsheet.worksheet("sales_activities").get_all_values()[1:], CONTACT_COLUMNS)
+    contact_rows = get_contact_rows(spreadsheet)
     latest_followup = {}
     for c in contact_rows:
         name = c["customer"].strip().lower()
-        nf = c["follow_up_date"].strip()
+        nf = parse_date_value(c["follow_up_date"])
         if nf and (name not in latest_followup or nf > latest_followup[name]):
             latest_followup[name] = nf
 
     # Latest order date and order count per customer
-    order_rows = rows_to_dicts(spreadsheet.worksheet("order_rows").get_all_values()[1:], ORDER_COLUMNS)
+    order_rows = get_order_rows(spreadsheet)
     latest_order = {}
     latest_delivery = {}
     order_count = {}
     for o in order_rows:
         name = o["Customer"].strip().lower()
-        d = o["Order date"].strip()
-        dd = o["Delivery date"].strip()
+        d = parse_date_value(o["Order date"])
+        dd = parse_date_value(o["Delivery date"])
         ref = o["Reference"].strip()
         if d and (name not in latest_order or d > latest_order[name]):
             latest_order[name] = d
@@ -317,39 +370,22 @@ def get_customer_insights():
     insights = {}
     for name in all_names:
         # missad_uppfoljning
-        nf = latest_followup.get(name, "")
-        missad = bool(nf and nf < today.isoformat())
+        nf = latest_followup.get(name)
+        missad = bool(nf and nf < today)
 
         # customer_risk — based on most recent of order date or delivery date
-        lo = latest_order.get(name, "")
-        ld_check = latest_delivery.get(name, "")
-        most_recent = max(lo, ld_check) if lo and ld_check else (lo or ld_check)
+        lo = latest_order.get(name)
+        ld_check = latest_delivery.get(name)
         count = order_count.get(name, 0)
-        if count == 0 or not most_recent:
-            risk = ""
-        else:
-            try:
-                recent_date = date.fromisoformat(most_recent[:10])
-                days = (today - recent_date).days
-                if days >= 75:
-                    risk = "Återaktivering krävs"
-                elif days >= 60:
-                    risk = "Hög risk"
-                elif days >= 45:
-                    risk = "Risk"
-                elif days >= 30:
-                    risk = "Bevaka"
-                else:
-                    risk = "Aktiv"
-            except ValueError:
-                risk = ""
+        risk = calculate_customer_risk(count, lo, ld_check, today)
 
-        ld = latest_delivery.get(name, "")
+        ld = latest_delivery.get(name)
+        latest_delivery_date = format_date_value(ld)
         insights[name] = {
             "missad_uppfoljning": missad,
             "customer_risk": risk,
-            "latest_delivery_date": ld,
-            "latest_delivery_month": ld[:7] if ld else "",  # "YYYY-MM"
+            "latest_delivery_date": latest_delivery_date,
+            "latest_delivery_month": latest_delivery_date[:7] if latest_delivery_date else "",  # "YYYY-MM"
         }
 
     return jsonify(insights)
@@ -381,21 +417,23 @@ def get_followup_insights():
             "customer_segment": d.get("customer_segment", "").strip(),
         }
 
-    contact_rows = rows_to_dicts(spreadsheet.worksheet("sales_activities").get_all_values()[1:], CONTACT_COLUMNS)
-    order_rows = rows_to_dicts(spreadsheet.worksheet("order_rows").get_all_values()[1:], ORDER_COLUMNS)
+    contact_rows = get_contact_rows(spreadsheet)
+    order_rows = get_order_rows(spreadsheet)
 
     responsible_options = sorted({
         c["sales_person"] for c in customers_by_name.values() if c["sales_person"]
     })
 
     def customer_belongs_to_selected(customer_name):
+        customer = customers_by_name.get(normalize_key(customer_name))
+        if not customer or not customer["sales_person"]:
+            return False
         if not selected_responsible:
             return True
-        customer = customers_by_name.get(normalize_key(customer_name))
-        return bool(customer and customer["sales_person"] == selected_responsible)
+        return customer["sales_person"] == selected_responsible
 
     def contact_belongs_to_selected(contact):
-        return not selected_responsible or contact["sales_person"].strip() == selected_responsible
+        return customer_belongs_to_selected(contact["customer"])
 
     # DFP leaderboard is intentionally global and ignores the selected responsible filter.
     # It sums Quantity for every order row by the customer's responsible salesperson.
@@ -409,7 +447,9 @@ def get_followup_insights():
             continue
 
         customer = customers_by_name.get(normalize_key(order["Customer"]))
-        responsible = customer["sales_person"] if customer and customer["sales_person"] else "Okänd"
+        if not customer or not customer["sales_person"]:
+            continue
+        responsible = customer["sales_person"]
         quantity = parse_number_value(order["Quantity"], default=0.0)
         dfp_counts[key][responsible] += quantity
 
@@ -518,8 +558,8 @@ def get_followup_insights():
             "sales_person": customer["sales_person"],
             "segment": customer["customer_segment"],
             "risk_status": risk,
-            "latest_order_date": lo.isoformat() if lo else "",
-            "latest_contact_date": latest_contact.isoformat() if latest_contact else "",
+            "latest_order_date": format_date_value(lo),
+            "latest_contact_date": format_date_value(latest_contact),
         })
 
     risk_priority = {"Återaktivering krävs": 0, "Hög risk": 1, "Risk": 2, "Bevaka": 3}

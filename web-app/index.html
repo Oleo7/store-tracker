@@ -2304,7 +2304,7 @@
   }
 
   function renderDfpLeaderboard(data) {
-    const weeks = data.dfp_leaderboard || [];
+    const weeks = [...(data.dfp_leaderboard || [])].reverse();
     const hasAny = weeks.some(week => (week.leaders || []).length > 0);
     const table = document.getElementById("dfp-leaderboard-table");
 
