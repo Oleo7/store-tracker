@@ -7,6 +7,7 @@ from datetime import datetime, date, timedelta
 from collections import defaultdict
 import os
 import json
+import math
 import requests
 from dotenv import load_dotenv
 from requests.exceptions import ConnectionError as RequestsConnectionError
@@ -161,6 +162,45 @@ def parse_number_value(value, default=0.0):
         return default
 
 
+def parse_coordinate_value(value, kind):
+    text = str(value or "").strip()
+    if not text:
+        return None
+
+    limits = {
+        "latitude": (55.0, 70.0),
+        "longitude": (10.0, 25.0),
+    }
+    lower, upper = limits[kind]
+
+    def in_range(number):
+        return math.isfinite(number) and lower <= number <= upper
+
+    normalized = text.replace("\xa0", "").replace(" ", "").replace(",", ".")
+    try:
+        parsed = float(normalized)
+        if in_range(parsed):
+            return parsed
+    except ValueError:
+        pass
+
+    # Some Google Sheet writes have been interpreted as thousands-grouped
+    # numbers, e.g. 57,8934438 -> 578934438. Recover by restoring the decimal.
+    sign = -1 if normalized.startswith("-") else 1
+    integer_part = normalized.lstrip("+-").split(".", 1)[0]
+    digits = "".join(ch for ch in integer_part if ch.isdigit())
+    if not digits:
+        return None
+
+    raw_number = sign * int(digits)
+    for decimals in range(1, 13):
+        candidate = raw_number / (10 ** decimals)
+        if in_range(candidate):
+            return candidate
+
+    return None
+
+
 def week_start(day):
     return day - timedelta(days=day.weekday())
 
@@ -251,19 +291,13 @@ def get_customers():
         if nf and (name not in latest_followup or nf > latest_followup[name]):
             latest_followup[name] = nf
 
-    def parse_coord(val):
-        try:
-            return float(val.replace(",", ".")) if val else None
-        except ValueError:
-            return None
-
     customers = []
     for i, row in enumerate(all_rows[1:], start=2):
         padded = row + [""] * (len(headers) - len(row))
         d = dict(zip(headers, padded))
         customer = {col: d.get(col, "") for col in CUSTOMER_COLUMNS}
-        customer["latitude"]  = parse_coord(d.get("latitude_google") or d.get("latitude",  ""))
-        customer["longitude"] = parse_coord(d.get("longitude_google") or d.get("longitude", ""))
+        customer["latitude"]  = parse_coordinate_value(d.get("latitude_google") or d.get("latitude",  ""), "latitude")
+        customer["longitude"] = parse_coordinate_value(d.get("longitude_google") or d.get("longitude", ""), "longitude")
         addr = d.get("address_google", "").strip()
         num  = d.get("address_number_google", "").strip()
         customer["address_google"] = addr
@@ -656,12 +690,12 @@ def update_customer_contact(row):
                     loc = geo["results"][0]["geometry"]["location"]
                     new_lat = loc["lat"]
                     new_lng = loc["lng"]
-                    lat_str = f"{new_lat:.7f}".replace(".", ",")
-                    lng_str = f"{new_lng:.7f}".replace(".", ",")
+                    lat_value = round(float(new_lat), 7)
+                    lng_value = round(float(new_lng), 7)
                     if "latitude_google" in headers:
-                        sheet.update_cell(row, headers.index("latitude_google") + 1, lat_str)
+                        sheet.update_cell(row, headers.index("latitude_google") + 1, lat_value)
                     if "longitude_google" in headers:
-                        sheet.update_cell(row, headers.index("longitude_google") + 1, lng_str)
+                        sheet.update_cell(row, headers.index("longitude_google") + 1, lng_value)
             except Exception:
                 pass
 

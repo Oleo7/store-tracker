@@ -1,6 +1,7 @@
 import os
 import logging
 import json
+import math
 import googlemaps
 from dotenv import load_dotenv
 
@@ -22,9 +23,47 @@ GOOGLE_MAPS_API_KEY = os.environ["GOOGLE_MAPS_API_KEY"]
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 
-def parse_coordinate_column(series: pd.Series) -> pd.Series:
-    cleaned = series.fillna("").astype(str).str.strip().str.replace(",", ".", regex=False)
-    return pd.to_numeric(cleaned, errors="coerce")
+def parse_coordinate_value(value, kind: str):
+    if pd.isna(value):
+        return None
+
+    limits = {
+        "latitude": (55.0, 70.0),
+        "longitude": (10.0, 25.0),
+    }
+    lower, upper = limits[kind]
+
+    def in_range(number):
+        return math.isfinite(number) and lower <= number <= upper
+
+    normalized = str(value).strip().replace("\xa0", "").replace(" ", "").replace(",", ".")
+    if not normalized:
+        return None
+
+    try:
+        parsed = float(normalized)
+        if in_range(parsed):
+            return parsed
+    except ValueError:
+        pass
+
+    sign = -1 if normalized.startswith("-") else 1
+    integer_part = normalized.lstrip("+-").split(".", 1)[0]
+    digits = "".join(ch for ch in integer_part if ch.isdigit())
+    if not digits:
+        return None
+
+    raw_number = sign * int(digits)
+    for decimals in range(1, 13):
+        candidate = raw_number / (10 ** decimals)
+        if in_range(candidate):
+            return candidate
+
+    return None
+
+
+def parse_coordinate_column(series: pd.Series, kind: str) -> pd.Series:
+    return pd.to_numeric(series.apply(lambda value: parse_coordinate_value(value, kind)), errors="coerce")
 
 
 def get_location_info(store_name: str, gmaps: googlemaps.Client) -> tuple:
@@ -67,8 +106,8 @@ def main():
     for col in ["city_google", "address_google", "address_number_google",
                 "postal_code_google", "region_google", "enriched", "modified"]:
         df[col] = df[col].astype(object)
-    df["latitude_google"] = parse_coordinate_column(df["latitude_google"])
-    df["longitude_google"] = parse_coordinate_column(df["longitude_google"])
+    df["latitude_google"] = parse_coordinate_column(df["latitude_google"], "latitude")
+    df["longitude_google"] = parse_coordinate_column(df["longitude_google"], "longitude")
     log.info(f"Loaded {len(df)} rows")
 
     # Rows where enriched column is not True need processing
@@ -97,10 +136,10 @@ def main():
     # Merge back and write the full sheet
     df.update(needs_enrichment)
 
-    # Write coordinates as comma-decimal strings to avoid Swedish locale mangling periods
+    # Write coordinates as numeric values so Sheets cannot treat decimal commas as thousands separators.
     for col in ["latitude_google", "longitude_google"]:
-        df[col] = df[col].apply(lambda x: f"{x:.7f}".replace(".", ",") if pd.notna(x) and x != 0 else "")
-        df[col] = df[col].astype(object)
+        df[col] = pd.to_numeric(df[col], errors="coerce").round(7)
+        df[col] = df[col].where(df[col].notna(), "")
 
     set_with_dataframe(enriched_sheet, df)
     log.info(f"Done — wrote {len(df)} total rows to 'customers_enriched'")
