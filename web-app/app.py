@@ -11,6 +11,12 @@ import math
 import requests
 from dotenv import load_dotenv
 from requests.exceptions import ConnectionError as RequestsConnectionError
+from priority import (
+    build_contact_features,
+    build_order_features,
+    build_priority_customers,
+    normalize_customer_key,
+)
 
 load_dotenv()
 
@@ -107,7 +113,7 @@ def get_contact_rows(spreadsheet):
 
 
 def normalize_key(value):
-    return str(value or "").strip().lower()
+    return normalize_customer_key(value)
 
 
 def parse_date_value(value):
@@ -438,18 +444,30 @@ def get_followup_insights():
     customer_values = spreadsheet.worksheet("customers_enriched").get_all_values()
     customer_headers = customer_values[0] if customer_values else []
     customers_by_name = {}
+    customers = []
     for i, row in enumerate(customer_values[1:], start=2):
         padded = row + [""] * (len(customer_headers) - len(row))
         d = dict(zip(customer_headers, padded))
         name = d.get("customer", "").strip()
         if not name:
             continue
-        customers_by_name[normalize_key(name)] = {
+        customer = {
             "row": i,
             "customer": name,
+            "cancelled_flag": d.get("cancelled_flag", "").strip(),
             "sales_person": d.get("sales_person", "").strip(),
             "customer_segment": d.get("customer_segment", "").strip(),
+            "customer_number": d.get("customer_number", "").strip(),
+            "phone": d.get("phone", "").strip(),
+            "email": d.get("email", "").strip(),
+            "city_google": d.get("city_google", "").strip(),
+            "region_google": d.get("region_google", "").strip(),
+            "latitude_google": d.get("latitude_google", "").strip(),
+            "longitude_google": d.get("longitude_google", "").strip(),
+            "comment": d.get("comment", "").strip(),
         }
+        customers.append(customer)
+        customers_by_name[normalize_key(name)] = customer
 
     contact_rows = get_contact_rows(spreadsheet)
     order_rows = get_order_rows(spreadsheet)
@@ -506,7 +524,6 @@ def get_followup_insights():
     contact_count_by_week = {w["key"]: 0 for w in weeks}
     positive_count_by_week = {w["key"]: 0 for w in weeks}
     contact_dates_by_customer = defaultdict(list)
-    latest_contact_for_risk = {}
 
     for contact in contact_rows:
         contact_date = parse_date_value(contact["date_time"])
@@ -521,11 +538,6 @@ def get_followup_insights():
                 contact_count_by_week[key] += 1
                 if is_positive_contact(contact["result"]):
                     positive_count_by_week[key] += 1
-
-        if (not selected_responsible or contact_belongs_to_selected(contact)) and (
-            customer_key not in latest_contact_for_risk or contact_date > latest_contact_for_risk[customer_key]
-        ):
-            latest_contact_for_risk[customer_key] = contact_date
 
     for dates in contact_dates_by_customer.values():
         dates.sort()
@@ -571,38 +583,16 @@ def get_followup_insights():
         if 0 <= (order_date - latest_prior_contact).days <= 10:
             orders_after_contact_by_week[key].add(ref)
 
-    risk_customers = []
-    for customer_key, customer in customers_by_name.items():
-        if selected_responsible and customer["sales_person"] != selected_responsible:
-            continue
-
-        lo = latest_order.get(customer_key)
-        ld = latest_delivery.get(customer_key)
-        risk = calculate_customer_risk(order_count_by_customer.get(customer_key, 0), lo, ld, today)
-        if risk not in {"Bevaka", "Risk", "Hög risk", "Återaktivering krävs"}:
-            continue
-
-        latest_contact = latest_contact_for_risk.get(customer_key)
-        #if latest_contact and lo and latest_contact >= lo:
-         #   continue
-
-        risk_customers.append({
-            "row": customer["row"],
-            "customer": customer["customer"],
-            "sales_person": customer["sales_person"],
-            "segment": customer["customer_segment"],
-            "risk_status": risk,
-            "latest_order_date": format_date_value(lo),
-            "latest_delivery_date": format_date_value(ld),
-            "latest_contact_date": format_date_value(latest_contact),
-        })
-
-    risk_priority = {"Bevaka": 0, "Risk": 1, "Hög risk": 2, "Återaktivering krävs": 3}
-    risk_customers.sort(key=lambda c: (
-        risk_priority.get(c["risk_status"], 9),
-        segment_sort_key(c["segment"]),
-        c["customer"].casefold(),
-    ))
+    order_features = build_order_features(order_rows)
+    contact_features = build_contact_features(contact_rows, order_features)
+    priority_customers = build_priority_customers(
+        customers,
+        order_features,
+        contact_features,
+        selected_responsible or None,
+        today,
+        limit=30,
+    )
 
     return jsonify({
         "generated_at": datetime.now().isoformat(timespec="minutes"),
@@ -624,7 +614,7 @@ def get_followup_insights():
                 for w in weeks
             ],
         },
-        "risk_customers": risk_customers,
+        "priority_customers": priority_customers,
     })
 
 

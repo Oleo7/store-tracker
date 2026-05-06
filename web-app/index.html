@@ -1044,38 +1044,91 @@
       font-size: 9px;
       font-weight: 650;
     }
-    .risk-list {
+    .priority-list {
       max-height: 440px;
       overflow-y: auto;
       overscroll-behavior: contain;
       border: 1px solid #eef0f5;
       border-radius: 10px;
     }
-    .risk-item {
+    .priority-item {
       display: flex;
       align-items: flex-start;
-      justify-content: space-between;
       gap: 12px;
       padding: 11px 12px;
       border-bottom: 1px solid #eef0f5;
       cursor: pointer;
       background: #fff;
     }
-    .risk-item:last-child { border-bottom: none; }
-    .risk-item:active { background: #f7f8fa; }
-    .risk-customer {
+    .priority-item:last-child { border-bottom: none; }
+    .priority-item:active { background: #f7f8fa; }
+    .priority-score {
+      width: 34px;
+      height: 34px;
+      border-radius: 999px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 0.78rem;
+      font-weight: 850;
+      flex-shrink: 0;
+    }
+    .priority-score.high,
+    .priority-pill.high {
+      background: #ffe0e0;
+      color: #c0392b;
+    }
+    .priority-score.medium,
+    .priority-pill.medium {
+      background: #ffecd6;
+      color: #d35400;
+    }
+    .priority-score.low,
+    .priority-pill.low {
+      background: #fff4cf;
+      color: #9a6a00;
+    }
+    .priority-main {
+      min-width: 0;
+      flex: 1;
+    }
+    .priority-customer {
       font-size: 0.9rem;
       font-weight: 800;
       color: #1a1a2e;
       margin-bottom: 4px;
     }
-    .risk-meta {
+    .priority-meta {
       display: flex;
       flex-wrap: wrap;
       gap: 6px;
       align-items: center;
+      margin-bottom: 5px;
     }
-    .risk-dates {
+    .priority-pill,
+    .priority-type {
+      border-radius: 999px;
+      padding: 3px 8px;
+      font-size: 0.68rem;
+      font-weight: 800;
+      white-space: nowrap;
+    }
+    .priority-type {
+      background: #eef0f5;
+      color: #555;
+    }
+    .priority-reason {
+      font-size: 0.74rem;
+      color: #666;
+      line-height: 1.35;
+    }
+    .priority-action {
+      margin-top: 4px;
+      font-size: 0.74rem;
+      font-weight: 800;
+      color: #1a1a2e;
+    }
+    .priority-dates {
       flex-shrink: 0;
       text-align: right;
       color: #777;
@@ -1083,18 +1136,6 @@
       line-height: 1.45;
       min-width: 92px;
     }
-    .risk-status-pill {
-      border-radius: 999px;
-      padding: 3px 8px;
-      font-size: 0.68rem;
-      font-weight: 800;
-      white-space: nowrap;
-    }
-    .risk-status-pill.active { background: #e0f7e9; color: #1e8449; }
-    .risk-status-pill.watch { background: #fff4cf; color: #9a6a00; }
-    .risk-status-pill.medium { background: #ffecd6; color: #d35400; }
-    .risk-status-pill.high { background: #ffe0e0; color: #c0392b; }
-    .risk-status-pill.reactivate { background: #f8d7da; color: #8f1d1d; }
 
     @media (min-width: 760px) {
       .contacts-grid {
@@ -1212,9 +1253,9 @@
     </div>
 
     <div class="insights-panel">
-      <div class="insights-panel-title">Risk-kunder</div>
-      <div class="risk-list" id="risk-customer-list">
-        <div class="state-msg">Laddar...</div>
+      <div class="insights-panel-title">Prio-lista</div>
+      <div class="priority-list" id="priority-customer-list">
+        <div class="state-msg">Laddar prio-lista...</div>
       </div>
     </div>
   </div>
@@ -2261,7 +2302,7 @@
     followupInsightsLoading = true;
     document.getElementById("insights-subtitle").textContent = "Laddar...";
     document.getElementById("dfp-leaderboard-table").innerHTML = "<tbody><tr><td>Laddar...</td></tr></tbody>";
-    document.getElementById("risk-customer-list").innerHTML = '<div class="state-msg">Laddar...</div>';
+    document.getElementById("priority-customer-list").innerHTML = '<div class="state-msg">Laddar prio-lista...</div>';
 
     try {
       const query = responsible ? `?responsible=${encodeURIComponent(responsible)}` : "";
@@ -2273,8 +2314,8 @@
       document.getElementById("insights-subtitle").textContent = "Kunde inte ladda";
       document.getElementById("dfp-leaderboard-table").innerHTML =
         '<tbody><tr><td>Kunde inte ladda DFP-topplistan.</td></tr></tbody>';
-      document.getElementById("risk-customer-list").innerHTML =
-        '<div class="state-msg">Kunde inte ladda riskkunder.</div>';
+      document.getElementById("priority-customer-list").innerHTML =
+        '<div class="state-msg">Kunde inte ladda prio-lista.</div>';
       showToast("Kunde inte ladda uppföljning.");
     } finally {
       followupInsightsLoading = false;
@@ -2285,7 +2326,7 @@
     renderResponsibleSelect(data);
     renderDfpLeaderboard(data);
     renderContactInsights(data.contacts);
-    renderRiskCustomers(data.risk_customers || []);
+    renderPriorityCustomers(data.priority_customers || []);
 
     const selected = data.selected_responsible || "Alla ansvariga";
     document.getElementById("insights-subtitle").textContent = selected;
@@ -2428,25 +2469,41 @@
     `;
   }
 
-  function renderRiskCustomers(riskCustomers) {
-    const list = document.getElementById("risk-customer-list");
-    if (!riskCustomers.length) {
-      list.innerHTML = '<div class="state-msg">Inga riskkunder</div>';
+  function renderPriorityCustomers(priorityCustomers) {
+    const list = document.getElementById("priority-customer-list");
+    if (!priorityCustomers.length) {
+      list.innerHTML = '<div class="state-msg">Inga prioriterade kunder</div>';
       return;
     }
 
-    list.innerHTML = riskCustomers.map(c => {
-      const riskClass = getRiskStatusClass(c.risk_status);
+    list.innerHTML = priorityCustomers.map(c => {
+      const levelClass = getPriorityLevelClass(c.priority_level);
       return `
-        <div class="risk-item" data-row="${c.row}">
-          <div style="min-width:0">
-            <div class="risk-customer">${esc(c.customer)}</div>
-            <div class="risk-meta">
+        <div class="priority-item" data-row="${c.row}">
+          <div class="priority-score ${levelClass}">
+            ${Number(c.priority_score || 0)}
+          </div>
+
+          <div class="priority-main">
+            <div class="priority-customer">${esc(c.customer)}</div>
+
+            <div class="priority-meta">
               ${c.segment ? `<span class="segment-badge">${esc(c.segment)}</span>` : ""}
-              <span class="risk-status-pill ${riskClass}">${esc(c.risk_status)}</span>
+              <span class="priority-pill ${levelClass}">${esc(c.priority_level || "Låg prio")}</span>
+              <span class="priority-type">${esc(c.priority_type || "")}</span>
+              <span class="priority-type">Ordrar ${Number(c.order_count || 0)}</span>
+            </div>
+
+            <div class="priority-reason">
+              ${(c.reasons || []).slice(0, 2).map(esc).join(" · ")}
+            </div>
+
+            <div class="priority-action">
+              ${esc(c.recommended_action || "")}
             </div>
           </div>
-          <div class="risk-dates">
+
+          <div class="priority-dates">
             <div>Leverans ${esc(c.latest_delivery_date || "—")}</div>
             <div>Kontakt ${esc(c.latest_contact_date || "—")}</div>
           </div>
@@ -2454,12 +2511,20 @@
       `;
     }).join("");
 
-    list.querySelectorAll(".risk-item").forEach(item => {
+    list.querySelectorAll(".priority-item").forEach(item => {
       item.addEventListener("click", () => {
         detailReturnView = "insights";
         openDetail(Number(item.dataset.row));
       });
     });
+  }
+
+  function getPriorityLevelClass(level) {
+    return {
+      "Hög prio": "high",
+      "Medel prio": "medium",
+      "Låg prio": "low",
+    }[level] || "low";
   }
 
   document.getElementById("insights-mode-btn").addEventListener("click", openFollowupInsights);
