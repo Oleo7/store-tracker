@@ -1191,7 +1191,8 @@
       <button class="chip" id="chip-city">Stad</button>
       <button class="chip" id="chip-region">Region</button>
       <button class="chip" id="chip-risk">Risk</button>
-      <button class="chip" id="chip-delivery">Leverans</button>
+      <button class="chip" id="chip-delivery">Senast Leverans</button>
+      <button class="chip" id="chip-latest-contact">Senast Kontakt</button>
     </div>
     <div id="clear-filters-row" style="display:none">
       <button class="chip chip-clear" id="clear-filters-btn">✕ Rensa filter</button>
@@ -1558,7 +1559,7 @@
   }
 
   // ── Multi-select filter state ──
-  const filterState = { segment: new Set(), responsible: new Set(), city: new Set(), region: new Set(), missed: new Set(), risk: new Set(), delivery: new Set() };
+  const filterState = { segment: new Set(), responsible: new Set(), city: new Set(), region: new Set(), missed: new Set(), risk: new Set(), delivery: new Set(), latestContact: new Set() };
 
   async function loadInsights() {
     try {
@@ -1590,7 +1591,8 @@
     city:        "Stad",
     region:      "Region",
     risk:        "Risk",
-    delivery:    "Leverans",
+    delivery:    "Senast Leverans",
+    latestContact: "Senast Kontakt",
   };
   const _chipIds = {
     segment:     "chip-segment",
@@ -1599,8 +1601,9 @@
     region:      "chip-region",
     risk:        "chip-risk",
     delivery:    "chip-delivery",
+    latestContact: "chip-latest-contact",
   };
-  const _sheetValues = { segment: [], responsible: [], city: [], region: [], risk: [], delivery: [] };
+  const _sheetValues = { segment: [], responsible: [], city: [], region: [], risk: [], delivery: [], latestContact: ["<1 månad", "1-2 månader", ">3 månader", "Saknar kontakt"] };
 
   // ── Filter modal ──
   const _customerFieldMap = {
@@ -1612,7 +1615,7 @@
 
   function getAvailableValues(key) {
     // Insight-based filters are not cascaded
-    if (key === "risk" || key === "delivery") return _sheetValues[key];
+    if (key === "risk" || key === "delivery" || key === "latestContact") return _sheetValues[key];
     // Apply all active filters except the one being opened
     let base = customers;
     for (const [k, field] of Object.entries(_customerFieldMap)) {
@@ -1684,6 +1687,7 @@
     )].sort().reverse();
     updateChip("risk");
     updateChip("delivery");
+    updateChip("latestContact");
   }
 
   function buildDropdowns() {
@@ -1692,10 +1696,34 @@
     _sheetValues.responsible = unique("sales_person");
     _sheetValues.city        = unique("city");
     _sheetValues.region      = unique("region_google");
+    _sheetValues.latestContact = ["<1 månad", "1-2 månader", ">3 månader", "Saknar kontakt"];
     updateChip("segment");
     updateChip("responsible");
     updateChip("city");
     updateChip("region");
+    updateChip("latestContact");
+  }
+
+  function getLatestContactBucket(dateText) {
+    if (!dateText) return "Saknar kontakt";
+    const datePart = String(dateText).slice(0, 10);
+    const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(datePart);
+    if (!match) return "Saknar kontakt";
+
+    const contactDate = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+    if (Number.isNaN(contactDate.getTime())) return "Saknar kontakt";
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    contactDate.setHours(0, 0, 0, 0);
+    if (contactDate > today) return "<1 månad";
+
+    let months = (today.getFullYear() - contactDate.getFullYear()) * 12 + (today.getMonth() - contactDate.getMonth());
+    if (today.getDate() < contactDate.getDate()) months -= 1;
+
+    if (months < 1) return "<1 månad";
+    if (months <= 2) return "1-2 månader";
+    return ">3 månader";
   }
 
   function getRiskStatusClass(risk) {
@@ -1742,7 +1770,7 @@
   }
 
   document.getElementById("clear-filters-btn").addEventListener("click", () => {
-    ["segment", "responsible", "city", "region", "missed", "risk", "delivery"].forEach(key => filterState[key].clear());
+    ["segment", "responsible", "city", "region", "missed", "risk", "delivery", "latestContact"].forEach(key => filterState[key].clear());
     Object.keys(_chipIds).forEach(key => updateChip(key));
     document.getElementById("chip-missed").classList.remove("active");
     document.getElementById("clear-filters-row").style.display = "none";
@@ -1773,6 +1801,9 @@
       const ins = insights[c.customer.toLowerCase()];
       return filterState.delivery.has(ins?.latest_delivery_month || "");
     });
+    if (filterState.latestContact.size) filtered = filtered.filter(c =>
+      filterState.latestContact.has(getLatestContactBucket(c.latest_contact_date))
+    );
 
     document.getElementById("subtitle").textContent =
       `${filtered.length} av ${customers.length} butiker`;
@@ -1809,7 +1840,7 @@
             if (ins.missad_uppfoljning) badges.push(`<span class="tag tag-orange" style="font-size:0.68rem;padding:2px 7px">Missad uppföljning</span>`);
             const riskBadge = getRiskBadgeHtml(ins.customer_risk, "font-size:0.68rem;padding:2px 7px");
             if (riskBadge) badges.push(riskBadge);
-            if (ins.latest_delivery_date) badges.push(`<span class="tag tag-blue" style="font-size:0.68rem;padding:2px 7px">Leverans ${esc(ins.latest_delivery_date)}</span>`);
+            if (ins.latest_delivery_date) badges.push(`<span class="tag tag-blue" style="font-size:0.68rem;padding:2px 7px">Senast leverans ${esc(ins.latest_delivery_date)}</span>`);
             if (badges.length === 0) return "";
             return `<div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:6px">${badges.join("")}</div>`;
           })()}
@@ -2514,7 +2545,7 @@
           </div>
 
           <div class="priority-dates">
-            <div>Leverans ${esc(c.latest_delivery_date || "—")}</div>
+            <div>Senast leverans ${esc(c.latest_delivery_date || "—")}</div>
             <div>Kontakt ${esc(c.latest_contact_date || "—")}</div>
           </div>
         </div>
