@@ -1341,11 +1341,16 @@
         <button id="contact-edit-btn" style="background:none;border:none;color:#1a1a2e;font-size:0.8rem;font-weight:600;cursor:pointer;padding:4px 0;font-family:inherit">Redigera</button>
       </div>
       <div id="contact-view-mode">
+        <div class="info-row"><span class="label">Namn</span><span class="value" id="d-contact-name">—</span></div>
         <div class="info-row"><span class="label">Telefon</span><a href="#" id="d-phone">—</a></div>
         <div class="info-row"><span class="label">Email</span><a href="#" id="d-email">—</a></div>
         <div class="info-row"><span class="label">Adress</span><span class="value" id="d-address">—</span></div>
       </div>
       <div id="contact-edit-mode" style="display:none">
+        <div class="form-field" style="margin-bottom:10px">
+          <label>Namn</label>
+          <input type="text" id="edit-contact-name" />
+        </div>
         <div class="form-field" style="margin-bottom:10px">
           <label>Telefon</label>
           <input type="tel" id="edit-phone" />
@@ -2048,6 +2053,7 @@
 
     // Kontaktuppgifter
     const fullAddr = [c.address_google, c.address_number_google, c.city_google].filter(Boolean).join(" ");
+    document.getElementById("d-contact-name").textContent = c.name || "—";
     document.getElementById("d-address").textContent = fullAddr || "—";
 
     const phoneEl = document.getElementById("d-phone");
@@ -2068,6 +2074,7 @@
     document.getElementById("contact-edit-mode").style.display = "none";
     document.getElementById("contact-view-mode").style.display = "block";
     document.getElementById("contact-edit-btn").onclick = () => {
+      document.getElementById("edit-contact-name").value         = c.name                 || "";
       document.getElementById("edit-phone").value                = c.phone                || "";
       document.getElementById("edit-email").value                = c.email                || "";
       document.getElementById("edit-address-google").value       = c.address_google       || "";
@@ -2083,6 +2090,7 @@
       document.getElementById("contact-view-mode").style.display = "block";
     };
     document.getElementById("contact-save-btn").onclick = async () => {
+      const name                  = document.getElementById("edit-contact-name").value.trim();
       const phone                 = document.getElementById("edit-phone").value.trim();
       const email                 = document.getElementById("edit-email").value.trim();
       const address_google        = document.getElementById("edit-address-google").value.trim();
@@ -2099,10 +2107,11 @@
         const res = await fetch(`${API}/customers/${c.row}/contact`, {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ phone, email, address_google, address_number_google, city_google, postal_code_google, region_google }),
+          body: JSON.stringify({ name, phone, email, address_google, address_number_google, city_google, postal_code_google, region_google }),
         });
         if (!res.ok) throw new Error();
         const saved_data = await res.json();
+        c.name = name;
         c.phone = phone;
         c.email = email;
         c.address_google = address_google;
@@ -2116,6 +2125,7 @@
           c.longitude = saved_data.longitude;
         }
         const saved = [address_google, address_number_google, city_google].filter(Boolean).join(" ");
+        document.getElementById("d-contact-name").textContent = name || "—";
         document.getElementById("d-phone").textContent = phone || "—";
         document.getElementById("d-phone").href = phone ? `tel:${phone.replace(/\s/g, "")}` : "#";
         document.getElementById("d-email").textContent = email || "—";

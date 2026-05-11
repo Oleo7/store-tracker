@@ -172,6 +172,7 @@ class PriorityTests(TestCase):
                 "sales_person",
                 "customer_segment",
                 "customer_number",
+                "name",
                 "phone",
                 "email",
                 "city_google",
@@ -180,8 +181,8 @@ class PriorityTests(TestCase):
                 "longitude_google",
                 "comment",
             ],
-            ["Customer Daniel", "", "Daniel", "A", "1001", "", "", "", "", "", "", ""],
-            ["Customer Johan", "", "Johan", "A", "1002", "", "", "", "", "", "", ""],
+            ["Customer Daniel", "", "Daniel", "A", "1001", "Anna", "0701111111", "daniel@example.com", "", "", "", "", ""],
+            ["Customer Johan", "", "Johan", "A", "1002", "Bo", "0702222222", "johan@example.com", "", "", "", "", ""],
         ]
         orders = [
             app_module.ORDER_COLUMNS,
@@ -209,6 +210,57 @@ class PriorityTests(TestCase):
         self.assertIn("priority_customers", data)
         self.assertEqual(data["selected_responsible"], "Daniel")
         self.assertTrue(all(customer["sales_person"] == "Daniel" for customer in data["priority_customers"]))
+
+    def test_customers_endpoint_reads_name_without_shifting_phone_or_email(self):
+        customers = [
+            [
+                "customer",
+                "cancelled_flag",
+                "sales_person",
+                "customer_segment",
+                "customer_reference",
+                "customer_number",
+                "name",
+                "phone",
+                "email",
+                "city_google",
+                "address_google",
+                "address_number_google",
+                "postal_code_google",
+                "region_google",
+                "latitude_google",
+                "longitude_google",
+                "comment",
+            ],
+            ["Store A", "", "Daniel", "A", "REF1", "1001", "Anna Andersson", "0701234567", "anna@example.com", "Göteborg", "Avenyn", "1", "41136", "VG", "57.7", "11.9", "Ring igen"],
+        ]
+        fake_spreadsheet = FakeSpreadsheet(
+            {
+                "customers_enriched": customers,
+                "sales_activities": [app_module.CONTACT_COLUMNS],
+            }
+        )
+
+        with patch.object(app_module, "get_spreadsheet_with_retry", return_value=fake_spreadsheet):
+            client = app_module.app.test_client()
+            response = client.get("/customers")
+            data = response.get_json()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(data[0]["name"], "Anna Andersson")
+        self.assertEqual(data[0]["phone"], "0701234567")
+        self.assertEqual(data[0]["email"], "anna@example.com")
+        self.assertEqual(data[0]["customer"], "Store A")
+
+    def test_customer_name_column_is_inserted_left_of_phone(self):
+        values = [["customer", "phone", "email"], ["Store A", "0701234567", "a@example.com"]]
+        sheet = FakeWorksheet("customers_enriched", values)
+
+        headers = app_module.ensure_customer_name_column(sheet, values[0])
+
+        self.assertEqual(headers, ["customer", "name", "phone", "email"])
+        self.assertEqual(values[0], ["customer", "name", "phone", "email"])
+        self.assertEqual(values[1], ["Store A", "", "0701234567", "a@example.com"])
 
 
 def _customer(name, sales_person, segment, row):
@@ -261,6 +313,19 @@ class FakeWorksheet:
 
     def get_all_values(self):
         return self._values
+
+    def insert_cols(self, columns, col=1):
+        insert_idx = col - 1
+        max_rows = max(len(self._values), *(len(column) for column in columns))
+        while len(self._values) < max_rows:
+            self._values.append([])
+
+        for offset, column in enumerate(columns):
+            for row_idx, row in enumerate(self._values):
+                while len(row) < insert_idx + offset:
+                    row.append("")
+                value = column[row_idx] if row_idx < len(column) else ""
+                row.insert(insert_idx + offset, value)
 
 
 class FakeSpreadsheet:

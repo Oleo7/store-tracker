@@ -27,7 +27,7 @@ SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 SHEET_ID = os.environ.get("SHEET_KEY", "")
 
 CUSTOMER_COLUMNS = ["customer", "cancelled_flag", "sales_person", "customer_segment",
-                    "customer_reference", "customer_number", "phone", "email",
+                    "customer_reference", "customer_number", "name", "phone", "email",
                     "comment"]
 
 ORDER_COLUMNS = ["Reference", "Order date", "Delivery date", "Customer", "Customer Reference",
@@ -55,6 +55,19 @@ def checkbox_to_sheet_value(value):
 def text_to_sheet_value(value, max_length=None):
     text = str(value or "").strip()
     return text[:max_length] if max_length is not None else text
+
+
+def ensure_customer_name_column(sheet, headers):
+    if "name" in headers:
+        return headers
+    if "phone" not in headers:
+        return headers
+
+    original_headers = list(headers)
+    insert_at = original_headers.index("phone") + 1
+    sheet.insert_cols([["name"]], col=insert_at)
+    return original_headers[:insert_at - 1] + ["name"] + original_headers[insert_at - 1:]
+
 
 def get_spreadsheet(force_reconnect=False):
     global _spreadsheet_cache
@@ -620,11 +633,15 @@ def get_followup_insights():
 
 @app.route("/customers/<int:row>/contact", methods=["PATCH"])
 def update_customer_contact(row):
-    data = request.get_json()
+    data = request.get_json() or {}
     sheet = get_spreadsheet_with_retry().worksheet("customers_enriched")
     headers = sheet.row_values(1)
+    if "name" in data:
+        headers = ensure_customer_name_column(sheet, headers)
+
     missing_columns = []
     fields = [
+        ("name",                 "name"),
         ("phone",                "phone"),
         ("email",                "email"),
         ("address_google",       "address_google"),
