@@ -1,4 +1,4 @@
-from flask import Flask, jsonify, send_file, request
+from flask import Flask, jsonify, send_file, request, send_from_directory
 from flask_cors import CORS
 import gspread
 from google.oauth2.service_account import Credentials
@@ -25,6 +25,7 @@ CORS(app)
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 SHEET_ID = os.environ.get("SHEET_KEY", "")
+IMAGE_DIR = os.path.abspath(os.path.join(app.root_path, "..", "images"))
 
 CUSTOMER_COLUMNS = ["customer", "cancelled_flag", "sales_person", "customer_segment",
                     "customer_reference", "customer_number", "name", "phone", "email",
@@ -280,6 +281,11 @@ def segment_sort_key(segment):
 @app.route("/")
 def index():
     return send_file("index.html")
+
+
+@app.route("/images/<path:filename>")
+def images(filename):
+    return send_from_directory(IMAGE_DIR, filename)
 
 
 @app.route("/login", methods=["POST"])

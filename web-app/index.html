@@ -1,11 +1,35 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="sv">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-  <title>Store Tracker</title>
+  <title>Polarbär CRM</title>
+  <link rel="icon" type="image/png" href="/images/Favicon_Pink_Google.png" />
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --pb-ink: #251c25;
+      --pb-charcoal: #302a31;
+      --pb-muted: #6f6671;
+      --pb-soft-muted: #9a8f98;
+      --pb-surface: #ffffff;
+      --pb-surface-soft: #fff8fb;
+      --pb-cream: #fff7ee;
+      --pb-pink: #f5a6c8;
+      --pb-pink-strong: #d83d79;
+      --pb-pink-soft: #fde7f1;
+      --pb-blue: #355983;
+      --pb-blue-soft: #e6eef8;
+      --pb-chocolate: #5a392e;
+      --pb-mango: #f2a444;
+      --pb-green: #20835b;
+      --pb-border: #eadfe6;
+      --pb-border-strong: #d8c6d1;
+      --pb-shadow: 0 10px 26px rgba(62, 43, 57, 0.08);
+      --pb-shadow-soft: 0 3px 14px rgba(62, 43, 57, 0.06);
+      --pb-radius: 12px;
+    }
 
     html { background: #1a1a2e; }
 
@@ -822,7 +846,7 @@
     }
     #map-locate-btn {
       position: absolute;
-      top: calc(60px + 12px);
+      top: calc(68px + 12px);
       right: 12px;
       z-index: 20;
       width: 40px;
@@ -1137,6 +1161,810 @@
       min-width: 92px;
     }
 
+    /* Polarbär CRM refresh */
+    html { background: var(--pb-ink); }
+
+    body {
+      background:
+        radial-gradient(circle at top left, rgba(245,166,200,0.18), transparent 300px),
+        linear-gradient(180deg, #fbf7fb 0, #f7f5f8 42%, #f3f6fa 100%);
+      color: var(--pb-ink);
+      letter-spacing: 0;
+    }
+
+    button,
+    input,
+    select,
+    textarea {
+      font: inherit;
+    }
+
+    button:focus-visible,
+    input:focus-visible,
+    select:focus-visible,
+    textarea:focus-visible,
+    .customer-card:focus-visible,
+    .priority-item:focus-visible {
+      outline: 3px solid rgba(216,61,121,0.34);
+      outline-offset: 2px;
+    }
+
+    #login-screen,
+    #app-loader {
+      background:
+        linear-gradient(rgba(37,28,37,0.84), rgba(37,28,37,0.88)),
+        url("/images/Background_Pink.jpg") center/cover;
+      color: #fff;
+    }
+
+    #login-screen::after,
+    #app-loader::after {
+      content: "";
+      position: absolute;
+      right: -42px;
+      bottom: -36px;
+      width: 148px;
+      height: 148px;
+      background: url("/images/Chokladboll.png") center/contain no-repeat;
+      opacity: 0.17;
+      pointer-events: none;
+    }
+
+    .login-card {
+      width: min(100%, 360px);
+      position: relative;
+      z-index: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: stretch;
+      gap: 14px;
+      padding: 24px;
+      border: 1px solid rgba(255,255,255,0.16);
+      border-radius: 18px;
+      background: rgba(37,28,37,0.62);
+      box-shadow: 0 20px 52px rgba(0,0,0,0.24);
+      backdrop-filter: blur(10px);
+    }
+
+    .login-logo {
+      width: 132px;
+      height: auto;
+      align-self: center;
+      margin-bottom: 2px;
+    }
+
+    #login-screen h2,
+    #app-loader h2 {
+      color: #fff;
+      font-size: 1.32rem;
+      text-align: center;
+    }
+
+    #login-screen p,
+    #app-loader p {
+      color: rgba(255,255,255,0.72);
+      text-align: center;
+    }
+
+    #login-password {
+      max-width: none;
+      border: 1px solid rgba(255,255,255,0.28);
+      background: rgba(255,255,255,0.94);
+      color: var(--pb-ink);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.45);
+    }
+
+    #login-btn {
+      max-width: none;
+      min-height: 48px;
+      background: var(--pb-pink);
+      color: var(--pb-ink);
+      box-shadow: 0 8px 22px rgba(216,61,121,0.28);
+    }
+
+    #login-error { color: #ffd6e5; text-align: center; }
+
+    .loader-logo {
+      width: 104px;
+      height: auto;
+      position: relative;
+      z-index: 1;
+    }
+
+    .spinner {
+      border-color: rgba(255,255,255,0.24);
+      border-top-color: var(--pb-pink);
+    }
+
+    #detail-loader {
+      background: rgba(251,247,251,0.84);
+      backdrop-filter: blur(2px);
+    }
+
+    #detail-loader .spinner {
+      border-color: rgba(37,28,37,0.16);
+      border-top-color: var(--pb-pink-strong);
+    }
+
+    .header {
+      min-height: 68px;
+      padding: 14px 16px 12px;
+      background:
+        linear-gradient(135deg, rgba(37,28,37,0.96), rgba(58,40,44,0.96)),
+        url("/images/Background_Pink.jpg") center/cover;
+      border-bottom: 1px solid rgba(255,255,255,0.08);
+      box-shadow: 0 8px 22px rgba(37,28,37,0.14);
+      overflow: hidden;
+    }
+
+    .header::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background: linear-gradient(90deg, rgba(255,255,255,0.06), transparent 42%);
+      pointer-events: none;
+    }
+
+    .header > * {
+      position: relative;
+      z-index: 1;
+    }
+
+    .header-brand-mark {
+      width: 34px;
+      height: 34px;
+      border-radius: 10px;
+      display: grid;
+      place-items: center;
+      flex-shrink: 0;
+      background: rgba(255,255,255,0.12);
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,0.16);
+      overflow: hidden;
+    }
+
+    .header-brand-mark img {
+      width: 26px;
+      height: 26px;
+      object-fit: contain;
+    }
+
+    .header-text h1 {
+      font-size: 1.08rem;
+      font-weight: 800;
+      letter-spacing: 0;
+    }
+
+    .header-text p {
+      color: rgba(255,255,255,0.72);
+      opacity: 1;
+      font-weight: 550;
+    }
+
+    .back-btn,
+    .route-mode-btn {
+      min-height: 38px;
+      border: 1px solid rgba(255,255,255,0.18);
+      background: rgba(255,255,255,0.12);
+      color: #fff;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.08);
+    }
+
+    .route-mode-btn {
+      padding: 8px 11px;
+      font-size: 0.78rem;
+      font-weight: 750;
+    }
+
+    .toolbar {
+      top: 68px;
+      padding: 11px 14px 12px;
+      background: rgba(255,255,255,0.94);
+      border-bottom-color: var(--pb-border);
+      box-shadow: 0 8px 20px rgba(54,44,54,0.06);
+      backdrop-filter: blur(10px);
+    }
+
+    .search-wrap {
+      position: relative;
+    }
+
+    .search-wrap::before {
+      content: "";
+      position: absolute;
+      left: 14px;
+      top: 50%;
+      width: 12px;
+      height: 12px;
+      border: 2px solid var(--pb-soft-muted);
+      border-radius: 50%;
+      transform: translateY(-58%);
+      pointer-events: none;
+    }
+
+    .search-wrap::after {
+      content: "";
+      position: absolute;
+      left: 25px;
+      top: 50%;
+      width: 7px;
+      height: 2px;
+      border-radius: 999px;
+      background: var(--pb-soft-muted);
+      transform: translateY(4px) rotate(45deg);
+      pointer-events: none;
+    }
+
+    .toolbar input[type="search"] {
+      min-height: 42px;
+      padding: 10px 14px 10px 40px;
+      border-color: var(--pb-border);
+      border-radius: var(--pb-radius);
+      background: #fff;
+      color: var(--pb-ink);
+      box-shadow: inset 0 1px 0 rgba(37,28,37,0.02);
+    }
+
+    .toolbar input[type="search"]:focus,
+    .filter-modal-search input:focus,
+    .form-field input:focus,
+    .form-field select:focus,
+    .form-field textarea:focus,
+    .customer-note-input:focus,
+    .insights-select:focus {
+      border-color: var(--pb-pink-strong);
+      background: #fff;
+      box-shadow: 0 0 0 3px rgba(216,61,121,0.12);
+    }
+
+    .chip-row {
+      flex-wrap: nowrap;
+      overflow-x: auto;
+      padding-bottom: 2px;
+      scrollbar-width: none;
+    }
+
+    .chip-row::-webkit-scrollbar { display: none; }
+
+    .chip {
+      min-height: 34px;
+      border-color: var(--pb-border);
+      background: var(--pb-surface-soft);
+      color: var(--pb-muted);
+      font-weight: 700;
+    }
+
+    .chip.active {
+      border-color: var(--pb-pink-strong);
+      background: var(--pb-pink-soft);
+      color: #8c214c;
+    }
+
+    .chip-clear {
+      background: #fff3f4;
+      border-color: #f3c9d1;
+      color: #a7344e;
+    }
+
+    .list-body {
+      padding: 12px 12px 44px;
+    }
+
+    .customer-card {
+      position: relative;
+      border: 1px solid rgba(234,223,230,0.92);
+      border-radius: var(--pb-radius);
+      padding: 13px 14px 12px 16px;
+      box-shadow: var(--pb-shadow-soft);
+      transition: transform 0.12s ease, box-shadow 0.12s ease, border-color 0.12s ease;
+      overflow: hidden;
+    }
+
+    .customer-card::before {
+      content: "";
+      position: absolute;
+      left: 0;
+      top: 12px;
+      bottom: 12px;
+      width: 4px;
+      border-radius: 0 99px 99px 0;
+      background: linear-gradient(180deg, var(--pb-pink), var(--pb-blue));
+      opacity: 0.72;
+    }
+
+    .customer-card:hover {
+      border-color: var(--pb-border-strong);
+      box-shadow: var(--pb-shadow);
+    }
+
+    .customer-card:active {
+      transform: scale(0.992);
+    }
+
+    .customer-main {
+      flex: 1;
+      min-width: 0;
+      padding-right: 2px;
+    }
+
+    .customer-name {
+      color: var(--pb-ink);
+      font-weight: 820;
+      line-height: 1.25;
+    }
+
+    .customer-sub {
+      color: var(--pb-muted);
+      font-weight: 560;
+    }
+
+    .card-side {
+      min-width: 96px;
+      gap: 7px;
+    }
+
+    .segment-badge {
+      background: var(--pb-blue-soft);
+      color: var(--pb-blue);
+      border: 1px solid rgba(53,89,131,0.12);
+      font-weight: 820;
+    }
+
+    .latest-contact-label {
+      color: var(--pb-soft-muted);
+      font-size: 0.64rem;
+    }
+
+    .latest-contact-value {
+      color: var(--pb-chocolate);
+      font-size: 0.78rem;
+    }
+
+    .card-meta {
+      gap: 7px;
+      margin-top: 9px;
+      color: var(--pb-muted);
+    }
+
+    .meta-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      min-height: 24px;
+      padding: 3px 8px;
+      border-radius: 999px;
+      background: #f7f2f6;
+      color: var(--pb-muted);
+      font-size: 0.72rem;
+      font-weight: 700;
+    }
+
+    .card-badges {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 5px;
+      margin-top: 7px;
+    }
+
+    .load-more-btn {
+      width: 100%;
+      min-height: 44px;
+      margin-top: 6px;
+      border: 1px solid var(--pb-border);
+      border-radius: var(--pb-radius);
+      background: #fff;
+      color: var(--pb-ink);
+      font-weight: 800;
+      cursor: pointer;
+      box-shadow: var(--pb-shadow-soft);
+    }
+
+    .load-more-btn:active {
+      transform: scale(0.992);
+    }
+
+    .tag {
+      border-radius: 999px;
+      font-weight: 760;
+    }
+
+    .tag-red {
+      background: #fde4e5;
+      color: #9c2834;
+    }
+
+    .tag-orange {
+      background: #ffead8;
+      color: #934513;
+    }
+
+    .tag-yellow {
+      background: #fff3c9;
+      color: #765a00;
+    }
+
+    .tag-blue {
+      background: var(--pb-blue-soft);
+      color: var(--pb-blue);
+    }
+
+    .tag-green {
+      background: #dff4eb;
+      color: var(--pb-green);
+    }
+
+    .state-msg {
+      color: var(--pb-muted);
+    }
+
+    .detail-body,
+    .insights-body {
+      padding-left: 12px;
+      padding-right: 12px;
+    }
+
+    .detail-section,
+    .insights-panel,
+    .chart-card,
+    .insights-kpi {
+      border: 1px solid var(--pb-border);
+      box-shadow: var(--pb-shadow-soft);
+    }
+
+    .detail-section,
+    .insights-panel {
+      border-radius: var(--pb-radius);
+    }
+
+    .detail-section-title,
+    .customer-note-label,
+    .form-field label,
+    .insights-panel-title {
+      color: var(--pb-muted);
+      letter-spacing: 0.055em;
+    }
+
+    .action-btn {
+      min-height: 44px;
+      background: var(--pb-ink);
+      border-radius: var(--pb-radius);
+      box-shadow: 0 8px 18px rgba(37,28,37,0.12);
+    }
+
+    .action-btn.secondary {
+      color: var(--pb-ink);
+      border-color: var(--pb-border-strong);
+      box-shadow: none;
+    }
+
+    .filter-backdrop {
+      background: rgba(37,28,37,0.38);
+      backdrop-filter: blur(2px);
+    }
+
+    .filter-modal {
+      border-radius: 0 0 18px 18px;
+      box-shadow: 0 20px 50px rgba(37,28,37,0.18);
+    }
+
+    .filter-option input[type=checkbox] {
+      accent-color: var(--pb-pink-strong);
+    }
+
+    .map-route-bar {
+      background: #fff;
+      border-top-color: var(--pb-border);
+    }
+
+    #map-locate-btn {
+      color: var(--pb-ink);
+      border: 1px solid var(--pb-border);
+    }
+
+    .insights-body {
+      gap: 12px;
+    }
+
+    .insights-hero {
+      position: relative;
+      min-height: 132px;
+      padding: 16px;
+      overflow: hidden;
+      color: #fff;
+      background:
+        linear-gradient(135deg, rgba(37,28,37,0.92), rgba(90,57,46,0.88)),
+        url("/images/Background_Pink.jpg") center/cover;
+      border: 1px solid rgba(255,255,255,0.12);
+      box-shadow: var(--pb-shadow);
+    }
+
+    .insights-hero::after {
+      content: "";
+      position: absolute;
+      right: -28px;
+      bottom: -38px;
+      width: 138px;
+      height: 122px;
+      background: url("/images/Hallon.png") center/contain no-repeat;
+      opacity: 0.2;
+      pointer-events: none;
+    }
+
+    .insights-hero-content,
+    .insights-hero .insights-filter-row {
+      position: relative;
+      z-index: 1;
+    }
+
+    .insights-eyebrow {
+      display: inline-flex;
+      align-items: center;
+      min-height: 24px;
+      padding: 3px 9px;
+      border: 1px solid rgba(255,255,255,0.18);
+      border-radius: 999px;
+      background: rgba(255,255,255,0.11);
+      color: rgba(255,255,255,0.84);
+      font-size: 0.68rem;
+      font-weight: 850;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+
+    .insights-hero h2 {
+      margin-top: 10px;
+      font-size: 1.28rem;
+      line-height: 1.12;
+      font-weight: 850;
+    }
+
+    .insights-hero p {
+      margin-top: 5px;
+      color: rgba(255,255,255,0.74);
+      font-size: 0.82rem;
+      font-weight: 560;
+    }
+
+    .insights-hero .insights-filter-row {
+      margin: 14px 0 0;
+      align-items: stretch;
+      flex-direction: column;
+      gap: 6px;
+      max-width: 360px;
+    }
+
+    .insights-hero .insights-filter-row label {
+      color: rgba(255,255,255,0.78);
+      font-size: 0.7rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+
+    .insights-select {
+      min-height: 42px;
+      border-color: rgba(255,255,255,0.18);
+      background: rgba(255,255,255,0.94);
+      color: var(--pb-ink);
+      font-weight: 700;
+    }
+
+    .panel-heading {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+
+    .panel-heading .insights-panel-title {
+      margin-bottom: 2px;
+    }
+
+    .panel-subtitle {
+      color: var(--pb-muted);
+      font-size: 0.78rem;
+      line-height: 1.35;
+      font-weight: 560;
+    }
+
+    .panel-badge {
+      flex-shrink: 0;
+      border-radius: 999px;
+      padding: 5px 9px;
+      background: var(--pb-pink-soft);
+      color: #8c214c;
+      font-size: 0.7rem;
+      font-weight: 850;
+      white-space: nowrap;
+    }
+
+    .dfp-table-wrap {
+      border-color: var(--pb-border);
+      border-radius: var(--pb-radius);
+      background: #fff;
+    }
+
+    .dfp-table th,
+    .dfp-table td {
+      border-bottom-color: #f0e8ee;
+    }
+
+    .dfp-table th {
+      background: #fbf5f8;
+      color: var(--pb-muted);
+    }
+
+    .dfp-name {
+      color: var(--pb-ink);
+    }
+
+    .dfp-count {
+      color: var(--pb-muted);
+      font-weight: 700;
+    }
+
+    .rank-medal {
+      display: inline-grid;
+      place-items: center;
+      width: 26px;
+      height: 26px;
+      border-radius: 999px;
+      background: #f4edf3;
+      color: var(--pb-muted);
+      font-weight: 850;
+    }
+
+    .rank-medal.rank-1 {
+      background: #fff0c9;
+      color: #7a5300;
+    }
+
+    .dfp-crown {
+      color: var(--pb-mango);
+      margin-left: 4px;
+      font-size: 0.78rem;
+    }
+
+    .contacts-grid {
+      gap: 12px;
+    }
+
+    .insights-kpi {
+      position: relative;
+      min-height: 150px;
+      background:
+        linear-gradient(180deg, rgba(253,231,241,0.72), rgba(255,255,255,0.96)),
+        #fff;
+      overflow: hidden;
+    }
+
+    .insights-kpi::after {
+      content: "";
+      position: absolute;
+      right: 10px;
+      bottom: 8px;
+      width: 54px;
+      height: 54px;
+      background: url("/images/Jordgubb.png") center/contain no-repeat;
+      opacity: 0.22;
+      pointer-events: none;
+    }
+
+    .insights-kpi-value {
+      color: var(--pb-ink);
+      font-size: 2.1rem;
+    }
+
+    .insights-kpi-label {
+      color: var(--pb-muted);
+      font-weight: 750;
+    }
+
+    .insights-kpi-delta.positive { color: var(--pb-green); }
+    .insights-kpi-delta.negative { color: #a7344e; }
+
+    .chart-card {
+      border-radius: var(--pb-radius);
+      background: #fff;
+    }
+
+    .chart-title {
+      color: var(--pb-ink);
+    }
+
+    .priority-list {
+      max-height: min(58vh, 560px);
+      border-color: var(--pb-border);
+      border-radius: var(--pb-radius);
+      background: #fff;
+    }
+
+    .priority-item {
+      gap: 10px;
+      border-bottom-color: #f0e8ee;
+      transition: background 0.12s ease;
+    }
+
+    .priority-item:hover {
+      background: #fff9fc;
+    }
+
+    .priority-score {
+      border: 1px solid rgba(255,255,255,0.7);
+      box-shadow: inset 0 0 0 1px rgba(37,28,37,0.04);
+    }
+
+    .priority-score.high,
+    .priority-pill.high {
+      background: #fde4e5;
+      color: #9c2834;
+    }
+
+    .priority-score.medium,
+    .priority-pill.medium {
+      background: #ffead8;
+      color: #934513;
+    }
+
+    .priority-score.low,
+    .priority-pill.low {
+      background: #fff3c9;
+      color: #765a00;
+    }
+
+    .priority-customer {
+      color: var(--pb-ink);
+    }
+
+    .priority-type {
+      background: #f5eff4;
+      color: var(--pb-muted);
+    }
+
+    .priority-reason {
+      color: var(--pb-muted);
+    }
+
+    .priority-action {
+      color: var(--pb-chocolate);
+    }
+
+    .toast {
+      background: var(--pb-ink);
+      box-shadow: 0 10px 26px rgba(37,28,37,0.18);
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *,
+      *::before,
+      *::after {
+        animation-duration: 0.001ms !important;
+        scroll-behavior: auto !important;
+        transition-duration: 0.001ms !important;
+      }
+    }
+
+    @media (max-width: 520px) {
+      .header-actions {
+        gap: 6px;
+      }
+
+      .route-mode-btn {
+        padding: 8px 9px;
+      }
+
+      .priority-item {
+        display: grid;
+        grid-template-columns: 34px minmax(0, 1fr);
+      }
+
+      .priority-dates {
+        grid-column: 2;
+        min-width: 0;
+        text-align: left;
+        font-size: 0.72rem;
+      }
+    }
+
     @media (min-width: 760px) {
       .contacts-grid {
         grid-template-columns: 0.85fr 1fr 1fr;
@@ -1144,6 +1972,23 @@
       .insights-body {
         max-width: 1100px;
         margin: 0 auto;
+        padding-top: 16px;
+      }
+      .list-body {
+        max-width: 940px;
+        margin: 0 auto;
+        padding-top: 16px;
+      }
+      .insights-hero {
+        min-height: 150px;
+        padding: 18px 20px;
+      }
+      .insights-hero .insights-filter-row {
+        flex-direction: row;
+        align-items: center;
+      }
+      .insights-hero .insights-filter-row label {
+        flex-shrink: 0;
       }
     }
   </style>
@@ -1152,17 +1997,21 @@
 
 <!-- ═══════════════ LOGIN ═══════════════ -->
 <div id="login-screen">
-  <h2>Store Tracker</h2>
-  <p>Ange lösenord för att fortsätta</p>
-  <input type="password" id="login-password" placeholder="Lösenord" />
-  <div id="login-error"></div>
-  <button id="login-btn">Logga in</button>
+  <div class="login-card">
+    <img class="login-logo" src="/images/Godare_Bättre_New_1500px_White.png" alt="Polarbär" />
+    <h2>Polarbär CRM</h2>
+    <p>Ange lösenord för att fortsätta</p>
+    <input type="password" id="login-password" placeholder="Lösenord" autocomplete="current-password" />
+    <div id="login-error"></div>
+    <button id="login-btn">Logga in</button>
+  </div>
 </div>
 
 <!-- ═══════════════ LOADER ═══════════════ -->
 <div id="app-loader">
   <div class="spinner"></div>
-  <h2>Store Tracker</h2>
+  <img class="loader-logo" src="/images/Godare_Bättre_New_1500px_White.png" alt="Polarbär" />
+  <h2>Polarbär CRM</h2>
   <p>Laddar butiker...</p>
 </div>
 
@@ -1172,6 +2021,9 @@
 <!-- ═══════════════ LIST VIEW ═══════════════ -->
 <div class="view active" id="view-list">
   <div class="header">
+    <div class="header-brand-mark" aria-hidden="true">
+      <img src="/images/Favicon_Pink_Google.png" alt="" />
+    </div>
     <div class="header-text">
       <h1 id="list-title">Butiker</h1>
       <p id="subtitle">Laddar...</p>
@@ -1183,7 +2035,9 @@
   </div>
 
   <div class="toolbar">
-    <input type="search" id="search-input" placeholder="Sök butik eller stad..." />
+    <div class="search-wrap">
+      <input type="search" id="search-input" placeholder="Sök butik eller stad..." />
+    </div>
     <div class="chip-row">
       <button class="chip" id="chip-missed">Uppföljning</button>
       <button class="chip" id="chip-segment">Segment</button>
@@ -1208,23 +2062,36 @@
 <!-- ═══════════════ FOLLOW-UP INSIGHTS VIEW ═══════════════ -->
 <div class="view" id="view-insights">
   <div class="header">
-    <button class="back-btn" id="insights-back-btn">&#8592;</button>
+    <button class="back-btn" id="insights-back-btn" aria-label="Tillbaka till butiker">&#8592;</button>
     <div class="header-text">
-      <h1>Uppföljning</h1>
+      <h1>Insikter</h1>
       <p id="insights-subtitle">Laddar...</p>
     </div>
   </div>
 
   <div class="insights-body">
-    <div class="insights-panel">
+    <div class="insights-panel insights-hero">
+      <div class="insights-hero-content">
+        <span class="insights-eyebrow">Polarbär</span>
+        <h2>Uppföljning</h2>
+        <p>DFP, kundkontakter och prioriterade butiker samlat för nästa säljsteg.</p>
+      </div>
       <div class="insights-filter-row">
         <label for="insights-responsible">Ansvarig</label>
         <select class="insights-select" id="insights-responsible">
           <option value="">Alla ansvariga</option>
         </select>
       </div>
+    </div>
 
-      <div class="insights-panel-title">DFP-topplista (kunders ordrar per ansvarig)</div>
+    <div class="insights-panel">
+      <div class="panel-heading">
+        <div>
+          <div class="insights-panel-title">DFP-topplista</div>
+          <p class="panel-subtitle">Kunders ordrar per ansvarig</p>
+        </div>
+        <span class="panel-badge">5 veckor</span>
+      </div>
       <div class="dfp-table-wrap">
         <table class="dfp-table" id="dfp-leaderboard-table">
           <tbody>
@@ -1235,7 +2102,12 @@
     </div>
 
     <div class="insights-panel">
-      <div class="insights-panel-title">Kundkontakter</div>
+      <div class="panel-heading">
+        <div>
+          <div class="insights-panel-title">Kundkontakter</div>
+          <p class="panel-subtitle">Aktivitet och effekt efter dialog</p>
+        </div>
+      </div>
       <div class="contacts-grid">
         <div class="insights-kpi">
           <div class="insights-kpi-value" id="contact-kpi-value">0</div>
@@ -1254,7 +2126,13 @@
     </div>
 
     <div class="insights-panel">
-      <div class="insights-panel-title">Prio-lista</div>
+      <div class="panel-heading">
+        <div>
+          <div class="insights-panel-title">Prio-lista</div>
+          <p class="panel-subtitle">Butiker som kan vara värda att ta först</p>
+        </div>
+        <span class="panel-badge">Topp 30</span>
+      </div>
       <div class="priority-list" id="priority-customer-list">
         <div class="state-msg">Laddar prio-lista...</div>
       </div>
@@ -1265,7 +2143,7 @@
 <!-- ═══════════════ DETAIL VIEW ═══════════════ -->
 <div class="view" id="view-detail">
   <div class="header">
-    <button class="back-btn" id="back-btn">&#8592;</button>
+    <button class="back-btn" id="back-btn" aria-label="Tillbaka">&#8592;</button>
     <div class="header-text">
       <h1 id="d-header-name"></h1>
       <p id="d-header-city"></p>
@@ -1412,7 +2290,7 @@
 <!-- ═══════════════ CONTACT FORM VIEW ═══════════════ -->
 <div class="view" id="view-form">
   <div class="header">
-    <button class="back-btn" id="form-back-btn">&#8592;</button>
+    <button class="back-btn" id="form-back-btn" aria-label="Tillbaka till kund">&#8592;</button>
     <div class="header-text">
       <h1>Logga besök</h1>
       <p id="form-header-customer"></p>
@@ -1494,14 +2372,14 @@
 <!-- ═══════════════ MAP VIEW ═══════════════ -->
 <div class="view" id="view-map">
   <div class="header">
-    <button class="back-btn" id="map-back-btn">&#8592;</button>
+    <button class="back-btn" id="map-back-btn" aria-label="Tillbaka till butiker">&#8592;</button>
     <div class="header-text">
       <h1>Karta</h1>
       <p id="map-subtitle"></p>
     </div>
   </div>
   <div id="map"></div>
-  <button id="map-locate-btn" title="Min position">&#x2316;</button>
+  <button id="map-locate-btn" title="Min position" aria-label="Min position">&#x2316;</button>
   <div class="map-route-bar" id="map-route-bar">
     <span id="map-route-count">Välj butiker nedan för rutt</span>
     <button class="action-btn" id="map-gmaps-btn" disabled style="margin:0;padding:8px 14px;font-size:0.8rem">&#127758; Öppna i Google Maps</button>
@@ -1515,7 +2393,7 @@
 <div class="filter-modal" id="filter-modal">
   <div class="filter-modal-header">
     <span class="filter-modal-title" id="filter-modal-title">Filter</span>
-    <button class="filter-modal-close" id="filter-modal-close">✕</button>
+    <button class="filter-modal-close" id="filter-modal-close" aria-label="Stäng filter">✕</button>
   </div>
   <div class="filter-modal-search" id="filter-modal-search" style="display:none">
     <input type="search" id="filter-modal-input" placeholder="Sök stad..." />
@@ -1527,6 +2405,7 @@
   const API = "";
   const FREEZER_FIELDS = ["Franui", "Schufrulade", "Boujee", "polarbar"];
   const FREEZER_LABELS = { Franui: "Franui", Schufrulade: "Schufrulade", Boujee: "Boujee", polarbar: "Polarbär" };
+  const LIST_BATCH_SIZE = 80;
 
   let customers = [];
   let searchQuery = "";
@@ -1535,6 +2414,8 @@
   let insights = {};
   let followupInsights = null;
   let followupInsightsLoading = false;
+  let visibleListCount = LIST_BATCH_SIZE;
+  let lastListSignature = "";
   const visitCompetitorButtons = Array.from(document.querySelectorAll(".visit-competitor-toggle"));
   const customerCommentInput = document.getElementById("customer-comment-input");
   const customerCommentCount = document.getElementById("customer-comment-count");
@@ -1749,6 +2630,13 @@
     return `<span class="tag ${tagClass}"${styleAttr}>${esc(risk)}</span>`;
   }
 
+  function getListSignature() {
+    return [
+      searchQuery,
+      ...Object.keys(filterState).sort().map(key => `${key}:${[...filterState[key]].sort().join("|")}`),
+    ].join(";");
+  }
+
   function updateChip(key) {
     const chip = document.getElementById(_chipIds[key]);
     if (!chip) return;
@@ -1781,6 +2669,11 @@
   function renderList() {
     const list = document.getElementById("customer-list");
     const q = searchQuery.toLowerCase();
+    const signature = getListSignature();
+    if (signature !== lastListSignature) {
+      visibleListCount = LIST_BATCH_SIZE;
+      lastListSignature = signature;
+    }
 
     let filtered = customers;
 
@@ -1807,18 +2700,20 @@
 
     document.getElementById("subtitle").textContent =
       `${filtered.length} av ${customers.length} butiker`;
+    filteredCustomers = filtered;
 
     if (filtered.length === 0) {
       list.innerHTML = '<div class="state-msg">Inga butiker matchar.</div>';
       return;
     }
 
-    filteredCustomers = filtered;
-    list.innerHTML = filtered.map(c => {
+    const visibleCustomers = filtered.slice(0, visibleListCount);
+    const remainingCount = Math.max(0, filtered.length - visibleCustomers.length);
+    list.innerHTML = visibleCustomers.map(c => {
       return `
-        <div class="customer-card" data-row="${c.row}">
+        <div class="customer-card" data-row="${c.row}" role="button" tabindex="0" aria-label="Öppna ${escAttr(c.customer)}">
           <div class="card-top">
-            <div style="flex:1">
+            <div class="customer-main">
               <div class="customer-name">${esc(c.customer)}</div>
               <div class="customer-sub">${esc(c.city)}</div>
             </div>
@@ -1831,7 +2726,8 @@
             </div>
           </div>
           <div class="card-meta">
-            ${c.sales_person ? `<span>&#128100; ${esc(c.sales_person)}</span>` : ""}
+            ${c.sales_person ? `<span class="meta-chip">${esc(c.sales_person)}</span>` : ""}
+            ${c.region_google ? `<span class="meta-chip">${esc(c.region_google)}</span>` : ""}
           </div>
           ${(() => {
             const ins = insights[c.customer.toLowerCase()];
@@ -1842,17 +2738,34 @@
             if (riskBadge) badges.push(riskBadge);
             if (ins.latest_delivery_date) badges.push(`<span class="tag tag-blue" style="font-size:0.68rem;padding:2px 7px">Senast leverans ${esc(ins.latest_delivery_date)}</span>`);
             if (badges.length === 0) return "";
-            return `<div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:6px">${badges.join("")}</div>`;
+            return `<div class="card-badges">${badges.join("")}</div>`;
           })()}
         </div>`;
-    }).join("");
+    }).join("") + (remainingCount > 0
+      ? `<button class="load-more-btn" id="load-more-btn">Visa fler (${remainingCount} kvar)</button>`
+      : "");
 
     list.querySelectorAll(".customer-card").forEach(card => {
-      card.addEventListener("click", () => {
+      const openCard = () => {
         detailReturnView = "list";
         openDetail(Number(card.dataset.row));
+      };
+      card.addEventListener("click", openCard);
+      card.addEventListener("keydown", e => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          openCard();
+        }
       });
     });
+
+    const loadMoreBtn = document.getElementById("load-more-btn");
+    if (loadMoreBtn) {
+      loadMoreBtn.addEventListener("click", () => {
+        visibleListCount += LIST_BATCH_SIZE;
+        renderList();
+      });
+    }
   }
 
   // ── Search & dropdowns ──
@@ -2405,15 +3318,15 @@
     `;
     const rows = [0, 1, 2].map(rankIdx => `
       <tr>
-        <td class="dfp-rank-cell">${rankIdx + 1}</td>
+        <td class="dfp-rank-cell"><span class="rank-medal rank-${rankIdx + 1}">${rankIdx + 1}</span></td>
         ${weeks.map(week => {
           const leader = (week.leaders || [])[rankIdx];
           if (!leader) return '<td><span class="dfp-count">—</span></td>';
-          const crown = rankIdx === 0 ? " &#128081;" : "";
+          const crown = rankIdx === 0 ? '<span class="dfp-crown" aria-hidden="true">★</span>' : "";
           return `
             <td>
-              <span class="dfp-name">${esc(leader.sales_person)}</span>
-              <span class="dfp-count">${leader.dfp_count} DFP${crown}</span>
+              <span class="dfp-name">${esc(leader.sales_person)}${crown}</span>
+              <span class="dfp-count">${leader.dfp_count} DFP</span>
             </td>
           `;
         }).join("")}
@@ -2462,9 +3375,9 @@
 
     target.innerHTML = `
       <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Positiva dialoger">
-        <polyline points="${area}" fill="rgba(34,197,94,0.12)" stroke="none"></polyline>
-        <polyline points="${line}" fill="none" stroke="#22c55e" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"></polyline>
-        ${points.map((p, i) => `<circle cx="${x(i)}" cy="${y(p.count)}" r="4" fill="#22c55e"></circle>`).join("")}
+        <polyline points="${area}" fill="rgba(32,131,91,0.12)" stroke="none"></polyline>
+        <polyline points="${line}" fill="none" stroke="#20835b" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"></polyline>
+        ${points.map((p, i) => `<circle cx="${x(i)}" cy="${y(p.count)}" r="4" fill="#20835b"></circle>`).join("")}
         ${points.map((p, i) => `<text class="chart-axis-label" x="${x(i)}" y="${height - 7}" text-anchor="middle">${esc(p.label.replace("Vecka ", "V"))}</text>`).join("")}
         <text class="chart-axis-label" x="4" y="${y(maxValue) + 4}">${maxValue}</text>
         <text class="chart-axis-label" x="8" y="${padTop + plotHeight + 4}">0</text>
@@ -2500,7 +3413,7 @@
           const bx = padLeft + slot * i + (slot - barWidth) / 2;
           const by = y(value);
           return `
-            <rect x="${bx}" y="${by}" width="${barWidth}" height="${barHeight}" rx="5" fill="#3b82f6"></rect>
+            <rect x="${bx}" y="${by}" width="${barWidth}" height="${barHeight}" rx="5" fill="#355983"></rect>
             <text class="chart-axis-label" x="${bx + barWidth / 2}" y="${Math.max(9, by - 3)}" text-anchor="middle">${value}</text>
             <text class="chart-axis-label" x="${bx + barWidth / 2}" y="${height - 7}" text-anchor="middle">${esc(p.label.replace("Vecka ", "V"))}</text>
           `;
@@ -2520,7 +3433,7 @@
     list.innerHTML = priorityCustomers.map(c => {
       const levelClass = getPriorityLevelClass(c.priority_level);
       return `
-        <div class="priority-item" data-row="${c.row}">
+        <div class="priority-item" data-row="${c.row}" role="button" tabindex="0" aria-label="Öppna ${escAttr(c.customer)}">
           <div class="priority-score ${levelClass}">
             ${Number(c.priority_score || 0)}
           </div>
@@ -2553,9 +3466,16 @@
     }).join("");
 
     list.querySelectorAll(".priority-item").forEach(item => {
-      item.addEventListener("click", () => {
+      const openPriority = () => {
         detailReturnView = "insights";
         openDetail(Number(item.dataset.row));
+      };
+      item.addEventListener("click", openPriority);
+      item.addEventListener("keydown", e => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          openPriority();
+        }
       });
     });
   }
