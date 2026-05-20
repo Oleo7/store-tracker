@@ -2024,14 +2024,14 @@
       <input type="search" id="search-input" placeholder="Sök butik eller stad..." />
     </div>
     <div class="chip-row">
-      <button class="chip" id="chip-missed">Uppföljning</button>
-      <button class="chip" id="chip-segment">Segment</button>
       <button class="chip" id="chip-responsible">Ansvarig</button>
-      <button class="chip" id="chip-city">Stad</button>
       <button class="chip" id="chip-region">Region</button>
+      <button class="chip" id="chip-city">Stad</button>
+      <button class="chip" id="chip-segment">Segment</button>
+      <button class="chip" id="chip-priority">Prio</button>
       <button class="chip" id="chip-risk">Risk</button>
+      <button class="chip" id="chip-latest-contact">Senast kontakt</button>
       <button class="chip" id="chip-delivery">Senast Leverans</button>
-      <button class="chip" id="chip-latest-contact">Senast Kontakt</button>
     </div>
     <div id="clear-filters-row" style="display:none">
       <button class="chip chip-clear" id="clear-filters-btn">✕ Rensa filter</button>
@@ -2423,7 +2423,7 @@
   }
 
   // ── Multi-select filter state ──
-  const filterState = { segment: new Set(), responsible: new Set(), city: new Set(), region: new Set(), missed: new Set(), risk: new Set(), delivery: new Set(), latestContact: new Set() };
+  const filterState = { segment: new Set(), responsible: new Set(), city: new Set(), region: new Set(), priority: new Set(), risk: new Set(), delivery: new Set(), latestContact: new Set() };
 
   async function loadInsights() {
     try {
@@ -2437,16 +2437,6 @@
     }
   }
 
-  // ── Filter chip: Missad uppföljning (toggle) ──
-  document.getElementById("chip-missed").addEventListener("click", () => {
-    const active = filterState.missed.size > 0;
-    if (active) filterState.missed.clear();
-    else filterState.missed.add("Missad uppföljning");
-    document.getElementById("chip-missed").classList.toggle("active", !active);
-    updateClearBtn();
-    renderList();
-  });
-
   // ── Filter bottom sheet state ──
   let _sheetKey = null;
   const _sheetLabels = {
@@ -2454,20 +2444,22 @@
     responsible: "Ansvarig",
     city:        "Stad",
     region:      "Region",
+    priority:    "Prio",
     risk:        "Risk",
     delivery:    "Senast Leverans",
-    latestContact: "Senast Kontakt",
+    latestContact: "Senast kontakt",
   };
   const _chipIds = {
     segment:     "chip-segment",
     responsible: "chip-responsible",
     city:        "chip-city",
     region:      "chip-region",
+    priority:    "chip-priority",
     risk:        "chip-risk",
     delivery:    "chip-delivery",
     latestContact: "chip-latest-contact",
   };
-  const _sheetValues = { segment: [], responsible: [], city: [], region: [], risk: [], delivery: [], latestContact: ["<1 månad", "1-2 månader", ">3 månader", "Saknar kontakt"] };
+  const _sheetValues = { segment: [], responsible: [], city: [], region: [], priority: ["Hög prio", "Medel prio", "Låg prio"], risk: [], delivery: [], latestContact: ["<1 månad", "1-2 månader", ">3 månader", "Saknar kontakt"] };
 
   // ── Filter modal ──
   const _customerFieldMap = {
@@ -2479,7 +2471,7 @@
 
   function getAvailableValues(key) {
     // Insight-based filters are not cascaded
-    if (key === "risk" || key === "delivery" || key === "latestContact") return _sheetValues[key];
+    if (key === "priority" || key === "risk" || key === "delivery" || key === "latestContact") return _sheetValues[key];
     // Apply all active filters except the one being opened
     let base = customers;
     for (const [k, field] of Object.entries(_customerFieldMap)) {
@@ -2545,10 +2537,12 @@
   });
 
   function buildInsightDropdowns() {
+    _sheetValues.priority = ["Hög prio", "Medel prio", "Låg prio"];
     _sheetValues.risk = ["Aktiv", "Bevaka", "Risk", "Hög risk", "Återaktivering krävs"];
     _sheetValues.delivery = [...new Set(
       Object.values(insights).map(i => i.latest_delivery_month).filter(Boolean)
     )].sort().reverse();
+    updateChip("priority");
     updateChip("risk");
     updateChip("delivery");
     updateChip("latestContact");
@@ -2560,11 +2554,13 @@
     _sheetValues.responsible = unique("sales_person");
     _sheetValues.city        = unique("city");
     _sheetValues.region      = unique("region_google");
+    _sheetValues.priority    = ["Hög prio", "Medel prio", "Låg prio"];
     _sheetValues.latestContact = ["<1 månad", "1-2 månader", ">3 månader", "Saknar kontakt"];
     updateChip("segment");
     updateChip("responsible");
     updateChip("city");
     updateChip("region");
+    updateChip("priority");
     updateChip("latestContact");
   }
 
@@ -2641,9 +2637,8 @@
   }
 
   document.getElementById("clear-filters-btn").addEventListener("click", () => {
-    ["segment", "responsible", "city", "region", "missed", "risk", "delivery", "latestContact"].forEach(key => filterState[key].clear());
+    ["segment", "responsible", "city", "region", "priority", "risk", "delivery", "latestContact"].forEach(key => filterState[key].clear());
     Object.keys(_chipIds).forEach(key => updateChip(key));
-    document.getElementById("chip-missed").classList.remove("active");
     document.getElementById("clear-filters-row").style.display = "none";
     renderList();
   });
@@ -2665,9 +2660,9 @@
     if (filterState.responsible.size) filtered = filtered.filter(c => filterState.responsible.has(c.sales_person));
     if (filterState.city.size)        filtered = filtered.filter(c => filterState.city.has(c.city));
     if (filterState.region.size)      filtered = filtered.filter(c => filterState.region.has(c.region_google));
-    if (filterState.missed.size) filtered = filtered.filter(c => {
+    if (filterState.priority.size) filtered = filtered.filter(c => {
       const ins = insights[c.customer.toLowerCase()];
-      return ins?.missad_uppfoljning;
+      return filterState.priority.has(ins?.priority_level || "");
     });
     if (filterState.risk.size) filtered = filtered.filter(c => {
       const ins = insights[c.customer.toLowerCase()];

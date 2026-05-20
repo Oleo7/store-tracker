@@ -211,6 +211,41 @@ class PriorityTests(TestCase):
         self.assertEqual(data["selected_responsible"], "Daniel")
         self.assertTrue(all(customer["sales_person"] == "Daniel" for customer in data["priority_customers"]))
 
+    def test_customer_insights_endpoint_returns_priority_level(self):
+        customers = [
+            [
+                "customer",
+                "cancelled_flag",
+                "sales_person",
+                "customer_segment",
+                "customer_number",
+                "city_google",
+                "region_google",
+            ],
+            ["Customer A", "", "Daniel", "A", "1001", "Stockholm", "Stockholms län"],
+        ]
+        orders = [
+            app_module.ORDER_COLUMNS,
+            _row(app_module.ORDER_COLUMNS, _order("A1", "Customer A", "2026-03-01", "2026-03-01", 40, 1000, customer_number="1001")),
+        ]
+        contacts = [app_module.CONTACT_COLUMNS]
+        fake_spreadsheet = FakeSpreadsheet(
+            {
+                "customers_enriched": customers,
+                "order_rows": orders,
+                "sales_activities": contacts,
+            }
+        )
+
+        with patch.object(app_module, "get_spreadsheet_with_retry", return_value=fake_spreadsheet):
+            client = app_module.app.test_client()
+            response = client.get("/customer-insights")
+            data = response.get_json()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("customer a", data)
+        self.assertIn(data["customer a"]["priority_level"], {"Hög prio", "Medel prio", "Låg prio"})
+
     def test_customers_endpoint_reads_name_without_shifting_phone_or_email(self):
         customers = [
             [

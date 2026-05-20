@@ -126,6 +126,34 @@ def get_contact_rows(spreadsheet):
     )
 
 
+def get_customer_rows(spreadsheet):
+    customer_values = spreadsheet.worksheet("customers_enriched").get_all_values()
+    customer_headers = customer_values[0] if customer_values else []
+    customers = []
+    for i, row in enumerate(customer_values[1:], start=2):
+        padded = row + [""] * (len(customer_headers) - len(row))
+        d = dict(zip(customer_headers, padded))
+        name = d.get("customer", "").strip()
+        if not name:
+            continue
+        customers.append({
+            "row": i,
+            "customer": name,
+            "cancelled_flag": d.get("cancelled_flag", "").strip(),
+            "sales_person": d.get("sales_person", "").strip(),
+            "customer_segment": d.get("customer_segment", "").strip(),
+            "customer_number": d.get("customer_number", "").strip(),
+            "phone": d.get("phone", "").strip(),
+            "email": d.get("email", "").strip(),
+            "city_google": d.get("city_google", "").strip(),
+            "region_google": d.get("region_google", "").strip(),
+            "latitude_google": d.get("latitude_google", "").strip(),
+            "longitude_google": d.get("longitude_google", "").strip(),
+            "comment": d.get("comment", "").strip(),
+        })
+    return customers
+
+
 def normalize_key(value):
     return normalize_customer_key(value)
 
@@ -397,6 +425,7 @@ def get_customer_stats(customer_name):
 def get_customer_insights():
     spreadsheet = get_spreadsheet_with_retry()
     today = date.today()
+    customers = get_customer_rows(spreadsheet)
 
     # Latest follow_up_date per customer
     contact_rows = get_contact_rows(spreadsheet)
@@ -424,8 +453,29 @@ def get_customer_insights():
         if ref:
             order_count[name] = order_count.get(name, 0) + 1
 
+    order_features = build_order_features(order_rows)
+    contact_features = build_contact_features(contact_rows, order_features)
+    priority_customers = build_priority_customers(
+        customers,
+        order_features,
+        contact_features,
+        None,
+        today,
+        limit=len(customers),
+    )
+    priority_by_name = {
+        normalize_key(customer["customer"]): customer
+        for customer in priority_customers
+    }
+
     # Compute insights for all customers
-    all_names = set(latest_followup.keys()) | set(latest_order.keys()) | set(order_count.keys()) | set(latest_delivery.keys())
+    all_names = (
+        set(latest_followup.keys())
+        | set(latest_order.keys())
+        | set(order_count.keys())
+        | set(latest_delivery.keys())
+        | {c["customer"].strip().lower() for c in customers if c.get("customer")}
+    )
     insights = {}
     for name in all_names:
         # missad_uppfoljning
@@ -440,9 +490,13 @@ def get_customer_insights():
 
         ld = latest_delivery.get(name)
         latest_delivery_date = format_date_value(ld)
+        priority = priority_by_name.get(normalize_key(name), {})
         insights[name] = {
             "missad_uppfoljning": missad,
             "customer_risk": risk,
+            "priority_level": priority.get("priority_level", ""),
+            "priority_score": priority.get("priority_score"),
+            "priority_type": priority.get("priority_type", ""),
             "latest_delivery_date": latest_delivery_date,
             "latest_delivery_month": latest_delivery_date[:7] if latest_delivery_date else "",  # "YYYY-MM"
         }
@@ -460,33 +514,10 @@ def get_followup_insights():
     previous_week_key = weeks[-2]["key"] if len(weeks) > 1 else ""
     selected_responsible = request.args.get("responsible", "").strip()
 
-    customer_values = spreadsheet.worksheet("customers_enriched").get_all_values()
-    customer_headers = customer_values[0] if customer_values else []
     customers_by_name = {}
-    customers = []
-    for i, row in enumerate(customer_values[1:], start=2):
-        padded = row + [""] * (len(customer_headers) - len(row))
-        d = dict(zip(customer_headers, padded))
-        name = d.get("customer", "").strip()
-        if not name:
-            continue
-        customer = {
-            "row": i,
-            "customer": name,
-            "cancelled_flag": d.get("cancelled_flag", "").strip(),
-            "sales_person": d.get("sales_person", "").strip(),
-            "customer_segment": d.get("customer_segment", "").strip(),
-            "customer_number": d.get("customer_number", "").strip(),
-            "phone": d.get("phone", "").strip(),
-            "email": d.get("email", "").strip(),
-            "city_google": d.get("city_google", "").strip(),
-            "region_google": d.get("region_google", "").strip(),
-            "latitude_google": d.get("latitude_google", "").strip(),
-            "longitude_google": d.get("longitude_google", "").strip(),
-            "comment": d.get("comment", "").strip(),
-        }
-        customers.append(customer)
-        customers_by_name[normalize_key(name)] = customer
+    customers = get_customer_rows(spreadsheet)
+    for customer in customers:
+        customers_by_name[normalize_key(customer["customer"])] = customer
 
     contact_rows = get_contact_rows(spreadsheet)
     order_rows = get_order_rows(spreadsheet)
