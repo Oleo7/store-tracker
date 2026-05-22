@@ -273,6 +273,10 @@ def build_recent_weeks(today, count=5):
     return weeks
 
 
+def format_dfp_count(count):
+    return int(count) if float(count).is_integer() else round(count, 1)
+
+
 def calculate_customer_risk(order_count, latest_order, latest_delivery, today):
     most_recent = max(latest_order, latest_delivery) if latest_order and latest_delivery else (latest_order or latest_delivery)
     if order_count == 0 or not most_recent:
@@ -540,6 +544,7 @@ def get_followup_insights():
     # DFP leaderboard is intentionally global and ignores the selected responsible filter.
     # It sums Quantity for every order row by the customer's responsible salesperson.
     dfp_counts = {w["key"]: defaultdict(float) for w in weeks}
+    dfp_team_totals = {w["key"]: 0.0 for w in weeks}
     for order in order_rows:
         order_date = parse_date_value(order["Order date"])
         if not order_date:
@@ -548,11 +553,16 @@ def get_followup_insights():
         if key not in week_keys:
             continue
 
+        quantity = parse_number_value(order["Quantity"], default=0.0)
+        if quantity <= 0:
+            continue
+
+        dfp_team_totals[key] += quantity
+
         customer = customers_by_name.get(normalize_key(order["Customer"]))
         if not customer or not customer["sales_person"]:
             continue
         responsible = customer["sales_person"]
-        quantity = parse_number_value(order["Quantity"], default=0.0)
         dfp_counts[key][responsible] += quantity
 
     dfp_leaderboard = []
@@ -561,11 +571,12 @@ def get_followup_insights():
         dfp_leaderboard.append({
             "week_key": w["key"],
             "label": w["label"],
+            "team_total_dfp": format_dfp_count(dfp_team_totals[w["key"]]),
             "leaders": [
                 {
                     "rank": idx + 1,
                     "sales_person": name,
-                    "dfp_count": int(count) if float(count).is_integer() else round(count, 1),
+                    "dfp_count": format_dfp_count(count),
                 }
                 for idx, (name, count) in enumerate(leaders)
             ],

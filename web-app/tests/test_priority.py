@@ -211,6 +211,59 @@ class PriorityTests(TestCase):
         self.assertEqual(data["selected_responsible"], "Daniel")
         self.assertTrue(all(customer["sales_person"] == "Daniel" for customer in data["priority_customers"]))
 
+    def test_followup_insights_dfp_team_total_includes_all_salespeople(self):
+        customers = [
+            [
+                "customer",
+                "cancelled_flag",
+                "sales_person",
+                "customer_segment",
+                "customer_number",
+                "name",
+                "phone",
+                "email",
+                "city_google",
+                "region_google",
+                "latitude_google",
+                "longitude_google",
+                "comment",
+            ],
+            ["Customer Daniel", "", "Daniel", "A", "1001", "", "", "", "", "", "", "", ""],
+            ["Customer Johan", "", "Johan", "A", "1002", "", "", "", "", "", "", "", ""],
+            ["Customer Sara", "", "Sara", "A", "1003", "", "", "", "", "", "", "", ""],
+            ["Customer Lisa", "", "Lisa", "A", "1004", "", "", "", "", "", "", "", ""],
+        ]
+        order_date = date.today().isoformat()
+        orders = [
+            app_module.ORDER_COLUMNS,
+            _row(app_module.ORDER_COLUMNS, _order("D1", "Customer Daniel", order_date, order_date, 50, 1000, customer_number="1001")),
+            _row(app_module.ORDER_COLUMNS, _order("J1", "Customer Johan", order_date, order_date, 40, 1000, customer_number="1002")),
+            _row(app_module.ORDER_COLUMNS, _order("S1", "Customer Sara", order_date, order_date, 30, 1000, customer_number="1003")),
+            _row(app_module.ORDER_COLUMNS, _order("L1", "Customer Lisa", order_date, order_date, 20, 1000, customer_number="1004")),
+            _row(app_module.ORDER_COLUMNS, _order("M1", "Customer Missing", order_date, order_date, 15, 1000, customer_number="9999")),
+        ]
+        fake_spreadsheet = FakeSpreadsheet(
+            {
+                "customers_enriched": customers,
+                "order_rows": orders,
+                "sales_activities": [app_module.CONTACT_COLUMNS],
+            }
+        )
+
+        with patch.object(app_module, "get_spreadsheet_with_retry", return_value=fake_spreadsheet):
+            client = app_module.app.test_client()
+            response = client.get("/followup-insights?responsible=Daniel")
+            data = response.get_json()
+
+        current_week = next(
+            week for week in data["dfp_leaderboard"]
+            if week["week_key"] == app_module.week_key(date.today())
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(current_week["team_total_dfp"], 155)
+        self.assertEqual([leader["sales_person"] for leader in current_week["leaders"]], ["Daniel", "Johan", "Sara"])
+        self.assertEqual(sum(leader["dfp_count"] for leader in current_week["leaders"]), 120)
+
     def test_customer_insights_endpoint_returns_priority_level(self):
         customers = [
             [

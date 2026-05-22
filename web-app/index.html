@@ -912,11 +912,31 @@
       background: #f8f9fc;
       flex-shrink: 0;
       gap: 10px;
+      flex-wrap: wrap;
     }
     .map-route-bar span {
+      flex: 1 1 130px;
       font-size: 0.78rem;
       color: #888;
       font-weight: 500;
+      min-width: 0;
+    }
+    .map-route-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-shrink: 0;
+    }
+    .map-route-actions .action-btn {
+      width: auto;
+      margin: 0;
+      padding: 8px 12px;
+      font-size: 0.78rem;
+      white-space: nowrap;
+    }
+    .map-route-actions .action-btn.secondary {
+      margin: 0;
+      border-width: 1.5px;
     }
     .map-stop-item { cursor: pointer; user-select: none; }
     .map-stop-item:active { background: #f5f7fa; border-radius: 6px; }
@@ -924,6 +944,20 @@
     .map-stop-detail-btn:active { color: #1a1a2e; }
     .stop-num.route-start { background: #22c55e; }
     .map-stop-item.route-selected { background: #f0f7ff; border-radius: 6px; padding-left: 4px; padding-right: 4px; }
+    @media (max-width: 420px) {
+      .map-route-bar { align-items: stretch; }
+      .map-route-bar span { flex-basis: 100%; }
+      .map-route-actions {
+        width: 100%;
+        display: grid;
+        grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.35fr);
+      }
+      .map-route-actions .action-btn {
+        width: 100%;
+        padding-left: 8px;
+        padding-right: 8px;
+      }
+    }
 
     /* ── Follow-up insights ── */
     .insights-body {
@@ -999,8 +1033,32 @@
       white-space: nowrap;
     }
     .dfp-table tr:last-child td { border-bottom: none; }
+    .dfp-team-row td {
+      background: #fff8fc;
+      border-bottom: 2px solid #eadce7;
+    }
+    .dfp-team-label {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 999px;
+      background: #1a1a2e;
+      color: #fff;
+      font-size: 0.7rem;
+      font-weight: 850;
+      padding: 5px 8px;
+      white-space: nowrap;
+    }
+    .dfp-team-count {
+      color: #1a1a2e;
+      display: block;
+      font-size: 0.9rem;
+      font-weight: 900;
+      line-height: 1.2;
+      white-space: nowrap;
+    }
     .dfp-rank-cell {
-      width: 44px;
+      width: 98px;
       color: #777;
       font-weight: 800;
     }
@@ -1778,6 +1836,20 @@
       color: var(--pb-muted);
     }
 
+    .dfp-team-row td {
+      background: #fff7fb;
+      border-bottom-color: var(--pb-pink);
+    }
+
+    .dfp-team-label {
+      background: var(--pb-ink);
+      color: #fff;
+    }
+
+    .dfp-team-count {
+      color: var(--pb-ink);
+    }
+
     .dfp-name {
       color: var(--pb-ink);
     }
@@ -2111,8 +2183,7 @@
     <div class="insights-panel">
       <div class="panel-heading">
         <div>
-          <div class="insights-panel-title">Prio-lista</div>
-          <p class="panel-subtitle">Butiker som kan vara värda att ta först</p>
+          <div class="insights-panel-title">Butiker värda att bevaka</div>
         </div>
         <span class="panel-badge">Topp 30</span>
       </div>
@@ -2365,7 +2436,10 @@
   <button id="map-locate-btn" title="Min position" aria-label="Min position">&#x2316;</button>
   <div class="map-route-bar" id="map-route-bar">
     <span id="map-route-count">Välj butiker nedan för rutt</span>
-    <button class="action-btn" id="map-gmaps-btn" disabled style="margin:0;padding:8px 14px;font-size:0.8rem">&#127758; Öppna i Google Maps</button>
+    <div class="map-route-actions">
+      <button class="action-btn secondary" id="map-clear-route-btn" disabled>Rensa rutt</button>
+      <button class="action-btn" id="map-gmaps-btn" disabled>&#127758; Öppna i Google Maps</button>
+    </div>
   </div>
   <div class="map-stop-list" id="map-stop-list"></div>
 </div>
@@ -2389,6 +2463,8 @@
   const FREEZER_FIELDS = ["Franui", "Schufrulade", "Boujee", "polarbar"];
   const FREEZER_LABELS = { Franui: "Franui", Schufrulade: "Schufrulade", Boujee: "Boujee", polarbar: "Polarbär" };
   const LIST_BATCH_SIZE = 80;
+  const MAP_ROUTE_DRAFT_KEY = "st_map_route_draft_v1";
+  const MAP_ROUTE_DRAFT_TTL_MS = 12 * 60 * 60 * 1000;
 
   let customers = [];
   let searchQuery = "";
@@ -3200,6 +3276,9 @@
     document.querySelectorAll(".view").forEach(v => v.classList.remove("active"));
     document.getElementById(`view-${name}`).classList.add("active");
     document.getElementById("detail-loader").classList.remove("show");
+    if (name === "map" && googleMap && window.google) {
+      setTimeout(() => google.maps.event.trigger(googleMap, "resize"), 0);
+    }
     window.scrollTo(0, 0);
   }
 
@@ -3278,7 +3357,7 @@
 
   function renderDfpLeaderboard(data) {
     const weeks = [...(data.dfp_leaderboard || [])].reverse();
-    const hasAny = weeks.some(week => (week.leaders || []).length > 0);
+    const hasAny = weeks.some(week => (week.leaders || []).length > 0 || Number(week.team_total_dfp || 0) > 0);
     const table = document.getElementById("dfp-leaderboard-table");
 
     if (!hasAny) {
@@ -3293,6 +3372,16 @@
           ${weeks.map(week => `<th>${esc(week.label)}</th>`).join("")}
         </tr>
       </thead>
+    `;
+    const teamRow = `
+      <tr class="dfp-team-row">
+        <td class="dfp-rank-cell"><span class="dfp-team-label">Team</span></td>
+        ${weeks.map(week => `
+          <td>
+            <span class="dfp-team-count">${week.team_total_dfp ?? "—"} DFP</span>
+          </td>
+        `).join("")}
+      </tr>
     `;
     const rows = [0, 1, 2].map(rankIdx => `
       <tr>
@@ -3311,7 +3400,7 @@
       </tr>
     `).join("");
 
-    table.innerHTML = `${head}<tbody>${rows}</tbody>`;
+    table.innerHTML = `${head}<tbody>${teamRow}${rows}</tbody>`;
   }
 
   function renderContactInsights(contacts) {
@@ -3481,6 +3570,7 @@
   let mapMarkers = [];
   let mapStops = [];        // all stores shown on the map
   let routeInMapStops = []; // selection for Google Maps route
+  let hasStoredRouteOutsideCurrentMap = false;
 
   document.getElementById("route-mode-btn").addEventListener("click", showMapView);
 
@@ -3489,6 +3579,79 @@
   });
 
   document.getElementById("map-gmaps-btn").addEventListener("click", openInGoogleMaps);
+  document.getElementById("map-clear-route-btn").addEventListener("click", clearMapRoute);
+
+  function getRouteDraftRows(rows) {
+    const seen = new Set();
+    return (Array.isArray(rows) ? rows : [])
+      .map(row => Number(row))
+      .filter(row => {
+        if (!Number.isFinite(row) || row <= 0 || seen.has(row)) return false;
+        seen.add(row);
+        return true;
+      });
+  }
+
+  function loadMapRouteDraft() {
+    try {
+      const raw = localStorage.getItem(MAP_ROUTE_DRAFT_KEY);
+      if (!raw) return null;
+
+      const draft = JSON.parse(raw);
+      const savedAt = Number(draft?.savedAt);
+      const rows = getRouteDraftRows(draft?.rows);
+      if (!savedAt || Date.now() - savedAt > MAP_ROUTE_DRAFT_TTL_MS || rows.length < 1) {
+        try { localStorage.removeItem(MAP_ROUTE_DRAFT_KEY); } catch {}
+        return null;
+      }
+
+      return { rows, savedAt };
+    } catch {
+      try { localStorage.removeItem(MAP_ROUTE_DRAFT_KEY); } catch {}
+      return null;
+    }
+  }
+
+  function saveCurrentMapRouteDraft() {
+    hasStoredRouteOutsideCurrentMap = false;
+    const rows = getRouteDraftRows(routeInMapStops.map(c => c.row));
+    try {
+      if (rows.length < 1) {
+        localStorage.removeItem(MAP_ROUTE_DRAFT_KEY);
+        return;
+      }
+
+      localStorage.setItem(MAP_ROUTE_DRAFT_KEY, JSON.stringify({
+        rows,
+        savedAt: Date.now(),
+      }));
+    } catch {}
+  }
+
+  function restoreMapRouteDraft() {
+    const draft = loadMapRouteDraft();
+    routeInMapStops = [];
+    hasStoredRouteOutsideCurrentMap = false;
+    if (!draft) return;
+
+    const stopsByRow = new Map(mapStops.map(c => [Number(c.row), c]));
+    const restoredStops = draft.rows.map(row => stopsByRow.get(row)).filter(Boolean);
+    if (restoredStops.length === draft.rows.length) {
+      routeInMapStops = restoredStops;
+      return;
+    }
+
+    hasStoredRouteOutsideCurrentMap = true;
+  }
+
+  function clearMapRoute() {
+    routeInMapStops = [];
+    hasStoredRouteOutsideCurrentMap = false;
+    try { localStorage.removeItem(MAP_ROUTE_DRAFT_KEY); } catch {}
+    renderMapMarkers();
+    renderMapStopList();
+    showToast("Rutten rensad");
+  }
 
   // ── Show map with all selected stores (no route yet) ──
   async function showMapView() {
@@ -3500,7 +3663,7 @@
       return;
     }
 
-    routeInMapStops = [];
+    restoreMapRouteDraft();
     showView("map");
     await initGoogleMap();
     renderMapMarkers();
@@ -3637,6 +3800,7 @@
     } else {
       routeInMapStops.push(c);
     }
+    saveCurrentMapRouteDraft();
     renderMapMarkers();
     renderMapStopList();
     updateMapRouteBar();
@@ -3645,9 +3809,12 @@
   function updateMapRouteBar() {
     const n = routeInMapStops.length;
     document.getElementById("map-route-count").textContent =
-      n === 0 ? "Välj butiker nedan för rutt"
-              : `${n} butik${n !== 1 ? "er" : ""} vald${n !== 1 ? "a" : ""} för rutt`;
+      n === 0
+        ? (hasStoredRouteOutsideCurrentMap ? "Sparad rutt utanför filtret" : "Välj butiker nedan för rutt")
+        : `${n} butik${n !== 1 ? "er" : ""} vald${n !== 1 ? "a" : ""} för rutt`;
     document.getElementById("map-gmaps-btn").disabled = routeInMapStops.length < 1;
+    document.getElementById("map-clear-route-btn").disabled =
+      routeInMapStops.length < 1 && !hasStoredRouteOutsideCurrentMap;
   }
 
   function renderMapStopList() {
