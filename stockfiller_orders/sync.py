@@ -53,6 +53,17 @@ PRODUCTION_BASE_URL = "https://api.stockfiller.com/v1"
 SANDBOX_BASE_URL = "https://public-api.staging.stockfillertech.com/v1"
 DEFAULT_LOOKBACK_HOURS = 48
 DEFAULT_TIMEOUT_SECONDS = 30
+BACKFILL_CHUNK_DAYS = 31
+NUMERIC_COLUMNS = {
+    "Weight",
+    "Quantity",
+    "Total weight",
+    "Total (Pre-discount)",
+    "Product Discount",
+    "Total",
+    "Order Discount (Amount)",
+    "Order Discount (%)",
+}
 
 
 @dataclass(frozen=True)
@@ -226,11 +237,11 @@ def sync_orders(
 ) -> SyncResult:
     spreadsheet = spreadsheet or open_spreadsheet(config)
     order_sheet = get_or_create_worksheet(spreadsheet, target_worksheet, rows=1000, cols=len(ORDER_COLUMNS))
-    existing_values = order_sheet.get_all_values()
+    existing_values = order_sheet.get_all_values(value_render_option="UNFORMATTED_VALUE")
     headers, existing_rows = values_to_dicts(existing_values)
 
     client = StockfillerClient(config)
-    orders = list(client.iter_orders(window.params))
+    orders = dedupe_orders_by_reference(fetch_orders_for_window(client, window))
     replace_references = {text(order.get("reference")) for order in orders if text(order.get("reference"))}
     output_rows = flatten_orders(orders)
     apply_crm_customer_numbers(output_rows, load_crm_customer_numbers(spreadsheet))
@@ -267,6 +278,73 @@ def sync_orders(
         final_rows=len(final_rows),
         stop_value=window.stop_value,
     )
+
+
+def fetch_orders_for_window(client: StockfillerClient, window: SyncWindow) -> list[dict[str, Any]]:
+    orders: list[dict[str, Any]] = []
+    for params in order_params_for_window(window):
+        orders.extend(client.iter_orders(params))
+    return orders
+
+
+def order_params_for_window(window: SyncWindow) -> list[dict[str, str]]:
+    if (
+        window.mode == "backfill"
+        and "createdDateTimeStart" in window.params
+        and "createdDateTimeStop" in window.params
+    ):
+        return chunk_datetime_params(
+            window.params,
+            start_key="createdDateTimeStart",
+            stop_key="createdDateTimeStop",
+            chunk_days=BACKFILL_CHUNK_DAYS,
+        )
+    return [window.params]
+
+
+def chunk_datetime_params(params: dict[str, str], start_key: str, stop_key: str, chunk_days: int) -> list[dict[str, str]]:
+    start = parse_datetime_arg(params[start_key])
+    stop = parse_datetime_arg(params[stop_key])
+    if start > stop:
+        return [params]
+
+    chunks = []
+    current = start
+    while current <= stop:
+        chunk_stop = min(current + timedelta(days=chunk_days) - timedelta(seconds=1), stop)
+        chunk = {
+            **params,
+            start_key: to_stockfiller_datetime(current),
+            stop_key: to_stockfiller_datetime(chunk_stop),
+        }
+        chunks.append(chunk)
+        current = chunk_stop + timedelta(seconds=1)
+    return chunks
+
+
+def dedupe_orders_by_reference(orders: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_reference: dict[str, dict[str, Any]] = {}
+    without_reference: list[dict[str, Any]] = []
+    for order in orders:
+        reference = text(order.get("reference") or order.get("externalOrderReference"))
+        if not reference:
+            without_reference.append(order)
+            continue
+
+        existing = by_reference.get(reference)
+        if existing is None or order_updated_at(order) >= order_updated_at(existing):
+            by_reference[reference] = order
+    return list(by_reference.values()) + without_reference
+
+
+def order_updated_at(order: dict[str, Any]) -> datetime:
+    value = text(order.get("updatedAtDateTime") or order.get("createdAtDateTime"))
+    if not value:
+        return datetime.min.replace(tzinfo=timezone.utc)
+    try:
+        return parse_datetime_arg(value)
+    except ValueError:
+        return datetime.min.replace(tzinfo=timezone.utc)
 
 
 def open_spreadsheet(config: SyncConfig):
@@ -327,9 +405,9 @@ def merge_headers(existing_headers: list[str]) -> list[str]:
 
 def write_rows(worksheet, headers: list[str], rows: list[dict[str, Any]]) -> None:
     values = [headers]
-    values.extend([[format_cell(row.get(header, "")) for header in headers] for row in rows])
+    values.extend([[format_cell(row.get(header, ""), header) for header in headers] for row in rows])
     worksheet.clear()
-    worksheet.update(values=values, range_name="A1")
+    worksheet.update(values=values, range_name="A1", raw=True)
 
 
 def flatten_orders(orders: Iterable[dict[str, Any]]) -> list[dict[str, str]]:
@@ -375,7 +453,7 @@ def apply_crm_customer_numbers(order_rows: list[dict[str, str]], customer_number
 
 def flatten_order(order: dict[str, Any]) -> list[dict[str, str]]:
     reference = text(order.get("reference") or order.get("externalOrderReference"))
-    if not reference or truthy(order.get("cancelled")):
+    if not reference:
         return []
 
     address, number = split_street_address(order.get("deliveryAddress"))
@@ -387,18 +465,22 @@ def flatten_order(order: dict[str, Any]) -> list[dict[str, str]]:
 
     rows = []
     for order_row in order.get("orderRows") or []:
-        if truthy(order_row.get("cancelled")) or truthy(order_row.get("deposit")):
+        if truthy(order_row.get("deposit")):
             continue
 
         quantity = parse_decimal(order_row.get("ordered"))
-        if quantity is None or quantity <= 0:
+        delivered_quantity = first_decimal(order_row.get("delivered"), order_row.get("received"))
+        financial_quantity = delivered_quantity if delivered_quantity is not None else quantity
+        if quantity is None and financial_quantity is None:
             continue
+        quantity = quantity or Decimal(0)
+        financial_quantity = financial_quantity or Decimal(0)
 
         discounted_price = parse_decimal(first_not_none(order_row.get("priceDiscounted"), order_row.get("price")))
         base_price = parse_decimal(order_row.get("price"))
-        total = money_from_minor(discounted_price * quantity, currency) if discounted_price is not None else ""
-        pre_discount_total = money_from_minor(base_price * quantity, currency) if base_price is not None else ""
-        discount = format_discount(order_row, currency)
+        total = money_from_minor(discounted_price * financial_quantity, currency) if discounted_price is not None else ""
+        pre_discount_total = money_from_minor(base_price * financial_quantity, currency) if base_price is not None else ""
+        discount = format_discount(order_row, currency, financial_quantity)
 
         rows.append(
             {
@@ -420,7 +502,7 @@ def flatten_order(order: dict[str, Any]) -> list[dict[str, str]]:
                 "Product": text(order_row.get("productName")),
                 "Weight": "",
                 "Quantity": format_decimal(quantity),
-                "Total weight": "",
+                "Total weight": format_decimal(financial_quantity),
                 "Unit": text(order_row.get("unit")),
                 "Total (Pre-discount)": pre_discount_total,
                 "Product Discount": discount,
@@ -428,20 +510,25 @@ def flatten_order(order: dict[str, Any]) -> list[dict[str, str]]:
                 "Currency": currency,
                 "Order Discount (Amount)": "",
                 "Order Discount (%)": "",
-                "Batch": "",
+                "Batch": text(order_row.get("note")),
             }
         )
     return rows
 
 
-def format_discount(order_row: dict[str, Any], currency: str) -> str:
+def format_discount(order_row: dict[str, Any], currency: str, quantity: Decimal) -> str:
+    base_price = parse_decimal(order_row.get("price"))
+    discounted_price = parse_decimal(order_row.get("priceDiscounted"))
+    if base_price is not None and discounted_price is not None:
+        return money_from_minor((base_price - discounted_price) * quantity, currency)
+
     discount_amount = parse_decimal(order_row.get("discountAmount"))
-    if discount_amount is not None and discount_amount:
-        return money_from_minor(discount_amount, currency)
+    if discount_amount is not None:
+        return money_from_minor(discount_amount * quantity, currency)
 
     discount_percentage = parse_decimal(order_row.get("discountPercentage"))
-    if discount_percentage is not None and discount_percentage:
-        return f"{format_decimal(discount_percentage)}%"
+    if discount_percentage is not None and base_price is not None:
+        return money_from_minor(base_price * quantity * discount_percentage / Decimal(100), currency)
 
     return ""
 
@@ -509,6 +596,14 @@ def parse_decimal(value: Any) -> Decimal | None:
         return None
 
 
+def first_decimal(*values: Any) -> Decimal | None:
+    for value in values:
+        parsed = parse_decimal(value)
+        if parsed is not None:
+            return parsed
+    return None
+
+
 def format_decimal(value: Decimal) -> str:
     normalized = value.normalize()
     if normalized == normalized.to_integral():
@@ -516,7 +611,14 @@ def format_decimal(value: Decimal) -> str:
     return format(normalized, "f")
 
 
-def format_cell(value: Any) -> str:
+def format_cell(value: Any, header: str | None = None) -> Any:
+    if header in NUMERIC_COLUMNS:
+        parsed = parse_number(value)
+        if parsed is not None:
+            if parsed == parsed.to_integral():
+                return int(parsed)
+            return float(parsed)
+
     if isinstance(value, Decimal):
         return format_decimal(value)
     return text(value)
@@ -524,6 +626,30 @@ def format_cell(value: Any) -> str:
 
 def text(value: Any) -> str:
     return str(value or "").replace("\xa0", " ").strip()
+
+
+def parse_number(value: Any) -> Decimal | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float, Decimal)):
+        return Decimal(str(value))
+
+    cleaned = "".join(ch for ch in text(value).replace("−", "-") if ch.isdigit() or ch in ",.-")
+    if cleaned in {"", "-", ".", ","}:
+        return None
+    if "," in cleaned and "." in cleaned:
+        if cleaned.rfind(",") > cleaned.rfind("."):
+            cleaned = cleaned.replace(".", "").replace(",", ".")
+        else:
+            cleaned = cleaned.replace(",", "")
+    elif "," in cleaned:
+        cleaned = cleaned.replace(".", "").replace(",", ".")
+    try:
+        return Decimal(cleaned)
+    except InvalidOperation:
+        return None
 
 
 def normalize_key(value: Any) -> str:

@@ -11,11 +11,14 @@ from stockfiller_orders.sync import (
     SyncWindow,
     apply_crm_customer_numbers,
     build_sync_window,
+    dedupe_orders_by_reference,
     flatten_order,
     merge_headers,
+    order_params_for_window,
     split_street_address,
     sync_orders,
     values_to_dicts,
+    write_rows,
 )
 
 
@@ -42,6 +45,7 @@ class StockfillerSyncTests(TestCase):
                         "productSku": "DFP-001",
                         "productName": "Dubai Fresh Pack",
                         "ordered": 3,
+                        "delivered": 3,
                         "unit": "DFP",
                         "price": 12900,
                         "priceDiscounted": 9900,
@@ -62,14 +66,68 @@ class StockfillerSyncTests(TestCase):
         self.assertEqual(row["Number"], "1A")
         self.assertEqual(row["SKU"], "DFP-001")
         self.assertEqual(row["Quantity"], "3")
+        self.assertEqual(row["Total weight"], "3")
         self.assertEqual(row["Total (Pre-discount)"], "387")
-        self.assertEqual(row["Product Discount"], "23.26%")
+        self.assertEqual(row["Product Discount"], "90")
         self.assertEqual(row["Total"], "297")
         self.assertEqual(row["Currency"], "SEK")
 
-    def test_flatten_order_skips_cancelled_order_and_deposit_rows(self):
-        cancelled_order_rows = flatten_order({"reference": "REF", "cancelled": True, "orderRows": [{"ordered": 1}]})
-        self.assertEqual(cancelled_order_rows, [])
+    def test_flatten_order_uses_delivered_quantity_for_financial_totals(self):
+        rows = flatten_order(
+            {
+                "reference": "PARTIAL",
+                "createdAtDateTime": "2026-02-12T15:22:42Z",
+                "deliveryDate": "2026-03-30",
+                "buyerName": "Store A",
+                "currency": "SEK",
+                "orderRows": [
+                    {
+                        "productSku": "10005",
+                        "productName": "Blabar",
+                        "ordered": 30,
+                        "delivered": 15,
+                        "unit": "Dfp",
+                        "price": 42000,
+                        "priceDiscounted": 39600,
+                        "discountAmount": 2400,
+                        "note": "07626K",
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(rows[0]["Quantity"], "30")
+        self.assertEqual(rows[0]["Total weight"], "15")
+        self.assertEqual(rows[0]["Total (Pre-discount)"], "6300")
+        self.assertEqual(rows[0]["Product Discount"], "360")
+        self.assertEqual(rows[0]["Total"], "5940")
+        self.assertEqual(rows[0]["Batch"], "07626K")
+
+    def test_flatten_order_keeps_cancelled_rows_as_zero_value_and_skips_deposits(self):
+        cancelled_rows = flatten_order(
+            {
+                "reference": "REF",
+                "createdAtDateTime": "2026-02-12T15:22:42Z",
+                "deliveryDate": "2026-03-30",
+                "buyerName": "Store A",
+                "currency": "SEK",
+                "orderRows": [
+                    {
+                        "productSku": "10003",
+                        "productName": "Cancelled product",
+                        "cancelled": True,
+                        "ordered": 15,
+                        "delivered": 0,
+                        "unit": "Dfp",
+                        "price": 42000,
+                        "priceDiscounted": 39600,
+                    }
+                ],
+            }
+        )
+        self.assertEqual(cancelled_rows[0]["Quantity"], "15")
+        self.assertEqual(cancelled_rows[0]["Total weight"], "0")
+        self.assertEqual(cancelled_rows[0]["Total"], "0")
 
         deposit_rows = flatten_order(
             {
@@ -91,6 +149,31 @@ class StockfillerSyncTests(TestCase):
         self.assertEqual(rows[0]["Reference"], "REF1")
         self.assertEqual(rows[0]["extra"], "keep")
         self.assertEqual(merge_headers(headers)[-1], "extra")
+
+    def test_write_rows_writes_numeric_columns_as_numbers(self):
+        worksheet = FakeWorksheet([])
+
+        write_rows(
+            worksheet,
+            ORDER_COLUMNS,
+            [
+                {
+                    "Reference": "REF",
+                    "Quantity": "2",
+                    "Total weight": "2",
+                    "Total (Pre-discount)": "840",
+                    "Product Discount": "48.04",
+                    "Total": "791.96",
+                    "Currency": "SEK",
+                }
+            ],
+        )
+
+        written = dict(zip(ORDER_COLUMNS, worksheet.get_all_values()[1]))
+        self.assertEqual(written["Reference"], "REF")
+        self.assertEqual(written["Quantity"], 2)
+        self.assertEqual(written["Product Discount"], 48.04)
+        self.assertEqual(written["Total"], 791.96)
 
     def test_apply_crm_customer_numbers_prefers_crm_number_by_customer_name(self):
         rows = [
@@ -133,6 +216,50 @@ class StockfillerSyncTests(TestCase):
         orders = list(StockfillerClient(config, session=session).iter_orders({}))
 
         self.assertEqual(orders, [])
+
+    def test_order_params_for_backfill_chunks_large_created_window(self):
+        window = SyncWindow(
+            mode="backfill",
+            params={
+                "createdDateTimeStart": "2026-01-01T00:00:00Z",
+                "createdDateTimeStop": "2026-03-05T12:00:00Z",
+            },
+            stop_value="2026-03-05T12:00:00Z",
+        )
+
+        params = order_params_for_window(window)
+
+        self.assertEqual(len(params), 3)
+        self.assertEqual(params[0]["createdDateTimeStart"], "2026-01-01T00:00:00Z")
+        self.assertEqual(params[0]["createdDateTimeStop"], "2026-01-31T23:59:59Z")
+        self.assertEqual(params[1]["createdDateTimeStart"], "2026-02-01T00:00:00Z")
+        self.assertEqual(params[-1]["createdDateTimeStop"], "2026-03-05T12:00:00Z")
+
+    def test_order_params_for_incremental_keeps_original_window(self):
+        window = SyncWindow(
+            mode="incremental",
+            params={
+                "updatedDateTimeStart": "2026-05-28T08:00:00Z",
+                "updatedDateTimeStop": "2026-05-28T12:00:00Z",
+            },
+            stop_value="2026-05-28T12:00:00Z",
+        )
+
+        self.assertEqual(order_params_for_window(window), [window.params])
+
+    def test_dedupe_orders_by_reference_keeps_latest_updated_order(self):
+        orders = dedupe_orders_by_reference(
+            [
+                {"reference": "REF", "updatedAtDateTime": "2026-01-01T10:00:00Z", "version": "old"},
+                {"reference": "OTHER", "updatedAtDateTime": "2026-01-01T09:00:00Z", "version": "only"},
+                {"reference": "REF", "updatedAtDateTime": "2026-01-01T11:00:00Z", "version": "new"},
+            ]
+        )
+
+        by_reference = {order["reference"]: order for order in orders}
+        self.assertEqual(len(orders), 2)
+        self.assertEqual(by_reference["REF"]["version"], "new")
+        self.assertEqual(by_reference["OTHER"]["version"], "only")
 
     def test_sync_orders_replaces_existing_reference_and_preserves_manual_columns(self):
         spreadsheet = FakeSpreadsheet(
@@ -286,13 +413,13 @@ class FakeWorksheet:
     def __init__(self, values):
         self.values = values
 
-    def get_all_values(self):
+    def get_all_values(self, **kwargs):
         return self.values
 
     def clear(self):
         self.values = []
 
-    def update(self, values, range_name="A1"):
+    def update(self, values, range_name="A1", raw=True):
         self.values = values
 
 
