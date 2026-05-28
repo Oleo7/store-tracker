@@ -1,0 +1,600 @@
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import sys
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
+from typing import Any, Iterable
+
+import gspread
+import requests
+from dotenv import load_dotenv
+from google.oauth2.service_account import Credentials
+from gspread.exceptions import WorksheetNotFound
+
+
+ORDER_COLUMNS = [
+    "Reference",
+    "Order date",
+    "Delivery date",
+    "Customer",
+    "Customer Reference",
+    "Buyer number",
+    "Customer number",
+    "Logistics number",
+    "Address",
+    "Number",
+    "Postal code",
+    "City",
+    "Country",
+    "Phone number",
+    "SKU",
+    "Product",
+    "Weight",
+    "Quantity",
+    "Total weight",
+    "Unit",
+    "Total (Pre-discount)",
+    "Product Discount",
+    "Total",
+    "Currency",
+    "Order Discount (Amount)",
+    "Order Discount (%)",
+    "Batch",
+]
+
+SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
+STATE_SHEET_NAME = "_stockfiller_sync_state"
+PRODUCTION_BASE_URL = "https://api.stockfiller.com/v1"
+SANDBOX_BASE_URL = "https://public-api.staging.stockfillertech.com/v1"
+DEFAULT_LOOKBACK_HOURS = 48
+DEFAULT_TIMEOUT_SECONDS = 30
+
+
+@dataclass(frozen=True)
+class SyncConfig:
+    base_url: str
+    api_token: str
+    supplier_identifier: str
+    supplier_id: str
+    sheet_key: str
+    google_credentials: dict[str, Any]
+    timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS
+
+    @classmethod
+    def from_env(cls) -> "SyncConfig":
+        load_dotenv()
+        api_token = os.environ.get("STOCKFILLER_API_TOKEN", "").strip()
+        supplier_identifier = os.environ.get("STOCKFILLER_SUPPLIER_IDENTIFIER", "supplierGln").strip()
+        supplier_id = os.environ.get("STOCKFILLER_SUPPLIER_ID", "").strip()
+        sheet_key = os.environ.get("SHEET_KEY", "").strip()
+        google_credentials_raw = os.environ.get("GOOGLE_CREDENTIALS", "").strip()
+
+        missing = []
+        if not api_token:
+            missing.append("STOCKFILLER_API_TOKEN")
+        if not supplier_id:
+            missing.append("STOCKFILLER_SUPPLIER_ID")
+        if not sheet_key:
+            missing.append("SHEET_KEY")
+        if not google_credentials_raw:
+            missing.append("GOOGLE_CREDENTIALS")
+        if missing:
+            raise ValueError(f"Missing required environment variables: {', '.join(missing)}")
+
+        valid_identifiers = {"supplierGln", "supplierExternalId", "supplierInternalId"}
+        if supplier_identifier not in valid_identifiers:
+            options = ", ".join(sorted(valid_identifiers))
+            raise ValueError(f"STOCKFILLER_SUPPLIER_IDENTIFIER must be one of: {options}")
+
+        try:
+            google_credentials = json.loads(google_credentials_raw)
+        except json.JSONDecodeError as exc:
+            raise ValueError("GOOGLE_CREDENTIALS must be valid JSON") from exc
+
+        timeout_seconds = int(os.environ.get("STOCKFILLER_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS))
+
+        return cls(
+            base_url=resolve_stockfiller_base_url(),
+            api_token=api_token,
+            supplier_identifier=supplier_identifier,
+            supplier_id=supplier_id,
+            sheet_key=sheet_key,
+            google_credentials=google_credentials,
+            timeout_seconds=timeout_seconds,
+        )
+
+
+@dataclass(frozen=True)
+class SyncWindow:
+    mode: str
+    params: dict[str, str]
+    stop_value: str | None
+
+
+@dataclass(frozen=True)
+class SyncResult:
+    dry_run: bool
+    mode: str
+    target_worksheet: str
+    fetched_orders: int
+    output_rows: int
+    replace_references: int
+    existing_rows: int
+    kept_existing_rows: int
+    final_rows: int
+    stop_value: str | None
+
+
+class StockfillerClient:
+    def __init__(self, config: SyncConfig, session: requests.Session | None = None):
+        self.config = config
+        self.session = session or requests.Session()
+
+    def iter_orders(self, params: dict[str, str]) -> Iterable[dict[str, Any]]:
+        page = 1
+        while True:
+            request_params = {
+                self.config.supplier_identifier: self.config.supplier_id,
+                "page": str(page),
+                **params,
+            }
+            response = self.session.get(
+                f"{self.config.base_url}/supplier/order",
+                headers={"Authorization": f"Bearer {self.config.api_token}"},
+                params=request_params,
+                timeout=self.config.timeout_seconds,
+            )
+            if response.status_code == 404:
+                return
+            response.raise_for_status()
+
+            payload = response.json()
+            data = payload.get("data") or []
+            if not isinstance(data, list):
+                raise ValueError("Unexpected Stockfiller response: 'data' is not a list")
+
+            for order in data:
+                yield order
+
+            meta = payload.get("meta") or {}
+            returned = int(meta.get("returned") or len(data))
+            page_size = int(meta.get("pageSize") or 100)
+            if not data or returned < page_size:
+                return
+            page += 1
+
+
+def resolve_stockfiller_base_url() -> str:
+    explicit_base_url = os.environ.get("STOCKFILLER_BASE_URL", "").strip()
+    if explicit_base_url:
+        return explicit_base_url.rstrip("/")
+
+    environment = os.environ.get("STOCKFILLER_ENVIRONMENT", "production").strip().lower()
+    if environment in {"production", "prod"}:
+        return PRODUCTION_BASE_URL
+    if environment in {"sandbox", "staging", "stage"}:
+        return SANDBOX_BASE_URL
+    raise ValueError("STOCKFILLER_ENVIRONMENT must be production or sandbox")
+
+
+def build_sync_window(args: argparse.Namespace, state: dict[str, str], now: datetime | None = None) -> SyncWindow:
+    now = now or datetime.now(timezone.utc)
+    stop = parse_datetime_arg(args.stop) if args.stop else now
+
+    if args.mode == "backfill":
+        if not args.start:
+            raise ValueError("--start is required in backfill mode")
+        start = parse_datetime_arg(args.start)
+        return SyncWindow(
+            mode="backfill",
+            params={
+                "createdDateTimeStart": to_stockfiller_datetime(start),
+                "createdDateTimeStop": to_stockfiller_datetime(stop),
+            },
+            stop_value=to_stockfiller_datetime(stop),
+        )
+
+    if args.start:
+        start = parse_datetime_arg(args.start)
+    elif state.get("last_successful_updated_stop"):
+        start = parse_datetime_arg(state["last_successful_updated_stop"]) - timedelta(hours=args.overlap_hours)
+    else:
+        start = now - timedelta(hours=args.lookback_hours)
+
+    return SyncWindow(
+        mode="incremental",
+        params={
+            "updatedDateTimeStart": to_stockfiller_datetime(start),
+            "updatedDateTimeStop": to_stockfiller_datetime(stop),
+        },
+        stop_value=to_stockfiller_datetime(stop),
+    )
+
+
+def sync_orders(
+    config: SyncConfig,
+    window: SyncWindow,
+    dry_run: bool = False,
+    spreadsheet=None,
+    target_worksheet: str = "order_rows",
+    update_state: bool = True,
+) -> SyncResult:
+    spreadsheet = spreadsheet or open_spreadsheet(config)
+    order_sheet = get_or_create_worksheet(spreadsheet, target_worksheet, rows=1000, cols=len(ORDER_COLUMNS))
+    existing_values = order_sheet.get_all_values()
+    headers, existing_rows = values_to_dicts(existing_values)
+
+    client = StockfillerClient(config)
+    orders = list(client.iter_orders(window.params))
+    replace_references = {text(order.get("reference")) for order in orders if text(order.get("reference"))}
+    output_rows = flatten_orders(orders)
+    apply_crm_customer_numbers(output_rows, load_crm_customer_numbers(spreadsheet))
+
+    merged_headers = merge_headers(headers)
+    kept_existing_rows = [row for row in existing_rows if text(row.get("Reference")) not in replace_references]
+    final_rows = kept_existing_rows + output_rows
+
+    if not dry_run:
+        write_rows(order_sheet, merged_headers, final_rows)
+        if update_state:
+            state = read_sync_state(spreadsheet)
+            state.update(
+                {
+                    "last_successful_mode": window.mode,
+                    "last_successful_run_at": to_stockfiller_datetime(datetime.now(timezone.utc)),
+                }
+            )
+            if window.mode == "incremental":
+                state["last_successful_updated_stop"] = window.stop_value or ""
+            else:
+                state["last_successful_backfill_created_stop"] = window.stop_value or ""
+            write_sync_state(spreadsheet, state)
+
+    return SyncResult(
+        dry_run=dry_run,
+        mode=window.mode,
+        target_worksheet=target_worksheet,
+        fetched_orders=len(orders),
+        output_rows=len(output_rows),
+        replace_references=len(replace_references),
+        existing_rows=len(existing_rows),
+        kept_existing_rows=len(kept_existing_rows),
+        final_rows=len(final_rows),
+        stop_value=window.stop_value,
+    )
+
+
+def open_spreadsheet(config: SyncConfig):
+    credentials = Credentials.from_service_account_info(config.google_credentials, scopes=SCOPES)
+    return gspread.authorize(credentials).open_by_key(config.sheet_key)
+
+
+def get_or_create_worksheet(spreadsheet, title: str, rows: int, cols: int):
+    try:
+        return spreadsheet.worksheet(title)
+    except WorksheetNotFound:
+        return spreadsheet.add_worksheet(title=title, rows=rows, cols=cols)
+
+
+def read_sync_state(spreadsheet) -> dict[str, str]:
+    try:
+        worksheet = spreadsheet.worksheet(STATE_SHEET_NAME)
+    except WorksheetNotFound:
+        return {}
+
+    rows = worksheet.get_all_values()
+    state = {}
+    for row in rows[1:]:
+        if len(row) >= 2 and row[0]:
+            state[row[0]] = row[1]
+    return state
+
+
+def write_sync_state(spreadsheet, state: dict[str, str]) -> None:
+    worksheet = get_or_create_worksheet(spreadsheet, STATE_SHEET_NAME, rows=10, cols=3)
+    now = to_stockfiller_datetime(datetime.now(timezone.utc))
+    values = [["key", "value", "updated_at"]]
+    for key, value in sorted(state.items()):
+        values.append([key, value, now])
+    worksheet.clear()
+    worksheet.update(values=values, range_name="A1")
+
+
+def values_to_dicts(values: list[list[str]]) -> tuple[list[str], list[dict[str, str]]]:
+    if not values:
+        return ORDER_COLUMNS[:], []
+
+    headers = [text(header) for header in values[0]]
+    rows = []
+    for value_row in values[1:]:
+        row = {}
+        for index, header in enumerate(headers):
+            if header:
+                row[header] = value_row[index] if index < len(value_row) else ""
+        rows.append(row)
+    return headers, rows
+
+
+def merge_headers(existing_headers: list[str]) -> list[str]:
+    extras = [header for header in existing_headers if header and header not in ORDER_COLUMNS]
+    return ORDER_COLUMNS + extras
+
+
+def write_rows(worksheet, headers: list[str], rows: list[dict[str, Any]]) -> None:
+    values = [headers]
+    values.extend([[format_cell(row.get(header, "")) for header in headers] for row in rows])
+    worksheet.clear()
+    worksheet.update(values=values, range_name="A1")
+
+
+def flatten_orders(orders: Iterable[dict[str, Any]]) -> list[dict[str, str]]:
+    rows = []
+    for order in orders:
+        rows.extend(flatten_order(order))
+    return rows
+
+
+def load_crm_customer_numbers(spreadsheet) -> dict[str, str]:
+    try:
+        worksheet = spreadsheet.worksheet("customers_enriched")
+    except WorksheetNotFound:
+        return {}
+
+    values = worksheet.get_all_values()
+    if not values:
+        return {}
+
+    headers = [text(header) for header in values[0]]
+    if "customer" not in headers or "customer_number" not in headers:
+        return {}
+
+    customer_index = headers.index("customer")
+    number_index = headers.index("customer_number")
+    customer_numbers = {}
+    for row in values[1:]:
+        customer = row[customer_index] if customer_index < len(row) else ""
+        number = row[number_index] if number_index < len(row) else ""
+        customer_key = normalize_key(customer)
+        number_value = text(number)
+        if customer_key and number_value:
+            customer_numbers[customer_key] = number_value
+    return customer_numbers
+
+
+def apply_crm_customer_numbers(order_rows: list[dict[str, str]], customer_numbers_by_name: dict[str, str]) -> None:
+    for row in order_rows:
+        crm_customer_number = customer_numbers_by_name.get(normalize_key(row.get("Customer")))
+        if crm_customer_number:
+            row["Customer number"] = crm_customer_number
+
+
+def flatten_order(order: dict[str, Any]) -> list[dict[str, str]]:
+    reference = text(order.get("reference") or order.get("externalOrderReference"))
+    if not reference or truthy(order.get("cancelled")):
+        return []
+
+    address, number = split_street_address(order.get("deliveryAddress"))
+    currency = text(order.get("currency"))
+    order_date = date_part(order.get("createdAtDateTime"))
+    delivery_date = date_part(order.get("deliveryDate"))
+    customer = first_text(order.get("buyerName"), order.get("buyerLegalName"), order.get("buyerExternalId"), order.get("buyerGln"))
+    customer_number = first_text(order.get("buyerExternalId"), order.get("buyerGln"), order.get("buyerOrganisationNumber"))
+
+    rows = []
+    for order_row in order.get("orderRows") or []:
+        if truthy(order_row.get("cancelled")) or truthy(order_row.get("deposit")):
+            continue
+
+        quantity = parse_decimal(order_row.get("ordered"))
+        if quantity is None or quantity <= 0:
+            continue
+
+        discounted_price = parse_decimal(first_not_none(order_row.get("priceDiscounted"), order_row.get("price")))
+        base_price = parse_decimal(order_row.get("price"))
+        total = money_from_minor(discounted_price * quantity, currency) if discounted_price is not None else ""
+        pre_discount_total = money_from_minor(base_price * quantity, currency) if base_price is not None else ""
+        discount = format_discount(order_row, currency)
+
+        rows.append(
+            {
+                "Reference": reference,
+                "Order date": order_date,
+                "Delivery date": delivery_date,
+                "Customer": customer,
+                "Customer Reference": text(order.get("customerReference")),
+                "Buyer number": text(order.get("buyerGln")),
+                "Customer number": customer_number,
+                "Logistics number": text(order.get("buyerExternalLogisticsId")),
+                "Address": address,
+                "Number": number,
+                "Postal code": text(order.get("deliveryZipCode")),
+                "City": text(order.get("deliveryCity")),
+                "Country": text(order.get("deliveryCountryCode")),
+                "Phone number": "",
+                "SKU": text(order_row.get("productSku")),
+                "Product": text(order_row.get("productName")),
+                "Weight": "",
+                "Quantity": format_decimal(quantity),
+                "Total weight": "",
+                "Unit": text(order_row.get("unit")),
+                "Total (Pre-discount)": pre_discount_total,
+                "Product Discount": discount,
+                "Total": total,
+                "Currency": currency,
+                "Order Discount (Amount)": "",
+                "Order Discount (%)": "",
+                "Batch": "",
+            }
+        )
+    return rows
+
+
+def format_discount(order_row: dict[str, Any], currency: str) -> str:
+    discount_amount = parse_decimal(order_row.get("discountAmount"))
+    if discount_amount is not None and discount_amount:
+        return money_from_minor(discount_amount, currency)
+
+    discount_percentage = parse_decimal(order_row.get("discountPercentage"))
+    if discount_percentage is not None and discount_percentage:
+        return f"{format_decimal(discount_percentage)}%"
+
+    return ""
+
+
+def split_street_address(value: Any) -> tuple[str, str]:
+    address = text(value)
+    if not address:
+        return "", ""
+
+    match = re.match(r"^(?P<street>.*\D)\s+(?P<number>\d+\s*[A-Za-z]?(?:[-/]\d+\s*[A-Za-z]?)?)$", address)
+    if not match:
+        return address, ""
+    return match.group("street").strip(), match.group("number").replace(" ", "")
+
+
+def parse_datetime_arg(value: str) -> datetime:
+    text_value = text(value)
+    if not text_value:
+        raise ValueError("Datetime value cannot be empty")
+
+    normalized = text_value.replace("Z", "+00:00")
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", normalized):
+        normalized = f"{normalized}T00:00:00+00:00"
+    parsed = datetime.fromisoformat(normalized)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def to_stockfiller_datetime(value: datetime) -> str:
+    return value.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def date_part(value: Any) -> str:
+    value_text = text(value)
+    if not value_text:
+        return ""
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", value_text):
+        return value_text
+    try:
+        return parse_datetime_arg(value_text).date().isoformat()
+    except ValueError:
+        return value_text[:10]
+
+
+def money_from_minor(value: Decimal, currency: str) -> str:
+    units = minor_units(currency)
+    amount = value / (Decimal(10) ** units)
+    quantizer = Decimal(1) if units == 0 else Decimal("0.01")
+    return format_decimal(amount.quantize(quantizer))
+
+
+def minor_units(currency: str) -> int:
+    if text(currency).upper() in {"BIF", "CLP", "DJF", "GNF", "JPY", "KMF", "KRW", "MGA", "PYG", "RWF", "UGX", "VND", "VUV", "XAF", "XOF", "XPF"}:
+        return 0
+    return 2
+
+
+def parse_decimal(value: Any) -> Decimal | None:
+    if value is None or value == "":
+        return None
+    try:
+        return Decimal(str(value).replace(",", "."))
+    except (InvalidOperation, ValueError):
+        return None
+
+
+def format_decimal(value: Decimal) -> str:
+    normalized = value.normalize()
+    if normalized == normalized.to_integral():
+        return str(normalized.quantize(Decimal(1)))
+    return format(normalized, "f")
+
+
+def format_cell(value: Any) -> str:
+    if isinstance(value, Decimal):
+        return format_decimal(value)
+    return text(value)
+
+
+def text(value: Any) -> str:
+    return str(value or "").replace("\xa0", " ").strip()
+
+
+def normalize_key(value: Any) -> str:
+    return " ".join(text(value).casefold().split())
+
+
+def first_text(*values: Any) -> str:
+    for value in values:
+        candidate = text(value)
+        if candidate:
+            return candidate
+    return ""
+
+
+def first_not_none(*values: Any) -> Any:
+    for value in values:
+        if value is not None:
+            return value
+    return None
+
+
+def truthy(value: Any) -> bool:
+    return str(value).strip().lower() in {"1", "true", "yes", "y"}
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Sync Stockfiller supplier orders to CRM_DATABASE order_rows.")
+    parser.add_argument("--mode", choices=["incremental", "backfill"], default="incremental")
+    parser.add_argument("--start", help="UTC start date/time. Required for backfill. Example: 2026-01-01 or 2026-01-01T00:00:00Z")
+    parser.add_argument("--stop", help="UTC stop date/time. Defaults to now.")
+    parser.add_argument("--dry-run", action="store_true", help="Fetch and merge in memory, but do not write to Google Sheets.")
+    parser.add_argument("--target-worksheet", default="order_rows", help="Worksheet to update. Defaults to order_rows.")
+    parser.add_argument("--lookback-hours", type=int, default=int(os.environ.get("STOCKFILLER_SYNC_LOOKBACK_HOURS", DEFAULT_LOOKBACK_HOURS)))
+    parser.add_argument("--overlap-hours", type=int, default=int(os.environ.get("STOCKFILLER_SYNC_OVERLAP_HOURS", 2)))
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_arg_parser()
+    args = parser.parse_args(argv)
+
+    try:
+        config = SyncConfig.from_env()
+        spreadsheet = open_spreadsheet(config)
+        state = read_sync_state(spreadsheet)
+        window = build_sync_window(args, state)
+        result = sync_orders(
+            config,
+            window,
+            dry_run=args.dry_run,
+            spreadsheet=spreadsheet,
+            target_worksheet=args.target_worksheet,
+            update_state=args.target_worksheet == "order_rows",
+        )
+    except Exception as exc:
+        print(f"Stockfiller sync failed: {exc}", file=sys.stderr)
+        return 1
+
+    action = "Dry run" if result.dry_run else "Sync"
+    print(f"{action} completed.")
+    print(f"Mode: {result.mode}")
+    print(f"Target worksheet: {result.target_worksheet}")
+    print(f"Fetched orders: {result.fetched_orders}")
+    print(f"Output rows: {result.output_rows}")
+    print(f"References replaced: {result.replace_references}")
+    print(f"Existing rows: {result.existing_rows}")
+    print(f"Final rows: {result.final_rows}")
+    if result.stop_value:
+        print(f"Window stop: {result.stop_value}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
