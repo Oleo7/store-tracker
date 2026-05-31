@@ -273,6 +273,72 @@ def build_recent_weeks(today, count=5):
     return weeks
 
 
+SWEDISH_MONTH_LABELS = {
+    1: "jan",
+    2: "feb",
+    3: "mar",
+    4: "apr",
+    5: "maj",
+    6: "jun",
+    7: "jul",
+    8: "aug",
+    9: "sep",
+    10: "okt",
+    11: "nov",
+    12: "dec",
+}
+
+
+def format_week_date_range(start, end):
+    start_month = SWEDISH_MONTH_LABELS[start.month]
+    end_month = SWEDISH_MONTH_LABELS[end.month]
+    if start.month == end.month:
+        return f"{start.day}-{end.day} {end_month}"
+    return f"{start.day} {start_month}-{end.day} {end_month}"
+
+
+def build_dfp_top_weeks(order_rows, year=2026, limit=5):
+    totals_by_week = defaultdict(float)
+    week_dates = {}
+
+    for order in order_rows:
+        order_date = parse_date_value(order["Order date"])
+        if not order_date or order_date.year != year:
+            continue
+
+        total_weight = parse_number_value(order["Total weight"], default=0.0)
+        if total_weight <= 0:
+            continue
+
+        start = week_start(order_date)
+        end = start + timedelta(days=6)
+        key = week_key(order_date)
+        totals_by_week[key] += total_weight
+        week_dates[key] = (start, end, order_date.isocalendar().week)
+
+    top_weeks = sorted(
+        totals_by_week.items(),
+        key=lambda item: (-item[1], week_dates[item[0]][0]),
+    )[:limit]
+    top_total = top_weeks[0][1] if top_weeks else 0
+
+    return [
+        {
+            "rank": idx + 1,
+            "week_key": key,
+            "label": f"Vecka {week_number}",
+            "short_label": f"V{week_number}",
+            "date_range": format_week_date_range(start, end),
+            "start_date": start.isoformat(),
+            "end_date": end.isoformat(),
+            "dfp_count": format_dfp_count(total),
+            "share_of_top": round((total / top_total) * 100) if top_total else 0,
+        }
+        for idx, (key, total) in enumerate(top_weeks)
+        for start, end, week_number in [week_dates[key]]
+    ]
+
+
 def format_dfp_count(count):
     return int(count) if float(count).is_integer() else round(count, 1)
 
@@ -525,6 +591,7 @@ def get_followup_insights():
 
     contact_rows = get_contact_rows(spreadsheet)
     order_rows = get_order_rows(spreadsheet)
+    dfp_top_weeks_2026 = build_dfp_top_weeks(order_rows, year=2026, limit=5)
 
     responsible_options = sorted({
         c["sales_person"] for c in customers_by_name.values() if c["sales_person"]
@@ -542,7 +609,7 @@ def get_followup_insights():
         return customer_belongs_to_selected(contact["customer"])
 
     # DFP leaderboard is intentionally global and ignores the selected responsible filter.
-    # It sums Quantity for every order row by the customer's responsible salesperson.
+    # It sums Total weight for every order row by the customer's responsible salesperson.
     dfp_counts = {w["key"]: defaultdict(float) for w in weeks}
     dfp_team_totals = {w["key"]: 0.0 for w in weeks}
     for order in order_rows:
@@ -553,17 +620,17 @@ def get_followup_insights():
         if key not in week_keys:
             continue
 
-        quantity = parse_number_value(order["Quantity"], default=0.0)
-        if quantity <= 0:
+        total_weight = parse_number_value(order["Total weight"], default=0.0)
+        if total_weight <= 0:
             continue
 
-        dfp_team_totals[key] += quantity
+        dfp_team_totals[key] += total_weight
 
         customer = customers_by_name.get(normalize_key(order["Customer"]))
         if not customer or not customer["sales_person"]:
             continue
         responsible = customer["sales_person"]
-        dfp_counts[key][responsible] += quantity
+        dfp_counts[key][responsible] += total_weight
 
     dfp_leaderboard = []
     for w in weeks:
@@ -661,6 +728,7 @@ def get_followup_insights():
         "responsible_options": responsible_options,
         "weeks": weeks,
         "dfp_leaderboard": dfp_leaderboard,
+        "dfp_top_weeks_2026": dfp_top_weeks_2026,
         "contacts": {
             "current_week_count": current_contacts,
             "previous_week_count": previous_contacts,

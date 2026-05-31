@@ -1073,6 +1073,82 @@
       margin-top: 2px;
       white-space: nowrap;
     }
+    .dfp-top-weeks {
+      display: grid;
+      gap: 8px;
+    }
+    .dfp-top-week {
+      --bar: 0%;
+      position: relative;
+      display: grid;
+      grid-template-columns: 34px minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 10px;
+      min-height: 48px;
+      padding: 8px 10px;
+      overflow: hidden;
+      border: 1px solid var(--pb-border);
+      border-radius: 8px;
+      background: #fff;
+    }
+    .dfp-top-week::before {
+      content: "";
+      position: absolute;
+      inset: 0 auto 0 0;
+      width: var(--bar);
+      min-width: 14px;
+      background: linear-gradient(90deg, rgba(216,61,121,0.2), rgba(242,164,68,0.14));
+    }
+    .dfp-top-week.is-top::before {
+      background: linear-gradient(90deg, rgba(242,164,68,0.28), rgba(216,61,121,0.16));
+    }
+    .dfp-top-week > * {
+      position: relative;
+      z-index: 1;
+    }
+    .dfp-top-week-rank {
+      display: grid;
+      place-items: center;
+      width: 28px;
+      height: 28px;
+      border-radius: 999px;
+      background: var(--pb-ink);
+      color: #fff;
+      font-size: 0.76rem;
+      font-weight: 900;
+    }
+    .dfp-top-week.is-top .dfp-top-week-rank {
+      background: var(--pb-mango);
+      color: #4d3200;
+    }
+    .dfp-top-week-main {
+      min-width: 0;
+    }
+    .dfp-top-week-label {
+      color: var(--pb-ink);
+      font-size: 0.9rem;
+      font-weight: 850;
+      line-height: 1.2;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .dfp-top-week-dates {
+      margin-top: 2px;
+      color: var(--pb-muted);
+      font-size: 0.72rem;
+      font-weight: 650;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .dfp-top-week-value {
+      color: var(--pb-ink);
+      font-size: 1rem;
+      font-weight: 900;
+      white-space: nowrap;
+      text-align: right;
+    }
     .contacts-grid {
       display: grid;
       grid-template-columns: 1fr;
@@ -2020,6 +2096,16 @@
         text-align: left;
         font-size: 0.72rem;
       }
+
+      .dfp-top-week {
+        grid-template-columns: 30px minmax(0, 1fr) auto;
+        gap: 8px;
+        padding: 8px;
+      }
+
+      .dfp-top-week-value {
+        font-size: 0.92rem;
+      }
     }
 
     @media (min-width: 760px) {
@@ -2142,8 +2228,7 @@
     <div class="insights-panel">
       <div class="panel-heading">
         <div>
-          <div class="insights-panel-title">DFP-topplista</div>
-          <p class="panel-subtitle">Kunders ordrar per ansvarig</p>
+          <div class="insights-panel-title">DFP TOPP 3 KUNDERS ORDRAR PER ANSVARIG</div>
         </div>
         <span class="panel-badge">5 veckor</span>
       </div>
@@ -2153,6 +2238,18 @@
             <tr><td>Laddar...</td></tr>
           </tbody>
         </table>
+      </div>
+    </div>
+
+    <div class="insights-panel">
+      <div class="panel-heading">
+        <div>
+          <div class="insights-panel-title">DFP TOPP 5 VECKOR 2026</div>
+        </div>
+        <span class="panel-badge">2026</span>
+      </div>
+      <div class="dfp-top-weeks" id="dfp-top-weeks-2026">
+        <div class="state-msg">Laddar...</div>
       </div>
     </div>
 
@@ -3313,6 +3410,7 @@
     followupInsightsLoading = true;
     document.getElementById("insights-subtitle").textContent = "Laddar...";
     document.getElementById("dfp-leaderboard-table").innerHTML = "<tbody><tr><td>Laddar...</td></tr></tbody>";
+    document.getElementById("dfp-top-weeks-2026").innerHTML = '<div class="state-msg">Laddar...</div>';
     document.getElementById("priority-customer-list").innerHTML = '<div class="state-msg">Laddar prio-lista...</div>';
 
     try {
@@ -3325,6 +3423,8 @@
       document.getElementById("insights-subtitle").textContent = "Kunde inte ladda";
       document.getElementById("dfp-leaderboard-table").innerHTML =
         '<tbody><tr><td>Kunde inte ladda DFP-topplistan.</td></tr></tbody>';
+      document.getElementById("dfp-top-weeks-2026").innerHTML =
+        '<div class="state-msg">Kunde inte ladda toppveckor.</div>';
       document.getElementById("priority-customer-list").innerHTML =
         '<div class="state-msg">Kunde inte ladda prio-lista.</div>';
       showToast("Kunde inte ladda uppföljning.");
@@ -3336,6 +3436,7 @@
   function renderFollowupInsights(data) {
     renderResponsibleSelect(data);
     renderDfpLeaderboard(data);
+    renderDfpTopWeeks2026(data);
     renderContactInsights(data.contacts);
     renderPriorityCustomers(data.priority_customers || []);
 
@@ -3401,6 +3502,32 @@
     `).join("");
 
     table.innerHTML = `${head}<tbody>${teamRow}${rows}</tbody>`;
+  }
+
+  function renderDfpTopWeeks2026(data) {
+    const target = document.getElementById("dfp-top-weeks-2026");
+    const weeks = data.dfp_top_weeks_2026 || [];
+
+    if (!weeks.length) {
+      target.innerHTML = '<div class="state-msg">Ingen DFP-data för 2026 ännu.</div>';
+      return;
+    }
+
+    target.innerHTML = weeks.map(week => {
+      const share = Math.max(8, Math.min(100, Number(week.share_of_top || 0)));
+      const isTop = Number(week.rank) === 1 ? " is-top" : "";
+      const value = week.dfp_count ?? "—";
+      return `
+        <div class="dfp-top-week${isTop}" style="--bar:${share}%">
+          <div class="dfp-top-week-rank">${week.rank}</div>
+          <div class="dfp-top-week-main">
+            <div class="dfp-top-week-label">${esc(week.label)}</div>
+            <div class="dfp-top-week-dates">${esc(week.date_range)}</div>
+          </div>
+          <div class="dfp-top-week-value">${esc(value)} DFP</div>
+        </div>
+      `;
+    }).join("");
   }
 
   function renderContactInsights(contacts) {

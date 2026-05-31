@@ -264,6 +264,58 @@ class PriorityTests(TestCase):
         self.assertEqual([leader["sales_person"] for leader in current_week["leaders"]], ["Daniel", "Johan", "Sara"])
         self.assertEqual(sum(leader["dfp_count"] for leader in current_week["leaders"]), 120)
 
+    def test_followup_insights_returns_top_five_dfp_weeks_2026_from_total_weight(self):
+        customers = [
+            [
+                "customer",
+                "cancelled_flag",
+                "sales_person",
+                "customer_segment",
+                "customer_number",
+                "name",
+                "phone",
+                "email",
+                "city_google",
+                "region_google",
+                "latitude_google",
+                "longitude_google",
+                "comment",
+            ],
+        ]
+        orders = [
+            app_module.ORDER_COLUMNS,
+            _row(app_module.ORDER_COLUMNS, _order("OLD", "Customer A", "2025-12-31", "2026-01-02", 999, 1000, total_weight=999)),
+            _row(app_module.ORDER_COLUMNS, _order("W1A", "Customer A", "2026-01-01", "2026-01-02", 999, 1000, total_weight=10)),
+            _row(app_module.ORDER_COLUMNS, _order("W1B", "Customer A", "2026-01-04", "2026-01-05", 999, 1000, total_weight=15)),
+            _row(app_module.ORDER_COLUMNS, _order("W2", "Customer A", "2026-01-05", "2026-01-06", 999, 1000, total_weight=30)),
+            _row(app_module.ORDER_COLUMNS, _order("W6", "Customer A", "2026-02-02", "2026-02-03", 999, 1000, total_weight=70)),
+            _row(app_module.ORDER_COLUMNS, _order("W10A", "Customer A", "2026-03-02", "2026-03-03", 999, 1000, total_weight=35)),
+            _row(app_module.ORDER_COLUMNS, _order("W10B", "Customer A", "2026-03-08", "2026-03-09", 999, 1000, total_weight=30)),
+            _row(app_module.ORDER_COLUMNS, _order("W11", "Customer A", "2026-03-09", "2026-03-10", 999, 1000, total_weight=50)),
+            _row(app_module.ORDER_COLUMNS, _order("W15", "Customer A", "2026-04-06", "2026-04-07", 999, 1000, total_weight=40)),
+            _row(app_module.ORDER_COLUMNS, _order("W16", "Customer A", "2026-04-13", "2026-04-14", 999, 1000, total_weight=20)),
+        ]
+        fake_spreadsheet = FakeSpreadsheet(
+            {
+                "customers_enriched": customers,
+                "order_rows": orders,
+                "sales_activities": [app_module.CONTACT_COLUMNS],
+            }
+        )
+
+        with patch.object(app_module, "get_spreadsheet_with_retry", return_value=fake_spreadsheet):
+            client = app_module.app.test_client()
+            response = client.get("/followup-insights")
+            data = response.get_json()
+
+        top_weeks = data["dfp_top_weeks_2026"]
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([week["week_key"] for week in top_weeks], ["2026-W06", "2026-W10", "2026-W11", "2026-W15", "2026-W02"])
+        self.assertEqual([week["dfp_count"] for week in top_weeks], [70, 65, 50, 40, 30])
+        self.assertEqual(top_weeks[1]["start_date"], "2026-03-02")
+        self.assertEqual(top_weeks[1]["end_date"], "2026-03-08")
+        self.assertEqual(top_weeks[0]["share_of_top"], 100)
+
     def test_customer_insights_endpoint_returns_priority_level(self):
         customers = [
             [
@@ -362,7 +414,7 @@ def _customer(name, sales_person, segment, row):
     }
 
 
-def _order(reference, customer, order_date, delivery_date, quantity, total, customer_number=""):
+def _order(reference, customer, order_date, delivery_date, quantity, total, customer_number="", total_weight=None):
     return {
         "Reference": reference,
         "Order date": order_date,
@@ -371,6 +423,7 @@ def _order(reference, customer, order_date, delivery_date, quantity, total, cust
         "Customer number": customer_number,
         "Product": "DFP",
         "Quantity": str(quantity),
+        "Total weight": str(quantity if total_weight is None else total_weight),
         "Total": str(total),
         "Unit": "DFP",
         "Currency": "SEK",
