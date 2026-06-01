@@ -402,6 +402,42 @@ class PriorityTests(TestCase):
         self.assertEqual(values[0], ["customer", "name", "phone", "email"])
         self.assertEqual(values[1], ["Store A", "", "0701234567", "a@example.com"])
 
+    def test_add_contact_creates_and_logs_none_column(self):
+        headers_without_none = [column for column in app_module.CONTACT_COLUMNS if column != "none"]
+        contacts = [headers_without_none]
+        fake_spreadsheet = FakeSpreadsheet({"sales_activities": contacts})
+
+        with patch.object(app_module, "get_spreadsheet_with_retry", return_value=fake_spreadsheet):
+            client = app_module.app.test_client()
+            response = client.post(
+                "/customers/Store%20A/contacts",
+                json={
+                    "sales_person": "Sofia",
+                    "contact_channel": "Besök",
+                    "result": "Neutral",
+                    "comment": "Test",
+                    "none": "1",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(contacts[0][-1], "none")
+        appended = contacts[1]
+        self.assertEqual(appended[contacts[0].index("customer")], "Store A")
+        self.assertEqual(appended[contacts[0].index("none")], "1")
+
+    def test_add_contact_requires_freezer_selection(self):
+        contacts = [list(app_module.CONTACT_COLUMNS)]
+        fake_spreadsheet = FakeSpreadsheet({"sales_activities": contacts})
+
+        with patch.object(app_module, "get_spreadsheet_with_retry", return_value=fake_spreadsheet):
+            client = app_module.app.test_client()
+            response = client.post("/customers/Store%20A/contacts", json={"comment": "Test"})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()["error"], "freezer_selection_required")
+        self.assertEqual(len(contacts), 1)
+
 
 def _customer(name, sales_person, segment, row):
     return {
@@ -454,6 +490,13 @@ class FakeWorksheet:
 
     def get_all_values(self):
         return self._values
+
+    def row_values(self, row):
+        row_idx = row - 1
+        return list(self._values[row_idx]) if row_idx < len(self._values) else []
+
+    def append_row(self, row):
+        self._values.append(row)
 
     def insert_cols(self, columns, col=1):
         insert_idx = col - 1

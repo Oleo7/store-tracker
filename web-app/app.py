@@ -39,9 +39,11 @@ ORDER_COLUMNS = ["Reference", "Order date", "Delivery date", "Customer", "Custom
 ORDER_REQUIRED_COLUMNS = ["Reference", "Order date", "Delivery date", "Customer",
                           "Quantity", "Total", "Currency"]
 
+FREEZER_COLUMNS = ["Franui", "Schufrulade", "Boujee", "polarbar", "none"]
+
 CONTACT_COLUMNS = ["date_time", "sales_person", "customer", "contact_channel", "result",
                    "comment", "customer_contact_person", "follow_up_date",
-                   "Franui", "Schufrulade", "Boujee", "polarbar"]
+                   *FREEZER_COLUMNS]
 CONTACT_REQUIRED_COLUMNS = ["date_time", "sales_person", "customer", "contact_channel",
                             "result", "comment", "customer_contact_person", "follow_up_date"]
 
@@ -68,6 +70,16 @@ def ensure_customer_name_column(sheet, headers):
     insert_at = original_headers.index("phone") + 1
     sheet.insert_cols([["name"]], col=insert_at)
     return original_headers[:insert_at - 1] + ["name"] + original_headers[insert_at - 1:]
+
+
+def ensure_worksheet_columns(sheet, headers, columns):
+    normalized_headers = [str(header).strip() for header in headers]
+    for column in columns:
+        if column in normalized_headers:
+            continue
+        sheet.insert_cols([[column]], col=len(normalized_headers) + 1)
+        normalized_headers.append(column)
+    return normalized_headers
 
 
 def get_spreadsheet(force_reconnect=False):
@@ -473,7 +485,7 @@ def get_customer_stats(customer_name):
         if c["customer"].strip().lower() != customer_name:
             continue
         contact = {k: c[k] for k in ("customer", "date_time", "sales_person", "contact_channel", "result", "comment", "customer_contact_person", "follow_up_date",
-                                     "Franui", "Schufrulade", "Boujee", "polarbar")}
+                                     *FREEZER_COLUMNS)}
         contact["_sort_date"] = parse_date_value(c["date_time"]) or date.min
         contact["date_time"] = format_date_value(c["date_time"])
         contact["follow_up_date"] = format_date_value(c["follow_up_date"])
@@ -837,7 +849,11 @@ def add_contact(customer_name):
     customer_name = unquote(customer_name)
     data = request.get_json()
     sheet = get_spreadsheet_with_retry().worksheet("sales_activities")
-    headers = sheet.row_values(1)
+    headers = ensure_worksheet_columns(sheet, sheet.row_values(1), FREEZER_COLUMNS)
+    freezer_values = {field: checkbox_to_sheet_value(data.get(field, "")) for field in FREEZER_COLUMNS}
+    if not any(freezer_values.values()):
+        return jsonify({"ok": False, "error": "freezer_selection_required"}), 400
+
     row_data = {
         "date_time": data.get("date_time", datetime.now().strftime("%Y-%m-%d %H:%M")),
         "sales_person": data.get("sales_person", ""),
@@ -847,10 +863,7 @@ def add_contact(customer_name):
         "comment": data.get("comment", ""),
         "customer_contact_person": data.get("customer_contact_person", ""),
         "follow_up_date": data.get("follow_up_date", ""),
-        "Franui": checkbox_to_sheet_value(data.get("Franui", "")),
-        "Schufrulade": checkbox_to_sheet_value(data.get("Schufrulade", "")),
-        "Boujee": checkbox_to_sheet_value(data.get("Boujee", "")),
-        "polarbar": checkbox_to_sheet_value(data.get("polarbar", "")),
+        **freezer_values,
     }
     row = [row_data.get(header, "") for header in headers]
     sheet.append_row(row)
