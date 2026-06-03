@@ -1,14 +1,17 @@
-from flask import Flask, jsonify, send_file, request, send_from_directory
+from flask import Flask, Response, jsonify, send_file, request, send_from_directory
 from flask_cors import CORS
 import gspread
 from google.oauth2.service_account import Credentials
 from urllib.parse import unquote
 from datetime import datetime, date, timedelta
 from collections import defaultdict
+from io import BytesIO
 import os
 import json
 import math
 import requests
+from zipfile import ZIP_DEFLATED, ZipFile
+from xml.sax.saxutils import escape as xml_escape
 from dotenv import load_dotenv
 from requests.exceptions import ConnectionError as RequestsConnectionError
 from priority import (
@@ -40,6 +43,23 @@ ORDER_REQUIRED_COLUMNS = ["Reference", "Order date", "Delivery date", "Customer"
                           "Quantity", "Total", "Currency"]
 
 FREEZER_COLUMNS = ["Franui", "Schufrulade", "Boujee", "polarbar", "none"]
+CONTACT_LOG_FREEZER_LABELS = {
+    "Franui": "Franui",
+    "Schufrulade": "Schufrulade",
+    "Boujee": "Boujee",
+    "polarbar": "Polarbär",
+    "none": "Ingen",
+}
+CONTACT_LOG_COLUMNS = [
+    "Datum",
+    "Ansvarig",
+    "Kund",
+    "Kanal",
+    "Resultat",
+    "Kommentar",
+    "Nästa uppföljning",
+    "I frysdisken",
+]
 
 CONTACT_COLUMNS = ["date_time", "sales_person", "customer", "contact_channel", "result",
                    "comment", "customer_contact_person", "follow_up_date",
@@ -53,6 +73,10 @@ _spreadsheet_cache = None
 
 def checkbox_to_sheet_value(value):
     return "1" if str(value).strip().lower() in {"1", "true", "yes", "on"} else ""
+
+
+def is_checked_value(value):
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def text_to_sheet_value(value, max_length=None):
@@ -189,6 +213,29 @@ def parse_date_value(value):
         return None
 
 
+def parse_datetime_value(value):
+    text = str(value or "").strip()
+    if not text:
+        return None
+
+    normalized = text.replace("Z", "").replace("T", " ")
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d",
+                "%Y/%m/%d %H:%M:%S", "%Y/%m/%d %H:%M", "%Y/%m/%d",
+                "%d/%m/%Y %H:%M:%S", "%d/%m/%Y %H:%M", "%d/%m/%Y",
+                "%d.%m.%Y %H:%M:%S", "%d.%m.%Y %H:%M", "%d.%m.%Y"):
+        try:
+            parsed = datetime.strptime(normalized[:len(datetime.now().strftime(fmt))], fmt)
+            return parsed
+        except ValueError:
+            pass
+
+    try:
+        parsed = datetime.fromisoformat(normalized)
+        return parsed.replace(tzinfo=None) if parsed.tzinfo else parsed
+    except ValueError:
+        return None
+
+
 def format_date_value(value, fallback=""):
     if isinstance(value, datetime):
         parsed = value.date()
@@ -268,6 +315,188 @@ def week_start(day):
 def week_key(day):
     iso = day.isocalendar()
     return f"{iso.year}-W{iso.week:02d}"
+
+
+def month_key(day):
+    return f"{day.year}-{day.month:02d}"
+
+
+def week_label(day):
+    iso = day.isocalendar()
+    return f"Vecka {iso.week} ({iso.year})"
+
+
+def build_contact_log_rows(contact_rows):
+    rows = []
+    for idx, row in enumerate(contact_rows):
+        parsed_datetime = parse_datetime_value(row.get("date_time"))
+        parsed_date = parsed_datetime.date() if parsed_datetime else parse_date_value(row.get("date_time"))
+        freezer_labels = [
+            label for field, label in CONTACT_LOG_FREEZER_LABELS.items()
+            if is_checked_value(row.get(field))
+        ]
+        log_row = {
+            "Datum": format_date_value(parsed_date),
+            "Ansvarig": text_to_sheet_value(row.get("sales_person")),
+            "Kund": text_to_sheet_value(row.get("customer")),
+            "Kanal": text_to_sheet_value(row.get("contact_channel")),
+            "Resultat": text_to_sheet_value(row.get("result")),
+            "Kommentar": text_to_sheet_value(row.get("comment")),
+            "Nästa uppföljning": format_date_value(row.get("follow_up_date")),
+            "I frysdisken": ", ".join(freezer_labels),
+            "_month": month_key(parsed_date) if parsed_date else "",
+            "_week": week_key(parsed_date) if parsed_date else "",
+            "_week_label": week_label(parsed_date) if parsed_date else "",
+            "_sort_value": parsed_datetime or (datetime.combine(parsed_date, datetime.min.time()) if parsed_date else datetime.min),
+            "_source_index": idx,
+        }
+        rows.append(log_row)
+
+    rows.sort(key=lambda item: (item["_sort_value"], item["_source_index"]), reverse=True)
+    return rows
+
+
+def get_contact_log_filter_values(args):
+    filters = {}
+    for key in ("responsible", "month", "week", "result"):
+        values = []
+        for value in args.getlist(key):
+            values.extend(part.strip() for part in str(value).split(","))
+        filters[key] = {value for value in values if value}
+    return filters
+
+
+def filter_contact_log_rows(rows, filters):
+    filtered = list(rows)
+    if filters.get("responsible"):
+        filtered = [row for row in filtered if row["Ansvarig"] in filters["responsible"]]
+    if filters.get("month"):
+        filtered = [row for row in filtered if row["_month"] in filters["month"]]
+    if filters.get("week"):
+        filtered = [row for row in filtered if row["_week"] in filters["week"]]
+    if filters.get("result"):
+        filtered = [row for row in filtered if row["Resultat"] in filters["result"]]
+    return filtered
+
+
+def build_contact_log_options(rows):
+    def unique_display_values(key):
+        return sorted({row[key] for row in rows if row.get(key)}, key=str.casefold)
+
+    month_values = sorted({row["_month"] for row in rows if row["_month"]}, reverse=True)
+    week_values = sorted(
+        {row["_week"] for row in rows if row["_week"]},
+        key=lambda value: tuple(int(part) for part in value.replace("W", "").split("-")),
+        reverse=True,
+    )
+    week_labels = {row["_week"]: row["_week_label"] for row in rows if row["_week"]}
+
+    return {
+        "responsible": [{"value": value, "label": value} for value in unique_display_values("Ansvarig")],
+        "month": [{"value": value, "label": value} for value in month_values],
+        "week": [{"value": value, "label": week_labels.get(value, value)} for value in week_values],
+        "result": [{"value": value, "label": value} for value in unique_display_values("Resultat")],
+    }
+
+
+def public_contact_log_row(row):
+    return {column: row.get(column, "") for column in CONTACT_LOG_COLUMNS}
+
+
+def build_contact_log_payload(contact_rows, filters=None):
+    all_rows = build_contact_log_rows(contact_rows)
+    selected_filters = filters or {}
+    filtered_rows = filter_contact_log_rows(all_rows, selected_filters)
+    return {
+        "columns": CONTACT_LOG_COLUMNS,
+        "rows": [public_contact_log_row(row) for row in filtered_rows],
+        "filters": build_contact_log_options(all_rows),
+        "total_count": len(all_rows),
+        "filtered_count": len(filtered_rows),
+    }
+
+
+def xlsx_column_name(index):
+    name = ""
+    while index:
+        index, remainder = divmod(index - 1, 26)
+        name = chr(65 + remainder) + name
+    return name
+
+
+def xml_text(value):
+    text = str(value or "")
+    text = "".join(ch for ch in text if ch in "\n\r\t" or ord(ch) >= 32)
+    return xml_escape(text)
+
+
+def build_xlsx(columns, rows, sheet_name="Kontaktlogg"):
+    output = BytesIO()
+    sheet_name = xml_escape(sheet_name[:31] or "Kontaktlogg")
+    table = [columns] + [[row.get(column, "") for column in columns] for row in rows]
+    last_column = xlsx_column_name(len(columns))
+    last_row = max(1, len(table))
+
+    def cell_xml(row_idx, col_idx, value, style=""):
+        cell_ref = f"{xlsx_column_name(col_idx)}{row_idx}"
+        style_attr = f' s="{style}"' if style else ""
+        return f'<c r="{cell_ref}" t="inlineStr"{style_attr}><is><t>{xml_text(value)}</t></is></c>'
+
+    row_xml = []
+    for row_idx, values in enumerate(table, start=1):
+        style = "1" if row_idx == 1 else ""
+        cells = "".join(cell_xml(row_idx, col_idx, value, style) for col_idx, value in enumerate(values, start=1))
+        row_xml.append(f'<row r="{row_idx}">{cells}</row>')
+
+    column_widths = [12, 16, 30, 14, 16, 52, 18, 26]
+    cols_xml = "".join(
+        f'<col min="{idx}" max="{idx}" width="{width}" customWidth="1"/>'
+        for idx, width in enumerate(column_widths, start=1)
+    )
+
+    worksheet_xml = f'''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <dimension ref="A1:{last_column}{last_row}"/>
+  <sheetViews><sheetView tabSelected="1" workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>
+  <cols>{cols_xml}</cols>
+  <sheetData>{"".join(row_xml)}</sheetData>
+  <autoFilter ref="A1:{last_column}{last_row}"/>
+</worksheet>'''
+
+    with ZipFile(output, "w", ZIP_DEFLATED) as archive:
+        archive.writestr("[Content_Types].xml", '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+  <Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>
+</Types>''')
+        archive.writestr("_rels/.rels", '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+</Relationships>''')
+        archive.writestr("xl/workbook.xml", f'''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheets><sheet name="{sheet_name}" sheetId="1" r:id="rId1"/></sheets>
+</workbook>''')
+        archive.writestr("xl/_rels/workbook.xml.rels", '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+</Relationships>''')
+        archive.writestr("xl/styles.xml", '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font></fonts>
+  <fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>
+  <borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>
+  <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
+  <cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/></cellXfs>
+</styleSheet>''')
+        archive.writestr("xl/worksheets/sheet1.xml", worksheet_xml)
+
+    output.seek(0)
+    return output.getvalue()
 
 
 def build_recent_weeks(today, count=5):
@@ -447,6 +676,29 @@ def get_customers():
         customer["follow_up_date"] = format_date_value(latest_followup.get(customer_key))
         customers.append({"row": i, **customer})
     return jsonify(customers)
+
+
+@app.route("/contact-log", methods=["GET"])
+def get_contact_log():
+    spreadsheet = get_spreadsheet_with_retry()
+    contact_rows = get_contact_rows(spreadsheet)
+    filters = get_contact_log_filter_values(request.args)
+    return jsonify(build_contact_log_payload(contact_rows, filters))
+
+
+@app.route("/contact-log/export", methods=["GET"])
+def export_contact_log():
+    spreadsheet = get_spreadsheet_with_retry()
+    contact_rows = get_contact_rows(spreadsheet)
+    filters = get_contact_log_filter_values(request.args)
+    payload = build_contact_log_payload(contact_rows, filters)
+    workbook = build_xlsx(payload["columns"], payload["rows"])
+    filename = f"kontaktlogg_{date.today().isoformat()}.xlsx"
+    return Response(
+        workbook,
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.route("/customers/<customer_name>/stats", methods=["GET"])

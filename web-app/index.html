@@ -1044,6 +1044,94 @@
       background: #fff8fc;
       border-bottom: 2px solid #eadce7;
     }
+    .contact-log-body {
+      padding: 12px 14px 40px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .contact-log-toolbar {
+      background: #fff;
+      border: 1px solid #eef0f5;
+      border-radius: 14px;
+      padding: 12px;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.07);
+    }
+    .contact-log-filter-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+      gap: 10px;
+    }
+    .contact-log-filter label {
+      display: block;
+      margin-bottom: 5px;
+      color: #777;
+      font-size: 0.72rem;
+      font-weight: 800;
+      letter-spacing: 0.055em;
+      text-transform: uppercase;
+    }
+    .contact-log-actions {
+      display: flex;
+      gap: 10px;
+      margin-top: 12px;
+      justify-content: flex-end;
+      flex-wrap: wrap;
+    }
+    .contact-log-actions .action-btn {
+      width: auto;
+      min-width: 150px;
+      margin-top: 0;
+      padding: 11px 14px;
+    }
+    .contact-log-table-wrap {
+      overflow-x: auto;
+      border: 1px solid #eef0f5;
+      border-radius: 14px;
+      background: #fff;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.07);
+    }
+    .contact-log-table {
+      width: 100%;
+      min-width: 1120px;
+      border-collapse: collapse;
+      font-size: 0.8rem;
+    }
+    .contact-log-table th,
+    .contact-log-table td {
+      padding: 10px 11px;
+      border-bottom: 1px solid #eef0f5;
+      text-align: left;
+      vertical-align: top;
+    }
+    .contact-log-table th {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      background: #f7f8fa;
+      color: #666;
+      font-size: 0.72rem;
+      font-weight: 850;
+      letter-spacing: 0.045em;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+    .contact-log-table tr:last-child td { border-bottom: none; }
+    .contact-log-table .comment-cell {
+      min-width: 260px;
+      max-width: 420px;
+      white-space: normal;
+      overflow-wrap: anywhere;
+      line-height: 1.35;
+    }
+    .contact-log-table .nowrap-cell {
+      white-space: nowrap;
+    }
+    .contact-log-empty {
+      padding: 44px 20px;
+      text-align: center;
+      color: #888;
+    }
     .dfp-team-label {
       display: inline-flex;
       align-items: center;
@@ -1924,6 +2012,27 @@
       border-bottom-color: var(--pb-pink);
     }
 
+    .contact-log-toolbar,
+    .contact-log-table-wrap {
+      border-color: var(--pb-border);
+      border-radius: var(--pb-radius);
+      box-shadow: var(--pb-shadow-soft);
+    }
+
+    .contact-log-filter label,
+    .contact-log-table th {
+      color: var(--pb-muted);
+    }
+
+    .contact-log-table th {
+      background: #fbf5f8;
+    }
+
+    .contact-log-table th,
+    .contact-log-table td {
+      border-bottom-color: #f0e8ee;
+    }
+
     .dfp-team-label {
       background: var(--pb-ink);
       color: #fff;
@@ -2092,6 +2201,10 @@
         padding: 8px 9px;
       }
 
+      .contact-log-actions .action-btn {
+        width: 100%;
+      }
+
       .priority-item {
         display: grid;
         grid-template-columns: 34px minmax(0, 1fr);
@@ -2121,6 +2234,11 @@
       }
       .insights-body {
         max-width: 1100px;
+        margin: 0 auto;
+        padding-top: 16px;
+      }
+      .contact-log-body {
+        max-width: 1380px;
         margin: 0 auto;
         padding-top: 16px;
       }
@@ -2181,6 +2299,7 @@
     <div class="header-actions">
       <button class="route-mode-btn" id="insights-mode-btn">Insikter</button>
       <button class="route-mode-btn" id="route-mode-btn">&#128205; Karta</button>
+      <button class="route-mode-btn" id="contact-log-mode-btn">Kontaktlogg</button>
     </div>
   </div>
 
@@ -2294,6 +2413,59 @@
       <div class="priority-list" id="priority-customer-list">
         <div class="state-msg">Laddar prio-lista...</div>
       </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════ CONTACT LOG VIEW ═══════════════ -->
+<div class="view" id="view-contact-log">
+  <div class="header">
+    <button class="back-btn" id="contact-log-back-btn" aria-label="Tillbaka till butiker">&#8592;</button>
+    <div class="header-text">
+      <h1>Kontaktlogg</h1>
+      <p id="contact-log-subtitle">Laddar...</p>
+    </div>
+  </div>
+
+  <div class="contact-log-body">
+    <div class="contact-log-toolbar">
+      <div class="contact-log-filter-grid">
+        <div class="contact-log-filter">
+          <label for="contact-log-responsible">Ansvarig</label>
+          <select class="insights-select" id="contact-log-responsible">
+            <option value="">Alla ansvariga</option>
+          </select>
+        </div>
+        <div class="contact-log-filter">
+          <label for="contact-log-month">Månad</label>
+          <select class="insights-select" id="contact-log-month">
+            <option value="">Alla månader</option>
+          </select>
+        </div>
+        <div class="contact-log-filter">
+          <label for="contact-log-week">Vecka</label>
+          <select class="insights-select" id="contact-log-week">
+            <option value="">Alla veckor</option>
+          </select>
+        </div>
+        <div class="contact-log-filter">
+          <label for="contact-log-result">Resultat</label>
+          <select class="insights-select" id="contact-log-result">
+            <option value="">Alla resultat</option>
+          </select>
+        </div>
+      </div>
+      <div class="contact-log-actions">
+        <button class="action-btn" id="contact-log-export-btn">Exportera</button>
+      </div>
+    </div>
+
+    <div class="contact-log-table-wrap">
+      <table class="contact-log-table" id="contact-log-table">
+        <tbody>
+          <tr><td><div class="contact-log-empty">Laddar kontaktlogg...</div></td></tr>
+        </tbody>
+      </table>
     </div>
   </div>
 </div>
@@ -2582,6 +2754,10 @@
   let insights = {};
   let followupInsights = null;
   let followupInsightsLoading = false;
+  let contactLogLoaded = false;
+  let contactLogLoading = false;
+  let contactLogData = null;
+  let contactLogVisibleCount = 25;
   let visibleListCount = LIST_BATCH_SIZE;
   let lastListSignature = "";
   const visitCompetitorButtons = Array.from(document.querySelectorAll(".visit-competitor-toggle"));
@@ -3386,6 +3562,7 @@
       if (res.ok) {
         showToast("Besök sparat!");
         showView("detail");
+        contactLogLoaded = false;
         refreshStats(currentCustomer);
         loadInsights();
         if (followupInsights) loadFollowupInsights(document.getElementById("insights-responsible").value);
@@ -3428,6 +3605,162 @@
   function escAttr(s) {
     return esc(s).replace(/"/g, "&quot;");
   }
+
+  // ══════════════════════════════════════
+  // CONTACT LOG
+  // ══════════════════════════════════════
+
+  const CONTACT_LOG_FILTERS = [
+    { key: "responsible", id: "contact-log-responsible", emptyLabel: "Alla ansvariga" },
+    { key: "month", id: "contact-log-month", emptyLabel: "Alla månader" },
+    { key: "week", id: "contact-log-week", emptyLabel: "Alla veckor" },
+    { key: "result", id: "contact-log-result", emptyLabel: "Alla resultat" },
+  ];
+  const CONTACT_LOG_PAGE_SIZE = 25;
+
+  function openContactLog() {
+    showView("contact-log");
+    loadContactLog();
+  }
+
+  function getContactLogFilterState() {
+    return Object.fromEntries(CONTACT_LOG_FILTERS.map(filter => [
+      filter.key,
+      document.getElementById(filter.id).value,
+    ]));
+  }
+
+  function contactLogQueryString(filters = getContactLogFilterState()) {
+    const params = new URLSearchParams();
+    Object.entries(filters).forEach(([key, value]) => {
+      if (value) params.set(key, value);
+    });
+    const query = params.toString();
+    return query ? `?${query}` : "";
+  }
+
+  function renderContactLogOptions(options, selected) {
+    CONTACT_LOG_FILTERS.forEach(filter => {
+      const select = document.getElementById(filter.id);
+      const rows = options?.[filter.key] || [];
+      select.innerHTML = [`<option value="">${esc(filter.emptyLabel)}</option>`]
+        .concat(rows.map(option =>
+          `<option value="${escAttr(option.value)}">${esc(option.label)}</option>`
+        ))
+        .join("");
+      select.value = selected[filter.key] || "";
+    });
+  }
+
+  async function loadContactLog() {
+    if (contactLogLoading) return;
+    contactLogLoading = true;
+    const selected = getContactLogFilterState();
+    const table = document.getElementById("contact-log-table");
+    const exportBtn = document.getElementById("contact-log-export-btn");
+
+    document.getElementById("contact-log-subtitle").textContent = "Laddar...";
+    table.innerHTML = '<tbody><tr><td><div class="contact-log-empty">Laddar kontaktlogg...</div></td></tr></tbody>';
+    exportBtn.disabled = true;
+    contactLogVisibleCount = CONTACT_LOG_PAGE_SIZE;
+
+    try {
+      const res = await fetch(`${API}/contact-log${contactLogQueryString(selected)}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      contactLogLoaded = true;
+      contactLogData = data;
+      renderContactLogOptions(data.filters || {}, selected);
+      renderContactLogTable();
+    } catch {
+      contactLogData = null;
+      document.getElementById("contact-log-subtitle").textContent = "Kunde inte ladda";
+      table.innerHTML = '<tbody><tr><td><div class="contact-log-empty">Kunde inte ladda kontaktloggen.</div></td></tr></tbody>';
+      showToast("Kunde inte ladda kontaktlogg.");
+    } finally {
+      exportBtn.disabled = false;
+      contactLogLoading = false;
+    }
+  }
+
+  function renderContactLogTable() {
+    const data = contactLogData || {};
+    const table = document.getElementById("contact-log-table");
+    const columns = data.columns || [];
+    const rows = data.rows || [];
+    const visibleRows = rows.slice(0, contactLogVisibleCount);
+
+    if (!columns.length) {
+      table.innerHTML = '<tbody><tr><td><div class="contact-log-empty">Inga kolumner hittades.</div></td></tr></tbody>';
+      updateContactLogSubtitle();
+      return;
+    }
+
+    const head = `
+      <thead>
+        <tr>${columns.map(column => `<th>${esc(column)}</th>`).join("")}</tr>
+      </thead>
+    `;
+
+    if (!rows.length) {
+      table.innerHTML = `${head}<tbody><tr><td colspan="${columns.length}"><div class="contact-log-empty">Inga kontakter matchar filtren.</div></td></tr></tbody>`;
+      updateContactLogSubtitle();
+      return;
+    }
+
+    const body = visibleRows.map(row => `
+      <tr>
+        ${columns.map(column => {
+          const className = column === "Kommentar"
+            ? "comment-cell"
+            : ["Datum", "Kanal", "Resultat", "Nästa uppföljning"].includes(column) ? "nowrap-cell" : "";
+          return `<td class="${className}">${esc(row[column] || "")}</td>`;
+        }).join("")}
+      </tr>
+    `).join("");
+
+    table.innerHTML = `${head}<tbody>${body}</tbody>`;
+    updateContactLogSubtitle();
+  }
+
+  function updateContactLogSubtitle() {
+    if (!contactLogData) return;
+    const filteredCount = Number(contactLogData.filtered_count ?? (contactLogData.rows || []).length);
+    const totalCount = Number(contactLogData.total_count || 0);
+    const visibleCount = Math.min(contactLogVisibleCount, filteredCount);
+    const totalText = totalCount && totalCount !== filteredCount
+      ? ` (${totalCount.toLocaleString("sv-SE")} totalt)`
+      : "";
+    document.getElementById("contact-log-subtitle").textContent =
+      `${visibleCount.toLocaleString("sv-SE")} av ${filteredCount.toLocaleString("sv-SE")} kontakter${totalText}`;
+  }
+
+  function loadMoreContactLogRows() {
+    if (!contactLogData || contactLogLoading) return;
+    if (!document.getElementById("view-contact-log").classList.contains("active")) return;
+    const rows = contactLogData.rows || [];
+    if (contactLogVisibleCount >= rows.length) return;
+    contactLogVisibleCount = Math.min(contactLogVisibleCount + CONTACT_LOG_PAGE_SIZE, rows.length);
+    renderContactLogTable();
+  }
+
+  function maybeLoadMoreContactLogRows() {
+    if (!document.getElementById("view-contact-log").classList.contains("active")) return;
+    const distanceToBottom = document.documentElement.scrollHeight - window.innerHeight - window.scrollY;
+    if (distanceToBottom < 220) loadMoreContactLogRows();
+  }
+
+  function exportContactLog() {
+    window.location.href = `${API}/contact-log/export${contactLogQueryString()}`;
+  }
+
+  document.getElementById("contact-log-mode-btn").addEventListener("click", openContactLog);
+  document.getElementById("contact-log-back-btn").addEventListener("click", () => showView("list"));
+  document.getElementById("contact-log-export-btn").addEventListener("click", exportContactLog);
+  window.addEventListener("scroll", maybeLoadMoreContactLogRows, { passive: true });
+  CONTACT_LOG_FILTERS.forEach(filter => {
+    document.getElementById(filter.id).addEventListener("change", loadContactLog);
+  });
 
   // ══════════════════════════════════════
   // FOLLOW-UP INSIGHTS

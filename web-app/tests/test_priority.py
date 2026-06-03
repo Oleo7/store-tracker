@@ -1,7 +1,9 @@
 from datetime import date
+from io import BytesIO
 from pathlib import Path
 from unittest import TestCase, main
 from unittest.mock import patch
+from zipfile import ZipFile
 import sys
 
 
@@ -401,6 +403,87 @@ class PriorityTests(TestCase):
         self.assertEqual(headers, ["customer", "name", "phone", "email"])
         self.assertEqual(values[0], ["customer", "name", "phone", "email"])
         self.assertEqual(values[1], ["Store A", "", "0701234567", "a@example.com"])
+
+    def test_contact_log_payload_formats_filters_and_freezer_labels(self):
+        contacts = [
+            {
+                **_contact("Store A", "2026-06-03 14:30", "Sofia", "Positiv", "2026-06-10"),
+                "comment": "Bra möte",
+                "Franui": "1",
+                "Boujee": "yes",
+                "polarbar": "true",
+            },
+            {
+                **_contact("Store B", "2026-05-28 09:10", "Daniel", "Neutral"),
+                "comment": "Tom disk",
+                "none": "1",
+            },
+        ]
+
+        all_payload = app_module.build_contact_log_payload(contacts)
+        filtered_payload = app_module.build_contact_log_payload(
+            contacts,
+            {
+                "responsible": {"Sofia"},
+                "month": {"2026-06"},
+                "week": {"2026-W23"},
+                "result": {"Positiv"},
+            },
+        )
+
+        self.assertEqual(all_payload["total_count"], 2)
+        self.assertEqual(all_payload["rows"][0]["Datum"], "2026-06-03")
+        self.assertEqual(all_payload["rows"][0]["Nästa uppföljning"], "2026-06-10")
+        self.assertEqual(all_payload["rows"][0]["I frysdisken"], "Franui, Boujee, Polarbär")
+        self.assertEqual(all_payload["rows"][1]["I frysdisken"], "Ingen")
+        self.assertEqual(filtered_payload["filtered_count"], 1)
+        self.assertEqual(filtered_payload["rows"][0]["Kund"], "Store A")
+        self.assertIn({"value": "2026-06", "label": "2026-06"}, all_payload["filters"]["month"])
+        self.assertIn({"value": "2026-W23", "label": "Vecka 23 (2026)"}, all_payload["filters"]["week"])
+
+    def test_contact_log_endpoint_and_export_use_same_filters(self):
+        contacts = [
+            app_module.CONTACT_COLUMNS,
+            _row(
+                app_module.CONTACT_COLUMNS,
+                {
+                    **_contact("Store A", "2026-06-03 14:30", "Sofia", "Positiv", "2026-06-10"),
+                    "comment": "Bra möte",
+                    "polarbar": "1",
+                },
+            ),
+            _row(
+                app_module.CONTACT_COLUMNS,
+                {
+                    **_contact("Store B", "2026-05-28 09:10", "Daniel", "Neutral"),
+                    "comment": "Tom disk",
+                    "none": "1",
+                },
+            ),
+        ]
+        fake_spreadsheet = FakeSpreadsheet({"sales_activities": contacts})
+
+        with patch.object(app_module, "get_spreadsheet_with_retry", return_value=fake_spreadsheet):
+            client = app_module.app.test_client()
+            response = client.get("/contact-log?responsible=Sofia&month=2026-06")
+            export_response = client.get("/contact-log/export?responsible=Sofia&month=2026-06")
+
+        data = response.get_json()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(data["filtered_count"], 1)
+        self.assertEqual(data["rows"][0]["Kund"], "Store A")
+        self.assertEqual(data["rows"][0]["I frysdisken"], "Polarbär")
+        self.assertEqual(export_response.status_code, 200)
+        self.assertEqual(
+            export_response.mimetype,
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        with ZipFile(BytesIO(export_response.data)) as workbook:
+            worksheet = workbook.read("xl/worksheets/sheet1.xml").decode("utf-8")
+        self.assertIn("Datum", worksheet)
+        self.assertIn("Store A", worksheet)
+        self.assertIn("Polarbär", worksheet)
+        self.assertNotIn("Store B", worksheet)
 
     def test_add_contact_creates_and_logs_none_column(self):
         headers_without_none = [column for column in app_module.CONTACT_COLUMNS if column != "none"]
