@@ -2299,7 +2299,6 @@
     <div class="header-actions">
       <button class="route-mode-btn" id="insights-mode-btn">Insikter</button>
       <button class="route-mode-btn" id="route-mode-btn">&#128205; Karta</button>
-      <button class="route-mode-btn" id="contact-log-mode-btn">Kontaktlogg</button>
     </div>
   </div>
 
@@ -2335,6 +2334,9 @@
     <div class="header-text">
       <h1>Insikter</h1>
       <p id="insights-subtitle">Laddar...</p>
+    </div>
+    <div class="header-actions">
+      <button class="route-mode-btn" id="contact-log-mode-btn">Kontakt-logg</button>
     </div>
   </div>
 
@@ -2420,10 +2422,9 @@
 <!-- ═══════════════ CONTACT LOG VIEW ═══════════════ -->
 <div class="view" id="view-contact-log">
   <div class="header">
-    <button class="back-btn" id="contact-log-back-btn" aria-label="Tillbaka till butiker">&#8592;</button>
+    <button class="back-btn" id="contact-log-back-btn" aria-label="Tillbaka till insikter">&#8592;</button>
     <div class="header-text">
-      <h1>Kontaktlogg</h1>
-      <p id="contact-log-subtitle">Laddar...</p>
+      <h1>Kontakt-logg</h1>
     </div>
   </div>
 
@@ -2456,7 +2457,7 @@
         </div>
       </div>
       <div class="contact-log-actions">
-        <button class="action-btn" id="contact-log-export-btn">Exportera</button>
+        <button class="action-btn" id="contact-log-export-btn">Exportera alla kontakter</button>
       </div>
     </div>
 
@@ -3659,7 +3660,6 @@
     const table = document.getElementById("contact-log-table");
     const exportBtn = document.getElementById("contact-log-export-btn");
 
-    document.getElementById("contact-log-subtitle").textContent = "Laddar...";
     table.innerHTML = '<tbody><tr><td><div class="contact-log-empty">Laddar kontaktlogg...</div></td></tr></tbody>';
     exportBtn.disabled = true;
     contactLogVisibleCount = CONTACT_LOG_PAGE_SIZE;
@@ -3674,7 +3674,6 @@
       renderContactLogTable();
     } catch {
       contactLogData = null;
-      document.getElementById("contact-log-subtitle").textContent = "Kunde inte ladda";
       table.innerHTML = '<tbody><tr><td><div class="contact-log-empty">Kunde inte ladda kontaktloggen.</div></td></tr></tbody>';
       showToast("Kunde inte ladda kontaktlogg.");
     } finally {
@@ -3692,7 +3691,6 @@
 
     if (!columns.length) {
       table.innerHTML = '<tbody><tr><td><div class="contact-log-empty">Inga kolumner hittades.</div></td></tr></tbody>';
-      updateContactLogSubtitle();
       return;
     }
 
@@ -3704,7 +3702,6 @@
 
     if (!rows.length) {
       table.innerHTML = `${head}<tbody><tr><td colspan="${columns.length}"><div class="contact-log-empty">Inga kontakter matchar filtren.</div></td></tr></tbody>`;
-      updateContactLogSubtitle();
       return;
     }
 
@@ -3720,19 +3717,6 @@
     `).join("");
 
     table.innerHTML = `${head}<tbody>${body}</tbody>`;
-    updateContactLogSubtitle();
-  }
-
-  function updateContactLogSubtitle() {
-    if (!contactLogData) return;
-    const filteredCount = Number(contactLogData.filtered_count ?? (contactLogData.rows || []).length);
-    const totalCount = Number(contactLogData.total_count || 0);
-    const visibleCount = Math.min(contactLogVisibleCount, filteredCount);
-    const totalText = totalCount && totalCount !== filteredCount
-      ? ` (${totalCount.toLocaleString("sv-SE")} totalt)`
-      : "";
-    document.getElementById("contact-log-subtitle").textContent =
-      `${visibleCount.toLocaleString("sv-SE")} av ${filteredCount.toLocaleString("sv-SE")} kontakter${totalText}`;
   }
 
   function loadMoreContactLogRows() {
@@ -3755,7 +3739,7 @@
   }
 
   document.getElementById("contact-log-mode-btn").addEventListener("click", openContactLog);
-  document.getElementById("contact-log-back-btn").addEventListener("click", () => showView("list"));
+  document.getElementById("contact-log-back-btn").addEventListener("click", () => showView("insights"));
   document.getElementById("contact-log-export-btn").addEventListener("click", exportContactLog);
   window.addEventListener("scroll", maybeLoadMoreContactLogRows, { passive: true });
   CONTACT_LOG_FILTERS.forEach(filter => {
