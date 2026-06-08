@@ -4295,7 +4295,9 @@
   }
 
   function renderMapStopList() {
-    document.getElementById("map-stop-list").innerHTML = mapStops.map(c => {
+    const selectedRows = new Set(routeInMapStops.map(c => c.row));
+    const listStops = routeInMapStops.concat(mapStops.filter(c => !selectedRows.has(c.row)));
+    document.getElementById("map-stop-list").innerHTML = listStops.map(c => {
       const routeIdx = routeInMapStops.findIndex(r => r.row === c.row);
       const inRoute  = routeIdx !== -1;
       const badge = inRoute
