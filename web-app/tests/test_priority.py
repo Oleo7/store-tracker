@@ -441,6 +441,29 @@ class PriorityTests(TestCase):
         self.assertIn({"value": "2026-06", "label": "2026-06"}, all_payload["filters"]["month"])
         self.assertIn({"value": "2026-W23", "label": "Vecka 23 (2026)"}, all_payload["filters"]["week"])
 
+    def test_contact_log_customer_and_comment_filters_are_loose(self):
+        contacts = [
+            {
+                **_contact("ICA Kvantum Åhus", "2026-06-03 14:30", "Sofia", "Positiv"),
+                "comment": "Bra möte om midsommarplatsen",
+            },
+            {
+                **_contact("ICA Supermarket Kivik", "2026-06-02 09:10", "Sofia", "Neutral"),
+                "comment": "Tom disk",
+            },
+        ]
+
+        payload = app_module.build_contact_log_payload(
+            contacts,
+            {
+                "customer": "kvnt ahus",
+                "comment": "bra mote",
+            },
+        )
+
+        self.assertEqual(payload["filtered_count"], 1)
+        self.assertEqual(payload["rows"][0]["Kund"], "ICA Kvantum Åhus")
+
     def test_contact_log_endpoint_and_export_use_same_filters(self):
         contacts = [
             app_module.CONTACT_COLUMNS,
@@ -465,8 +488,8 @@ class PriorityTests(TestCase):
 
         with patch.object(app_module, "get_spreadsheet_with_retry", return_value=fake_spreadsheet):
             client = app_module.app.test_client()
-            response = client.get("/contact-log?responsible=Sofia&month=2026-06")
-            export_response = client.get("/contact-log/export?responsible=Sofia&month=2026-06")
+            response = client.get("/contact-log?responsible=Sofia&month=2026-06&customer=stor+a&comment=bra+mote")
+            export_response = client.get("/contact-log/export?responsible=Sofia&month=2026-06&customer=stor+a&comment=bra+mote")
 
         data = response.get_json()
         self.assertEqual(response.status_code, 200)

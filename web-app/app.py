@@ -9,7 +9,9 @@ from io import BytesIO
 import os
 import json
 import math
+import re
 import requests
+import unicodedata
 from zipfile import ZIP_DEFLATED, ZipFile
 from xml.sax.saxutils import escape as xml_escape
 from dotenv import load_dotenv
@@ -363,7 +365,43 @@ def get_contact_log_filter_values(args):
         for value in args.getlist(key):
             values.extend(part.strip() for part in str(value).split(","))
         filters[key] = {value for value in values if value}
+    for key in ("customer", "comment"):
+        value = " ".join(str(value).strip() for value in args.getlist(key) if str(value).strip())
+        if value:
+            filters[key] = value
     return filters
+
+
+def normalize_contact_log_search_text(value):
+    text = unicodedata.normalize("NFD", str(value or "").casefold())
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    return re.sub(r"[^a-z0-9]+", " ", text).strip()
+
+
+def contact_log_is_subsequence(needle, haystack):
+    needle_index = 0
+    for char in haystack:
+        if needle_index < len(needle) and needle[needle_index] == char:
+            needle_index += 1
+    return needle_index == len(needle)
+
+
+def contact_log_text_matches(value, query):
+    terms = normalize_contact_log_search_text(query).split()
+    if not terms:
+        return True
+
+    normalized_value = normalize_contact_log_search_text(value)
+    words = normalized_value.split()
+    compact_value = normalized_value.replace(" ", "")
+
+    for term in terms:
+        if term in normalized_value or term in compact_value:
+            continue
+        if len(term) >= 4 and any(contact_log_is_subsequence(term, word) for word in words):
+            continue
+        return False
+    return True
 
 
 def filter_contact_log_rows(rows, filters):
@@ -376,6 +414,10 @@ def filter_contact_log_rows(rows, filters):
         filtered = [row for row in filtered if row["_week"] in filters["week"]]
     if filters.get("result"):
         filtered = [row for row in filtered if row["Resultat"] in filters["result"]]
+    if filters.get("customer"):
+        filtered = [row for row in filtered if contact_log_text_matches(row["Kund"], filters["customer"])]
+    if filters.get("comment"):
+        filtered = [row for row in filtered if contact_log_text_matches(row["Kommentar"], filters["comment"])]
     return filtered
 
 
