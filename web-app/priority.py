@@ -99,8 +99,9 @@ def normalize_contact_result(result: str) -> str:
     mapping = {
         "Order lagd!": "Order lagd",
         "Order lagd": "Order lagd",
-        "Intresserad/Återkom :)": "Positivt",
-        "Positivt": "Positivt",
+        "Intresserad/Återkom :)": "Positiv",
+        "Positivt": "Positiv",
+        "Positiv": "Positiv",
         "Kräver mer bearbetning!": "Negativ",
         "Återkom ej": "Negativ",
         "Negativ": "Negativ",
@@ -413,7 +414,7 @@ def _priority_score(
         elif overdue_days >= 0:
             score += 10
 
-    if latest_contact_class == "Positivt" and not has_order_after_latest_contact:
+    if latest_contact_class == "Positiv" and not has_order_after_latest_contact:
         if days_since_contact is not None and days_since_contact >= 3:
             score += 30
         else:
@@ -460,7 +461,7 @@ def _priority_type(
         return "Försenad uppföljning"
     if order_count > 0 and overdue_days is not None and overdue_days >= 7:
         return "Rädda återorder"
-    if latest_contact_class == "Positivt" and not has_order_after_latest_contact:
+    if latest_contact_class == "Positiv" and not has_order_after_latest_contact:
         return "Varm chans"
     if order_count == 0 and segment in ["A", "B"]:
         return "Ny A/B-chans"
@@ -505,7 +506,7 @@ def _priority_reasons(
         reasons.append("Försenad uppföljning")
     if overdue_days is not None and overdue_days >= 0:
         reasons.append(f"Över normal återköpstid: +{overdue_days} dagar")
-    if latest_contact_class == "Positivt" and not has_order_after_latest_contact:
+    if latest_contact_class == "Positiv" and not has_order_after_latest_contact:
         reasons.append("Positiv dialog utan order")
     if order_count > 0:
         reasons.append(f"Tidigare kund: {_clean_number(total_dfp)} DFP")

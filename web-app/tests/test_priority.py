@@ -28,8 +28,9 @@ class PriorityTests(TestCase):
         cases = [
             ("Order lagd!", "Order lagd"),
             ("Order lagd", "Order lagd"),
-            ("Intresserad/Återkom :)", "Positivt"),
-            ("Positivt", "Positivt"),
+            ("Intresserad/Återkom :)", "Positiv"),
+            ("Positivt", "Positiv"),
+            ("Positiv", "Positiv"),
             ("Kräver mer bearbetning!", "Negativ"),
             ("Kräver mer bearbetning!\xa0", "Negativ"),
             ("Återkom ej", "Negativ"),
@@ -107,7 +108,7 @@ class PriorityTests(TestCase):
     def test_positive_dialog_without_order(self):
         contact_features = build_contact_features(
             [
-                _contact("Customer B", "2026-05-01 10:00", "Daniel", "Intresserad/Återkom :)"),
+                _contact("Customer B", "2026-05-01 10:00", "Daniel", "Positiv"),
             ],
             {},
         )
