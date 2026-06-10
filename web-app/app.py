@@ -873,8 +873,23 @@ def get_customer_insights():
             "priority_level": priority.get("priority_level", ""),
             "priority_score": priority.get("priority_score"),
             "priority_type": priority.get("priority_type", ""),
+            "recommended_action": priority.get("recommended_action", ""),
+            "reasons": priority.get("reasons", []),
+            "next_action": priority.get("next_action", {}),
+            "order_count": priority.get("order_count", 0),
+            "total_dfp": priority.get("total_dfp"),
+            "latest_order_date": priority.get("latest_order_date", ""),
             "latest_delivery_date": latest_delivery_date,
             "latest_delivery_month": latest_delivery_date[:7] if latest_delivery_date else "",  # "YYYY-MM"
+            "expected_next_order_date": priority.get("expected_next_order_date", ""),
+            "overdue_days": priority.get("overdue_days"),
+            "days_since_delivery": priority.get("days_since_delivery"),
+            "latest_contact_date": priority.get("latest_contact_date", ""),
+            "latest_contact_result": priority.get("latest_contact_result", ""),
+            "latest_contact_class": priority.get("latest_contact_class", ""),
+            "latest_contact_channel": priority.get("latest_contact_channel", ""),
+            "follow_up_due": priority.get("follow_up_due", False),
+            "has_order_after_latest_contact": priority.get("has_order_after_latest_contact", False),
         }
 
     return jsonify(insights)

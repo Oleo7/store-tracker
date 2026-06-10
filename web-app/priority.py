@@ -323,6 +323,8 @@ def build_priority_customers(
             segment=segment,
         )
         priority_level = _priority_level(score)
+        total_dfp = enriched_order.get("total_dfp", 0)
+        order_count = enriched_order.get("order_count", 0)
 
         result.append(
             {
@@ -334,8 +336,8 @@ def build_priority_customers(
                 "priority_level": priority_level,
                 "priority_type": priority_type,
                 "recommended_action": _recommended_action(priority_type),
-                "order_count": enriched_order.get("order_count", 0),
-                "total_dfp": _clean_number(enriched_order.get("total_dfp", 0)),
+                "order_count": order_count,
+                "total_dfp": _clean_number(total_dfp),
                 "latest_order_date": _iso_date(last_order),
                 "latest_delivery_date": _iso_date(last_delivery),
                 "days_since_delivery": days_since_delivery,
@@ -349,6 +351,20 @@ def build_priority_customers(
                 "latest_contact_sales_person": contact_feature.get("latest_contact_sales_person", ""),
                 "follow_up_due": follow_up_due,
                 "has_order_after_latest_contact": has_order_after_latest_contact,
+                "next_action": _next_action(
+                    priority_type=priority_type,
+                    follow_up_due=follow_up_due,
+                    overdue_days=overdue_days,
+                    total_dfp=total_dfp,
+                    order_count=order_count,
+                    latest_contact_class=latest_contact_class,
+                    has_order_after_latest_contact=has_order_after_latest_contact,
+                    days_since_contact=days_since_contact,
+                    latest_contact_date=latest_contact_date,
+                    last_order_date=last_order,
+                    segment=segment,
+                    today=today,
+                ),
                 "reasons": _priority_reasons(
                     follow_up_due=follow_up_due,
                     has_order_after_latest_contact=has_order_after_latest_contact,
@@ -487,6 +503,94 @@ def _recommended_action(priority_type: str) -> str:
         "Försök igen": "Gör nytt försök",
         "Låg prio": "Bearbeta vid tid över",
     }[priority_type]
+
+
+def _next_action(
+    *,
+    priority_type,
+    follow_up_due,
+    overdue_days,
+    total_dfp,
+    order_count,
+    latest_contact_class,
+    has_order_after_latest_contact,
+    days_since_contact,
+    latest_contact_date,
+    last_order_date,
+    segment,
+    today,
+) -> dict:
+    if follow_up_due and not has_order_after_latest_contact:
+        return {
+            "label": "Följ upp idag",
+            "action_type": "follow_up",
+            "tone": "urgent",
+            "reason": "Försenad uppföljning · ingen order efter senaste kontakt",
+            "primary_cta": "Ring",
+        }
+
+    if order_count > 0 and overdue_days is not None and overdue_days >= 7:
+        return {
+            "label": "Ring för återorder",
+            "action_type": "reorder",
+            "tone": "urgent" if overdue_days >= 21 else "warning",
+            "reason": f"Över normal återköpstid +{overdue_days} dagar · tidigare kund: {_clean_number(total_dfp or 0)} DFP",
+            "primary_cta": "Ring",
+        }
+
+    if latest_contact_class == "Positiv" and not has_order_after_latest_contact:
+        return {
+            "label": "Stäng positiv dialog",
+            "action_type": "warm_lead",
+            "tone": "positive",
+            "reason": "Positiv dialog · ingen order efter kontakt",
+            "primary_cta": "Följ upp",
+        }
+
+    if latest_contact_class == "Ej anträffbar" and days_since_contact is not None and days_since_contact >= 3:
+        return {
+            "label": "Försök igen",
+            "action_type": "retry",
+            "tone": "neutral",
+            "reason": "Ej anträffbar senast",
+            "primary_cta": "Ring",
+        }
+
+    segment_value = str(segment or "").strip().upper()[:1]
+    if order_count == 0 and segment_value in ["A", "B"]:
+        return {
+            "label": "Bearbeta ny A/B-kund",
+            "action_type": "new_ab",
+            "tone": "opportunity",
+            "reason": f"Segment {segment_value} · ingen order ännu",
+            "primary_cta": "Kontakta",
+        }
+
+    if last_order_date and 0 <= (today - last_order_date).days <= 10:
+        return {
+            "label": "Bevaka rotation",
+            "action_type": "monitor",
+            "tone": "low",
+            "reason": "Order nyligen lagd",
+            "primary_cta": "Bevaka",
+        }
+
+    if latest_contact_class == "Negativ" and days_since_contact is not None and days_since_contact <= 30:
+        return {
+            "label": "Pausa/bevaka",
+            "action_type": "pause",
+            "tone": "low",
+            "reason": "Negativ dialog nyligen",
+            "primary_cta": "Bevaka",
+        }
+
+    return {
+        "label": "Bearbeta vid rutt",
+        "action_type": "route_fill",
+        "tone": "low",
+        "reason": "Lägre prioritet just nu",
+        "primary_cta": "Öppna",
+    }
 
 
 def _priority_reasons(

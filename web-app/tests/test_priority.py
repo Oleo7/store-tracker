@@ -90,6 +90,8 @@ class PriorityTests(TestCase):
         self.assertEqual(priority[0]["priority_type"], "Rädda återorder")
         self.assertGreaterEqual(priority[0]["priority_score"], 50)
         self.assertTrue(any("Över normal återköpstid" in reason for reason in priority[0]["reasons"]))
+        self.assertEqual(priority[0]["next_action"]["action_type"], "reorder")
+        self.assertEqual(priority[0]["next_action"]["label"], "Ring för återorder")
 
     def test_single_order_does_not_show_reorder_time(self):
         order_features = build_order_features(
@@ -119,6 +121,8 @@ class PriorityTests(TestCase):
         self.assertEqual(priority[0]["priority_type"], "Varm chans")
         self.assertIn("Positiv dialog utan order", priority[0]["reasons"])
         self.assertEqual(priority[0]["recommended_action"], "Följ upp positiv dialog")
+        self.assertEqual(priority[0]["next_action"]["action_type"], "warm_lead")
+        self.assertEqual(priority[0]["next_action"]["primary_cta"], "Följ upp")
 
     def test_overdue_followup(self):
         contact_features = build_contact_features(
@@ -133,6 +137,8 @@ class PriorityTests(TestCase):
 
         self.assertEqual(priority[0]["priority_type"], "Försenad uppföljning")
         self.assertEqual(priority[0]["recommended_action"], "Följ upp")
+        self.assertEqual(priority[0]["next_action"]["action_type"], "follow_up")
+        self.assertEqual(priority[0]["next_action"]["tone"], "urgent")
 
     def test_negative_contact_cools_customer_down(self):
         customers = [
@@ -166,6 +172,26 @@ class PriorityTests(TestCase):
 
     def test_empty_data_does_not_crash(self):
         self.assertEqual(build_priority_customers([], build_order_features([]), build_contact_features([], {}), None, TODAY), [])
+
+    def test_next_action_handles_new_ab_recent_order_and_fallback(self):
+        customers = [
+            _customer("New A", "Daniel", "A", 2),
+            _customer("Recent Order", "Daniel", "C", 3),
+            _customer("Fallback", "Daniel", "C", 4),
+        ]
+        order_features = build_order_features(
+            [
+                _order("RECENT", "Recent Order", TODAY.isoformat(), TODAY.isoformat(), 10, 1000),
+            ]
+        )
+
+        priority = build_priority_customers(customers, order_features, {}, "Daniel", TODAY)
+        by_customer = {item["customer"]: item for item in priority}
+
+        self.assertEqual(by_customer["New A"]["next_action"]["action_type"], "new_ab")
+        self.assertEqual(by_customer["New A"]["next_action"]["reason"], "Segment A · ingen order ännu")
+        self.assertEqual(by_customer["Recent Order"]["next_action"]["action_type"], "monitor")
+        self.assertEqual(by_customer["Fallback"]["next_action"]["action_type"], "route_fill")
 
     def test_followup_insights_endpoint_returns_priority_customers(self):
         customers = [
@@ -353,6 +379,15 @@ class PriorityTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("customer a", data)
         self.assertIn(data["customer a"]["priority_level"], {"Hög prio", "Medel prio", "Låg prio"})
+        self.assertIn("recommended_action", data["customer a"])
+        self.assertIn("reasons", data["customer a"])
+        self.assertIn("next_action", data["customer a"])
+        self.assertIn("order_count", data["customer a"])
+        self.assertIn("total_dfp", data["customer a"])
+        self.assertIn("latest_order_date", data["customer a"])
+        self.assertIn("expected_next_order_date", data["customer a"])
+        self.assertIn("latest_contact_class", data["customer a"])
+        self.assertIn("follow_up_due", data["customer a"])
 
     def test_customers_endpoint_reads_name_without_shifting_phone_or_email(self):
         customers = [

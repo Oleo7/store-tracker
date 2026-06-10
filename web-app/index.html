@@ -1820,6 +1820,60 @@
       margin-top: 7px;
     }
 
+    .next-action {
+      margin-top: 8px;
+      padding: 8px 10px;
+      border-radius: 10px;
+      border: 1px solid var(--pb-border);
+      background: #fff;
+    }
+
+    .next-action-label {
+      font-size: 0.78rem;
+      font-weight: 850;
+      color: var(--pb-ink);
+    }
+
+    .next-action-reason {
+      margin-top: 2px;
+      font-size: 0.72rem;
+      font-weight: 600;
+      color: var(--pb-muted);
+      line-height: 1.35;
+    }
+
+    .next-action-urgent {
+      background: #fff3f4;
+      border-color: #f3c9d1;
+    }
+
+    .next-action-warning {
+      background: #fff7ed;
+      border-color: #fed7aa;
+    }
+
+    .next-action-positive {
+      background: #effaf4;
+      border-color: #bbebd1;
+    }
+
+    .next-action-opportunity {
+      background: var(--pb-blue-soft);
+      border-color: rgba(53,89,131,0.18);
+    }
+
+    .next-action-neutral,
+    .next-action-low {
+      background: #faf8fb;
+    }
+
+    .daily-focus-summary {
+      margin-top: 7px;
+      font-size: 0.72rem;
+      font-weight: 800;
+      color: var(--pb-chocolate);
+    }
+
     .load-more-btn {
       width: 100%;
       min-height: 44px;
@@ -2382,6 +2436,7 @@
       <input type="search" id="search-input" placeholder="Sök butik eller stad..." />
     </div>
     <div class="chip-row">
+      <button class="chip" id="chip-daily-focus">&#11088; Förslag</button>
       <button class="chip" id="chip-responsible">Ansvarig</button>
       <button class="chip" id="chip-region">Region</button>
       <button class="chip" id="chip-city">Stad</button>
@@ -2821,6 +2876,7 @@
   const FREEZER_FIELDS = ["Franui", "Schufrulade", "Boujee", "polarbar", FREEZER_NONE_FIELD];
   const FREEZER_LABELS = { Franui: "Franui", Schufrulade: "Schufrulade", Boujee: "Boujee", polarbar: "Polarbär", none: "Inget" };
   const LIST_BATCH_SIZE = 80;
+  const DAILY_FOCUS_LIMIT = 20;
   const MAP_ROUTE_DRAFT_KEY = "st_map_route_draft_v1";
   const MAP_ROUTE_DRAFT_TTL_MS = 12 * 60 * 60 * 1000;
 
@@ -2829,6 +2885,9 @@
   let currentCustomer = null;
   let detailReturnView = "list";
   let insights = {};
+  let dailyFocusActive = false;
+  let insightsLoaded = false;
+  let insightsLoadFailed = false;
   let followupInsights = null;
   let followupInsightsLoading = false;
   let contactLogLoaded = false;
@@ -2869,9 +2928,16 @@
       const res = await fetch(`${API}/customer-insights`);
       if (!res.ok) throw new Error();
       insights = await res.json();
+      insightsLoaded = true;
+      insightsLoadFailed = false;
       buildInsightDropdowns();
+      updateDailyFocusChip();
       renderList();
     } catch {
+      insightsLoaded = false;
+      insightsLoadFailed = true;
+      dailyFocusActive = false;
+      updateDailyFocusChip();
       showToast("Kunde inte ladda kundinsikter – risk och uppföljning visas inte");
     }
   }
@@ -3048,9 +3114,76 @@
     return `<span class="tag ${tagClass}"${styleAttr}>${esc(risk)}</span>`;
   }
 
+  function customerInsightKey(value) {
+    return String(value || "").replace(/\u00a0/g, " ").trim().toLowerCase().replace(/\s+/g, " ");
+  }
+
+  function getCustomerInsight(c) {
+    const rawKey = String(c?.customer || "").toLowerCase();
+    return insights[customerInsightKey(c?.customer)] || insights[rawKey] || {};
+  }
+
+  function segmentRank(segment) {
+    const value = String(segment || "").trim().toUpperCase()[0];
+    return { A: 4, B: 3, C: 2 }[value] || 1;
+  }
+
+  function hasPriorityScore(insight) {
+    return insight?.priority_score !== undefined && insight?.priority_score !== null && insight?.priority_score !== "";
+  }
+
+  function prioritySort(a, b) {
+    const ia = getCustomerInsight(a);
+    const ib = getCustomerInsight(b);
+
+    return (
+      (Number(hasPriorityScore(ib)) - Number(hasPriorityScore(ia))) ||
+      (Number(ib.priority_score || 0) - Number(ia.priority_score || 0)) ||
+      (segmentRank(b.customer_segment) - segmentRank(a.customer_segment)) ||
+      (Number(ib.overdue_days ?? -999) - Number(ia.overdue_days ?? -999)) ||
+      (Number(ib.total_dfp || 0) - Number(ia.total_dfp || 0)) ||
+      String(a.customer || "").localeCompare(String(b.customer || ""), "sv")
+    );
+  }
+
+  function getNextActionHtml(c) {
+    const action = getCustomerInsight(c).next_action;
+    if (!action || !action.label) return "";
+
+    const toneClass = {
+      urgent: "next-action-urgent",
+      warning: "next-action-warning",
+      positive: "next-action-positive",
+      opportunity: "next-action-opportunity",
+      neutral: "next-action-neutral",
+      low: "next-action-low",
+    }[action.tone] || "next-action-neutral";
+
+    return `
+      <div class="next-action ${toneClass}">
+        <div class="next-action-label">Nästa: ${esc(action.label)}</div>
+        ${action.reason ? `<div class="next-action-reason">${esc(action.reason)}</div>` : ""}
+      </div>
+    `;
+  }
+
+  function getPrioritySummaryHtml(c) {
+    if (!dailyFocusActive) return "";
+
+    const ins = getCustomerInsight(c);
+    if (!hasPriorityScore(ins)) return "";
+
+    return `
+      <div class="daily-focus-summary">
+        ${esc(String(ins.priority_score))} poäng · ${esc(ins.priority_level || "Prio saknas")} · ${esc(ins.priority_type || "Typ saknas")}
+      </div>
+    `;
+  }
+
   function getListSignature() {
     return [
       searchQuery,
+      dailyFocusActive ? "daily-focus:1" : "daily-focus:0",
       ...Object.keys(filterState).sort().map(key => `${key}:${[...filterState[key]].sort().join("|")}`),
     ].join(";");
   }
@@ -3070,14 +3203,42 @@
     updateClearBtn();
   }
 
+  function updateDailyFocusChip(count = DAILY_FOCUS_LIMIT) {
+    const chip = document.getElementById("chip-daily-focus");
+    if (!chip) return;
+
+    if (!dailyFocusActive) {
+      chip.textContent = "\u2B50 Förslag";
+      chip.classList.remove("active");
+      return;
+    }
+
+    chip.textContent = `\u2B50 Förslag \u00B7 ${count}`;
+    chip.classList.add("active");
+  }
+
   function updateClearBtn() {
-    const anyActive = Object.values(filterState).some(s => s.size > 0);
+    const anyActive = dailyFocusActive || Object.values(filterState).some(s => s.size > 0);
     document.getElementById("clear-filters-row").style.display = anyActive ? "block" : "none";
   }
 
+  document.getElementById("chip-daily-focus").addEventListener("click", () => {
+    if (!insightsLoaded) {
+      showToast("Laddar kundinsikter – försök igen om en sekund");
+      return;
+    }
+
+    dailyFocusActive = !dailyFocusActive;
+    updateDailyFocusChip();
+    updateClearBtn();
+    renderList();
+  });
+
   document.getElementById("clear-filters-btn").addEventListener("click", () => {
     ["segment", "responsible", "city", "region", "priority", "risk", "delivery", "latestContact"].forEach(key => filterState[key].clear());
+    dailyFocusActive = false;
     Object.keys(_chipIds).forEach(key => updateChip(key));
+    updateDailyFocusChip();
     document.getElementById("clear-filters-row").style.display = "none";
     renderList();
   });
@@ -3100,23 +3261,34 @@
     if (filterState.city.size)        filtered = filtered.filter(c => filterState.city.has(c.city));
     if (filterState.region.size)      filtered = filtered.filter(c => filterState.region.has(c.region_google));
     if (filterState.priority.size) filtered = filtered.filter(c => {
-      const ins = insights[c.customer.toLowerCase()];
+      const ins = getCustomerInsight(c);
       return filterState.priority.has(ins?.priority_level || "");
     });
     if (filterState.risk.size) filtered = filtered.filter(c => {
-      const ins = insights[c.customer.toLowerCase()];
+      const ins = getCustomerInsight(c);
       return filterState.risk.has(ins?.customer_risk || "");
     });
     if (filterState.delivery.size) filtered = filtered.filter(c => {
-      const ins = insights[c.customer.toLowerCase()];
+      const ins = getCustomerInsight(c);
       return filterState.delivery.has(ins?.latest_delivery_month || "");
     });
     if (filterState.latestContact.size) filtered = filtered.filter(c =>
       filterState.latestContact.has(getLatestContactBucket(c.latest_contact_date))
     );
 
-    document.getElementById("subtitle").textContent =
-      `${filtered.length} av ${customers.length} butiker`;
+    const matchedBeforeDailyFocus = filtered.length;
+
+    if (dailyFocusActive) {
+      filtered = filtered
+        .slice()
+        .sort(prioritySort)
+        .slice(0, DAILY_FOCUS_LIMIT);
+    }
+
+    updateDailyFocusChip(filtered.length);
+    document.getElementById("subtitle").textContent = dailyFocusActive
+      ? `Förslag: visar ${filtered.length} av ${matchedBeforeDailyFocus} matchande butiker`
+      : `${filtered.length} av ${customers.length} butiker`;
     filteredCustomers = filtered;
 
     if (filtered.length === 0) {
@@ -3124,8 +3296,8 @@
       return;
     }
 
-    const visibleCustomers = filtered.slice(0, visibleListCount);
-    const remainingCount = Math.max(0, filtered.length - visibleCustomers.length);
+    const visibleCustomers = dailyFocusActive ? filtered : filtered.slice(0, visibleListCount);
+    const remainingCount = dailyFocusActive ? 0 : Math.max(0, filtered.length - visibleCustomers.length);
     list.innerHTML = visibleCustomers.map(c => {
       return `
         <div class="customer-card" data-row="${c.row}" role="button" tabindex="0" aria-label="Öppna ${escAttr(c.customer)}">
@@ -3142,17 +3314,13 @@
               </div>
             </div>
           </div>
-          <div class="card-meta">
-            ${c.sales_person ? `<span class="meta-chip">${esc(c.sales_person)}</span>` : ""}
-            ${c.region_google ? `<span class="meta-chip">${esc(c.region_google)}</span>` : ""}
-          </div>
+          ${getPrioritySummaryHtml(c)}
+          ${getNextActionHtml(c)}
           ${(() => {
-            const ins = insights[c.customer.toLowerCase()];
-            if (!ins) return "";
+            const ins = getCustomerInsight(c);
+            if (!Object.keys(ins).length) return "";
             const badges = [];
             if (ins.missad_uppfoljning) badges.push(`<span class="tag tag-orange" style="font-size:0.68rem;padding:2px 7px">Missad uppföljning</span>`);
-            const riskBadge = getRiskBadgeHtml(ins.customer_risk, "font-size:0.68rem;padding:2px 7px");
-            if (riskBadge) badges.push(riskBadge);
             if (ins.latest_delivery_date) badges.push(`<span class="tag tag-blue" style="font-size:0.68rem;padding:2px 7px">Senast leverans ${esc(ins.latest_delivery_date)}</span>`);
             if (badges.length === 0) return "";
             return `<div class="card-badges">${badges.join("")}</div>`;
@@ -3233,7 +3401,7 @@
   }
 
   function renderDetailTags() {
-    const ins = currentCustomer ? insights[currentCustomer.customer.toLowerCase()] : null;
+    const ins = currentCustomer ? getCustomerInsight(currentCustomer) : null;
     const tags = [];
     if (currentCustomer?.customer_segment) tags.push(`<span class="tag tag-blue">${esc(currentCustomer.customer_segment)}</span>`);
     if (currentCustomer?.sales_person) tags.push(`<span class="tag tag-green">Ansvarig: ${esc(currentCustomer.sales_person)}</span>`);
@@ -3391,7 +3559,7 @@
     document.getElementById("d-total-sales").textContent =
       stats.total_sales.toLocaleString("sv-SE", { minimumFractionDigits: 2 }) +
       (stats.currency ? " " + stats.currency : "");
-    const ins = currentCustomer ? insights[currentCustomer.customer.toLowerCase()] : null;
+    const ins = currentCustomer ? getCustomerInsight(currentCustomer) : null;
     document.getElementById("d-latest-order").textContent = ins?.latest_delivery_date || "—";
     renderContactList(stats.contacts);
   }
@@ -4321,10 +4489,22 @@
     showToast("Rutten rensad");
   }
 
+  function hasMapCoordinates(c) {
+    return c?.latitude !== null && c?.latitude !== undefined && c?.latitude !== "" &&
+      c?.longitude !== null && c?.longitude !== undefined && c?.longitude !== "";
+  }
+
+  function getDailyFocusRank(c) {
+    if (!dailyFocusActive) return null;
+    const index = filteredCustomers.findIndex(item => Number(item.row) === Number(c.row));
+    return index >= 0 ? index + 1 : null;
+  }
+
   // ── Show map with all selected stores (no route yet) ──
   async function showMapView() {
     const MAP_LIMIT = 150;
-    mapStops = filteredCustomers.filter(c => c.latitude && c.longitude).slice(0, MAP_LIMIT);
+    const customersWithCoordinates = filteredCustomers.filter(hasMapCoordinates);
+    mapStops = customersWithCoordinates.slice(0, MAP_LIMIT);
 
     if (mapStops.length < 1) {
       showToast("Inga butiker med koordinater i listan");
@@ -4336,10 +4516,17 @@
     await initGoogleMap();
     renderMapMarkers();
     fitMapToBounds(mapStops);
-    const total = filteredCustomers.filter(c => c.latitude && c.longitude).length;
-    document.getElementById("map-subtitle").textContent = total > MAP_LIMIT
-      ? `Visar ${MAP_LIMIT} av ${total} butiker — filtrera för färre`
-      : `${mapStops.length} butik${mapStops.length !== 1 ? "er" : ""}`;
+    const total = customersWithCoordinates.length;
+    const missingCoordinates = Math.max(0, filteredCustomers.length - total);
+    if (dailyFocusActive) {
+      document.getElementById("map-subtitle").textContent = missingCoordinates > 0
+        ? `Förslag: ${mapStops.length} av ${filteredCustomers.length} visas på karta · ${missingCoordinates} saknar koordinater`
+        : `Förslag: ${mapStops.length} butik${mapStops.length !== 1 ? "er" : ""} på karta`;
+    } else {
+      document.getElementById("map-subtitle").textContent = total > MAP_LIMIT
+        ? `Visar ${MAP_LIMIT} av ${total} butiker — filtrera för färre`
+        : `${mapStops.length} butik${mapStops.length !== 1 ? "er" : ""}`;
+    }
     renderMapStopList();
     showMyLocation();
   }
@@ -4417,6 +4604,7 @@
       const routeIdx = routeInMapStops.findIndex(r => r.row === c.row);
       const inRoute  = routeIdx !== -1;
       const bg = inRoute ? "#22c55e" : "#6b7280";
+      const focusRank = getDailyFocusRank(c);
 
       let marker;
       if (inRoute) {
@@ -4444,9 +4632,17 @@
           position: { lat: c.latitude, lng: c.longitude },
           map: googleMap,
           title: c.customer,
+          label: dailyFocusActive && focusRank
+            ? {
+                text: String(focusRank),
+                color: "#fff",
+                fontSize: "10px",
+                fontWeight: "bold",
+              }
+            : undefined,
           icon: {
             path: google.maps.SymbolPath.CIRCLE,
-            scale: 9,
+            scale: dailyFocusActive && focusRank ? 10 : 9,
             fillColor: bg,
             fillOpacity: 1,
             strokeColor: "#fff",
@@ -4491,15 +4687,24 @@
     document.getElementById("map-stop-list").innerHTML = listStops.map(c => {
       const routeIdx = routeInMapStops.findIndex(r => r.row === c.row);
       const inRoute  = routeIdx !== -1;
+      const focusRank = getDailyFocusRank(c);
+      const ins = getCustomerInsight(c);
+      const actionLabel = ins.next_action?.label || "";
+      const priorityLabel = hasPriorityScore(ins)
+        ? `${ins.priority_score} poäng`
+        : (ins.priority_type || "");
+      const stopMeta = [c.city, actionLabel, priorityLabel].filter(Boolean).join(" · ");
       const badge = inRoute
         ? `<div style="width:22px;height:22px;border-radius:50%;background:#22c55e;color:#fff;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0">${routeIdx + 1}</div>`
+        : dailyFocusActive && focusRank
+          ? `<div style="min-width:26px;height:22px;border-radius:999px;background:#f7f2f6;color:#8c214c;border:1px solid var(--pb-border);font-size:11px;font-weight:800;display:flex;align-items:center;justify-content:center;flex-shrink:0">#${focusRank}</div>`
         : `<div style="width:14px;height:14px;border-radius:50%;background:#d1d5db;flex-shrink:0;margin:0 4px"></div>`;
       return `
         <div class="map-stop-item${inRoute ? " route-selected" : ""}" data-row="${c.row}">
           ${badge}
           <div class="stop-info" style="flex:1">
             <div class="stop-name">${esc(c.customer)}</div>
-            <div class="stop-city">${esc(c.city)}</div>
+            <div class="stop-city">${esc(stopMeta || c.city)}</div>
           </div>
           <button class="map-stop-detail-btn" data-detail-row="${c.row}">›</button>
         </div>
