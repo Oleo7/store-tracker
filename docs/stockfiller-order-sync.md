@@ -56,7 +56,8 @@ Suggested settings:
 ```text
 Build Command: pip install -r web-app/requirements.txt
 Command: python scripts/sync_stockfiller_orders.py
-Schedule: twice per day, for example 05:30 and 13:30 UTC
+Schedule: 07:30, 10:30, and 15:30 UTC
+Cron Expression: 30 7,10,15 * * *
 ```
 
 The sync stores its last successful incremental stop time in `_stockfiller_sync_state`.
