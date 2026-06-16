@@ -15,6 +15,7 @@ import unicodedata
 from zipfile import ZIP_DEFLATED, ZipFile
 from xml.sax.saxutils import escape as xml_escape
 from dotenv import load_dotenv
+from gspread.utils import rowcol_to_a1
 from requests.exceptions import ConnectionError as RequestsConnectionError
 from priority import (
     build_contact_features,
@@ -86,6 +87,14 @@ def text_to_sheet_value(value, max_length=None):
     return text[:max_length] if max_length is not None else text
 
 
+def merge_worksheet_cell_value(column, current, candidate):
+    if column in FREEZER_COLUMNS:
+        return "1" if is_checked_value(current) or is_checked_value(candidate) else ""
+
+    current_text = str(current or "").strip()
+    return current if current_text else candidate
+
+
 def ensure_customer_name_column(sheet, headers):
     if "name" in headers:
         return headers
@@ -106,6 +115,69 @@ def ensure_worksheet_columns(sheet, headers, columns):
         sheet.insert_cols([[column]], col=len(normalized_headers) + 1)
         normalized_headers.append(column)
     return normalized_headers
+
+
+def ensure_unique_worksheet_columns(sheet, headers, columns):
+    normalized_headers = [str(header).strip() for header in headers]
+    duplicate_groups = {
+        column: [idx for idx, header in enumerate(normalized_headers) if header == column]
+        for column in columns
+    }
+    duplicate_groups = {column: indexes for column, indexes in duplicate_groups.items() if len(indexes) > 1}
+    if not duplicate_groups:
+        return normalized_headers
+
+    try:
+        rows = sheet.get_all_values()
+        if rows:
+            for column, indexes in duplicate_groups.items():
+                primary_idx = indexes[0]
+                merged_values = []
+                primary_values = []
+                for row in rows[1:]:
+                    merged = ""
+                    for idx in indexes:
+                        value = row[idx] if idx < len(row) else ""
+                        merged = merge_worksheet_cell_value(column, merged, value)
+                    current = row[primary_idx] if primary_idx < len(row) else ""
+                    merged_values.append([merged])
+                    primary_values.append(current)
+
+                if merged_values and any(value[0] != primary for value, primary in zip(merged_values, primary_values)):
+                    range_name = f"{rowcol_to_a1(2, primary_idx + 1)}:{rowcol_to_a1(len(rows), primary_idx + 1)}"
+                    sheet.update(merged_values, range_name=range_name)
+
+        duplicate_indexes = sorted(
+            {idx for indexes in duplicate_groups.values() for idx in indexes[1:]},
+            reverse=True,
+        )
+        for idx in duplicate_indexes:
+            sheet.delete_columns(idx + 1)
+            del normalized_headers[idx]
+    except Exception as exc:
+        app.logger.warning("Could not deduplicate worksheet columns for %s: %s", sheet.title, exc)
+        return normalized_headers
+
+    return normalized_headers
+
+
+def ensure_contact_worksheet_schema(sheet):
+    headers = ensure_worksheet_columns(sheet, sheet.row_values(1), CONTACT_COLUMNS)
+    return ensure_unique_worksheet_columns(sheet, headers, FREEZER_COLUMNS)
+
+
+def build_worksheet_row(headers, row_data, single_value_columns=None):
+    single_value_columns = set(single_value_columns or [])
+    seen = set()
+    row = []
+    for header in headers:
+        if header in single_value_columns and header in seen:
+            row.append("")
+            continue
+        row.append(row_data.get(header, ""))
+        if header:
+            seen.add(header)
+    return row
 
 
 def get_spreadsheet(force_reconnect=False):
@@ -143,7 +215,11 @@ def worksheet_to_dicts(worksheet, expected_columns=None, required_columns=None):
         for idx, header in enumerate(headers):
             if not header:
                 continue
-            item[header] = row[idx] if idx < len(row) else ""
+            value = row[idx] if idx < len(row) else ""
+            if header in item:
+                item[header] = merge_worksheet_cell_value(header, item[header], value)
+            else:
+                item[header] = value
         result.append(item)
     return result
 
@@ -1161,7 +1237,7 @@ def add_contact(customer_name):
     customer_name = unquote(customer_name)
     data = request.get_json()
     sheet = get_spreadsheet_with_retry().worksheet("sales_activities")
-    headers = ensure_worksheet_columns(sheet, sheet.row_values(1), FREEZER_COLUMNS)
+    headers = ensure_contact_worksheet_schema(sheet)
     freezer_values = {field: checkbox_to_sheet_value(data.get(field, "")) for field in FREEZER_COLUMNS}
     if not any(freezer_values.values()):
         return jsonify({"ok": False, "error": "freezer_selection_required"}), 400
@@ -1177,7 +1253,7 @@ def add_contact(customer_name):
         "follow_up_date": data.get("follow_up_date", ""),
         **freezer_values,
     }
-    row = [row_data.get(header, "") for header in headers]
+    row = build_worksheet_row(headers, row_data, single_value_columns=FREEZER_COLUMNS)
     sheet.append_row(row)
     return jsonify({"ok": True})
 

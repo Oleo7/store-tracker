@@ -4,6 +4,7 @@ from pathlib import Path
 from unittest import TestCase, main
 from unittest.mock import patch
 from zipfile import ZipFile
+import re
 import sys
 
 
@@ -587,6 +588,47 @@ class PriorityTests(TestCase):
         self.assertIn("Polarbär", worksheet)
         self.assertNotIn("Store B", worksheet)
 
+    def test_contact_rows_merge_duplicate_polarbar_header(self):
+        headers = list(app_module.CONTACT_COLUMNS) + ["polarbar"]
+        contacts = [
+            headers,
+            _row(app_module.CONTACT_COLUMNS, _contact("Store A", "2026-06-03 14:30", "Sofia", "Positiv")) + ["true"],
+        ]
+        fake_spreadsheet = FakeSpreadsheet({"sales_activities": contacts})
+
+        rows = app_module.get_contact_rows(fake_spreadsheet)
+
+        self.assertEqual(rows[0]["polarbar"], "1")
+
+    def test_add_contact_merges_and_removes_duplicate_polarbar_header(self):
+        headers = list(app_module.CONTACT_COLUMNS) + ["polarbar"]
+        contacts = [
+            headers,
+            _row(app_module.CONTACT_COLUMNS, _contact("Existing Store", "2026-06-03 14:30", "Sofia", "Positiv")) + ["true"],
+        ]
+        fake_spreadsheet = FakeSpreadsheet({"sales_activities": contacts})
+
+        with patch.object(app_module, "get_spreadsheet_with_retry", return_value=fake_spreadsheet):
+            client = app_module.app.test_client()
+            response = client.post(
+                "/customers/Store%20A/contacts",
+                json={
+                    "sales_person": "Sofia",
+                    "contact_channel": "Besök",
+                    "result": "Positiv",
+                    "comment": "Test",
+                    "polarbar": "1",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(contacts[0].count("polarbar"), 1)
+        polarbar_idx = contacts[0].index("polarbar")
+        self.assertEqual(contacts[1][polarbar_idx], "1")
+        self.assertEqual(contacts[2][contacts[0].index("customer")], "Store A")
+        self.assertEqual(contacts[2][polarbar_idx], "1")
+        self.assertEqual(len(contacts[2]), len(contacts[0]))
+
     def test_add_contact_creates_and_logs_none_column(self):
         headers_without_none = [column for column in app_module.CONTACT_COLUMNS if column != "none"]
         contacts = [headers_without_none]
@@ -683,6 +725,32 @@ class FakeWorksheet:
     def append_row(self, row):
         self._values.append(row)
 
+    def update(self, values, range_name=None, **kwargs):
+        match = re.match(r"([A-Z]+)(\d+):([A-Z]+)(\d+)$", range_name or "")
+        if not match:
+            raise ValueError(f"Unsupported range: {range_name}")
+
+        start_col, start_row, end_col, _end_row = match.groups()
+        if start_col != end_col:
+            raise ValueError("FakeWorksheet.update only supports single-column updates")
+
+        col_idx = _a1_column_to_index(start_col) - 1
+        row_idx = int(start_row) - 1
+        for offset, value_row in enumerate(values):
+            target_row_idx = row_idx + offset
+            while len(self._values) <= target_row_idx:
+                self._values.append([])
+            target_row = self._values[target_row_idx]
+            while len(target_row) <= col_idx:
+                target_row.append("")
+            target_row[col_idx] = value_row[0] if value_row else ""
+
+    def delete_columns(self, start_index, end_index=None):
+        start_idx = start_index - 1
+        end_idx = end_index if end_index is not None else start_index
+        for row in self._values:
+            del row[start_idx:end_idx]
+
     def insert_cols(self, columns, col=1):
         insert_idx = col - 1
         max_rows = max(len(self._values), *(len(column) for column in columns))
@@ -703,6 +771,13 @@ class FakeSpreadsheet:
 
     def worksheet(self, name):
         return FakeWorksheet(name, self._worksheets[name])
+
+
+def _a1_column_to_index(label):
+    index = 0
+    for char in label:
+        index = index * 26 + ord(char) - ord("A") + 1
+    return index
 
 
 if __name__ == "__main__":

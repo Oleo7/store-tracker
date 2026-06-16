@@ -2873,7 +2873,8 @@
 <script>
   const API = "";
   const FREEZER_NONE_FIELD = "none";
-  const FREEZER_FIELDS = ["Franui", "Schufrulade", "Boujee", "polarbar", FREEZER_NONE_FIELD];
+  const FREEZER_FIELDS = Object.freeze(["Franui", "Schufrulade", "Boujee", "polarbar", FREEZER_NONE_FIELD]);
+  const FREEZER_FIELD_SET = new Set(FREEZER_FIELDS);
   const FREEZER_LABELS = { Franui: "Franui", Schufrulade: "Schufrulade", Boujee: "Boujee", polarbar: "Polarbär", none: "Inget" };
   const LIST_BATCH_SIZE = 80;
   const DAILY_FOCUS_LIMIT = 20;
@@ -2897,7 +2898,8 @@
   let contactLogColumnFilters = { customer: "", comment: "" };
   let visibleListCount = LIST_BATCH_SIZE;
   let lastListSignature = "";
-  const visitCompetitorButtons = Array.from(document.querySelectorAll(".visit-competitor-toggle"));
+  const visitCompetitorButtons = Array.from(document.querySelectorAll(".visit-competitor-toggle"))
+    .filter(btn => FREEZER_FIELD_SET.has(btn.dataset.competitor));
   const customerCommentInput = document.getElementById("customer-comment-input");
   const customerCommentCount = document.getElementById("customer-comment-count");
 
@@ -3456,10 +3458,17 @@
   }
 
   function getVisitFreezerPayload() {
-    const payload = {};
+    const payload = Object.fromEntries(FREEZER_FIELDS.map(field => [field, ""]));
     visitCompetitorButtons.forEach(btn => {
-      payload[btn.dataset.competitor] = btn.classList.contains("active") ? "1" : "";
+      const field = btn.dataset.competitor;
+      if (!FREEZER_FIELD_SET.has(field)) return;
+      if (btn.classList.contains("active")) payload[field] = "1";
     });
+    if (payload[FREEZER_NONE_FIELD] === "1") {
+      FREEZER_FIELDS.forEach(field => {
+        if (field !== FREEZER_NONE_FIELD) payload[field] = "";
+      });
+    }
     return payload;
   }
 
@@ -3703,7 +3712,7 @@
       visitCompetitorButtons.forEach(button => {
         state[button.dataset.competitor] = button.classList.contains("active") ? "1" : "";
       });
-      if (!FREEZER_FIELDS.includes(field)) return;
+      if (!FREEZER_FIELD_SET.has(field)) return;
       const nextActive = !btn.classList.contains("active");
       if (field === FREEZER_NONE_FIELD) {
         FREEZER_FIELDS.forEach(name => state[name] = "");
