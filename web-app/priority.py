@@ -121,8 +121,8 @@ def build_order_features(order_rows: list[dict]) -> dict:
         if not customer or "polarbär" in customer.casefold():
             continue
 
-        quantity = _parse_number(row.get("Quantity"))
-        if quantity <= 0:
+        dfp = _order_dfp(row)
+        if dfp <= 0:
             continue
 
         reference = str(row.get("Reference") or "").strip() or f"row-{idx}"
@@ -145,7 +145,7 @@ def build_order_features(order_rows: list[dict]) -> dict:
                 "sales": 0.0,
             },
         )
-        order["dfp"] += quantity
+        order["dfp"] += dfp
         order["sales"] += total
         if order_date and (not order["order_date"] or order_date > order["order_date"]):
             order["order_date"] = order_date
@@ -170,6 +170,10 @@ def build_order_features(order_rows: list[dict]) -> dict:
         total_dfp = sum(o["dfp"] for o in customer_orders)
         total_sales = sum(o["sales"] for o in customer_orders)
         order_count = len(customer_orders)
+        avg_dfp = total_dfp / order_count if order_count else 0
+        avg_sales = total_sales / order_count if order_count else 0
+        latest_dfp = latest_order.get("dfp", 0)
+        latest_sales = latest_order.get("sales", 0)
 
         median_gap = None
         expected_cycle = None
@@ -185,10 +189,14 @@ def build_order_features(order_rows: list[dict]) -> dict:
             "order_count": order_count,
             "total_dfp": _clean_number(total_dfp),
             "total_sales": _clean_number(total_sales),
-            "avg_dfp_per_order": _clean_number(total_dfp / order_count) if order_count else 0,
+            "avg_dfp_per_order": _clean_number(avg_dfp),
+            "avg_sales_per_order": _clean_number(avg_sales),
             "last_order_date": max(order_dates) if order_dates else latest_order.get("delivery_date"),
             "last_delivery_date": latest_order.get("delivery_date"),
-            "latest_order_dfp": _clean_number(latest_order.get("dfp", 0)),
+            "latest_order_dfp": _clean_number(latest_dfp),
+            "latest_order_value": _clean_number(latest_sales),
+            "expected_order_dfp": _clean_number(_weighted_recent_average(latest_dfp, avg_dfp)),
+            "expected_order_value": _clean_number(_weighted_recent_average(latest_sales, avg_sales)),
             "median_reorder_gap_days": _clean_number(median_gap),
             "expected_cycle_days": expected_cycle,
             "expected_next_order_date": (
@@ -258,6 +266,7 @@ def build_priority_customers(
         for feature in order_features.values()
         if normalize_customer_key(feature.get("customer_number"))
     }
+    benchmarks = _build_priority_benchmarks(customers, order_features, number_index)
 
     result = []
     for customer in customers:
@@ -277,11 +286,35 @@ def build_priority_customers(
         order_feature = number_index.get(customer_number_key) or order_features.get(customer_key) or {}
         contact_feature = contact_features.get(customer_key) or {}
         segment = _segment_value(customer)
+        segment_defaults = _segment_defaults(benchmarks, segment)
         enriched_order = dict(order_feature)
 
         last_delivery = enriched_order.get("last_delivery_date")
         last_order = enriched_order.get("last_order_date")
+        order_count = enriched_order.get("order_count", 0)
+        total_dfp = enriched_order.get("total_dfp", 0)
+        expected_order_dfp = enriched_order.get("expected_order_dfp")
+        expected_order_value = enriched_order.get("expected_order_value")
+
+        if order_count:
+            expected_order_dfp = expected_order_dfp or enriched_order.get("avg_dfp_per_order") or segment_defaults["expected_order_dfp"]
+            expected_order_value = (
+                expected_order_value
+                or enriched_order.get("avg_sales_per_order")
+                or segment_defaults["expected_order_value"]
+            )
+        else:
+            expected_order_dfp = segment_defaults["expected_order_dfp"]
+            expected_order_value = segment_defaults["expected_order_value"]
+
+        expected_cycle = enriched_order.get("expected_cycle_days")
+        expected_cycle_source = "customer" if expected_cycle else ""
         expected_next = enriched_order.get("expected_next_order_date")
+        if last_delivery and not expected_cycle:
+            expected_cycle = segment_defaults["expected_cycle_days"]
+            expected_cycle_source = "segment"
+            expected_next = last_delivery + timedelta(days=expected_cycle) if expected_cycle else None
+
         overdue_days = (today - expected_next).days if expected_next else None
         days_since_delivery = (today - last_delivery).days if last_delivery else None
 
@@ -302,8 +335,10 @@ def build_priority_customers(
 
         score = _priority_score(
             segment=segment,
-            order_count=enriched_order.get("order_count", 0),
-            total_dfp=enriched_order.get("total_dfp", 0),
+            order_count=order_count,
+            expected_order_dfp=expected_order_dfp,
+            expected_order_value=expected_order_value,
+            benchmarks=benchmarks,
             overdue_days=overdue_days,
             latest_contact_class=latest_contact_class,
             has_order_after_latest_contact=has_order_after_latest_contact,
@@ -311,20 +346,19 @@ def build_priority_customers(
             follow_up_due=follow_up_due,
             latest_contact_date=latest_contact_date,
             last_order_date=last_order,
+            last_delivery_date=last_delivery,
             today=today,
         )
         priority_type = _priority_type(
             follow_up_due=follow_up_due,
             has_order_after_latest_contact=has_order_after_latest_contact,
-            order_count=enriched_order.get("order_count", 0),
+            order_count=order_count,
             overdue_days=overdue_days,
             latest_contact_class=latest_contact_class,
             days_since_contact=days_since_contact,
             segment=segment,
         )
         priority_level = _priority_level(score)
-        total_dfp = enriched_order.get("total_dfp", 0)
-        order_count = enriched_order.get("order_count", 0)
 
         result.append(
             {
@@ -338,10 +372,13 @@ def build_priority_customers(
                 "recommended_action": _recommended_action(priority_type),
                 "order_count": order_count,
                 "total_dfp": _clean_number(total_dfp),
+                "expected_order_dfp": _clean_number(expected_order_dfp),
+                "_expected_order_value_sort": _clean_number(expected_order_value),
                 "latest_order_date": _iso_date(last_order),
                 "latest_delivery_date": _iso_date(last_delivery),
                 "days_since_delivery": days_since_delivery,
-                "expected_cycle_days": enriched_order.get("expected_cycle_days"),
+                "expected_cycle_days": expected_cycle,
+                "expected_cycle_source": expected_cycle_source,
                 "expected_next_order_date": _iso_date(expected_next),
                 "overdue_days": overdue_days,
                 "latest_contact_date": _iso_date(latest_contact_date),
@@ -356,6 +393,7 @@ def build_priority_customers(
                     follow_up_due=follow_up_due,
                     overdue_days=overdue_days,
                     total_dfp=total_dfp,
+                    expected_order_dfp=expected_order_dfp,
                     order_count=order_count,
                     latest_contact_class=latest_contact_class,
                     has_order_after_latest_contact=has_order_after_latest_contact,
@@ -372,6 +410,7 @@ def build_priority_customers(
                     latest_contact_class=latest_contact_class,
                     days_since_contact=days_since_contact,
                     total_dfp=enriched_order.get("total_dfp", 0),
+                    expected_order_dfp=expected_order_dfp,
                     order_count=enriched_order.get("order_count", 0),
                     segment=segment,
                     latest_contact_date=latest_contact_date,
@@ -382,12 +421,16 @@ def build_priority_customers(
     result.sort(
         key=lambda c: (
             c["priority_score"],
+            c.get("_expected_order_value_sort") or 0,
+            c.get("expected_order_dfp") or 0,
             _segment_rank(c.get("segment")),
             c.get("overdue_days") if c.get("overdue_days") is not None else -999,
             c.get("total_dfp") or 0,
         ),
         reverse=True,
     )
+    for customer in result:
+        customer.pop("_expected_order_value_sort", None)
     return result[:limit]
 
 
@@ -395,7 +438,9 @@ def _priority_score(
     *,
     segment,
     order_count,
-    total_dfp,
+    expected_order_dfp,
+    expected_order_value,
+    benchmarks,
     overdue_days,
     latest_contact_class,
     has_order_after_latest_contact,
@@ -403,44 +448,27 @@ def _priority_score(
     follow_up_due,
     latest_contact_date,
     last_order_date,
+    last_delivery_date,
     today,
 ) -> int:
-    score = 0
-    if segment == "A":
-        score += 25
-    elif segment == "B":
-        score += 15
-    elif segment == "C":
-        score += 5
-    else:
-        score += 3
+    value_index = _value_index(expected_order_value, expected_order_dfp, benchmarks)
+    score = 0.0
+    score += 50 * value_index
+    score += 25 * _timing_index(overdue_days, order_count)
+    score += 15 * _engagement_index(
+        latest_contact_class,
+        days_since_contact,
+        follow_up_due,
+        has_order_after_latest_contact,
+    )
+    score += 7 * _segment_index(segment)
+    score += 3 * _repeat_index(order_count)
 
-    if total_dfp >= 80:
-        score += 20
-    elif total_dfp >= 30:
-        score += 12
-    elif order_count > 0:
-        score += 7
+    if order_count == 0 and segment in ["A", "B"]:
+        score += 6
 
-    if order_count > 0 and overdue_days is not None:
-        if overdue_days >= 21:
-            score += 30
-        elif overdue_days >= 7:
-            score += 20
-        elif overdue_days >= 0:
-            score += 10
-
-    if latest_contact_class == "Positiv" and not has_order_after_latest_contact:
-        if days_since_contact is not None and days_since_contact >= 3:
-            score += 30
-        else:
-            score += 10
-
-    if latest_contact_class == "Neutral" and follow_up_due:
-        score += 15
-
-    if latest_contact_class == "Ej anträffbar" and days_since_contact is not None and days_since_contact >= 3:
-        score += 8
+    if follow_up_due and score < 50:
+        score = 50 + (8 * value_index)
 
     if latest_contact_class == "Negativ" and days_since_contact is not None and days_since_contact <= 30:
         score -= 25
@@ -448,17 +476,14 @@ def _priority_score(
     if latest_contact_class == "Order lagd" and last_order_date and (today - last_order_date).days <= 14:
         score -= 20
 
-    if order_count == 0 and segment in ["A", "B"]:
-        score += 10
-
-    if order_count == 0 and latest_contact_date is None:
-        score += 8
-
     if last_order_date and (today - last_order_date).days <= 10:
-        score -= 20
+        score -= 28
+
+    if last_delivery_date and (today - last_delivery_date).days < 0:
+        score -= 30
 
     if latest_contact_date and days_since_contact is not None and days_since_contact <= 2 and not follow_up_due:
-        score -= 15
+        score -= 12
 
     return max(0, min(100, int(round(score))))
 
@@ -475,7 +500,9 @@ def _priority_type(
 ) -> str:
     if follow_up_due and not has_order_after_latest_contact:
         return "Försenad uppföljning"
-    if order_count > 0 and overdue_days is not None and overdue_days >= 7:
+    if order_count > 0 and overdue_days is not None and overdue_days >= 0:
+        if order_count == 1:
+            return "Återaktivera provorder"
         return "Rädda återorder"
     if latest_contact_class == "Positiv" and not has_order_after_latest_contact:
         return "Varm chans"
@@ -498,6 +525,7 @@ def _recommended_action(priority_type: str) -> str:
     return {
         "Försenad uppföljning": "Följ upp",
         "Rädda återorder": "Driv återorder",
+        "Återaktivera provorder": "Följ upp första ordern",
         "Varm chans": "Följ upp positiv dialog",
         "Ny A/B-chans": "Bearbeta som prioriterad kund",
         "Försök igen": "Gör nytt försök",
@@ -511,6 +539,7 @@ def _next_action(
     follow_up_due,
     overdue_days,
     total_dfp,
+    expected_order_dfp,
     order_count,
     latest_contact_class,
     has_order_after_latest_contact,
@@ -529,12 +558,21 @@ def _next_action(
             "primary_cta": "Ring",
         }
 
+    if order_count == 1 and overdue_days is not None and overdue_days >= 0:
+        return {
+            "label": "Följ upp första ordern",
+            "action_type": "trial_reorder",
+            "tone": "urgent" if overdue_days >= 21 else "warning",
+            "reason": f"Första ordern är redo för uppföljning · potential ca {_format_dfp(expected_order_dfp)}",
+            "primary_cta": "Ring",
+        }
+
     if order_count > 0 and overdue_days is not None and overdue_days >= 7:
         return {
             "label": "Ring för återorder",
             "action_type": "reorder",
             "tone": "urgent" if overdue_days >= 21 else "warning",
-            "reason": f"Över normal återköpstid +{overdue_days} dagar · tidigare kund: {_clean_number(total_dfp or 0)} DFP",
+            "reason": f"Över normal återköpstid +{overdue_days} dagar · potential ca {_format_dfp(expected_order_dfp or total_dfp)}",
             "primary_cta": "Ring",
         }
 
@@ -543,7 +581,7 @@ def _next_action(
             "label": "Stäng positiv dialog",
             "action_type": "warm_lead",
             "tone": "positive",
-            "reason": "Positiv dialog · ingen order efter kontakt",
+            "reason": f"Positiv dialog · potential ca {_format_dfp(expected_order_dfp)}",
             "primary_cta": "Följ upp",
         }
 
@@ -601,13 +639,18 @@ def _priority_reasons(
     latest_contact_class,
     days_since_contact,
     total_dfp,
+    expected_order_dfp,
     order_count,
     segment,
     latest_contact_date,
 ) -> list[str]:
     reasons = []
+    if expected_order_dfp:
+        reasons.append(f"Orderpotential ca {_format_dfp(expected_order_dfp)}")
     if follow_up_due and not has_order_after_latest_contact:
         reasons.append("Försenad uppföljning")
+    if order_count == 1 and overdue_days is not None and overdue_days >= 0:
+        reasons.append("Första ordern redo för uppföljning")
     if overdue_days is not None and overdue_days >= 0:
         reasons.append(f"Över normal återköpstid: +{overdue_days} dagar")
     if latest_contact_class == "Positiv" and not has_order_after_latest_contact:
@@ -625,6 +668,172 @@ def _priority_reasons(
     if latest_contact_class == "Negativ" and days_since_contact is not None and days_since_contact <= 30:
         reasons.append("Negativ kontakt senaste 30 dagarna")
     return reasons[:3]
+
+
+def _build_priority_benchmarks(customers: list[dict], order_features: dict, number_index: dict) -> dict:
+    global_dfp = []
+    global_value = []
+    global_cycles = []
+    by_segment = defaultdict(lambda: {"dfp": [], "value": [], "cycle": []})
+
+    for customer in customers:
+        if _is_truthy(customer.get("cancelled_flag")):
+            continue
+
+        customer_key = normalize_customer_key(customer.get("customer"))
+        customer_number_key = normalize_customer_key(customer.get("customer_number"))
+        feature = number_index.get(customer_number_key) or order_features.get(customer_key)
+        if not feature:
+            continue
+
+        segment = _segment_value(customer)
+        dfp = _positive_float(feature.get("expected_order_dfp"))
+        value = _positive_float(feature.get("expected_order_value"))
+        cycle = _positive_float(feature.get("median_reorder_gap_days"))
+
+        if dfp:
+            global_dfp.append(dfp)
+            by_segment[segment]["dfp"].append(dfp)
+        if value:
+            global_value.append(value)
+            by_segment[segment]["value"].append(value)
+        if cycle:
+            global_cycles.append(cycle)
+            by_segment[segment]["cycle"].append(cycle)
+
+    global_default = {
+        "expected_order_dfp": _median_or(global_dfp, 0),
+        "expected_order_value": _median_or(global_value, 0),
+        "expected_cycle_days": _cycle_default(global_cycles, 45),
+    }
+    segment_defaults = {"": global_default}
+    for segment, values in by_segment.items():
+        segment_defaults[segment] = {
+            "expected_order_dfp": _median_or(values["dfp"], global_default["expected_order_dfp"]),
+            "expected_order_value": _median_or(values["value"], global_default["expected_order_value"]),
+            "expected_cycle_days": _cycle_default(values["cycle"], global_default["expected_cycle_days"]),
+        }
+
+    return {
+        "expected_order_dfp_p90": _percentile(global_dfp, 0.9) or global_default["expected_order_dfp"] or 1,
+        "expected_order_value_p90": _percentile(global_value, 0.9) or global_default["expected_order_value"] or 1,
+        "segment_defaults": segment_defaults,
+    }
+
+
+def _segment_defaults(benchmarks: dict, segment: str) -> dict:
+    defaults = benchmarks.get("segment_defaults", {})
+    return defaults.get(str(segment or "").strip().upper()[:1]) or defaults.get("") or {
+        "expected_order_dfp": 0,
+        "expected_order_value": 0,
+        "expected_cycle_days": 45,
+    }
+
+
+def _value_index(expected_order_value, expected_order_dfp, benchmarks: dict) -> float:
+    value = _positive_float(expected_order_value)
+    value_p90 = _positive_float(benchmarks.get("expected_order_value_p90"))
+    if value and value_p90:
+        return _clamp(value / value_p90, 0, 1)
+
+    dfp = _positive_float(expected_order_dfp)
+    dfp_p90 = _positive_float(benchmarks.get("expected_order_dfp_p90"))
+    if dfp and dfp_p90:
+        return _clamp(dfp / dfp_p90, 0, 1)
+
+    return 0
+
+
+def _timing_index(overdue_days, order_count) -> float:
+    if overdue_days is None:
+        return 0.25 if order_count == 0 else 0
+    if overdue_days < -14:
+        return 0
+    if overdue_days < 0:
+        return 0.25
+    if overdue_days < 7:
+        return 0.45
+    if overdue_days < 21:
+        return 0.7
+    return 1
+
+
+def _engagement_index(
+    latest_contact_class,
+    days_since_contact,
+    follow_up_due,
+    has_order_after_latest_contact,
+) -> float:
+    index = 0
+    if follow_up_due:
+        index = max(index, 0.8)
+    if latest_contact_class == "Positiv" and not has_order_after_latest_contact:
+        index = max(index, 1 if days_since_contact is not None and days_since_contact >= 3 else 0.45)
+    if latest_contact_class == "Neutral" and follow_up_due:
+        index = max(index, 0.65)
+    if latest_contact_class == "Ej anträffbar" and days_since_contact is not None and days_since_contact >= 3:
+        index = max(index, 0.35)
+    return index
+
+
+def _segment_index(segment) -> float:
+    return {"A": 1, "B": 0.65, "C": 0.25}.get(str(segment or "").strip().upper()[:1], 0.15)
+
+
+def _repeat_index(order_count) -> float:
+    if order_count >= 3:
+        return 1
+    if order_count == 2:
+        return 0.65
+    if order_count == 1:
+        return 0.35
+    return 0
+
+
+def _order_dfp(row: dict) -> float:
+    total_weight = _parse_number(row.get("Total weight"))
+    return total_weight if total_weight > 0 else _parse_number(row.get("Quantity"))
+
+
+def _weighted_recent_average(latest, average) -> float:
+    return (_positive_float(latest) * 0.65) + (_positive_float(average) * 0.35)
+
+
+def _format_dfp(value) -> str:
+    return f"{_clean_number(_positive_float(value))} DFP"
+
+
+def _positive_float(value) -> float:
+    try:
+        number = float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    return number if number > 0 else 0.0
+
+
+def _median_or(values: list[float], fallback: float) -> float:
+    cleaned = [_positive_float(value) for value in values if _positive_float(value)]
+    return median(cleaned) if cleaned else fallback
+
+
+def _percentile(values: list[float], fraction: float) -> float | None:
+    cleaned = sorted(_positive_float(value) for value in values if _positive_float(value))
+    if not cleaned:
+        return None
+    if len(cleaned) == 1:
+        return cleaned[0]
+
+    position = (len(cleaned) - 1) * fraction
+    lower = int(position)
+    upper = min(lower + 1, len(cleaned) - 1)
+    weight = position - lower
+    return (cleaned[lower] * (1 - weight)) + (cleaned[upper] * weight)
+
+
+def _cycle_default(cycles: list[float], fallback: int) -> int:
+    if not cycles:
+        return fallback
+    return _clamp(round(median(cycles) * 1.25), 21, 75)
 
 
 def _segment_value(customer: dict) -> str:

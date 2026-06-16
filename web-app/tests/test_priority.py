@@ -62,6 +62,18 @@ class PriorityTests(TestCase):
         self.assertNotIn(normalize_customer_key("Polarbär - Inköp"), features)
         self.assertNotIn(normalize_customer_key("Customer B"), features)
 
+    def test_order_features_prefer_total_weight_for_dfp(self):
+        features = build_order_features(
+            [
+                _order("REF1", "Customer A", "2026-04-01", "2026-04-08", 7, 100, total_weight=6),
+            ]
+        )
+
+        customer = features[normalize_customer_key("Customer A")]
+        self.assertEqual(customer["total_dfp"], 6)
+        self.assertEqual(customer["latest_order_dfp"], 6)
+        self.assertEqual(customer["expected_order_dfp"], 6)
+
     def test_reorder_cycle_from_three_deliveries(self):
         features = build_order_features(
             [
@@ -93,7 +105,7 @@ class PriorityTests(TestCase):
         self.assertEqual(priority[0]["next_action"]["action_type"], "reorder")
         self.assertEqual(priority[0]["next_action"]["label"], "Ring för återorder")
 
-    def test_single_order_does_not_show_reorder_time(self):
+    def test_single_order_uses_segment_cycle_fallback_for_followup(self):
         order_features = build_order_features(
             [
                 _order("REF1", "Customer A", "2025-12-01", "2025-12-01", 30, 1000),
@@ -103,9 +115,37 @@ class PriorityTests(TestCase):
         customers = [_customer("Customer A", "Daniel", "A", 2)]
         priority = build_priority_customers(customers, order_features, {}, "Daniel", TODAY)
 
-        self.assertIsNone(priority[0]["expected_cycle_days"])
-        self.assertIsNone(priority[0]["overdue_days"])
-        self.assertFalse(any("Över normal återköpstid" in reason for reason in priority[0]["reasons"]))
+        self.assertEqual(priority[0]["priority_type"], "Återaktivera provorder")
+        self.assertEqual(priority[0]["expected_cycle_source"], "segment")
+        self.assertIsNotNone(priority[0]["expected_cycle_days"])
+        self.assertGreater(priority[0]["overdue_days"], 0)
+        self.assertEqual(priority[0]["next_action"]["action_type"], "trial_reorder")
+
+    def test_high_expected_order_value_beats_small_stale_reorder(self):
+        order_features = build_order_features(
+            [
+                _order("LOW1", "Small A", "2026-01-01", "2026-01-01", 5, 100),
+                _order("LOW2", "Small A", "2026-02-01", "2026-02-01", 5, 100),
+                _order("LOW3", "Small A", "2026-03-01", "2026-03-01", 5, 100),
+                _order("HIGH1", "Large B", "2026-01-01", "2026-01-01", 70, 5000),
+                _order("HIGH2", "Large B", "2026-03-10", "2026-03-10", 80, 6000),
+            ]
+        )
+        contact_features = build_contact_features(
+            [
+                _contact("Small A", "2026-04-01 10:00", "Daniel", "Positiv"),
+            ],
+            order_features,
+        )
+
+        customers = [
+            _customer("Small A", "Daniel", "A", 2),
+            _customer("Large B", "Daniel", "B", 3),
+        ]
+        priority = build_priority_customers(customers, order_features, contact_features, "Daniel", TODAY)
+
+        self.assertEqual(priority[0]["customer"], "Large B")
+        self.assertGreater(priority[0]["expected_order_dfp"], priority[1]["expected_order_dfp"])
 
     def test_positive_dialog_without_order(self):
         contact_features = build_contact_features(
@@ -384,7 +424,10 @@ class PriorityTests(TestCase):
         self.assertIn("next_action", data["customer a"])
         self.assertIn("order_count", data["customer a"])
         self.assertIn("total_dfp", data["customer a"])
+        self.assertIn("expected_order_dfp", data["customer a"])
+        self.assertNotIn("expected_order_value", data["customer a"])
         self.assertIn("latest_order_date", data["customer a"])
+        self.assertIn("expected_cycle_days", data["customer a"])
         self.assertIn("expected_next_order_date", data["customer a"])
         self.assertIn("latest_contact_class", data["customer a"])
         self.assertIn("follow_up_due", data["customer a"])

@@ -3139,6 +3139,7 @@
     return (
       (Number(hasPriorityScore(ib)) - Number(hasPriorityScore(ia))) ||
       (Number(ib.priority_score || 0) - Number(ia.priority_score || 0)) ||
+      (Number(ib.expected_order_dfp || 0) - Number(ia.expected_order_dfp || 0)) ||
       (segmentRank(b.customer_segment) - segmentRank(a.customer_segment)) ||
       (Number(ib.overdue_days ?? -999) - Number(ia.overdue_days ?? -999)) ||
       (Number(ib.total_dfp || 0) - Number(ia.total_dfp || 0)) ||
@@ -3172,10 +3173,14 @@
 
     const ins = getCustomerInsight(c);
     if (!hasPriorityScore(ins)) return "";
+    const potential = Number(ins.expected_order_dfp || 0);
+    const potentialText = potential > 0
+      ? ` · ca ${potential.toLocaleString("sv-SE", { maximumFractionDigits: 1 })} DFP`
+      : "";
 
     return `
       <div class="daily-focus-summary">
-        ${esc(String(ins.priority_score))} poäng · ${esc(ins.priority_level || "Prio saknas")} · ${esc(ins.priority_type || "Typ saknas")}
+        ${esc(String(ins.priority_score))} poäng · ${esc(ins.priority_level || "Prio saknas")} · ${esc(ins.priority_type || "Typ saknas")}${potentialText}
       </div>
     `;
   }
@@ -4349,6 +4354,7 @@
               <span class="priority-pill ${levelClass}">${esc(c.priority_level || "Låg prio")}</span>
               <span class="priority-type">${esc(c.priority_type || "")}</span>
               <span class="priority-type">Ordrar ${Number(c.order_count || 0)}</span>
+              ${Number(c.expected_order_dfp || 0) > 0 ? `<span class="priority-type">Pot ${Number(c.expected_order_dfp).toLocaleString("sv-SE", { maximumFractionDigits: 1 })} DFP</span>` : ""}
             </div>
 
             <div class="priority-reason">

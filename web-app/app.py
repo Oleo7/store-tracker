@@ -878,9 +878,12 @@ def get_customer_insights():
             "next_action": priority.get("next_action", {}),
             "order_count": priority.get("order_count", 0),
             "total_dfp": priority.get("total_dfp"),
+            "expected_order_dfp": priority.get("expected_order_dfp"),
             "latest_order_date": priority.get("latest_order_date", ""),
             "latest_delivery_date": latest_delivery_date,
             "latest_delivery_month": latest_delivery_date[:7] if latest_delivery_date else "",  # "YYYY-MM"
+            "expected_cycle_days": priority.get("expected_cycle_days"),
+            "expected_cycle_source": priority.get("expected_cycle_source", ""),
             "expected_next_order_date": priority.get("expected_next_order_date", ""),
             "overdue_days": priority.get("overdue_days"),
             "days_since_delivery": priority.get("days_since_delivery"),
