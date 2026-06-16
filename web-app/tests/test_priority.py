@@ -281,6 +281,109 @@ class PriorityTests(TestCase):
         self.assertEqual(data["selected_responsible"], "Daniel")
         self.assertTrue(all(customer["sales_person"] == "Daniel" for customer in data["priority_customers"]))
 
+    def test_followup_insights_returns_freezer_summary_by_sales_person(self):
+        customers = [
+            [
+                "customer",
+                "cancelled_flag",
+                "sales_person",
+                "customer_segment",
+                "customer_number",
+            ],
+        ]
+        orders = [app_module.ORDER_COLUMNS]
+        contacts = [
+            app_module.CONTACT_COLUMNS,
+            _row(
+                app_module.CONTACT_COLUMNS,
+                {
+                    **_contact("ICA Kvantum A", "2026-06-01 10:00", "Daniel", "Neutral"),
+                    "Franui": "1",
+                    "polarbar": "1",
+                },
+            ),
+            _row(
+                app_module.CONTACT_COLUMNS,
+                {
+                    **_contact("ica kvantum a", "2026-06-02 10:00", "Daniel", "Neutral"),
+                    "Franui": "1",
+                    "Boujee": "1",
+                },
+            ),
+            _row(
+                app_module.CONTACT_COLUMNS,
+                {
+                    **_contact("Store B", "2026-06-03 10:00", "Johan", "Neutral"),
+                    "polarbar": "true",
+                },
+            ),
+            _row(
+                app_module.CONTACT_COLUMNS,
+                {
+                    **_contact("Store C", "2026-06-04 10:00", "Johan", "Neutral"),
+                    "none": "1",
+                },
+            ),
+            _row(
+                app_module.CONTACT_COLUMNS,
+                {
+                    **_contact("Store D", "2026-06-05 10:00", "johan", "Neutral"),
+                    "none": "yes",
+                },
+            ),
+            _row(
+                app_module.CONTACT_COLUMNS,
+                {
+                    **_contact("ICA Supermarket Medborgarplatsen", "2026-05-04 10:00", "Sofia", "Neutral"),
+                    "Boujee": "1",
+                    "polarbar": "1",
+                },
+            ),
+            _row(
+                app_module.CONTACT_COLUMNS,
+                {
+                    **_contact("ica supermarket medborgarplatsen", "2026-06-12 10:00", "Sofia", "Neutral"),
+                    "none": "1",
+                },
+            ),
+        ]
+        fake_spreadsheet = FakeSpreadsheet(
+            {
+                "customers_enriched": customers,
+                "order_rows": orders,
+                "sales_activities": contacts,
+            }
+        )
+
+        with patch.object(app_module, "get_spreadsheet_with_retry", return_value=fake_spreadsheet):
+            client = app_module.app.test_client()
+            response = client.get("/followup-insights")
+            data = response.get_json()
+
+        summary = data["freezer_summary"]
+        rows = {row["field"]: row for row in summary["rows"]}
+        seller_keys = {person["label"]: person["key"] for person in summary["sales_people"]}
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([person["label"] for person in summary["sales_people"]], ["Daniel", "Johan", "Sofia"])
+        self.assertEqual(rows["Franui"]["total"], 1)
+        self.assertEqual(rows["Franui"]["counts"][seller_keys["Daniel"]], 1)
+        self.assertEqual(rows["Boujee"]["total"], 1)
+        self.assertEqual(rows["Boujee"]["counts"][seller_keys["Sofia"]], 0)
+        self.assertEqual(rows["polarbar"]["total"], 1)
+        self.assertEqual(rows["polarbar"]["counts"][seller_keys["Daniel"]], 0)
+        self.assertEqual(rows["polarbar"]["counts"][seller_keys["Johan"]], 1)
+        self.assertEqual(rows["none"]["counts"][seller_keys["Johan"]], 2)
+        self.assertEqual(rows["none"]["counts"][seller_keys["Sofia"]], 1)
+        self.assertEqual(summary["sum_row"]["total"], 6)
+        self.assertEqual(summary["sum_row"]["counts"][seller_keys["Daniel"]], 2)
+        self.assertEqual(summary["sum_row"]["counts"][seller_keys["Johan"]], 3)
+        self.assertEqual(summary["sum_row"]["counts"][seller_keys["Sofia"]], 1)
+        self.assertEqual(summary["polarbar_share_row"]["total"], 17)
+        self.assertEqual(summary["polarbar_share_row"]["counts"][seller_keys["Daniel"]], 0)
+        self.assertEqual(summary["polarbar_share_row"]["counts"][seller_keys["Johan"]], 33)
+        self.assertEqual(summary["polarbar_share_row"]["counts"][seller_keys["Sofia"]], 0)
+
     def test_followup_insights_dfp_team_total_includes_all_salespeople(self):
         customers = [
             [

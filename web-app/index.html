@@ -2183,6 +2183,87 @@
       font-size: 0.78rem;
     }
 
+    .freezer-summary-wrap {
+      overflow-x: auto;
+      border: 1px solid var(--pb-border);
+      border-radius: var(--pb-radius);
+      background: #fff;
+    }
+
+    .freezer-summary-table {
+      width: 100%;
+      min-width: 560px;
+      border-collapse: collapse;
+      font-size: 0.8rem;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .freezer-summary-table th,
+    .freezer-summary-table td {
+      padding: 10px 11px;
+      border-bottom: 1px solid #f0e8ee;
+      text-align: right;
+      white-space: nowrap;
+    }
+
+    .freezer-summary-table th {
+      background: var(--pb-ink);
+      color: #fff;
+      font-size: 0.72rem;
+      font-weight: 850;
+      letter-spacing: 0.035em;
+      text-transform: uppercase;
+    }
+
+    .freezer-summary-table tr:last-child td {
+      border-bottom: none;
+    }
+
+    .freezer-brand-cell {
+      position: sticky;
+      left: 0;
+      z-index: 1;
+      min-width: 130px;
+      text-align: left !important;
+      background: #fff;
+      color: var(--pb-ink);
+      font-weight: 800;
+      box-shadow: 1px 0 0 #f0e8ee;
+    }
+
+    .freezer-summary-table th.freezer-brand-cell {
+      z-index: 2;
+      background: var(--pb-ink);
+      color: #fff;
+    }
+
+    .freezer-total-cell {
+      background: #fff8fc;
+      color: var(--pb-ink);
+      font-weight: 900;
+    }
+
+    .freezer-summary-sum-row td {
+      border-top: 2px solid var(--pb-pink);
+      background: #fbf5f8;
+      color: var(--pb-ink);
+      font-weight: 900;
+    }
+
+    .freezer-summary-share-row td {
+      background: var(--pb-pink-soft);
+      color: #8c214c;
+      font-weight: 850;
+    }
+
+    .freezer-summary-sum-row .freezer-brand-cell {
+      background: #fbf5f8;
+    }
+
+    .freezer-summary-share-row .freezer-brand-cell {
+      background: var(--pb-pink-soft);
+    }
+
     .contacts-grid {
       gap: 12px;
     }
@@ -2354,6 +2435,20 @@
 
       .dfp-top-week-value {
         font-size: 0.92rem;
+      }
+
+      .freezer-summary-table {
+        min-width: 480px;
+        font-size: 0.76rem;
+      }
+
+      .freezer-summary-table th,
+      .freezer-summary-table td {
+        padding: 9px 8px;
+      }
+
+      .freezer-brand-cell {
+        min-width: 108px;
       }
     }
 
@@ -2544,6 +2639,22 @@
       </div>
       <div class="priority-list" id="priority-customer-list">
         <div class="state-msg">Laddar prio-lista...</div>
+      </div>
+    </div>
+
+    <div class="insights-panel">
+      <div class="panel-heading">
+        <div>
+          <div class="insights-panel-title">Marknadsläge (per senast logg)</div>
+        </div>
+        <span class="panel-badge">Unika kunder</span>
+      </div>
+      <div class="freezer-summary-wrap">
+        <table class="freezer-summary-table" id="freezer-summary-table">
+          <tbody>
+            <tr><td>Laddar...</td></tr>
+          </tbody>
+        </table>
       </div>
     </div>
   </div>
@@ -4135,6 +4246,7 @@
     document.getElementById("dfp-leaderboard-table").innerHTML = "<tbody><tr><td>Laddar...</td></tr></tbody>";
     document.getElementById("dfp-top-weeks-2026").innerHTML = '<div class="state-msg">Laddar...</div>';
     document.getElementById("priority-customer-list").innerHTML = '<div class="state-msg">Laddar prio-lista...</div>';
+    document.getElementById("freezer-summary-table").innerHTML = "<tbody><tr><td>Laddar...</td></tr></tbody>";
 
     try {
       const query = responsible ? `?responsible=${encodeURIComponent(responsible)}` : "";
@@ -4150,6 +4262,8 @@
         '<div class="state-msg">Kunde inte ladda toppveckor.</div>';
       document.getElementById("priority-customer-list").innerHTML =
         '<div class="state-msg">Kunde inte ladda prio-lista.</div>';
+      document.getElementById("freezer-summary-table").innerHTML =
+        '<tbody><tr><td>Kunde inte ladda frysdisken.</td></tr></tbody>';
       showToast("Kunde inte ladda uppföljning.");
     } finally {
       followupInsightsLoading = false;
@@ -4162,6 +4276,7 @@
     renderDfpTopWeeks2026(data);
     renderContactInsights(data.contacts);
     renderPriorityCustomers(data.priority_customers || []);
+    renderFreezerSummary(data.freezer_summary);
 
     const selected = data.selected_responsible || "Alla ansvariga";
     document.getElementById("insights-subtitle").textContent = selected;
@@ -4337,6 +4452,51 @@
         }).join("")}
         <text class="chart-axis-label" x="8" y="${padTop + plotHeight + 4}">0</text>
       </svg>
+    `;
+  }
+
+  function renderFreezerSummary(summary) {
+    const table = document.getElementById("freezer-summary-table");
+    const salesPeople = summary?.sales_people || [];
+    const rows = summary?.rows || [];
+    const sumRow = summary?.sum_row || null;
+    const shareRow = summary?.polarbar_share_row || null;
+    const hasData = rows.some(row => Number(row.total || 0) > 0);
+
+    if (!summary || !rows.length || !hasData) {
+      table.innerHTML = '<tbody><tr><td>Ingen frysdata loggad ännu.</td></tr></tbody>';
+      return;
+    }
+
+    const head = `
+      <thead>
+        <tr>
+          <th class="freezer-brand-cell">Varumärke</th>
+          <th class="freezer-total-cell">Antal kunder</th>
+          ${salesPeople.map(person => `<th>${esc(person.label)}</th>`).join("")}
+        </tr>
+      </thead>
+    `;
+
+    const bodyRows = rows.map(row => renderFreezerSummaryRow(row, salesPeople)).join("");
+    const totals = sumRow ? renderFreezerSummaryRow(sumRow, salesPeople, "freezer-summary-sum-row") : "";
+    const share = shareRow ? renderFreezerSummaryRow(shareRow, salesPeople, "freezer-summary-share-row", true) : "";
+
+    table.innerHTML = `${head}<tbody>${bodyRows}${totals}${share}</tbody>`;
+  }
+
+  function renderFreezerSummaryRow(row, salesPeople, className = "", isShare = false) {
+    const valueText = value => isShare ? `${Number(value || 0)}%` : Number(value || 0).toLocaleString("sv-SE");
+    const rowClass = className ? ` class="${className}"` : "";
+
+    return `
+      <tr${rowClass}>
+        <td class="freezer-brand-cell">${esc(row.label || "")}</td>
+        <td class="freezer-total-cell">${valueText(row.total)}</td>
+        ${salesPeople.map(person => `
+          <td>${valueText(row.counts?.[person.key])}</td>
+        `).join("")}
+      </tr>
     `;
   }
 
