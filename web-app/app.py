@@ -331,6 +331,24 @@ def format_date_value(value, fallback=""):
     return parsed.isoformat() if parsed else fallback
 
 
+def build_latest_contact_followups(contact_rows):
+    latest_by_customer = {}
+    for idx, contact in enumerate(contact_rows):
+        customer_key = normalize_key(contact.get("customer"))
+        if not customer_key:
+            continue
+
+        registered_at = parse_datetime_value(contact.get("date_time")) or datetime.min
+        sort_key = (registered_at, idx)
+        if customer_key not in latest_by_customer or sort_key > latest_by_customer[customer_key][0]:
+            latest_by_customer[customer_key] = (sort_key, contact)
+
+    return {
+        customer_key: parse_date_value(contact.get("follow_up_date"))
+        for customer_key, (_, contact) in latest_by_customer.items()
+    }
+
+
 def parse_number_value(value, default=0.0):
     text = str(value or "").strip()
     if not text:
@@ -855,15 +873,12 @@ def get_customers():
     # Build latest contact/follow_up_date per customer from sales_activities
     contact_rows = get_contact_rows(spreadsheet)
     latest_contact = {}
-    latest_followup = {}
+    latest_contact_followup = build_latest_contact_followups(contact_rows)
     for c in contact_rows:
         name = c["customer"].strip().lower()
         dt = parse_date_value(c["date_time"])
-        nf = parse_date_value(c["follow_up_date"])
         if dt and (name not in latest_contact or dt > latest_contact[name]):
             latest_contact[name] = dt
-        if nf and (name not in latest_followup or nf > latest_followup[name]):
-            latest_followup[name] = nf
 
     customers = []
     for i, row in enumerate(all_rows[1:], start=2):
@@ -883,7 +898,7 @@ def get_customers():
         customer["city"] = customer["city_google"] or d.get("city", "")
         customer_key = customer["customer"].strip().lower()
         customer["latest_contact_date"] = format_date_value(latest_contact.get(customer_key))
-        customer["follow_up_date"] = format_date_value(latest_followup.get(customer_key))
+        customer["follow_up_date"] = format_date_value(latest_contact_followup.get(normalize_key(customer_key)))
         customers.append({"row": i, **customer})
     return jsonify(customers)
 
@@ -971,14 +986,8 @@ def get_customer_insights():
     today = date.today()
     customers = get_customer_rows(spreadsheet)
 
-    # Latest follow_up_date per customer
     contact_rows = get_contact_rows(spreadsheet)
-    latest_followup = {}
-    for c in contact_rows:
-        name = c["customer"].strip().lower()
-        nf = parse_date_value(c["follow_up_date"])
-        if nf and (name not in latest_followup or nf > latest_followup[name]):
-            latest_followup[name] = nf
+    latest_contact_followup = build_latest_contact_followups(contact_rows)
 
     # Latest order date and order count per customer
     order_rows = get_order_rows(spreadsheet)
@@ -1014,7 +1023,7 @@ def get_customer_insights():
 
     # Compute insights for all customers
     all_names = (
-        set(latest_followup.keys())
+        set(latest_contact_followup.keys())
         | set(latest_order.keys())
         | set(order_count.keys())
         | set(latest_delivery.keys())
@@ -1023,7 +1032,7 @@ def get_customer_insights():
     insights = {}
     for name in all_names:
         # missad_uppfoljning
-        nf = latest_followup.get(name)
+        nf = latest_contact_followup.get(normalize_key(name))
         missad = bool(nf and nf < today)
 
         # customer_risk — based on most recent of order date or delivery date

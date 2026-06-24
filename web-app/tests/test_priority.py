@@ -106,6 +106,40 @@ class PriorityTests(TestCase):
         self.assertEqual(priority[0]["next_action"]["action_type"], "reorder")
         self.assertEqual(priority[0]["next_action"]["label"], "Ring för återorder")
 
+    def test_planned_self_ordering_followup_caps_reorder_priority(self):
+        order_features = build_order_features(
+            [
+                _order("REF1", "Customer A", "2026-01-01", "2026-01-01", 30, 1000),
+                _order("REF2", "Customer A", "2026-01-22", "2026-01-22", 30, 1000),
+                _order("REF3", "Customer A", "2026-03-01", "2026-03-01", 30, 1000),
+            ]
+        )
+        contact_features = build_contact_features(
+            [
+                _contact(
+                    "Customer A",
+                    "2026-05-01 10:00",
+                    "Daniel",
+                    "Positiv",
+                    follow_up_date="2026-08-20",
+                    comment="Lägger själv om det behövs mera.",
+                ),
+            ],
+            order_features,
+        )
+
+        customers = [_customer("Customer A", "Daniel", "A", 2)]
+        priority = build_priority_customers(customers, order_features, contact_features, "Daniel", TODAY)
+
+        self.assertEqual(priority[0]["priority_type"], "Planerad uppföljning")
+        self.assertEqual(priority[0]["priority_score"], 79)
+        self.assertEqual(priority[0]["priority_level"], "Medel prio")
+        self.assertEqual(priority[0]["recommended_action"], "Bevaka")
+        self.assertEqual(priority[0]["next_action"]["action_type"], "scheduled_followup")
+        self.assertTrue(priority[0]["self_ordering_signal"])
+        self.assertIn("Planerad uppföljning finns", priority[0]["reasons"])
+        self.assertIn("Kommentar tyder på självbeställning", priority[0]["reasons"])
+
     def test_single_order_uses_segment_cycle_fallback_for_followup(self):
         order_features = build_order_features(
             [
@@ -536,6 +570,95 @@ class PriorityTests(TestCase):
         self.assertIn("latest_contact_class", data["customer a"])
         self.assertIn("follow_up_due", data["customer a"])
 
+    def test_customer_insights_later_contact_clears_old_missed_followup(self):
+        customers = [
+            [
+                "customer",
+                "cancelled_flag",
+                "sales_person",
+                "customer_segment",
+                "customer_number",
+                "city_google",
+                "region_google",
+            ],
+            ["ICA Kvantum Sickla", "", "Daniel", "B", "1001", "Nacka", "Stockholms län"],
+        ]
+        contacts = [
+            app_module.CONTACT_COLUMNS,
+            _row(
+                app_module.CONTACT_COLUMNS,
+                _contact(
+                    "ICA Kvantum Sickla",
+                    "2026-05-19 08:53",
+                    "Daniel",
+                    "Positiv",
+                    follow_up_date="2026-05-29",
+                ),
+            ),
+            _row(
+                app_module.CONTACT_COLUMNS,
+                _contact("ICA Kvantum Sickla", "2026-06-02 08:17", "Daniel", "Positiv"),
+            ),
+        ]
+        fake_spreadsheet = FakeSpreadsheet(
+            {
+                "customers_enriched": customers,
+                "order_rows": [app_module.ORDER_COLUMNS],
+                "sales_activities": contacts,
+            }
+        )
+
+        with patch.object(app_module, "get_spreadsheet_with_retry", return_value=fake_spreadsheet):
+            client = app_module.app.test_client()
+            response = client.get("/customer-insights")
+            data = response.get_json()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(data["ica kvantum sickla"]["missad_uppfoljning"])
+
+    def test_customers_endpoint_later_contact_clears_old_followup_date(self):
+        customers = [
+            [
+                "customer",
+                "cancelled_flag",
+                "sales_person",
+                "customer_segment",
+                "customer_number",
+            ],
+            ["ICA Kvantum Sickla", "", "Daniel", "B", "1001"],
+        ]
+        contacts = [
+            app_module.CONTACT_COLUMNS,
+            _row(
+                app_module.CONTACT_COLUMNS,
+                _contact(
+                    "ICA Kvantum Sickla",
+                    "2026-05-19 08:53",
+                    "Daniel",
+                    "Positiv",
+                    follow_up_date="2026-05-29",
+                ),
+            ),
+            _row(
+                app_module.CONTACT_COLUMNS,
+                _contact("ICA Kvantum Sickla", "2026-06-02 08:17", "Daniel", "Positiv"),
+            ),
+        ]
+        fake_spreadsheet = FakeSpreadsheet(
+            {
+                "customers_enriched": customers,
+                "sales_activities": contacts,
+            }
+        )
+
+        with patch.object(app_module, "get_spreadsheet_with_retry", return_value=fake_spreadsheet):
+            client = app_module.app.test_client()
+            response = client.get("/customers")
+            data = response.get_json()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(data[0]["follow_up_date"], "")
+
     def test_customers_endpoint_reads_name_without_shifting_phone_or_email(self):
         customers = [
             [
@@ -796,14 +919,14 @@ def _order(reference, customer, order_date, delivery_date, quantity, total, cust
     }
 
 
-def _contact(customer, date_time, sales_person, result, follow_up_date=""):
+def _contact(customer, date_time, sales_person, result, follow_up_date="", comment="Ska inte påverka scoring"):
     return {
         "date_time": date_time,
         "sales_person": sales_person,
         "customer": customer,
         "contact_channel": "Besök",
         "result": result,
-        "comment": "Ska inte påverka scoring",
+        "comment": comment,
         "customer_contact_person": "",
         "follow_up_date": follow_up_date,
     }

@@ -3504,8 +3504,7 @@
       document.getElementById("d-last-contact").textContent = lc.date_time ? lc.date_time.slice(0, 10) : "—";
       document.getElementById("d-last-result").textContent  = lc.result || "—";
       document.getElementById("d-freezer-latest").textContent = getFreezerLabels(lc).join(", ") || "—";
-      const latestFollowUp = allContacts.map(c => c.follow_up_date).filter(Boolean).sort().reverse()[0] || "—";
-      document.getElementById("d-next-followup").textContent = latestFollowUp;
+      document.getElementById("d-next-followup").textContent = lc.follow_up_date || "—";
 
       renderDetailTags();
     } else {

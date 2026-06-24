@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import date, datetime, time, timedelta
+import re
 from statistics import median
+import unicodedata
 
 
 def normalize_customer_key(value: str) -> str:
@@ -233,6 +235,7 @@ def build_contact_features(sales_activities: list[dict], order_features: dict) -
             latest_order_date = order_feature.get("last_order_date")
             has_order_after_latest_contact = bool(latest_order_date and latest_order_date >= contact_dt.date())
             result = str(row.get("result") or "").replace("\xa0", " ").strip()
+            comment = str(row.get("comment") or "").replace("\xa0", " ").strip()
             latest_by_customer[customer_key] = {
                 "latest_contact_date": contact_dt.date(),
                 "latest_contact_datetime": contact_dt,
@@ -240,9 +243,11 @@ def build_contact_features(sales_activities: list[dict], order_features: dict) -
                 "latest_contact_channel": str(row.get("contact_channel") or "").strip(),
                 "latest_contact_result": result,
                 "latest_contact_class": normalize_contact_result(result),
+                "latest_contact_comment": comment,
                 "latest_follow_up_date": follow_up_date,
                 "contact_count_30d": 0,
                 "has_order_after_latest_contact": has_order_after_latest_contact,
+                "self_ordering_signal": _has_self_ordering_signal(comment),
                 "days_since_contact": None,
                 "follow_up_due": False,
             }
@@ -332,6 +337,16 @@ def build_priority_customers(
             and not has_order_after_latest_contact
         )
         latest_contact_class = contact_feature.get("latest_contact_class")
+        self_ordering_followup = _is_self_ordering_followup(
+            latest_contact_class=latest_contact_class,
+            latest_contact_date=latest_contact_date,
+            days_since_contact=days_since_contact,
+            latest_follow_up_date=latest_follow_up_date,
+            follow_up_due=follow_up_due,
+            has_order_after_latest_contact=has_order_after_latest_contact,
+            self_ordering_signal=contact_feature.get("self_ordering_signal"),
+            today=today,
+        )
 
         score = _priority_score(
             segment=segment,
@@ -347,6 +362,7 @@ def build_priority_customers(
             latest_contact_date=latest_contact_date,
             last_order_date=last_order,
             last_delivery_date=last_delivery,
+            self_ordering_followup=self_ordering_followup,
             today=today,
         )
         priority_type = _priority_type(
@@ -357,6 +373,7 @@ def build_priority_customers(
             latest_contact_class=latest_contact_class,
             days_since_contact=days_since_contact,
             segment=segment,
+            self_ordering_followup=self_ordering_followup,
         )
         priority_level = _priority_level(score)
 
@@ -388,6 +405,7 @@ def build_priority_customers(
                 "latest_contact_sales_person": contact_feature.get("latest_contact_sales_person", ""),
                 "follow_up_due": follow_up_due,
                 "has_order_after_latest_contact": has_order_after_latest_contact,
+                "self_ordering_signal": bool(contact_feature.get("self_ordering_signal")),
                 "next_action": _next_action(
                     priority_type=priority_type,
                     follow_up_due=follow_up_due,
@@ -401,6 +419,7 @@ def build_priority_customers(
                     latest_contact_date=latest_contact_date,
                     last_order_date=last_order,
                     segment=segment,
+                    self_ordering_followup=self_ordering_followup,
                     today=today,
                 ),
                 "reasons": _priority_reasons(
@@ -414,6 +433,7 @@ def build_priority_customers(
                     order_count=enriched_order.get("order_count", 0),
                     segment=segment,
                     latest_contact_date=latest_contact_date,
+                    self_ordering_followup=self_ordering_followup,
                 ),
             }
         )
@@ -449,6 +469,7 @@ def _priority_score(
     latest_contact_date,
     last_order_date,
     last_delivery_date,
+    self_ordering_followup,
     today,
 ) -> int:
     value_index = _value_index(expected_order_value, expected_order_dfp, benchmarks)
@@ -485,6 +506,9 @@ def _priority_score(
     if latest_contact_date and days_since_contact is not None and days_since_contact <= 2 and not follow_up_due:
         score -= 12
 
+    if self_ordering_followup:
+        score = min(score, 79)
+
     return max(0, min(100, int(round(score))))
 
 
@@ -497,9 +521,12 @@ def _priority_type(
     latest_contact_class,
     days_since_contact,
     segment,
+    self_ordering_followup,
 ) -> str:
     if follow_up_due and not has_order_after_latest_contact:
         return "Försenad uppföljning"
+    if self_ordering_followup:
+        return "Planerad uppföljning"
     if order_count > 0 and overdue_days is not None and overdue_days >= 0:
         if order_count == 1:
             return "Återaktivera provorder"
@@ -524,6 +551,7 @@ def _priority_level(score: int) -> str:
 def _recommended_action(priority_type: str) -> str:
     return {
         "Försenad uppföljning": "Följ upp",
+        "Planerad uppföljning": "Bevaka",
         "Rädda återorder": "Driv återorder",
         "Återaktivera provorder": "Följ upp första ordern",
         "Varm chans": "Följ upp positiv dialog",
@@ -547,6 +575,7 @@ def _next_action(
     latest_contact_date,
     last_order_date,
     segment,
+    self_ordering_followup,
     today,
 ) -> dict:
     if follow_up_due and not has_order_after_latest_contact:
@@ -556,6 +585,15 @@ def _next_action(
             "tone": "urgent",
             "reason": "Försenad uppföljning · ingen order efter senaste kontakt",
             "primary_cta": "Ring",
+        }
+
+    if self_ordering_followup:
+        return {
+            "label": "Bevaka planerad uppföljning",
+            "action_type": "scheduled_followup",
+            "tone": "low",
+            "reason": "Framtida uppföljning finns · kommentar tyder på att kunden lägger order själv",
+            "primary_cta": "Öppna",
         }
 
     if order_count == 1 and overdue_days is not None and overdue_days >= 0:
@@ -643,12 +681,16 @@ def _priority_reasons(
     order_count,
     segment,
     latest_contact_date,
+    self_ordering_followup,
 ) -> list[str]:
     reasons = []
     if expected_order_dfp:
         reasons.append(f"Orderpotential ca {_format_dfp(expected_order_dfp)}")
     if follow_up_due and not has_order_after_latest_contact:
         reasons.append("Försenad uppföljning")
+    if self_ordering_followup:
+        reasons.append("Planerad uppföljning finns")
+        reasons.append("Kommentar tyder på självbeställning")
     if order_count == 1 and overdue_days is not None and overdue_days >= 0:
         reasons.append("Första ordern redo för uppföljning")
     if overdue_days is not None and overdue_days >= 0:
@@ -668,6 +710,50 @@ def _priority_reasons(
     if latest_contact_class == "Negativ" and days_since_contact is not None and days_since_contact <= 30:
         reasons.append("Negativ kontakt senaste 30 dagarna")
     return reasons[:3]
+
+
+def _is_self_ordering_followup(
+    *,
+    latest_contact_class,
+    latest_contact_date,
+    days_since_contact,
+    latest_follow_up_date,
+    follow_up_due,
+    has_order_after_latest_contact,
+    self_ordering_signal,
+    today,
+) -> bool:
+    return bool(
+        self_ordering_signal
+        and latest_contact_date
+        and days_since_contact is not None
+        and latest_follow_up_date
+        and latest_follow_up_date > today
+        and not follow_up_due
+        and not has_order_after_latest_contact
+        and latest_contact_class in {"Positiv", "Neutral"}
+    )
+
+
+def _has_self_ordering_signal(comment: str) -> bool:
+    text = _searchable_text(comment)
+    if not text:
+        return False
+
+    patterns = (
+        r"\b(?:bestaller|lagger|ordrar)\s+(?:de\s+|han\s+|hon\s+)?sjalv\b",
+        r"\bsjalv\s+(?:bestaller|lagger|ordrar)\b",
+        r"\b(?:bestaller|lagger|ordrar)\s+(?:vid behov|nar det behovs|om det behovs|om de behovs)\b",
+        r"\blagger\s+.*\bom det behovs\b",
+        r"\border\s+sjalv\b",
+    )
+    return any(re.search(pattern, text) for pattern in patterns)
+
+
+def _searchable_text(value) -> str:
+    normalized = unicodedata.normalize("NFKD", str(value or "").replace("\xa0", " "))
+    ascii_text = normalized.encode("ascii", "ignore").decode("ascii")
+    return " ".join(ascii_text.casefold().split())
 
 
 def _build_priority_benchmarks(customers: list[dict], order_features: dict, number_index: dict) -> dict:
