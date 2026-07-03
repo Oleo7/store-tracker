@@ -7,6 +7,10 @@ from statistics import median
 import unicodedata
 
 
+FREEZER_FIELDS = ("Franui", "Schufrulade", "Boujee", "polarbar", "none")
+OTHER_COMPETITOR_FREEZER_FIELDS = {"Schufrulade", "Boujee"}
+
+
 def normalize_customer_key(value: str) -> str:
     text = str(value or "").replace("\xa0", " ").strip().casefold()
     return " ".join(text.split())
@@ -236,6 +240,7 @@ def build_contact_features(sales_activities: list[dict], order_features: dict) -
             has_order_after_latest_contact = bool(latest_order_date and latest_order_date >= contact_dt.date())
             result = str(row.get("result") or "").replace("\xa0", " ").strip()
             comment = str(row.get("comment") or "").replace("\xa0", " ").strip()
+            freezer_fields = _freezer_fields(row)
             latest_by_customer[customer_key] = {
                 "latest_contact_date": contact_dt.date(),
                 "latest_contact_datetime": contact_dt,
@@ -244,6 +249,7 @@ def build_contact_features(sales_activities: list[dict], order_features: dict) -
                 "latest_contact_result": result,
                 "latest_contact_class": normalize_contact_result(result),
                 "latest_contact_comment": comment,
+                "latest_freezer_fields": freezer_fields,
                 "latest_follow_up_date": follow_up_date,
                 "contact_count_30d": 0,
                 "has_order_after_latest_contact": has_order_after_latest_contact,
@@ -337,6 +343,14 @@ def build_priority_customers(
             and not has_order_after_latest_contact
         )
         latest_contact_class = contact_feature.get("latest_contact_class")
+        future_follow_up_days = _future_follow_up_days(
+            latest_contact_date=latest_contact_date,
+            latest_follow_up_date=latest_follow_up_date,
+            follow_up_due=follow_up_due,
+            has_order_after_latest_contact=has_order_after_latest_contact,
+            today=today,
+        )
+        scheduled_followup = future_follow_up_days is not None
         self_ordering_followup = _is_self_ordering_followup(
             latest_contact_class=latest_contact_class,
             latest_contact_date=latest_contact_date,
@@ -363,10 +377,13 @@ def build_priority_customers(
             last_order_date=last_order,
             last_delivery_date=last_delivery,
             self_ordering_followup=self_ordering_followup,
+            future_follow_up_days=future_follow_up_days,
+            freezer_fields=contact_feature.get("latest_freezer_fields"),
             today=today,
         )
         priority_type = _priority_type(
             follow_up_due=follow_up_due,
+            scheduled_followup=scheduled_followup,
             has_order_after_latest_contact=has_order_after_latest_contact,
             order_count=order_count,
             overdue_days=overdue_days,
@@ -403,12 +420,17 @@ def build_priority_customers(
                 "latest_contact_class": latest_contact_class or "",
                 "latest_contact_channel": contact_feature.get("latest_contact_channel", ""),
                 "latest_contact_sales_person": contact_feature.get("latest_contact_sales_person", ""),
+                "latest_follow_up_date": _iso_date(latest_follow_up_date),
+                "future_follow_up_days": future_follow_up_days,
+                "latest_freezer_fields": list(contact_feature.get("latest_freezer_fields") or []),
                 "follow_up_due": follow_up_due,
                 "has_order_after_latest_contact": has_order_after_latest_contact,
                 "self_ordering_signal": bool(contact_feature.get("self_ordering_signal")),
                 "next_action": _next_action(
                     priority_type=priority_type,
                     follow_up_due=follow_up_due,
+                    scheduled_followup=scheduled_followup,
+                    future_follow_up_days=future_follow_up_days,
                     overdue_days=overdue_days,
                     total_dfp=total_dfp,
                     expected_order_dfp=expected_order_dfp,
@@ -424,6 +446,7 @@ def build_priority_customers(
                 ),
                 "reasons": _priority_reasons(
                     follow_up_due=follow_up_due,
+                    future_follow_up_days=future_follow_up_days,
                     has_order_after_latest_contact=has_order_after_latest_contact,
                     overdue_days=overdue_days,
                     latest_contact_class=latest_contact_class,
@@ -434,6 +457,7 @@ def build_priority_customers(
                     segment=segment,
                     latest_contact_date=latest_contact_date,
                     self_ordering_followup=self_ordering_followup,
+                    freezer_fields=contact_feature.get("latest_freezer_fields"),
                 ),
             }
         )
@@ -470,6 +494,8 @@ def _priority_score(
     last_order_date,
     last_delivery_date,
     self_ordering_followup,
+    future_follow_up_days,
+    freezer_fields,
     today,
 ) -> int:
     value_index = _value_index(expected_order_value, expected_order_dfp, benchmarks)
@@ -487,6 +513,14 @@ def _priority_score(
 
     if order_count == 0 and segment in ["A", "B"]:
         score += 6
+
+    score += _freezer_opportunity_points(
+        freezer_fields=freezer_fields,
+        order_count=order_count,
+        overdue_days=overdue_days,
+        latest_contact_class=latest_contact_class,
+        days_since_contact=days_since_contact,
+    )
 
     if follow_up_due and score < 50:
         score = 50 + (8 * value_index)
@@ -509,12 +543,26 @@ def _priority_score(
     if self_ordering_followup:
         score = min(score, 79)
 
+    single_order_cap = _single_order_confidence_cap(
+        order_count=order_count,
+        follow_up_due=follow_up_due,
+        overdue_days=overdue_days,
+        freezer_fields=freezer_fields,
+    )
+    if single_order_cap is not None:
+        score = min(score, single_order_cap)
+
+    future_follow_up_cap = _future_follow_up_score_cap(future_follow_up_days)
+    if future_follow_up_cap is not None:
+        score = min(score, future_follow_up_cap)
+
     return max(0, min(100, int(round(score))))
 
 
 def _priority_type(
     *,
     follow_up_due,
+    scheduled_followup,
     has_order_after_latest_contact,
     order_count,
     overdue_days,
@@ -525,7 +573,7 @@ def _priority_type(
 ) -> str:
     if follow_up_due and not has_order_after_latest_contact:
         return "Försenad uppföljning"
-    if self_ordering_followup:
+    if scheduled_followup or self_ordering_followup:
         return "Planerad uppföljning"
     if order_count > 0 and overdue_days is not None and overdue_days >= 0:
         if order_count == 1:
@@ -565,6 +613,8 @@ def _next_action(
     *,
     priority_type,
     follow_up_due,
+    scheduled_followup,
+    future_follow_up_days,
     overdue_days,
     total_dfp,
     expected_order_dfp,
@@ -587,12 +637,17 @@ def _next_action(
             "primary_cta": "Ring",
         }
 
-    if self_ordering_followup:
+    if scheduled_followup or self_ordering_followup:
+        reason = "Framtida uppföljning finns"
+        if future_follow_up_days is not None:
+            reason = f"Planerad uppföljning om {future_follow_up_days} dagar"
+        if self_ordering_followup:
+            reason = f"{reason} · kommentar tyder på att kunden lägger order själv"
         return {
             "label": "Bevaka planerad uppföljning",
             "action_type": "scheduled_followup",
-            "tone": "low",
-            "reason": "Framtida uppföljning finns · kommentar tyder på att kunden lägger order själv",
+            "tone": "warning" if future_follow_up_days is not None and future_follow_up_days <= 7 else "low",
+            "reason": reason,
             "primary_cta": "Öppna",
         }
 
@@ -672,6 +727,7 @@ def _next_action(
 def _priority_reasons(
     *,
     follow_up_due,
+    future_follow_up_days,
     has_order_after_latest_contact,
     overdue_days,
     latest_contact_class,
@@ -682,15 +738,20 @@ def _priority_reasons(
     segment,
     latest_contact_date,
     self_ordering_followup,
+    freezer_fields,
 ) -> list[str]:
     reasons = []
     if expected_order_dfp:
         reasons.append(f"Orderpotential ca {_format_dfp(expected_order_dfp)}")
     if follow_up_due and not has_order_after_latest_contact:
         reasons.append("Försenad uppföljning")
+    if future_follow_up_days is not None:
+        reasons.append(f"Planerad uppföljning om {future_follow_up_days} dagar")
     if self_ordering_followup:
-        reasons.append("Planerad uppföljning finns")
         reasons.append("Kommentar tyder på självbeställning")
+    freezer_reason = _freezer_reason(freezer_fields, order_count, overdue_days)
+    if freezer_reason:
+        reasons.append(freezer_reason)
     if order_count == 1 and overdue_days is not None and overdue_days >= 0:
         reasons.append("Första ordern redo för uppföljning")
     if overdue_days is not None and overdue_days >= 0:
@@ -735,6 +796,130 @@ def _is_self_ordering_followup(
     )
 
 
+def _future_follow_up_days(
+    *,
+    latest_contact_date,
+    latest_follow_up_date,
+    follow_up_due,
+    has_order_after_latest_contact,
+    today,
+) -> int | None:
+    if not latest_contact_date or not latest_follow_up_date:
+        return None
+    if follow_up_due or has_order_after_latest_contact:
+        return None
+    if latest_follow_up_date <= today:
+        return None
+    return (latest_follow_up_date - today).days
+
+
+def _future_follow_up_score_cap(future_follow_up_days) -> int | None:
+    if future_follow_up_days is None:
+        return None
+    if future_follow_up_days <= 7:
+        return 85
+    if future_follow_up_days <= 21:
+        return 75
+    if future_follow_up_days <= 45:
+        return 65
+    return 55
+
+
+def _single_order_confidence_cap(*, order_count, follow_up_due, overdue_days, freezer_fields) -> int | None:
+    if order_count != 1 or follow_up_due:
+        return None
+
+    fields = set(freezer_fields or [])
+    if "polarbar" in fields and overdue_days is not None and overdue_days >= 0:
+        return 95
+    if overdue_days is not None and overdue_days >= 21:
+        return 90
+    return 85
+
+
+def _freezer_opportunity_points(
+    *,
+    freezer_fields,
+    order_count,
+    overdue_days,
+    latest_contact_class,
+    days_since_contact,
+) -> int:
+    fields = set(freezer_fields or [])
+    if not fields:
+        return 0
+    if latest_contact_class == "Negativ" and days_since_contact is not None and days_since_contact <= 30:
+        return 0
+
+    has_polarbar = "polarbar" in fields
+    has_franui = "Franui" in fields
+    has_other_competitor = bool(OTHER_COMPETITOR_FREEZER_FIELDS & fields)
+    has_none = "none" in fields
+    no_prior_order = order_count == 0
+    overdue_reorder = order_count > 0 and overdue_days is not None and overdue_days >= 0
+
+    if has_none:
+        if no_prior_order:
+            return 8
+        if overdue_reorder:
+            return 5
+        return 2
+
+    if has_polarbar and not has_franui and not has_other_competitor:
+        return 8 if overdue_reorder else 3
+
+    if has_polarbar:
+        return 6 if overdue_reorder else 2
+
+    if has_franui and not has_other_competitor:
+        return 10 if no_prior_order else 8
+
+    if has_franui and has_other_competitor:
+        return 6
+
+    if has_other_competitor:
+        return 4
+
+    return 0
+
+
+def _freezer_reason(freezer_fields, order_count, overdue_days) -> str:
+    fields = set(freezer_fields or [])
+    if not fields:
+        return ""
+
+    has_polarbar = "polarbar" in fields
+    has_franui = "Franui" in fields
+    has_other_competitor = bool(OTHER_COMPETITOR_FREEZER_FIELDS & fields)
+    has_none = "none" in fields
+    no_prior_order = order_count == 0
+    overdue_reorder = order_count > 0 and overdue_days is not None and overdue_days >= 0
+
+    if has_none:
+        return "Frysdisken: ingen loggad konkurrent"
+    if has_polarbar and not has_franui and not has_other_competitor:
+        return "Frysdisken: Polarbär"
+    if has_polarbar and overdue_reorder:
+        return "Frysdisken: Polarbär + konkurrent"
+    if has_franui and not has_other_competitor:
+        return "Frysdisken: Franui, bredda sortiment"
+    if has_franui and has_other_competitor:
+        return "Frysdisken: flera konkurrenter"
+    if has_other_competitor and no_prior_order:
+        return "Frysdisken: konkurrent finns"
+    if has_other_competitor:
+        return "Frysdisken: konkurrensläge"
+    return ""
+
+
+def _freezer_fields(row: dict) -> tuple[str, ...]:
+    selected = tuple(field for field in FREEZER_FIELDS if _is_checked_value(row.get(field)))
+    real_fields = tuple(field for field in selected if field != "none")
+    if real_fields:
+        return real_fields
+    return ("none",) if "none" in selected else ()
+
+
 def _has_self_ordering_signal(comment: str) -> bool:
     text = _searchable_text(comment)
     if not text:
@@ -748,6 +933,10 @@ def _has_self_ordering_signal(comment: str) -> bool:
         r"\border\s+sjalv\b",
     )
     return any(re.search(pattern, text) for pattern in patterns)
+
+
+def _is_checked_value(value) -> bool:
+    return str(value or "").strip().casefold() in {"1", "true", "yes", "on"}
 
 
 def _searchable_text(value) -> str:

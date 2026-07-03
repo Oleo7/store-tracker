@@ -132,13 +132,80 @@ class PriorityTests(TestCase):
         priority = build_priority_customers(customers, order_features, contact_features, "Daniel", TODAY)
 
         self.assertEqual(priority[0]["priority_type"], "Planerad uppföljning")
-        self.assertEqual(priority[0]["priority_score"], 79)
+        self.assertEqual(priority[0]["priority_score"], 55)
         self.assertEqual(priority[0]["priority_level"], "Medel prio")
         self.assertEqual(priority[0]["recommended_action"], "Bevaka")
         self.assertEqual(priority[0]["next_action"]["action_type"], "scheduled_followup")
+        self.assertEqual(priority[0]["future_follow_up_days"], 106)
         self.assertTrue(priority[0]["self_ordering_signal"])
-        self.assertIn("Planerad uppföljning finns", priority[0]["reasons"])
+        self.assertIn("Planerad uppföljning om 106 dagar", priority[0]["reasons"])
         self.assertIn("Kommentar tyder på självbeställning", priority[0]["reasons"])
+
+    def test_future_followup_far_ahead_caps_trial_reorder_like_balsta(self):
+        today = date(2026, 7, 3)
+        order_features = build_order_features(
+            [
+                _order("REF1", "ICA Maxi Bålsta", "2026-03-05", "2026-03-30", 48, 14256),
+            ]
+        )
+        contact_features = build_contact_features(
+            [
+                {
+                    **_contact(
+                        "ICA Maxi Bålsta",
+                        "2026-06-16 10:00",
+                        "Daniel",
+                        "Positiv",
+                        follow_up_date="2026-08-20",
+                        comment="Är fortfarande intresserad, bara inte just nu. Han skulle höra av sig när det var dags för ny order.",
+                    ),
+                    "Franui": "1",
+                },
+            ],
+            order_features,
+        )
+
+        customers = [_customer("ICA Maxi Bålsta", "Daniel", "A", 2)]
+        priority = build_priority_customers(customers, order_features, contact_features, "Daniel", today)
+
+        self.assertEqual(priority[0]["priority_type"], "Planerad uppföljning")
+        self.assertEqual(priority[0]["priority_score"], 55)
+        self.assertEqual(priority[0]["priority_level"], "Medel prio")
+        self.assertEqual(priority[0]["future_follow_up_days"], 48)
+        self.assertEqual(priority[0]["latest_follow_up_date"], "2026-08-20")
+        self.assertEqual(priority[0]["latest_freezer_fields"], ["Franui"])
+        self.assertEqual(priority[0]["next_action"]["action_type"], "scheduled_followup")
+        self.assertIn("Planerad uppföljning om 48 dagar", priority[0]["reasons"])
+        self.assertIn("Frysdisken: Franui, bredda sortiment", priority[0]["reasons"])
+
+    def test_future_followup_soon_can_still_be_high_but_not_absolute_top(self):
+        today = date(2026, 7, 3)
+        order_features = build_order_features(
+            [
+                _order("REF1", "Customer A", "2026-03-01", "2026-03-01", 70, 5000),
+            ]
+        )
+        contact_features = build_contact_features(
+            [
+                _contact(
+                    "Customer A",
+                    "2026-06-25 10:00",
+                    "Daniel",
+                    "Positiv",
+                    follow_up_date="2026-07-09",
+                ),
+            ],
+            order_features,
+        )
+
+        customers = [_customer("Customer A", "Daniel", "A", 2)]
+        priority = build_priority_customers(customers, order_features, contact_features, "Daniel", today)
+
+        self.assertEqual(priority[0]["priority_type"], "Planerad uppföljning")
+        self.assertEqual(priority[0]["priority_score"], 85)
+        self.assertEqual(priority[0]["priority_level"], "Hög prio")
+        self.assertEqual(priority[0]["future_follow_up_days"], 6)
+        self.assertEqual(priority[0]["next_action"]["tone"], "warning")
 
     def test_single_order_uses_segment_cycle_fallback_for_followup(self):
         order_features = build_order_features(
@@ -155,6 +222,69 @@ class PriorityTests(TestCase):
         self.assertIsNotNone(priority[0]["expected_cycle_days"])
         self.assertGreater(priority[0]["overdue_days"], 0)
         self.assertEqual(priority[0]["next_action"]["action_type"], "trial_reorder")
+
+    def test_single_order_positive_trial_is_capped_below_absolute_top(self):
+        order_features = build_order_features(
+            [
+                _order("REF1", "Customer A", "2025-12-01", "2025-12-01", 90, 9000),
+            ]
+        )
+        contact_features = build_contact_features(
+            [
+                _contact("Customer A", "2026-05-01 10:00", "Daniel", "Positiv"),
+            ],
+            order_features,
+        )
+
+        customers = [_customer("Customer A", "Daniel", "A", 2)]
+        priority = build_priority_customers(customers, order_features, contact_features, "Daniel", TODAY)
+
+        self.assertEqual(priority[0]["priority_type"], "Återaktivera provorder")
+        self.assertEqual(priority[0]["priority_score"], 90)
+        self.assertEqual(priority[0]["priority_level"], "Hög prio")
+
+    def test_overdue_followup_is_not_limited_by_single_order_cap(self):
+        order_features = build_order_features(
+            [
+                _order("REF1", "Customer A", "2025-12-01", "2025-12-01", 90, 9000),
+            ]
+        )
+        contact_features = build_contact_features(
+            [
+                _contact("Customer A", "2026-05-01 10:00", "Daniel", "Neutral", follow_up_date="2026-05-03"),
+            ],
+            order_features,
+        )
+
+        customers = [_customer("Customer A", "Daniel", "A", 2)]
+        priority = build_priority_customers(customers, order_features, contact_features, "Daniel", TODAY)
+
+        self.assertEqual(priority[0]["priority_type"], "Försenad uppföljning")
+        self.assertGreaterEqual(priority[0]["priority_score"], 94)
+        self.assertEqual(priority[0]["next_action"]["action_type"], "follow_up")
+
+    def test_freezer_status_adjusts_category_opportunity(self):
+        contact_features = build_contact_features(
+            [
+                {**_contact("Franui Only", "2026-05-01 10:00", "Daniel", "Positiv"), "Franui": "1"},
+                {**_contact("Boujee Only", "2026-05-01 10:00", "Daniel", "Positiv"), "Boujee": "1"},
+                {**_contact("No Competitor", "2026-05-01 10:00", "Daniel", "Positiv"), "none": "1"},
+            ],
+            {},
+        )
+
+        customers = [
+            _customer("Franui Only", "Daniel", "A", 2),
+            _customer("Boujee Only", "Daniel", "A", 3),
+            _customer("No Competitor", "Daniel", "A", 4),
+        ]
+        priority = build_priority_customers(customers, {}, contact_features, "Daniel", TODAY)
+        by_customer = {item["customer"]: item for item in priority}
+
+        self.assertGreater(by_customer["Franui Only"]["priority_score"], by_customer["Boujee Only"]["priority_score"])
+        self.assertGreater(by_customer["No Competitor"]["priority_score"], by_customer["Boujee Only"]["priority_score"])
+        self.assertEqual(by_customer["Franui Only"]["latest_freezer_fields"], ["Franui"])
+        self.assertEqual(by_customer["No Competitor"]["latest_freezer_fields"], ["none"])
 
     def test_high_expected_order_value_beats_small_stale_reorder(self):
         order_features = build_order_features(
