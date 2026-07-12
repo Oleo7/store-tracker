@@ -13,6 +13,7 @@ sys.path.insert(0, str(WEB_APP_DIR))
 
 import app as app_module
 from priority import (
+    _negative_contact_score_cap,
     build_contact_features,
     build_order_features,
     build_priority_customers,
@@ -361,7 +362,140 @@ class PriorityTests(TestCase):
         by_customer = {item["customer"]: item for item in priority}
 
         self.assertLess(by_customer["Customer D"]["priority_score"], by_customer["Customer E"]["priority_score"])
-        self.assertIn("Negativ kontakt senaste 30 dagarna", by_customer["Customer D"]["reasons"])
+        self.assertIn("Negativ kontakt för 5 dagar sedan", by_customer["Customer D"]["reasons"])
+
+    def test_negative_contact_score_caps_use_requested_age_bands(self):
+        cases = [
+            (0, 30),
+            (30, 30),
+            (31, 50),
+            (90, 50),
+            (91, 75),
+            (180, 75),
+            (181, 95),
+            (365, 95),
+        ]
+
+        for days_since_contact, expected_cap in cases:
+            with self.subTest(days_since_contact=days_since_contact):
+                self.assertEqual(
+                    _negative_contact_score_cap(
+                        latest_contact_class="Negativ",
+                        days_since_contact=days_since_contact,
+                        has_order_after_latest_contact=False,
+                    ),
+                    expected_cap,
+                )
+
+        self.assertIsNone(
+            _negative_contact_score_cap(
+                latest_contact_class="Positiv",
+                days_since_contact=10,
+                has_order_after_latest_contact=False,
+            )
+        )
+        self.assertIsNone(
+            _negative_contact_score_cap(
+                latest_contact_class="Negativ",
+                days_since_contact=10,
+                has_order_after_latest_contact=True,
+            )
+        )
+
+    def test_negative_missed_followup_is_reactivation_not_high_priority_like_gagnef(self):
+        today = date(2026, 7, 3)
+        order_features = build_order_features(
+            [
+                _order("REF1", "ICA Nära Gagnef", "2025-12-16", "2025-12-16", 35, 13860),
+            ]
+        )
+        contact_features = build_contact_features(
+            [
+                _contact(
+                    "ICA Nära Gagnef",
+                    "2026-05-04 10:00",
+                    "Johan - tel",
+                    "Negativ",
+                    follow_up_date="2026-06-30",
+                    comment="Kommer inte fortsätta då de inte har någon efterfrågan",
+                ),
+            ],
+            order_features,
+        )
+
+        priority = build_priority_customers(
+            [_customer("ICA Nära Gagnef", "Johan - tel", "A", 2)],
+            order_features,
+            contact_features,
+            "Johan - tel",
+            today,
+        )
+        gagnef = priority[0]
+
+        self.assertEqual(gagnef["priority_score"], 50)
+        self.assertEqual(gagnef["priority_level"], "Medel prio")
+        self.assertTrue(gagnef["follow_up_due"])
+        self.assertEqual(gagnef["priority_type"], "Återaktivera efter negativt besked")
+        self.assertEqual(gagnef["recommended_action"], "Kontrollera om läget ändrats")
+        self.assertEqual(gagnef["next_action"]["action_type"], "negative_reactivation")
+        self.assertEqual(gagnef["next_action"]["tone"], "low")
+        self.assertIn("planerad uppföljning är försenad", gagnef["next_action"]["reason"])
+        self.assertIn("Negativ kontakt för 60 dagar sedan", gagnef["reasons"])
+        self.assertIn("Försenad uppföljning", gagnef["reasons"])
+
+    def test_negative_missed_followup_does_not_force_score_floor(self):
+        contact_features = build_contact_features(
+            [
+                _contact("Low potential", "2026-05-01 10:00", "Daniel", "Negativ", follow_up_date="2026-05-03"),
+            ],
+            {},
+        )
+
+        priority = build_priority_customers(
+            [_customer("Low potential", "Daniel", "C", 2)],
+            {},
+            contact_features,
+            "Daniel",
+            TODAY,
+        )
+
+        self.assertLess(priority[0]["priority_score"], 50)
+        self.assertEqual(priority[0]["priority_level"], "Låg prio")
+        self.assertEqual(priority[0]["priority_type"], "Återaktivera efter negativt besked")
+
+    def test_order_after_negative_contact_clears_negative_score_effect(self):
+        order_features = build_order_features(
+            [
+                _order("NEG1", "Negative resolved", "2026-04-15", "2026-04-15", 35, 1000),
+                _order("NEU1", "Neutral comparison", "2026-04-15", "2026-04-15", 35, 1000),
+            ]
+        )
+        contact_features = build_contact_features(
+            [
+                _contact("Negative resolved", "2026-04-01 10:00", "Daniel", "Negativ"),
+                _contact("Neutral comparison", "2026-04-01 10:00", "Daniel", "Neutral"),
+            ],
+            order_features,
+        )
+
+        priority = build_priority_customers(
+            [
+                _customer("Negative resolved", "Daniel", "A", 2),
+                _customer("Neutral comparison", "Daniel", "A", 3),
+            ],
+            order_features,
+            contact_features,
+            "Daniel",
+            TODAY,
+        )
+        by_customer = {item["customer"]: item for item in priority}
+
+        resolved = by_customer["Negative resolved"]
+        comparison = by_customer["Neutral comparison"]
+        self.assertTrue(resolved["has_order_after_latest_contact"])
+        self.assertEqual(resolved["priority_score"], comparison["priority_score"])
+        self.assertNotEqual(resolved["priority_type"], "Återaktivera efter negativt besked")
+        self.assertFalse(any(reason.startswith("Negativ kontakt") for reason in resolved["reasons"]))
 
     def test_responsible_filter(self):
         customers = [

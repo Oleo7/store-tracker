@@ -522,10 +522,15 @@ def _priority_score(
         days_since_contact=days_since_contact,
     )
 
-    if follow_up_due and score < 50:
+    if follow_up_due and latest_contact_class != "Negativ" and score < 50:
         score = 50 + (8 * value_index)
 
-    if latest_contact_class == "Negativ" and days_since_contact is not None and days_since_contact <= 30:
+    if (
+        latest_contact_class == "Negativ"
+        and not has_order_after_latest_contact
+        and days_since_contact is not None
+        and days_since_contact <= 30
+    ):
         score -= 25
 
     if latest_contact_class == "Order lagd" and last_order_date and (today - last_order_date).days <= 14:
@@ -548,6 +553,7 @@ def _priority_score(
         follow_up_due=follow_up_due,
         overdue_days=overdue_days,
         freezer_fields=freezer_fields,
+        latest_contact_class=latest_contact_class,
     )
     if single_order_cap is not None:
         score = min(score, single_order_cap)
@@ -555,6 +561,14 @@ def _priority_score(
     future_follow_up_cap = _future_follow_up_score_cap(future_follow_up_days)
     if future_follow_up_cap is not None:
         score = min(score, future_follow_up_cap)
+
+    negative_contact_cap = _negative_contact_score_cap(
+        latest_contact_class=latest_contact_class,
+        days_since_contact=days_since_contact,
+        has_order_after_latest_contact=has_order_after_latest_contact,
+    )
+    if negative_contact_cap is not None:
+        score = min(score, negative_contact_cap)
 
     return max(0, min(100, int(round(score))))
 
@@ -571,6 +585,8 @@ def _priority_type(
     segment,
     self_ordering_followup,
 ) -> str:
+    if latest_contact_class == "Negativ" and not has_order_after_latest_contact:
+        return "Återaktivera efter negativt besked"
     if follow_up_due and not has_order_after_latest_contact:
         return "Försenad uppföljning"
     if scheduled_followup or self_ordering_followup:
@@ -598,6 +614,7 @@ def _priority_level(score: int) -> str:
 
 def _recommended_action(priority_type: str) -> str:
     return {
+        "Återaktivera efter negativt besked": "Kontrollera om läget ändrats",
         "Försenad uppföljning": "Följ upp",
         "Planerad uppföljning": "Bevaka",
         "Rädda återorder": "Driv återorder",
@@ -628,6 +645,16 @@ def _next_action(
     self_ordering_followup,
     today,
 ) -> dict:
+    if latest_contact_class == "Negativ" and not has_order_after_latest_contact:
+        follow_up_reason = " · planerad uppföljning är försenad" if follow_up_due else ""
+        return {
+            "label": "Kontrollera om läget ändrats",
+            "action_type": "negative_reactivation",
+            "tone": "low",
+            "reason": f"Negativt besked senast{follow_up_reason}",
+            "primary_cta": "Öppna",
+        }
+
     if follow_up_due and not has_order_after_latest_contact:
         return {
             "label": "Följ upp idag",
@@ -741,6 +768,11 @@ def _priority_reasons(
     freezer_fields,
 ) -> list[str]:
     reasons = []
+    if latest_contact_class == "Negativ" and not has_order_after_latest_contact:
+        if days_since_contact is None:
+            reasons.append("Negativ kontakt senast")
+        else:
+            reasons.append(f"Negativ kontakt för {days_since_contact} dagar sedan")
     if expected_order_dfp:
         reasons.append(f"Orderpotential ca {_format_dfp(expected_order_dfp)}")
     if follow_up_due and not has_order_after_latest_contact:
@@ -768,8 +800,6 @@ def _priority_reasons(
         reasons.append("Ej kontaktad tidigare")
     if latest_contact_class == "Ej anträffbar":
         reasons.append("Ej anträffbar senast")
-    if latest_contact_class == "Negativ" and days_since_contact is not None and days_since_contact <= 30:
-        reasons.append("Negativ kontakt senaste 30 dagarna")
     return reasons[:3]
 
 
@@ -825,8 +855,29 @@ def _future_follow_up_score_cap(future_follow_up_days) -> int | None:
     return 55
 
 
-def _single_order_confidence_cap(*, order_count, follow_up_due, overdue_days, freezer_fields) -> int | None:
-    if order_count != 1 or follow_up_due:
+def _negative_contact_score_cap(*, latest_contact_class, days_since_contact, has_order_after_latest_contact) -> int | None:
+    if latest_contact_class != "Negativ" or has_order_after_latest_contact or days_since_contact is None:
+        return None
+    if days_since_contact <= 30:
+        return 30
+    if days_since_contact <= 90:
+        return 50
+    if days_since_contact <= 180:
+        return 75
+    return 95
+
+
+def _single_order_confidence_cap(
+    *,
+    order_count,
+    follow_up_due,
+    overdue_days,
+    freezer_fields,
+    latest_contact_class,
+) -> int | None:
+    if order_count != 1:
+        return None
+    if follow_up_due and latest_contact_class != "Negativ":
         return None
 
     fields = set(freezer_fields or [])
@@ -1040,7 +1091,7 @@ def _engagement_index(
     has_order_after_latest_contact,
 ) -> float:
     index = 0
-    if follow_up_due:
+    if follow_up_due and latest_contact_class != "Negativ":
         index = max(index, 0.8)
     if latest_contact_class == "Positiv" and not has_order_after_latest_contact:
         index = max(index, 1 if days_since_contact is not None and days_since_contact >= 3 else 0.45)

@@ -3,3 +3,6 @@ __pycache__/
 *.pyc
 .env
 .claude
+.codex_tmp/
+sync_artifacts/
+customer_master_sync_dry_run_*.csv
