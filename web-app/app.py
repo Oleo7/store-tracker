@@ -35,9 +35,10 @@ IMAGE_DIR = os.path.abspath(os.path.join(app.root_path, "..", "images"))
 
 CUSTOMER_COLUMNS = ["customer", "cancelled_flag", "sales_person", "customer_segment",
                     "customer_reference", "customer_number", "name", "phone", "email",
-                    "comment"]
+                    "email_last_order", "comment"]
 
-ORDER_COLUMNS = ["Reference", "Order date", "Delivery date", "Customer", "Customer Reference",
+ORDER_COLUMNS = ["Reference", "Order date", "Delivery date", "Customer", "placedBy", "buyerEmail",
+                 "placedAs", "Customer Reference",
                  "Buyer number", "Customer number", "Logistics number", "Address", "Number",
                  "Postal code", "City", "Country", "Phone number", "SKU", "Product", "Weight",
                  "Quantity", "Total weight", "Unit", "Total (Pre-discount)", "Product Discount",
@@ -266,6 +267,7 @@ def get_customer_rows(spreadsheet):
             "customer_number": d.get("customer_number", "").strip(),
             "phone": d.get("phone", "").strip(),
             "email": d.get("email", "").strip(),
+            "email_last_order": d.get("email_last_order", "").strip(),
             "city_google": d.get("city_google", "").strip(),
             "region_google": d.get("region_google", "").strip(),
             "latitude_google": d.get("latitude_google", "").strip(),

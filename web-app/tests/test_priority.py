@@ -801,6 +801,7 @@ class PriorityTests(TestCase):
                 "name",
                 "phone",
                 "email",
+                "email_last_order",
                 "city_google",
                 "address_google",
                 "address_number_google",
@@ -810,7 +811,7 @@ class PriorityTests(TestCase):
                 "longitude_google",
                 "comment",
             ],
-            ["Store A", "", "Daniel", "A", "REF1", "1001", "Anna Andersson", "0701234567", "anna@example.com", "Göteborg", "Avenyn", "1", "41136", "VG", "57.7", "11.9", "Ring igen"],
+            ["Store A", "", "Daniel", "A", "REF1", "1001", "Anna Andersson", "0701234567", "anna@example.com", "buyer@example.com", "Göteborg", "Avenyn", "1", "41136", "VG", "57.7", "11.9", "Ring igen"],
         ]
         fake_spreadsheet = FakeSpreadsheet(
             {
@@ -828,6 +829,8 @@ class PriorityTests(TestCase):
         self.assertEqual(data[0]["name"], "Anna Andersson")
         self.assertEqual(data[0]["phone"], "0701234567")
         self.assertEqual(data[0]["email"], "anna@example.com")
+        self.assertEqual(data[0]["email_last_order"], "buyer@example.com")
+        self.assertEqual(data[0]["city_google"], "Göteborg")
         self.assertEqual(data[0]["customer"], "Store A")
 
     def test_customer_name_column_is_inserted_left_of_phone(self):

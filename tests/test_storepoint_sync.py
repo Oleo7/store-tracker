@@ -87,10 +87,13 @@ class StorepointSyncTests(TestCase):
 
     def test_sync_storepoint_customers_writes_only_target_columns_and_verifies(self):
         source_values = [
-            ["Delivery date", "Customer", "Address", "Number", "Postal code", "City", "Other"],
-            ["2026-06-01", "Store A", "Main Street", "1", "11111", "Stockholm", "keep"],
-            ["2026-06-01", "Store B", "Side Street", "2", "22222", "Goteborg", "keep"],
-            ["2026-01-01", "Old Store", "Old Street", "3", "33333", "Malmo", "keep"],
+            [
+                "Delivery date", "Customer", "placedBy", "buyerEmail", "placedAs",
+                "Customer Reference", "Address", "Number", "Postal code", "City", "Other",
+            ],
+            ["2026-06-01", "Store A", "Anna", "anna@example.com", "buyer", "A1", "Main Street", "1", "11111", "Stockholm", "keep"],
+            ["2026-06-01", "Store B", "Bo", "bo@example.com", "buyer", "B1", "Side Street", "2", "22222", "Goteborg", "keep"],
+            ["2026-01-01", "Old Store", "Olle", "olle@example.com", "buyer", "O1", "Old Street", "3", "33333", "Malmo", "keep"],
         ]
         target_values = [
             ["name", "description", "address", "city", "state", "postcode"],

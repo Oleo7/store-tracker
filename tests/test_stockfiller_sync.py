@@ -1,5 +1,6 @@
 from argparse import Namespace
 from datetime import datetime, timezone
+import re
 from unittest import TestCase
 from unittest.mock import patch
 
@@ -12,7 +13,9 @@ from stockfiller_orders.sync import (
     apply_crm_customer_numbers,
     build_sync_window,
     dedupe_orders_by_reference,
+    ensure_customer_email_column,
     flatten_order,
+    latest_order_emails_by_customer,
     merge_headers,
     order_params_for_window,
     split_street_address,
@@ -31,6 +34,9 @@ class StockfillerSyncTests(TestCase):
                 "updatedAtDateTime": "2026-05-28T08:20:00Z",
                 "deliveryDate": "2026-06-01",
                 "buyerName": "Store A",
+                "placedBy": "Anna Andersson",
+                "buyerEmail": "anna@example.com",
+                "placedAs": "buyer",
                 "buyerGln": "7350000000000",
                 "buyerExternalId": "1001",
                 "buyerExternalLogisticsId": "L1001",
@@ -61,6 +67,9 @@ class StockfillerSyncTests(TestCase):
         self.assertEqual(row["Order date"], "2026-05-28")
         self.assertEqual(row["Delivery date"], "2026-06-01")
         self.assertEqual(row["Customer"], "Store A")
+        self.assertEqual(row["placedBy"], "Anna Andersson")
+        self.assertEqual(row["buyerEmail"], "anna@example.com")
+        self.assertEqual(row["placedAs"], "buyer")
         self.assertEqual(row["Customer number"], "1001")
         self.assertEqual(row["Address"], "Hantverkargatan")
         self.assertEqual(row["Number"], "1A")
@@ -71,6 +80,14 @@ class StockfillerSyncTests(TestCase):
         self.assertEqual(row["Product Discount"], "90")
         self.assertEqual(row["Total"], "297")
         self.assertEqual(row["Currency"], "SEK")
+
+    def test_new_order_columns_are_immediately_after_customer(self):
+        customer_index = ORDER_COLUMNS.index("Customer")
+
+        self.assertEqual(
+            ORDER_COLUMNS[customer_index + 1 : customer_index + 5],
+            ["placedBy", "buyerEmail", "placedAs", "Customer Reference"],
+        )
 
     def test_flatten_order_uses_delivered_quantity_for_financial_totals(self):
         rows = flatten_order(
@@ -186,6 +203,34 @@ class StockfillerSyncTests(TestCase):
         self.assertEqual(rows[0]["Customer number"], "CRM-1001")
         self.assertEqual(rows[1]["Customer number"], "stockfiller-unknown")
 
+    def test_latest_order_emails_uses_last_physical_row_per_customer(self):
+        emails = latest_order_emails_by_customer(
+            [
+                {"Customer": "Store A", "buyerEmail": "old@example.com"},
+                {"Customer": "Store B", "buyerEmail": "b@example.com"},
+                {"Customer": " store a ", "buyerEmail": "latest@example.com"},
+            ]
+        )
+
+        self.assertEqual(emails, {"store a": "latest@example.com", "store b": "b@example.com"})
+
+    def test_customer_email_column_is_inserted_between_email_and_city(self):
+        worksheet = FakeWorksheet(
+            [["customer", "email", "city_google"], ["Store A", "contact@example.com", "Goteborg"]]
+        )
+
+        headers = ensure_customer_email_column(worksheet, worksheet.get_all_values()[0])
+
+        self.assertEqual(headers, ["customer", "email", "email_last_order", "city_google"])
+        self.assertEqual(
+            worksheet.get_all_values()[1],
+            ["Store A", "contact@example.com", "", "Goteborg"],
+        )
+
+        second_headers = ensure_customer_email_column(worksheet, worksheet.get_all_values()[0])
+        self.assertEqual(second_headers, headers)
+        self.assertEqual(worksheet.get_all_values()[0].count("email_last_order"), 1)
+
     def test_stockfiller_client_paginates_until_short_page(self):
         session = FakeSession(
             [
@@ -270,8 +315,8 @@ class StockfillerSyncTests(TestCase):
                     _sheet_row("REF-REPLACE", customer="Old Store", manual_note="replace me"),
                 ],
                 "customers_enriched": [
-                    ["customer", "customer_number"],
-                    ["Store A", "CRM-1001"],
+                    ["customer", "customer_number", "email", "city_google"],
+                    ["Store A", "CRM-1001", "contact@example.com", "Stockholm"],
                 ],
                 STATE_SHEET_NAME: [
                     ["key", "value", "updated_at"],
@@ -302,7 +347,16 @@ class StockfillerSyncTests(TestCase):
         self.assertEqual(rows[1]["Reference"], "REF-REPLACE")
         self.assertEqual(rows[1]["Customer"], "Store A")
         self.assertEqual(rows[1]["Customer number"], "CRM-1001")
+        self.assertEqual(rows[1]["placedBy"], "Anna Andersson")
+        self.assertEqual(rows[1]["buyerEmail"], "latest@example.com")
+        self.assertEqual(rows[1]["placedAs"], "buyer")
         self.assertEqual(rows[1]["Manual Note"], "")
+        customer_values = spreadsheet.worksheet("customers_enriched").get_all_values()
+        self.assertEqual(
+            customer_values[0],
+            ["customer", "customer_number", "email", "email_last_order", "city_google"],
+        )
+        self.assertEqual(customer_values[1][3], "latest@example.com")
         self.assertIn(["last_successful_updated_stop", "2026-05-28T12:00:00Z", state_rows[1][2]], state_rows)
 
     def test_sync_orders_dry_run_does_not_write_rows_or_state(self):
@@ -420,7 +474,29 @@ class FakeWorksheet:
         self.values = []
 
     def update(self, values, range_name="A1", raw=True):
-        self.values = values
+        if range_name == "A1":
+            self.values = values
+            return
+
+        match = re.fullmatch(r"([A-Z]+)(\d+):([A-Z]+)(\d+)", range_name)
+        if not match or match.group(1) != match.group(3):
+            raise ValueError(f"Unsupported fake range: {range_name}")
+        column_index = _column_index(match.group(1))
+        start_row = int(match.group(2)) - 1
+        for offset, value_row in enumerate(values):
+            row_index = start_row + offset
+            while len(self.values) <= row_index:
+                self.values.append([])
+            while len(self.values[row_index]) <= column_index:
+                self.values[row_index].append("")
+            self.values[row_index][column_index] = value_row[0] if value_row else ""
+
+    def insert_cols(self, columns, col=1):
+        insert_index = col - 1
+        width = len(columns)
+        for row_index, row in enumerate(self.values):
+            inserted = [columns[offset][row_index] if row_index < len(columns[offset]) else "" for offset in range(width)]
+            row[insert_index:insert_index] = inserted
 
 
 class FakeSpreadsheet:
@@ -464,6 +540,9 @@ def _api_order(reference):
         "createdAtDateTime": "2026-05-28T08:15:00Z",
         "deliveryDate": "2026-06-01",
         "buyerName": "Store A",
+        "placedBy": "Anna Andersson",
+        "buyerEmail": "latest@example.com",
+        "placedAs": "buyer",
         "buyerExternalId": "stockfiller-customer-id",
         "deliveryAddress": "Hantverkargatan 1",
         "deliveryZipCode": "11152",
@@ -480,3 +559,10 @@ def _api_order(reference):
             }
         ],
     }
+
+
+def _column_index(name):
+    number = 0
+    for character in name:
+        number = number * 26 + ord(character) - ord("A") + 1
+    return number - 1

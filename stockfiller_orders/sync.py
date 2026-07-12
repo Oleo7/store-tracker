@@ -22,6 +22,9 @@ ORDER_COLUMNS = [
     "Order date",
     "Delivery date",
     "Customer",
+    "placedBy",
+    "buyerEmail",
+    "placedAs",
     "Customer Reference",
     "Buyer number",
     "Customer number",
@@ -46,6 +49,10 @@ ORDER_COLUMNS = [
     "Order Discount (%)",
     "Batch",
 ]
+
+CUSTOMER_EMAIL_COLUMN = "email_last_order"
+CUSTOMER_EMAIL_LEFT_COLUMN = "email"
+CUSTOMER_EMAIL_RIGHT_COLUMN = "city_google"
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 STATE_SHEET_NAME = "_stockfiller_sync_state"
@@ -252,6 +259,8 @@ def sync_orders(
 
     if not dry_run:
         write_rows(order_sheet, merged_headers, final_rows)
+        if target_worksheet == "order_rows":
+            sync_latest_order_emails(spreadsheet, final_rows)
         if update_state:
             state = read_sync_state(spreadsheet)
             state.update(
@@ -451,6 +460,85 @@ def apply_crm_customer_numbers(order_rows: list[dict[str, str]], customer_number
             row["Customer number"] = crm_customer_number
 
 
+def latest_order_emails_by_customer(order_rows: Iterable[dict[str, Any]]) -> dict[str, str]:
+    """Return buyerEmail from each customer's last physical row in order_rows."""
+    latest_emails: dict[str, str] = {}
+    for row in order_rows:
+        customer_key = normalize_key(row.get("Customer"))
+        if customer_key:
+            latest_emails[customer_key] = text(row.get("buyerEmail"))
+    return latest_emails
+
+
+def sync_latest_order_emails(spreadsheet, order_rows: Iterable[dict[str, Any]]) -> None:
+    worksheet = spreadsheet.worksheet("customers_enriched")
+    values = worksheet.get_all_values()
+    if not values:
+        raise ValueError("customers_enriched is empty; cannot add email_last_order")
+
+    headers = [text(header) for header in values[0]]
+    ensure_customer_email_column(worksheet, headers)
+    values = worksheet.get_all_values()
+    headers = [text(header) for header in values[0]]
+    customer_index = required_header_index(headers, "customer", "customers_enriched")
+    email_index = required_header_index(headers, CUSTOMER_EMAIL_COLUMN, "customers_enriched")
+    latest_emails = latest_order_emails_by_customer(order_rows)
+
+    email_values = []
+    for row in values[1:]:
+        customer = row[customer_index] if customer_index < len(row) else ""
+        email_values.append([latest_emails.get(normalize_key(customer), "")])
+
+    if email_values:
+        column = column_name(email_index)
+        worksheet.update(
+            values=email_values,
+            range_name=f"{column}2:{column}{len(email_values) + 1}",
+            raw=True,
+        )
+
+
+def ensure_customer_email_column(worksheet, headers: list[str]) -> list[str]:
+    headers = list(headers)
+    if CUSTOMER_EMAIL_COLUMN in headers:
+        left_index = required_header_index(headers, CUSTOMER_EMAIL_LEFT_COLUMN, "customers_enriched")
+        email_index = headers.index(CUSTOMER_EMAIL_COLUMN)
+        right_index = required_header_index(headers, CUSTOMER_EMAIL_RIGHT_COLUMN, "customers_enriched")
+        if email_index != left_index + 1 or right_index != email_index + 1:
+            raise ValueError(
+                "customers_enriched must order email, email_last_order, and city_google consecutively"
+            )
+        return headers
+
+    left_index = required_header_index(headers, CUSTOMER_EMAIL_LEFT_COLUMN, "customers_enriched")
+    right_index = required_header_index(headers, CUSTOMER_EMAIL_RIGHT_COLUMN, "customers_enriched")
+    if right_index != left_index + 1:
+        raise ValueError(
+            "customers_enriched must have city_google immediately after email "
+            "before email_last_order can be inserted"
+        )
+
+    insert_col = right_index + 1
+    worksheet.insert_cols([[CUSTOMER_EMAIL_COLUMN]], col=insert_col)
+    return headers[:right_index] + [CUSTOMER_EMAIL_COLUMN] + headers[right_index:]
+
+
+def required_header_index(headers: list[str], header: str, sheet_name: str) -> int:
+    try:
+        return headers.index(header)
+    except ValueError as exc:
+        raise ValueError(f"{sheet_name} is missing required column: {header}") from exc
+
+
+def column_name(zero_based_index: int) -> str:
+    number = zero_based_index + 1
+    name = ""
+    while number:
+        number, remainder = divmod(number - 1, 26)
+        name = chr(65 + remainder) + name
+    return name
+
+
 def flatten_order(order: dict[str, Any]) -> list[dict[str, str]]:
     reference = text(order.get("reference") or order.get("externalOrderReference"))
     if not reference:
@@ -488,6 +576,9 @@ def flatten_order(order: dict[str, Any]) -> list[dict[str, str]]:
                 "Order date": order_date,
                 "Delivery date": delivery_date,
                 "Customer": customer,
+                "placedBy": text(order.get("placedBy")),
+                "buyerEmail": text(order.get("buyerEmail")),
+                "placedAs": text(order.get("placedAs")),
                 "Customer Reference": text(order.get("customerReference")),
                 "Buyer number": text(order.get("buyerGln")),
                 "Customer number": customer_number,

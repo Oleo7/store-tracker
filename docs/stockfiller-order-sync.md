@@ -3,6 +3,12 @@
 The Stockfiller sync fetches Supplier API orders and upserts them into the `order_rows` worksheet in `CRM_DATABASE`.
 It replaces rows by Stockfiller order `Reference`, which makes repeated runs idempotent.
 
+The order columns `placedBy`, `buyerEmail`, and `placedAs` are written immediately after
+`Customer`. After a successful production write, the sync also updates
+`customers_enriched.email_last_order` with `buyerEmail` from each customer's last physical
+row in `order_rows`. The customer column is inserted between `email` and `city_google` on
+the first run and reused on later runs.
+
 ## Required Variables
 
 Add these to `.env` locally and to the Render Cron Job environment:
