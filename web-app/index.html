@@ -2730,7 +2730,7 @@
     <div class="detail-action-bar">
       <button class="action-btn" id="update-contact-btn">Logga besök</button>
       <button class="action-btn secondary" id="d-call-btn">Ring</button>
-      <button class="action-btn secondary" id="d-mail-btn">Mail</button>
+      <button class="action-btn secondary" id="d-mail-btn">Email</button>
     </div>
 
     <!-- Översikt -->
@@ -2796,6 +2796,7 @@
         <div class="info-row"><span class="label">Namn</span><span class="value" id="d-contact-name">—</span></div>
         <div class="info-row"><span class="label">Telefon</span><a href="#" id="d-phone">—</a></div>
         <div class="info-row"><span class="label">Email</span><a href="#" id="d-email">—</a></div>
+        <div class="info-row"><span class="label">Email order</span><a href="#" id="d-order-email">—</a></div>
         <div class="info-row"><span class="label">Adress</span><span class="value" id="d-address">—</span></div>
       </div>
       <div id="contact-edit-mode" style="display:none">
@@ -3688,6 +3689,15 @@
     renderContactList(stats.contacts);
   }
 
+  function getCustomerEmailRecipients(customer) {
+    const recipients = [customer?.email_last_order, customer?.email]
+      .map(value => String(value || "").trim())
+      .filter(Boolean);
+    return recipients.filter((email, index) =>
+      recipients.findIndex(candidate => candidate.toLowerCase() === email.toLowerCase()) === index
+    );
+  }
+
   // ── Open detail ──
   async function openDetail(row) {
     const c = customers.find(c => c.row === row);
@@ -3721,11 +3731,21 @@
     emailEl.textContent = c.email || "—";
     emailEl.href = c.email ? `mailto:${c.email}` : "#";
 
+    const orderEmail = String(c.email_last_order || "").trim();
+    const orderEmailEl = document.getElementById("d-order-email");
+    orderEmailEl.textContent = orderEmail || "—";
+    orderEmailEl.href = orderEmail ? `mailto:${orderEmail}` : "#";
+
     setCustomerComment(c.comment || "");
 
-    // Ring / Mail buttons
+    // Ring / Email buttons
     document.getElementById("d-call-btn").onclick = () => { if (c.phone) window.location.href = `tel:${c.phone.replace(/\s/g, "")}`; };
-    document.getElementById("d-mail-btn").onclick = () => { if (c.email) window.location.href = `mailto:${c.email}`; };
+    const emailRecipients = getCustomerEmailRecipients(c);
+    const emailHref = emailRecipients.length ? `mailto:${emailRecipients.join(",")}` : "";
+    const mailBtn = document.getElementById("d-mail-btn");
+    mailBtn.dataset.mailto = emailHref;
+    mailBtn.disabled = !emailHref;
+    mailBtn.onclick = () => { if (emailHref) window.location.href = emailHref; };
 
     // Kontaktuppgifter edit
     document.getElementById("contact-edit-mode").style.display = "none";

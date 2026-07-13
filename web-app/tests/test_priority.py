@@ -967,6 +967,19 @@ class PriorityTests(TestCase):
         self.assertEqual(data[0]["city_google"], "Göteborg")
         self.assertEqual(data[0]["customer"], "Store A")
 
+    def test_customer_detail_exposes_last_order_email_field_and_action(self):
+        html = (WEB_APP_DIR / "index.html").read_text(encoding="utf-8")
+
+        self.assertIn('<span class="label">Email order</span>', html)
+        self.assertIn('id="d-order-email"', html)
+        self.assertNotIn('id="d-order-mail-btn"', html)
+        self.assertIn('const orderEmail = String(c.email_last_order || "").trim();', html)
+        self.assertIn('const recipients = [customer?.email_last_order, customer?.email]', html)
+        self.assertIn('candidate.toLowerCase() === email.toLowerCase()', html)
+        self.assertIn('`mailto:${emailRecipients.join(",")}`', html)
+        self.assertIn('mailBtn.dataset.mailto = emailHref;', html)
+        self.assertIn('mailBtn.disabled = !emailHref;', html)
+
     def test_customer_name_column_is_inserted_left_of_phone(self):
         values = [["customer", "phone", "email"], ["Store A", "0701234567", "a@example.com"]]
         sheet = FakeWorksheet("customers_enriched", values)
