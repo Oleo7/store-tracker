@@ -59,6 +59,7 @@
     #login-screen.hidden { display: none; }
     #login-screen h2 { color: #fff; font-size: 1.4rem; font-weight: 700; }
     #login-screen p { color: rgba(255,255,255,0.5); font-size: 0.85rem; }
+    #login-user-name,
     #login-password {
       width: 100%;
       max-width: 320px;
@@ -393,6 +394,7 @@
 
     .detail-action-bar {
       display: flex;
+      flex-wrap: wrap;
       align-items: stretch;
       gap: 8px;
       margin-bottom: 2px;
@@ -412,6 +414,10 @@
     }
     .detail-action-bar .action-btn.secondary {
       border-color: #1a1a2e;
+    }
+    .detail-action-bar #d-reminder-btn {
+      flex: 1 0 100%;
+      width: 100%;
     }
 
     .detail-section {
@@ -1521,6 +1527,7 @@
       text-align: center;
     }
 
+    #login-user-name,
     #login-password {
       max-width: none;
       border: 1px solid rgba(255,255,255,0.28);
@@ -2483,6 +2490,121 @@
         flex-shrink: 0;
       }
     }
+    .session-control {
+      position: fixed; right: 10px; bottom: 10px; z-index: 45;
+      display: none; align-items: center; gap: 8px;
+      padding: 7px 8px 7px 12px; color: var(--pb-ink);
+      background: rgba(255,255,255,0.94); border: 1px solid var(--pb-border);
+      border-radius: 999px; box-shadow: var(--pb-shadow-soft); font-size: 0.76rem;
+    }
+    .session-control.visible { display: flex; }
+    .session-control button {
+      border: 0; border-radius: 999px; padding: 6px 9px;
+      color: var(--pb-muted); background: var(--pb-pink-soft);
+      cursor: pointer; font: inherit; font-weight: 700;
+    }
+    .email-modal-backdrop {
+      position: fixed; inset: 0; z-index: 210; display: none;
+      background: rgba(37,28,37,0.62); backdrop-filter: blur(3px);
+      padding: 18px; overflow-y: auto;
+    }
+    .email-modal-backdrop.open { display: flex; align-items: flex-start; justify-content: center; }
+    .email-modal {
+      width: min(760px, 100%); margin: auto; background: var(--pb-surface);
+      border-radius: 18px; box-shadow: 0 26px 70px rgba(20,10,20,0.28); overflow: hidden;
+    }
+    .email-modal-header {
+      display: flex; align-items: flex-start; gap: 12px; padding: 20px 22px 16px;
+      color: #fff; background: linear-gradient(135deg, var(--pb-ink), #593846);
+    }
+    .email-modal-heading { flex: 1; min-width: 0; }
+    .email-modal-heading h2 { font-size: 1.18rem; margin-bottom: 4px; }
+    .email-modal-heading p { color: rgba(255,255,255,.7); font-size: .8rem; }
+    .email-close {
+      width: 34px; height: 34px; border: 0; border-radius: 50%;
+      background: rgba(255,255,255,.14); color: #fff; font-size: 1.05rem; cursor: pointer;
+    }
+    .email-modal-body { padding: 20px 22px 8px; }
+    .email-banner {
+      display: none; margin-bottom: 12px; padding: 11px 13px;
+      border-radius: 10px; font-size: .82rem; line-height: 1.45;
+    }
+    .email-banner.visible { display: block; }
+    .email-banner.test { background: #fff0d6; color: #724700; border: 1px solid #f4cf8e; }
+    .email-banner.warning { background: #fff4e9; color: #7a3f16; border: 1px solid #efc29d; }
+    .email-banner.notice { background: var(--pb-blue-soft); color: #274968; border: 1px solid #c3d5eb; }
+    .email-field { margin-bottom: 16px; }
+    .email-field > label, .email-section-label {
+      display: block; margin-bottom: 6px; color: var(--pb-muted); font-size: .72rem;
+      font-weight: 800; letter-spacing: .045em; text-transform: uppercase;
+    }
+    .email-field input, .email-field textarea, .email-order-row input {
+      width: 100%; border: 1px solid var(--pb-border-strong); border-radius: 10px;
+      padding: 11px 12px; color: var(--pb-ink); background: #fff; resize: vertical;
+    }
+    .email-field textarea { min-height: 104px; line-height: 1.45; }
+    .email-recipient-list { display: grid; gap: 9px; }
+    .email-recipient {
+      display: grid; grid-template-columns: auto minmax(0, 1.35fr) minmax(120px, .8fr);
+      align-items: center; gap: 9px; padding: 10px; border: 1px solid var(--pb-border);
+      border-radius: 11px; background: var(--pb-surface-soft);
+    }
+    .email-recipient.blocked { background: #fff0f0; border-color: #efb6b6; }
+    .email-recipient input[type="checkbox"] { width: 18px; height: 18px; accent-color: var(--pb-pink-strong); }
+    .email-recipient-address { min-width: 0; overflow-wrap: anywhere; font-size: .86rem; }
+    .email-recipient-address small { display: block; margin-top: 3px; color: #a03b3b; }
+    .email-recipient-name {
+      width: 100%; border: 1px solid var(--pb-border-strong); border-radius: 8px; padding: 8px 9px;
+    }
+    .email-order-list { display: grid; gap: 8px; }
+    .email-order-row {
+      display: grid; grid-template-columns: minmax(0, 1fr) 86px 70px 34px;
+      gap: 7px; align-items: center;
+    }
+    .email-order-row .email-order-remove {
+      width: 34px; height: 36px; border: 1px solid var(--pb-border); border-radius: 9px;
+      background: #fff; color: var(--pb-muted); cursor: pointer;
+    }
+    .email-add-row {
+      margin-top: 8px; border: 0; color: var(--pb-pink-strong);
+      background: transparent; font-weight: 800; cursor: pointer;
+    }
+    .email-product-picker {
+      display: none; margin-top: 8px; padding: 10px; gap: 7px; flex-wrap: wrap;
+      border: 1px solid var(--pb-border); border-radius: 10px; background: var(--pb-surface-soft);
+    }
+    .email-product-picker.open { display: flex; }
+    .email-product-option {
+      border: 1px solid var(--pb-border-strong); border-radius: 999px; padding: 7px 10px;
+      color: var(--pb-ink); background: #fff; cursor: pointer; font: inherit; font-size: .76rem;
+    }
+    .email-product-option:hover { border-color: var(--pb-pink-strong); color: var(--pb-pink-strong); }
+    .email-product-picker-empty { color: var(--pb-muted); font-size: .76rem; }
+    .email-protected {
+      margin: 18px 0 10px; padding: 14px; border: 1px dashed var(--pb-border-strong);
+      border-radius: 12px; background: #faf7f9; color: var(--pb-muted);
+      font-size: .84rem; line-height: 1.55;
+    }
+    .email-protected-buttons { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0 14px; }
+    .email-protected-button { padding: 9px 11px; border-radius: 8px; color: #fff; background: var(--pb-ink); font-weight: 700; }
+    .email-signature { white-space: pre-line; color: var(--pb-ink); }
+    .email-modal-footer {
+      position: sticky; bottom: 0; display: flex; justify-content: flex-end; gap: 9px;
+      padding: 14px 22px 18px; background: rgba(255,255,255,.96); border-top: 1px solid var(--pb-border);
+    }
+    .email-modal-footer .action-btn { margin: 0; width: auto; }
+    .email-modal-loading { padding: 42px 20px; text-align: center; color: var(--pb-muted); }
+    @media (max-width: 620px) {
+      .email-modal-backdrop { padding: 0; }
+      .email-modal { min-height: 100%; border-radius: 0; }
+      .email-modal-body { padding: 16px 14px 6px; }
+      .email-modal-header, .email-modal-footer { padding-left: 14px; padding-right: 14px; }
+      .email-recipient { grid-template-columns: auto minmax(0, 1fr); }
+      .email-recipient-name { grid-column: 2; }
+      .email-order-row { grid-template-columns: minmax(0, 1fr) 70px 34px; }
+      .email-order-unit { display: none; }
+      .session-control span { display: none; }
+    }
   </style>
 </head>
 <body>
@@ -2492,7 +2614,8 @@
   <div class="login-card">
     <img class="login-logo" src="/images/Godare_Bättre_New_1500px_White.png" alt="Polarbär" />
     <h2>Polarbär CRM</h2>
-    <p>Ange lösenord för att fortsätta</p>
+    <p>Logga in med ditt Store Tracker-konto</p>
+    <input type="text" id="login-user-name" placeholder="Användarnamn" autocomplete="username" autocapitalize="none" />
     <input type="password" id="login-password" placeholder="Lösenord" autocomplete="current-password" />
     <div id="login-error"></div>
     <button id="login-btn">Logga in</button>
@@ -2509,6 +2632,10 @@
 
 <div id="detail-loader"><div class="spinner"></div></div>
 <div class="toast" id="toast"></div>
+<div class="session-control" id="session-control">
+  <span id="session-user-name"></span>
+  <button id="logout-btn" type="button">Logga ut</button>
+</div>
 
 <!-- ═══════════════ LIST VIEW ═══════════════ -->
 <div class="view active" id="view-list">
@@ -2540,6 +2667,7 @@
       <button class="chip" id="chip-risk">Risk</button>
       <button class="chip" id="chip-latest-contact">Senast kontakt</button>
       <button class="chip" id="chip-delivery">Senast Leverans</button>
+      <button class="chip" id="chip-email-proposal">Mejl-förslag</button>
     </div>
     <div id="clear-filters-row" style="display:none">
       <button class="chip chip-clear" id="clear-filters-btn">✕ Rensa filter</button>
@@ -2731,6 +2859,7 @@
       <button class="action-btn" id="update-contact-btn">Logga besök</button>
       <button class="action-btn secondary" id="d-call-btn">Ring</button>
       <button class="action-btn secondary" id="d-mail-btn">Email</button>
+      <button class="action-btn secondary" id="d-reminder-btn">Mejlförslag</button>
     </div>
 
     <!-- Översikt -->
@@ -2969,6 +3098,22 @@
 </div>
 
 
+<!-- ═══════════════ EMAIL PROPOSAL MODAL ═══════════════ -->
+<div class="email-modal-backdrop" id="email-modal-backdrop" aria-hidden="true">
+  <section class="email-modal" role="dialog" aria-modal="true" aria-labelledby="email-modal-title">
+    <div class="email-modal-header">
+      <div class="email-modal-heading">
+        <h2 id="email-modal-title">Mejlförslag</h2>
+        <p id="email-modal-subtitle"></p>
+      </div>
+      <button class="email-close" id="email-modal-close" type="button" aria-label="Stäng">✕</button>
+    </div>
+    <div id="email-modal-content">
+      <div class="email-modal-loading">Laddar personligt utkast…</div>
+    </div>
+  </section>
+</div>
+
 <!-- ═══════════════ FILTER MODAL ═══════════════ -->
 <div class="filter-backdrop" id="filter-backdrop"></div>
 <div class="filter-modal" id="filter-modal">
@@ -2994,6 +3139,7 @@
   const MAP_ROUTE_DRAFT_TTL_MS = 12 * 60 * 60 * 1000;
 
   let customers = [];
+  let currentUser = null;
   let searchQuery = "";
   let currentCustomer = null;
   let detailReturnView = "list";
@@ -3035,7 +3181,7 @@
   }
 
   // ── Multi-select filter state ──
-  const filterState = { segment: new Set(), responsible: new Set(), city: new Set(), region: new Set(), priority: new Set(), risk: new Set(), delivery: new Set(), latestContact: new Set() };
+  const filterState = { segment: new Set(), responsible: new Set(), city: new Set(), region: new Set(), priority: new Set(), risk: new Set(), delivery: new Set(), latestContact: new Set(), emailProposal: new Set() };
 
   async function loadInsights() {
     try {
@@ -3046,12 +3192,15 @@
       insightsLoadFailed = false;
       buildInsightDropdowns();
       updateDailyFocusChip();
+      updateChip("emailProposal");
       renderList();
     } catch {
       insightsLoaded = false;
       insightsLoadFailed = true;
       dailyFocusActive = false;
+      filterState.emailProposal.clear();
       updateDailyFocusChip();
+      updateChip("emailProposal");
       showToast("Kunde inte ladda kundinsikter – risk och uppföljning visas inte");
     }
   }
@@ -3067,6 +3216,7 @@
     risk:        "Risk",
     delivery:    "Senast Leverans",
     latestContact: "Senast kontakt",
+    emailProposal: "Mejl-förslag",
   };
   const _chipIds = {
     segment:     "chip-segment",
@@ -3077,8 +3227,9 @@
     risk:        "chip-risk",
     delivery:    "chip-delivery",
     latestContact: "chip-latest-contact",
+    emailProposal: "chip-email-proposal",
   };
-  const _sheetValues = { segment: [], responsible: [], city: [], region: [], priority: ["Hög prio", "Medel prio", "Låg prio"], risk: [], delivery: [], latestContact: ["<1 månad", "1-2 månader", ">3 månader", "Saknar kontakt"] };
+  const _sheetValues = { segment: [], responsible: [], city: [], region: [], priority: ["Hög prio", "Medel prio", "Låg prio"], risk: [], delivery: [], latestContact: ["<1 månad", "1-2 månader", ">3 månader", "Saknar kontakt"], emailProposal: ["Påminnelse", "Återaktivering", "Nykund"] };
 
   // ── Filter modal ──
   const _customerFieldMap = {
@@ -3090,7 +3241,7 @@
 
   function getAvailableValues(key) {
     // Insight-based filters are not cascaded
-    if (key === "priority" || key === "risk" || key === "delivery" || key === "latestContact") return _sheetValues[key];
+    if (key === "priority" || key === "risk" || key === "delivery" || key === "latestContact" || key === "emailProposal") return _sheetValues[key];
     // Apply all active filters except the one being opened
     let base = customers;
     for (const [k, field] of Object.entries(_customerFieldMap)) {
@@ -3152,7 +3303,13 @@
   document.getElementById("filter-modal-input").addEventListener("input", e => renderFilterOptions(e.target.value));
 
   Object.keys(_chipIds).forEach(key => {
-    document.getElementById(_chipIds[key]).addEventListener("click", () => openFilterModal(key));
+    document.getElementById(_chipIds[key]).addEventListener("click", () => {
+      if (key === "emailProposal" && !insightsLoaded) {
+        showToast("Laddar kundinsikter – försök igen om en sekund");
+        return;
+      }
+      openFilterModal(key);
+    });
   });
 
   function buildInsightDropdowns() {
@@ -3165,6 +3322,7 @@
     updateChip("risk");
     updateChip("delivery");
     updateChip("latestContact");
+    updateChip("emailProposal");
   }
 
   function buildDropdowns() {
@@ -3226,6 +3384,18 @@
     if (!tagClass) return "";
     const styleAttr = style ? ` style="${style}"` : "";
     return `<span class="tag ${tagClass}"${styleAttr}>${esc(risk)}</span>`;
+  }
+
+  function getEmailProposalBadgeHtml(insight, style = "") {
+    const label = insight?.email_proposal_type_label;
+    if (!label) return "";
+    const tagClass = {
+      "Påminnelse": "tag-blue",
+      "Återaktivering": "tag-orange",
+      "Nykund": "tag-green",
+    }[label] || "tag-blue";
+    const styleAttr = style ? ` style="${style}"` : "";
+    return `<span class="tag ${tagClass}"${styleAttr}>${esc(label)}</span>`;
   }
 
   function customerInsightKey(value) {
@@ -3354,7 +3524,7 @@
   });
 
   document.getElementById("clear-filters-btn").addEventListener("click", () => {
-    ["segment", "responsible", "city", "region", "priority", "risk", "delivery", "latestContact"].forEach(key => filterState[key].clear());
+    Object.keys(filterState).forEach(key => filterState[key].clear());
     dailyFocusActive = false;
     Object.keys(_chipIds).forEach(key => updateChip(key));
     updateDailyFocusChip();
@@ -3395,6 +3565,17 @@
       filterState.latestContact.has(getLatestContactBucket(c.latest_contact_date))
     );
 
+    if (filterState.emailProposal.size) {
+      filtered = filtered
+        .filter(c => {
+          const ins = getCustomerInsight(c);
+          return Number(ins?.email_proposal_recipient_count || 0) > 0
+            && filterState.emailProposal.has(ins?.email_proposal_type_label || "");
+        })
+        .sort(prioritySort);
+    }
+
+    const emailProposalMatchCount = filtered.length;
     const matchedBeforeDailyFocus = filtered.length;
 
     if (dailyFocusActive) {
@@ -3405,9 +3586,15 @@
     }
 
     updateDailyFocusChip(filtered.length);
-    document.getElementById("subtitle").textContent = dailyFocusActive
-      ? `Förslag: visar ${filtered.length} av ${matchedBeforeDailyFocus} matchande butiker`
-      : `${filtered.length} av ${customers.length} butiker`;
+    if (dailyFocusActive && filterState.emailProposal.size) {
+      document.getElementById("subtitle").textContent = `Mejl-förslag + Förslag: visar ${filtered.length} av ${matchedBeforeDailyFocus} matchande butiker`;
+    } else if (dailyFocusActive) {
+      document.getElementById("subtitle").textContent = `Förslag: visar ${filtered.length} av ${matchedBeforeDailyFocus} matchande butiker`;
+    } else if (filterState.emailProposal.size) {
+      document.getElementById("subtitle").textContent = `Mejl-förslag: ${emailProposalMatchCount} matchande butiker`;
+    } else {
+      document.getElementById("subtitle").textContent = `${filtered.length} av ${customers.length} butiker`;
+    }
     filteredCustomers = filtered;
 
     if (filtered.length === 0) {
@@ -3439,6 +3626,10 @@
             const ins = getCustomerInsight(c);
             if (!Object.keys(ins).length) return "";
             const badges = [];
+            if (filterState.emailProposal.size) {
+              const proposalBadge = getEmailProposalBadgeHtml(ins, "font-size:0.68rem;padding:2px 7px");
+              if (proposalBadge) badges.push(proposalBadge);
+            }
             if (ins.missad_uppfoljning) badges.push(`<span class="tag tag-orange" style="font-size:0.68rem;padding:2px 7px">Missad uppföljning</span>`);
             if (ins.latest_delivery_date) badges.push(`<span class="tag tag-blue" style="font-size:0.68rem;padding:2px 7px">Senast leverans ${esc(ins.latest_delivery_date)}</span>`);
             if (badges.length === 0) return "";
@@ -3479,43 +3670,60 @@
   });
 
   let allContacts = [];
+  let allTimeline = [];
   let historyExpanded = false;
 
   // ── Render contact list ──
-  function renderContactList(contacts) {
+  function timelineDate(value) {
+    return String(value || "").replace("T", " ").slice(0, 16) || "—";
+  }
+
+  function renderContactList(contacts, timeline) {
     allContacts = contacts || [];
+    allTimeline = timeline || allContacts.map(contact => ({
+      ...contact,
+      event_type: "contact",
+      title: contact.result || contact.contact_channel || "Kundkontakt",
+      channel: contact.contact_channel,
+      recipient: contact.customer_contact_person,
+      details: [],
+    }));
     historyExpanded = false;
     renderHistory();
 
-    // Senaste aktivitet
+    // Senaste aktivitet i den gemensamma tidslinjen
     const latestSection = document.getElementById("d-latest-section");
-    if (allContacts.length > 0) {
-      const lc = allContacts[0];
+    if (allTimeline.length > 0) {
+      const lc = allTimeline[0];
       latestSection.style.display = "block";
-      document.getElementById("d-act-date").textContent   = lc.date_time ? lc.date_time.slice(0, 10) : "—";
+      document.getElementById("d-act-date").textContent   = timelineDate(lc.date_time);
       document.getElementById("d-act-seller").textContent = lc.sales_person || "—";
       const commentEl = document.getElementById("d-act-comment");
       if (lc.comment) { commentEl.textContent = lc.comment; commentEl.style.display = "block"; }
       else { commentEl.style.display = "none"; }
-      document.getElementById("d-act-channel").textContent       = lc.contact_channel       || "—";
-      document.getElementById("d-act-result").textContent        = lc.result        || "—";
-      document.getElementById("d-act-contactperson").textContent = lc.customer_contact_person      || "—";
-      document.getElementById("d-act-nextfollowup").textContent  = lc.follow_up_date       || "—";
-      // Översikt meta
-      document.getElementById("d-last-contact").textContent = lc.date_time ? lc.date_time.slice(0, 10) : "—";
-      document.getElementById("d-last-result").textContent  = lc.result || "—";
-      document.getElementById("d-freezer-latest").textContent = getFreezerLabels(lc).join(", ") || "—";
-      document.getElementById("d-next-followup").textContent = lc.follow_up_date || "—";
-
-      renderDetailTags();
+      document.getElementById("d-act-channel").textContent       = lc.channel || lc.contact_channel || "—";
+      document.getElementById("d-act-result").textContent        = lc.title || lc.result || "—";
+      document.getElementById("d-act-contactperson").textContent = lc.recipient || lc.customer_contact_person || "—";
+      const nextFollowup = (lc.details || []).find(item => item.label === "Nästa uppföljning")?.value;
+      document.getElementById("d-act-nextfollowup").textContent  = nextFollowup || lc.follow_up_date || "—";
     } else {
       latestSection.style.display = "none";
+    }
+
+    // Översikten fortsätter att baseras på senaste faktiska säljkontakt.
+    if (allContacts.length > 0) {
+      const latestContact = allContacts[0];
+      document.getElementById("d-last-contact").textContent = latestContact.date_time ? latestContact.date_time.slice(0, 10) : "—";
+      document.getElementById("d-last-result").textContent  = latestContact.result || "—";
+      document.getElementById("d-freezer-latest").textContent = getFreezerLabels(latestContact).join(", ") || "—";
+      document.getElementById("d-next-followup").textContent = latestContact.follow_up_date || "—";
+    } else {
       document.getElementById("d-last-contact").textContent = "—";
       document.getElementById("d-last-result").textContent  = "—";
       document.getElementById("d-freezer-latest").textContent = "—";
       document.getElementById("d-next-followup").textContent = "—";
-      renderDetailTags();
     }
+    renderDetailTags();
   }
 
   function renderDetailTags() {
@@ -3524,6 +3732,8 @@
     if (currentCustomer?.customer_segment) tags.push(`<span class="tag tag-blue">${esc(currentCustomer.customer_segment)}</span>`);
     if (currentCustomer?.sales_person) tags.push(`<span class="tag tag-green">Ansvarig: ${esc(currentCustomer.sales_person)}</span>`);
     if (ins) {
+      const proposalBadge = getEmailProposalBadgeHtml(ins);
+      if (proposalBadge) tags.push(proposalBadge);
       if (ins.missad_uppfoljning) tags.push(`<span class="tag tag-orange">Missad uppföljning</span>`);
       const riskBadge = getRiskBadgeHtml(ins.customer_risk);
       if (riskBadge) tags.push(riskBadge);
@@ -3584,7 +3794,7 @@
   }
 
   function getPrefilledSellerName() {
-    return String(currentCustomer?.sales_person || "").trim();
+    return String(currentUser?.name || currentCustomer?.sales_person || "").trim();
   }
 
   async function saveCustomerDetailPatch(updates, rollback) {
@@ -3622,7 +3832,7 @@
     const showMore = document.getElementById("d-show-more");
     const title    = document.getElementById("d-history-title");
 
-    const historyContacts = allContacts.slice(1); // skip first — shown in Senaste aktivitet
+    const historyContacts = allTimeline.slice(1); // skip first — shown in Senaste aktivitet
 
     if (historyContacts.length === 0) {
       section.style.display = "none";
@@ -3635,16 +3845,16 @@
     list.innerHTML = visible.map((lc) => `
       <div class="history-item">
         <div class="history-summary">
-          <span class="history-date">${esc(lc.date_time ? lc.date_time.slice(0, 10) : "—")}</span>
-          <span class="history-comment">${esc(lc.result || "—")}</span>
+          <span class="history-date">${esc(timelineDate(lc.date_time))}</span>
+          <span class="history-comment">${esc(lc.title || lc.result || "—")}</span>
           <span class="history-chevron">&#9660;</span>
         </div>
         <div class="history-detail">
           <div class="activity-row"><span class="activity-label">Säljare</span><span class="activity-value">${esc(lc.sales_person) || "—"}</span></div>
-          <div class="activity-row"><span class="activity-label">Kanal</span><span class="activity-value">${esc(lc.contact_channel) || "—"}</span></div>
-          <div class="activity-row"><span class="activity-label">Resultat</span><span class="activity-value">${esc(lc.result) || "—"}</span></div>
-          <div class="activity-row"><span class="activity-label">Kontaktperson</span><span class="activity-value">${esc(lc.customer_contact_person) || "—"}</span></div>
-          <div class="activity-row"><span class="activity-label">Nästa uppföljning</span><span class="activity-value">${esc(lc.follow_up_date) || "—"}</span></div>
+          <div class="activity-row"><span class="activity-label">Kanal</span><span class="activity-value">${esc(lc.channel || lc.contact_channel) || "—"}</span></div>
+          <div class="activity-row"><span class="activity-label">Resultat</span><span class="activity-value">${esc(lc.result || lc.title) || "—"}</span></div>
+          ${lc.recipient || lc.customer_contact_person ? `<div class="activity-row"><span class="activity-label">Mottagare</span><span class="activity-value">${esc(lc.recipient || lc.customer_contact_person)}</span></div>` : ""}
+          ${(lc.details || []).map(item => `<div class="activity-row"><span class="activity-label">${esc(item.label)}</span><span class="activity-value">${esc(item.value) || "—"}</span></div>`).join("")}
           ${lc.comment ? `<div class="activity-comment">${esc(lc.comment)}</div>` : ""}
         </div>
       </div>
@@ -3686,7 +3896,7 @@
       (stats.currency ? " " + stats.currency : "");
     const ins = currentCustomer ? getCustomerInsight(currentCustomer) : null;
     document.getElementById("d-latest-order").textContent = ins?.latest_delivery_date || "—";
-    renderContactList(stats.contacts);
+    renderContactList(stats.contacts, stats.timeline);
   }
 
   function getCustomerEmailRecipients(customer) {
@@ -3697,6 +3907,267 @@
       recipients.findIndex(candidate => candidate.toLowerCase() === email.toLowerCase()) === index
     );
   }
+
+  const emailModalBackdrop = document.getElementById("email-modal-backdrop");
+  const emailModalContent = document.getElementById("email-modal-content");
+  let reminderDraft = null;
+  let reminderDirty = false;
+  let reminderSending = false;
+
+  function markReminderDirty() { reminderDirty = true; }
+
+  function closeReminderModal(force = false) {
+    if (reminderSending) return;
+    if (!force && reminderDirty && !window.confirm("Du har ändringar som inte är skickade. Vill du stänga ändå?")) return;
+    emailModalBackdrop.classList.remove("open");
+    emailModalBackdrop.setAttribute("aria-hidden", "true");
+    document.body.style.overflow = "";
+    reminderDraft = null;
+    reminderDirty = false;
+  }
+
+  function signatureText(signature) {
+    return [signature?.name, signature?.role, signature?.phone ? `📞 ${signature.phone}` : "", "🌐 polarbär.se"]
+      .filter(Boolean).join("\n");
+  }
+
+  function renderReminderOrderRows(rows) {
+    const list = document.getElementById("email-order-list");
+    if (!list) return;
+    list.innerHTML = (rows || []).map((row, index) => `
+      <div class="email-order-row" data-index="${index}">
+        <input class="email-order-product" type="text" value="${escAttr(row.product || "")}" aria-label="Produkt" placeholder="Produkt" />
+        <input class="email-order-quantity" type="text" value="${escAttr(row.quantity || "")}" aria-label="Antal" placeholder="Antal" />
+        <input class="email-order-unit" type="text" value="${escAttr(row.unit || "DFP")}" aria-label="Enhet" placeholder="DFP" />
+        <button class="email-order-remove" type="button" aria-label="Ta bort rad">✕</button>
+      </div>
+    `).join("");
+    list.querySelectorAll("input").forEach(input => input.addEventListener("input", markReminderDirty));
+    list.querySelectorAll(".email-order-remove").forEach(button => button.addEventListener("click", () => {
+      button.closest(".email-order-row").remove();
+      markReminderDirty();
+      renderProductPicker();
+    }));
+  }
+
+  function renderProductPicker() {
+    const picker = document.getElementById("email-product-picker");
+    if (!picker || !reminderDraft) return;
+    const used = new Set(collectReminderOrderRows().map(row => row.product.toLocaleLowerCase("sv-SE")));
+    const available = (reminderDraft.product_catalog || [])
+      .map((item, index) => ({ item, index }))
+      .filter(({ item }) => !used.has(String(item.product || "").trim().toLocaleLowerCase("sv-SE")));
+    picker.innerHTML = available.length
+      ? available.map(({ item, index }) => `<button class="email-product-option" type="button" data-catalog-index="${index}">${esc(item.product || "")}</button>`).join("")
+      : '<span class="email-product-picker-empty">Alla artiklar är redan tillagda.</span>';
+  }
+
+  function renderReminderDraft(draft) {
+    const warnings = (draft.warnings || []).map(item => item.message).filter(Boolean);
+    const notices = draft.notices || [];
+    const recipients = draft.recipients || [];
+    const productButton = draft.links?.product_sheet_url
+      ? `<span class="email-protected-button">${esc(draft.cta_labels?.product_sheet || "Se Produktblad")}</span>` : "";
+    const stockfillerButton = draft.links?.stockfiller_url
+      ? `<span class="email-protected-button">${esc(draft.cta_labels?.stockfiller || "Beställ via Stockfiller")}</span>` : "";
+    document.getElementById("email-modal-title").textContent = `Mejlförslag · ${draft.email_type_label || ""}`.trim();
+    document.getElementById("email-modal-subtitle").textContent = draft.customer?.customer || "";
+    emailModalContent.innerHTML = `
+      <div class="email-modal-body">
+        <div class="email-banner test ${draft.send_mode !== "live" ? "visible" : ""}">
+          Testläge: separata testmejl skickas till ${esc(draft.test_recipient || "testmottagaren")}. Avsedd mottagare skrivs i ämnesraden.
+        </div>
+        <div class="email-banner notice visible"><strong>${esc(draft.email_type_label || "Mejlförslag")}</strong> · ${esc(draft.relationship?.days_since_delivery != null ? `${draft.relationship.days_since_delivery} dagar sedan senaste leverans` : draft.email_type === "new_customer" ? "Ingen tidigare order" : "Tidigare kund")}</div>
+        <div class="email-banner warning ${warnings.length ? "visible" : ""}">${warnings.map(esc).join("<br>")}</div>
+        <div class="email-banner notice ${notices.length ? "visible" : ""}">${notices.map(esc).join("<br>")}</div>
+        <div class="email-field">
+          <span class="email-section-label">Mottagare och hälsningsnamn</span>
+          <div class="email-recipient-list">
+            ${recipients.map((recipient, index) => {
+              const blockedText = recipient.blocked_reason || (!recipient.valid ? "Ogiltig e-postadress" : "");
+              const disabled = Boolean(blockedText);
+              return `<label class="email-recipient ${disabled ? "blocked" : ""}">
+                <input class="email-recipient-selected" type="checkbox" data-index="${index}" ${recipient.selected ? "checked" : ""} ${disabled ? "disabled" : ""} />
+                <span class="email-recipient-address">${esc(recipient.email)}${blockedText ? `<small>${esc(blockedText)}</small>` : ""}</span>
+                <input class="email-recipient-name" data-index="${index}" type="text" value="${escAttr(recipient.greeting_name || "")}" placeholder="Förnamn (valfritt)" ${disabled ? "disabled" : ""} />
+              </label>`;
+            }).join("") || '<div class="email-banner warning visible">Ingen e-postadress finns på kunden.</div>'}
+          </div>
+        </div>
+        <div class="email-field">
+          <label for="email-subject">Ämne</label>
+          <input id="email-subject" type="text" maxlength="250" value="${escAttr(draft.subject || "")}" />
+        </div>
+        <div class="email-field">
+          <label for="email-intro">Brödtext (** är fetstilt)</label>
+          <textarea id="email-intro" maxlength="5000">${esc(draft.intro_text || "")}</textarea>
+        </div>
+        <div class="email-field">
+          <span class="email-section-label">Föreslagen beställning</span>
+          <div class="email-order-list" id="email-order-list"></div>
+          <button class="email-add-row" id="email-add-row" type="button">+ Lägg till produktrad</button>
+          <div class="email-product-picker" id="email-product-picker"></div>
+        </div>
+        <div class="email-field">
+          <label for="email-closing">Avslutning</label>
+          <textarea id="email-closing" maxlength="5000">${esc(draft.closing_text || "")}</textarea>
+        </div>
+        <div class="email-protected">
+          <div class="email-protected-buttons">${productButton}${stockfillerButton}</div>
+          <div class="email-signature">${esc(signatureText(draft.signature))}</div>
+        </div>
+      </div>
+      <div class="email-modal-footer">
+        <button class="action-btn secondary" id="email-cancel" type="button">Avbryt</button>
+        <button class="action-btn secondary" id="email-reset" type="button">Återställ</button>
+        <button class="action-btn" id="email-send" type="button" ${draft.customer?.cancelled ? "disabled" : ""}>${draft.send_mode === "live" ? "Skicka mejl" : "Skicka test"}</button>
+      </div>`;
+
+    renderReminderOrderRows(draft.order_rows || []);
+    emailModalContent.querySelectorAll("#email-subject, #email-intro, #email-closing, .email-recipient-selected, .email-recipient-name")
+      .forEach(element => element.addEventListener("input", markReminderDirty));
+    document.getElementById("email-add-row").addEventListener("click", () => {
+      const picker = document.getElementById("email-product-picker");
+      renderProductPicker();
+      picker.classList.toggle("open");
+    });
+    document.getElementById("email-product-picker").addEventListener("click", event => {
+      const option = event.target.closest(".email-product-option");
+      if (!option) return;
+      const product = reminderDraft.product_catalog?.[Number(option.dataset.catalogIndex)];
+      if (!product) return;
+      const rows = collectReminderOrderRows();
+      rows.push({ product: product.product, quantity: "1", unit: product.unit || "DFP" });
+      renderReminderOrderRows(rows);
+      document.getElementById("email-product-picker").classList.remove("open");
+      markReminderDirty();
+    });
+    document.getElementById("email-cancel").addEventListener("click", () => closeReminderModal());
+    document.getElementById("email-reset").addEventListener("click", () => {
+      if (!reminderDirty || window.confirm("Återställa alla ändringar i utkastet?")) {
+        renderReminderDraft(reminderDraft);
+        reminderDirty = false;
+      }
+    });
+    document.getElementById("email-send").addEventListener("click", () => sendReminderEmail(false));
+  }
+
+  function collectReminderOrderRows() {
+    return Array.from(document.querySelectorAll(".email-order-row")).map(row => ({
+      product: row.querySelector(".email-order-product")?.value.trim() || "",
+      quantity: row.querySelector(".email-order-quantity")?.value.trim() || "",
+      unit: row.querySelector(".email-order-unit")?.value.trim() || "DFP",
+    })).filter(row => row.product);
+  }
+
+  function collectReminderPayload(confirmWarnings) {
+    return {
+      draft_id: reminderDraft.draft_id,
+      email_type: reminderDraft.email_type,
+      created_at: reminderDraft.created_at,
+      latest_order_reference: reminderDraft.latest_order_reference,
+      subject: document.getElementById("email-subject").value.trim(),
+      intro_text: document.getElementById("email-intro").value.trim(),
+      closing_text: document.getElementById("email-closing").value.trim(),
+      order_rows: collectReminderOrderRows(),
+      links: reminderDraft.links,
+      confirm_warnings: confirmWarnings,
+      recipients: reminderDraft.recipients.map((recipient, index) => ({
+        email: recipient.email,
+        selected: Boolean(document.querySelector(`.email-recipient-selected[data-index="${index}"]`)?.checked),
+        greeting_name: document.querySelector(`.email-recipient-name[data-index="${index}"]`)?.value.trim() || "",
+      })),
+    };
+  }
+
+  function reminderErrorMessage(error) {
+    const messages = {
+      customer_cancelled: "Kunden är avslutad och kan inte få mejlförslag.",
+      no_valid_recipients: "Välj minst en giltig mottagare.",
+      recipient_blocked: "En vald adress är blockerad eller avregistrerad.",
+      missing_email_content: "Ämne och brödtext måste vara ifyllda.",
+      invalid_sender_email: "Din användare saknar en giltig avsändaradress.",
+      duplicate_send: "Det här utkastet har redan skickats.",
+      send_in_progress: "Utskicket pågår redan.",
+      email_type_changed: "Kundrelationen har ändrats sedan utkastet öppnades. Stäng och skapa ett nytt mejlförslag.",
+    };
+    return messages[error] || "Mejlet kunde inte skickas.";
+  }
+
+  async function sendReminderEmail(confirmWarnings) {
+    if (!reminderDraft || reminderSending) return;
+    if (!confirmWarnings && (reminderDraft.warnings || []).length) {
+      const text = reminderDraft.warnings.map(item => `• ${item.message}`).join("\n");
+      if (!window.confirm(`${text}\n\nVill du skicka ändå?`)) return;
+      confirmWarnings = true;
+    }
+    const button = document.getElementById("email-send");
+    reminderSending = true;
+    button.disabled = true;
+    const oldText = button.textContent;
+    button.textContent = "Skickar…";
+    try {
+      const response = await fetch(`${API}/customers/${currentCustomer.row}/email-proposal/send`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(collectReminderPayload(confirmWarnings)),
+      });
+      const result = await response.json().catch(() => ({}));
+      if (response.status === 409 && result.error === "warning_confirmation_required") {
+        const text = (result.warnings || []).map(item => `• ${item.message}`).join("\n");
+        if (window.confirm(`${text}\n\nFörutsättningarna har ändrats. Vill du ändå skicka?`)) {
+          reminderSending = false;
+          button.disabled = false;
+          button.textContent = oldText;
+          return sendReminderEmail(true);
+        }
+        return;
+      }
+      if (!response.ok || !result.ok) throw result;
+      reminderDirty = false;
+      closeReminderModal(true);
+      showToast(result.status === "partial" ? "Mejlet skickades till vissa mottagare" : (result.is_test ? "Testmejl skickat" : `${result.email_type_label || "Mejlförslag"} skickat`));
+      if (!result.is_test) await refreshStats(currentCustomer);
+    } catch (error) {
+      showToast(reminderErrorMessage(error?.error));
+    } finally {
+      reminderSending = false;
+      if (document.body.contains(button)) {
+        button.disabled = false;
+        button.textContent = oldText;
+      }
+    }
+  }
+
+  async function openEmailProposal() {
+    if (!currentCustomer) return;
+    reminderDraft = null;
+    reminderDirty = false;
+    emailModalBackdrop.classList.add("open");
+    emailModalBackdrop.setAttribute("aria-hidden", "false");
+    document.body.style.overflow = "hidden";
+    document.getElementById("email-modal-title").textContent = "Mejlförslag";
+    document.getElementById("email-modal-subtitle").textContent = currentCustomer.customer || "";
+    emailModalContent.innerHTML = '<div class="email-modal-loading">Laddar personligt utkast…</div>';
+    try {
+      const response = await fetch(`${API}/customers/${currentCustomer.row}/email-proposal-draft`);
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok || !result.draft) throw result;
+      reminderDraft = result.draft;
+      renderReminderDraft(reminderDraft);
+      reminderDirty = false;
+    } catch {
+      emailModalContent.innerHTML = '<div class="email-modal-loading">Utkastet kunde inte skapas. Kontrollera kund- och inställningsdata.</div>';
+    }
+  }
+
+  document.getElementById("email-modal-close").addEventListener("click", () => closeReminderModal());
+  emailModalBackdrop.addEventListener("click", event => {
+    if (event.target === emailModalBackdrop) closeReminderModal();
+  });
+  document.addEventListener("keydown", event => {
+    if (event.key === "Escape" && emailModalBackdrop.classList.contains("open")) closeReminderModal();
+  });
 
   // ── Open detail ──
   async function openDetail(row) {
@@ -3746,6 +4217,9 @@
     mailBtn.dataset.mailto = emailHref;
     mailBtn.disabled = !emailHref;
     mailBtn.onclick = () => { if (emailHref) window.location.href = emailHref; };
+    const reminderBtn = document.getElementById("d-reminder-btn");
+    reminderBtn.disabled = false;
+    reminderBtn.onclick = openEmailProposal;
 
     // Kontaktuppgifter edit
     document.getElementById("contact-edit-mode").style.display = "none";
@@ -4936,35 +5410,72 @@
   // ── Login ──
   const loginScreen = document.getElementById("login-screen");
 
-  function checkLogin() {
-    if (localStorage.getItem("st_auth") === "1") {
+  function setSessionUser(user) {
+    currentUser = user || null;
+    const control = document.getElementById("session-control");
+    document.getElementById("session-user-name").textContent = currentUser?.name || currentUser?.user_name || "";
+    control.classList.toggle("visible", Boolean(currentUser));
+  }
+
+  async function checkLogin() {
+    try {
+      const response = await fetch(`${API}/session`);
+      if (!response.ok) throw new Error();
+      const result = await response.json();
+      setSessionUser(result.user);
       loginScreen.classList.add("hidden");
-      loadCustomers();
+      await loadCustomers();
+    } catch {
+      setSessionUser(null);
+      loginScreen.classList.remove("hidden");
+      document.getElementById("login-user-name").focus();
     }
   }
 
   document.getElementById("login-btn").addEventListener("click", async () => {
-    const val = document.getElementById("login-password").value;
+    const button = document.getElementById("login-btn");
+    const userName = document.getElementById("login-user-name").value.trim();
+    const password = document.getElementById("login-password").value;
+    document.getElementById("login-error").textContent = "";
+    if (!userName || !password) {
+      document.getElementById("login-error").textContent = "Fyll i användarnamn och lösenord";
+      return;
+    }
+    button.disabled = true;
+    const oldText = button.textContent;
+    button.textContent = "Loggar in…";
     try {
       const res = await fetch(`${API}/login`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ password: val }),
+        body: JSON.stringify({ user_name: userName, password }),
       });
       if (res.ok) {
-        localStorage.setItem("st_auth", "1");
+        const result = await res.json();
+        setSessionUser(result.user);
         loginScreen.classList.add("hidden");
-        loadCustomers();
+        document.getElementById("login-password").value = "";
+        await loadCustomers();
+      } else if (res.status === 401) {
+        document.getElementById("login-error").textContent = "Fel användarnamn eller lösenord";
       } else {
-        document.getElementById("login-error").textContent = "Fel lösenord";
+        document.getElementById("login-error").textContent = "Serverfel vid inloggning. Försök igen om en stund";
       }
     } catch {
       document.getElementById("login-error").textContent = "Kunde inte ansluta till servern";
+    } finally {
+      button.disabled = false;
+      button.textContent = oldText;
     }
   });
 
-  document.getElementById("login-password").addEventListener("keydown", e => {
+  ["login-user-name", "login-password"].forEach(id => document.getElementById(id).addEventListener("keydown", e => {
     if (e.key === "Enter") document.getElementById("login-btn").click();
+  }));
+
+  document.getElementById("logout-btn").addEventListener("click", async () => {
+    try { await fetch(`${API}/logout`, { method: "POST" }); } catch {}
+    window.location.reload();
   });
 
   checkLogin();
