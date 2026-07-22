@@ -342,12 +342,20 @@ class TimelineAndWebhookTests(unittest.TestCase):
             "sent_at": "2026-07-01 09:00:00", "product_sheet_url": "https://drive.google.com/p",
             "stockfiller_url": "https://order.stockfiller.com/",
         }])
-        recipients = FakeWorksheet("email_recipients", EMAIL_RECIPIENTS_COLUMNS, [{
-            "email_id": "mail-1", "customer": "Butiken", "intended_email": "buyer@example.com",
-            "actual_email": "buyer@example.com", "brevo_message_id": "msg-1", "send_status": "sent",
-            "sent_at": "2026-07-01 09:00:00", "open_count": "3", "last_opened_at": "2026-07-02 10:00:00",
-            "product_sheet_click_count": "1", "product_sheet_last_clicked_at": "2026-07-03 11:00:00",
-        }])
+        recipients = FakeWorksheet("email_recipients", EMAIL_RECIPIENTS_COLUMNS, [
+            {
+                "email_id": "mail-1", "customer": "Butiken", "intended_email": "buyer@example.com",
+                "actual_email": "buyer@example.com", "brevo_message_id": "msg-1", "send_status": "sent",
+                "sent_at": "2026-07-01 09:00:00", "open_count": "3", "last_opened_at": "2026-07-02 10:00:00",
+                "product_sheet_click_count": "1", "product_sheet_last_clicked_at": "2026-07-03 11:00:00",
+            },
+            {
+                "email_id": "mail-1", "customer": "Butiken", "intended_email": "owner@example.com",
+                "actual_email": "owner@example.com", "brevo_message_id": "msg-2", "send_status": "sent",
+                "sent_at": "2026-07-01 09:00:00", "open_count": "5", "last_opened_at": "2026-07-02 12:00:00",
+                "product_sheet_click_count": "4", "product_sheet_last_clicked_at": "2026-07-03 13:00:00",
+            },
+        ])
         events = FakeWorksheet("email_events", EMAIL_EVENTS_COLUMNS, [])
         return {
             app_module.EMAIL_MESSAGES_SHEET: messages,
@@ -369,8 +377,27 @@ class TimelineAndWebhookTests(unittest.TestCase):
         self.assertIn("email_proposal_opened", types)
         self.assertIn("product_sheet_clicked", types)
         self.assertEqual(types.count("subsequent_order"), 2)
+        self.assertEqual(types.count("email_proposal_opened"), 1)
+        self.assertEqual(types.count("product_sheet_clicked"), 1)
+        self.assertNotIn("email_delivered", types)
         opened = next(item for item in timeline if item["event_type"] == "email_proposal_opened")
-        self.assertEqual(opened["title"], "Öppnat 3 gånger")
+        self.assertEqual(opened["title"], "Öppnat")
+        self.assertEqual(opened["importance"], "secondary")
+        self.assertNotIn("gånger", opened["title"])
+        self.assertFalse(any(detail.get("label") == "Antal" for detail in opened.get("details", [])))
+
+        attributed = [item for item in timeline if item["event_type"] == "subsequent_order"]
+        references = {
+            next(detail["value"] for detail in item["details"] if detail["label"] == "Orderreferens")
+            for item in attributed
+        }
+        self.assertEqual(references, {"ORDER-0", "ORDER-1"})
+        day_ten = next(
+            item for item in attributed
+            if any(detail.get("value") == "ORDER-1" for detail in item["details"])
+        )
+        self.assertIn({"label": "Ordervärde", "value": "150,00 SEK"}, day_ten["details"])
+        self.assertIn({"label": "Antal DFP", "value": "3"}, day_ten["details"])
 
     def test_webhook_is_deduplicated_and_updates_open_summary(self):
         sheets = self._sheets()
@@ -448,6 +475,11 @@ class TimelineAndWebhookTests(unittest.TestCase):
             "subject": "Ny påminnelse", "is_test": "N", "status": "sent",
             "sent_at": "2026-07-05 09:00:00",
         })
+        app_module.append_dict_row(sheets[app_module.EMAIL_RECIPIENTS_SHEET], EMAIL_RECIPIENTS_COLUMNS, {
+            "email_id": "mail-2", "customer": "Butiken", "intended_email": "buyer@example.com",
+            "actual_email": "buyer@example.com", "brevo_message_id": "msg-latest",
+            "send_status": "sent", "sent_at": "2026-07-05 09:00:00",
+        })
         orders = [{
             "Customer": "Butiken", "Reference": "ORDER-LATEST", "Order date": "2026-07-06",
             "Total": "200", "Currency": "SEK", "Unit": "DFP", "Quantity": "3",
@@ -455,6 +487,369 @@ class TimelineAndWebhookTests(unittest.TestCase):
         timeline = app_module.build_customer_timeline("Butiken", orders, [], sheets)
         order = next(item for item in timeline if item["event_type"] == "subsequent_order")
         self.assertEqual(order["email_id"], "mail-2")
+
+
+class EmailPerformanceTests(unittest.TestCase):
+    @staticmethod
+    def _message(email_id, customer, sent_at, **overrides):
+        return {
+            "email_id": email_id,
+            "customer": customer,
+            "email_type": "reminder",
+            "sender_name": "Olle",
+            "subject": "Mejlförslag",
+            "is_test": "N",
+            "status": "sent",
+            "sent_at": sent_at,
+            **overrides,
+        }
+
+    @staticmethod
+    def _recipient(email_id, customer, email, **overrides):
+        return {
+            "email_id": email_id,
+            "customer": customer,
+            "intended_email": email,
+            "actual_email": email,
+            "send_status": "sent",
+            "sent_at": "2026-07-01 09:00:00",
+            **overrides,
+        }
+
+    def test_report_counts_unique_stores_and_attributes_only_day_ten(self):
+        messages = [
+            self._message("a-1", "Butik A", "2026-07-01 09:00:00"),
+            self._message("a-2", "Butik A", "2026-07-05 09:00:00"),
+            self._message("b-1", "Butik B", "2026-07-01 09:00:00"),
+            self._message("c-1", "Butik C", "2026-07-01 09:00:00"),
+            self._message("test-1", "Butik D", "2026-07-01 09:00:00", is_test="Y"),
+            self._message("failed-1", "Butik E", "2026-07-01 09:00:00", status="failed"),
+        ]
+        recipients = [
+            self._recipient(
+                "a-1", "Butik A", "buyer-a@example.com",
+                delivered_at="2026-07-01 09:01:00",
+                open_count="5", last_opened_at="2026-07-01 10:00:00",
+                product_sheet_click_count="7",
+                product_sheet_first_clicked_at="2026-07-02 10:00:00",
+                product_sheet_last_clicked_at="2026-07-03 10:00:00",
+            ),
+            self._recipient(
+                "a-1", "Butik A", "owner-a@example.com",
+                delivered_at="2026-07-01 09:01:00",
+                product_sheet_click_count="3",
+                product_sheet_first_clicked_at="2026-07-02 11:00:00",
+                product_sheet_last_clicked_at="2026-07-03 11:00:00",
+            ),
+            self._recipient(
+                "a-2", "Butik A", "buyer-a@example.com",
+                stockfiller_click_count="4",
+                stockfiller_first_clicked_at="2026-07-06 10:00:00",
+                stockfiller_last_clicked_at="2026-07-07 10:00:00",
+            ),
+            self._recipient(
+                "b-1", "Butik B", "buyer-b@example.com",
+                product_sheet_click_count="9",
+                product_sheet_first_clicked_at="2026-07-02 10:00:00",
+                product_sheet_last_clicked_at="2026-07-03 10:00:00",
+            ),
+            self._recipient(
+                "c-1", "Butik C", "buyer-c@example.com",
+                delivered_at="2026-07-01 09:01:00",
+            ),
+            self._recipient(
+                "test-1", "Butik D", "buyer-d@example.com",
+                delivered_at="2026-07-01 09:01:00",
+                stockfiller_click_count="20",
+                stockfiller_first_clicked_at="2026-07-02 10:00:00",
+                stockfiller_last_clicked_at="2026-07-02 10:00:00",
+            ),
+        ]
+        orders = [
+            {
+                "Customer": "Butik A", "Reference": "ORDER-A", "Order date": "2026-07-15",
+                "Total": "100", "Currency": "SEK", "Unit": "DFP", "Quantity": "2",
+            },
+            {
+                "Customer": "Butik A", "Reference": "ORDER-A", "Order date": "2026-07-15",
+                "Total": "50", "Currency": "SEK", "Unit": "DFP", "Quantity": "1",
+            },
+            {
+                "Customer": "Butik B", "Reference": "ORDER-B", "Order date": "2026-07-12",
+                "Total": "80", "Currency": "SEK", "Unit": "DFP", "Quantity": "1",
+            },
+        ]
+
+        report = app_module.build_email_performance(
+            messages, recipients, orders, today=date(2026, 7, 20)
+        )
+        self.assertEqual(report["unique_store_count"], 3)
+        self.assertEqual(report["sent_email_count"], 5)
+        self.assertEqual(report["delivered_email_count"], 5)
+        self.assertEqual(report["product_clicked_store_count"], 2)
+        self.assertEqual(report["stockfiller_clicked_store_count"], 1)
+        self.assertEqual(report["product_clicked_recipient_count"], 3)
+        self.assertEqual(report["stockfiller_clicked_recipient_count"], 1)
+        self.assertEqual(report["ordered_store_count"], 1)
+        self.assertEqual(report["attributed_order_count"], 1)
+        self.assertEqual(report["attributed_order_value_by_currency"], {"SEK": 150.0})
+        self.assertEqual(report["attributed_dfp"], 3.0)
+        self.assertEqual(report["product_clicked_store_rate"], 66.7)
+        self.assertEqual(report["stockfiller_clicked_store_rate"], 33.3)
+        self.assertEqual(report["ordered_store_rate"], 33.3)
+
+        selected = app_module.build_email_performance(
+            messages,
+            recipients,
+            orders,
+            included_customer_keys={"butik b"},
+            today=date(2026, 7, 20),
+        )
+        self.assertEqual(selected["unique_store_count"], 1)
+        self.assertEqual(selected["product_clicked_store_count"], 1)
+        self.assertEqual(selected["ordered_store_count"], 0)
+
+    def test_followup_priority_and_three_day_wait(self):
+        messages = [
+            self._message("stock", "Stock", "2026-07-01 09:00:00"),
+            self._message("product", "Product", "2026-07-01 09:00:00"),
+            self._message("open", "Open", "2026-07-01 09:00:00"),
+            self._message("delivery", "Delivery", "2026-07-01 09:00:00"),
+        ]
+        recipients = [
+            self._recipient(
+                "stock", "Stock", "stock@example.com",
+                stockfiller_click_count="2",
+                stockfiller_first_clicked_at="2026-07-02 10:00:00",
+                stockfiller_last_clicked_at="2026-07-03 10:00:00",
+            ),
+            self._recipient(
+                "product", "Product", "product@example.com",
+                product_sheet_click_count="6",
+                product_sheet_first_clicked_at="2026-07-02 10:00:00",
+                product_sheet_last_clicked_at="2026-07-03 10:00:00",
+            ),
+            self._recipient(
+                "open", "Open", "open@example.com",
+                delivered_at="2026-07-01 09:01:00",
+                open_count="4", last_opened_at="2026-07-02 10:00:00",
+            ),
+            self._recipient(
+                "delivery", "Delivery", "delivery@example.com",
+                delivered_at="2026-07-01 09:01:00",
+            ),
+        ]
+
+        day_two = app_module.build_email_engagement_snapshot(
+            messages, recipients, [], today=date(2026, 7, 4)
+        )
+        self.assertFalse(day_two["stock"]["email_click_without_order"])
+        self.assertEqual(day_two["stock"]["email_followup_wait_days_remaining"], 1)
+
+        day_three = app_module.build_email_engagement_snapshot(
+            messages, recipients, [], today=date(2026, 7, 5)
+        )
+        self.assertEqual(day_three["stock"]["email_followup_status"], "stockfiller_clicked_no_order")
+        self.assertEqual(day_three["stock"]["email_followup_priority"], 1)
+        self.assertTrue(day_three["stock"]["email_click_without_order"])
+        self.assertEqual(day_three["product"]["email_followup_status"], "product_sheet_clicked_no_order")
+        self.assertEqual(day_three["product"]["email_followup_priority"], 2)
+        self.assertTrue(day_three["product"]["email_click_without_order"])
+        self.assertEqual(day_three["open"]["email_followup_status"], "opened_no_click")
+        self.assertEqual(day_three["open"]["email_followup_priority"], 3)
+        self.assertFalse(day_three["open"]["email_click_without_order"])
+        self.assertEqual(day_three["delivery"]["email_followup_status"], "delivered_no_activity")
+        self.assertEqual(day_three["delivery"]["email_followup_priority"], 4)
+
+        order_day_ten = [{
+            "Customer": "Stock", "Reference": "ORDER-10", "Order date": "2026-07-11",
+            "Total": "100", "Currency": "SEK", "Unit": "DFP", "Quantity": "2",
+        }]
+        converted = app_module.build_email_engagement_snapshot(
+            messages, recipients, order_day_ten, today=date(2026, 7, 20)
+        )
+        self.assertEqual(converted["stock"]["email_followup_status"], "ordered_within_10_days")
+        self.assertFalse(converted["stock"]["email_click_without_order"])
+
+        order_day_eleven = [{
+            "Customer": "Stock", "Reference": "ORDER-11", "Order date": "2026-07-12",
+            "Total": "100", "Currency": "SEK", "Unit": "DFP", "Quantity": "2",
+        }]
+        not_attributed = app_module.build_email_engagement_snapshot(
+            messages, recipients, order_day_eleven, today=date(2026, 7, 20)
+        )
+        self.assertEqual(not_attributed["stock"]["email_followup_status"], "stockfiller_clicked_no_order")
+        self.assertTrue(not_attributed["stock"]["email_click_without_order"])
+
+    def test_wait_period_uses_the_prioritized_link_type(self):
+        messages = [self._message("both", "Båda", "2026-07-01 09:00:00")]
+        recipients = [self._recipient(
+            "both", "Båda", "both@example.com",
+            product_sheet_click_count="1",
+            product_sheet_first_clicked_at="2026-07-01 10:00:00",
+            product_sheet_last_clicked_at="2026-07-02 10:00:00",
+            stockfiller_click_count="1",
+            stockfiller_first_clicked_at="2026-07-04 10:00:00",
+            stockfiller_last_clicked_at="2026-07-04 10:00:00",
+        )]
+
+        waiting = app_module.build_email_engagement_snapshot(
+            messages, recipients, [], today=date(2026, 7, 5)
+        )["båda"]
+        self.assertEqual(waiting["email_followup_status"], "stockfiller_clicked_no_order")
+        self.assertEqual(waiting["email_followup_wait_days_remaining"], 2)
+        self.assertFalse(waiting["email_click_without_order"])
+
+        ready = app_module.build_email_engagement_snapshot(
+            messages, recipients, [], today=date(2026, 7, 7)
+        )["båda"]
+        self.assertEqual(ready["email_followup_wait_days_remaining"], 0)
+        self.assertTrue(ready["email_click_without_order"])
+
+    def test_invalid_order_rows_are_ignored_and_reused_references_stay_separate(self):
+        rows = [
+            {
+                "Customer": "Butik A", "Reference": "ZERO", "Order date": "2026-07-02",
+                "Total": "0", "Currency": "SEK", "Unit": "DFP", "Quantity": "0",
+            },
+            {
+                "Customer": "Butik A", "Reference": "RETURN", "Order date": "2026-07-03",
+                "Total": "-100", "Currency": "SEK", "Unit": "DFP", "Quantity": "-2",
+            },
+            {
+                "Customer": "Butik A", "Reference": "REUSED", "Order date": "2026-07-04",
+                "Total": "100", "Currency": "SEK", "Unit": "DFP", "Quantity": "2",
+            },
+            {
+                "Customer": "Butik A", "Reference": "REUSED", "Order date": "2026-07-05",
+                "Total": "150", "Currency": "SEK", "Unit": "DFP", "Quantity": "3",
+            },
+        ]
+
+        grouped = app_module.group_customer_orders(rows)
+        self.assertEqual(len(grouped), 2)
+        self.assertEqual([order["date"] for order in grouped], [date(2026, 7, 4), date(2026, 7, 5)])
+        self.assertEqual(sum(order["total"] for order in grouped), 250)
+        self.assertEqual(sum(order["dfp"] for order in grouped), 5)
+
+    def test_frontend_contains_filter_report_and_compact_timeline_rules(self):
+        html = (WEB_APP / "index.html").read_text(encoding="utf-8")
+        self.assertIn('id="chip-email-click-no-order"', html)
+        self.assertIn("email_click_without_order", html)
+        self.assertIn('id="email-performance-report"', html)
+        self.assertIn("renderEmailPerformance", html)
+        self.assertIn('item.importance !== "secondary"', html)
+
+
+class EmailInsightsEndpointTests(unittest.TestCase):
+    def setUp(self):
+        customer_headers = [
+            "customer", "cancelled_flag", "sales_person", "customer_segment",
+            "customer_number", "name", "phone", "email", "email_last_order",
+            "city_google", "region_google",
+        ]
+        customers = FakeWorksheet("customers_enriched", customer_headers, [
+            {
+                "customer": "Butik A", "sales_person": "Sofia", "customer_segment": "A",
+                "customer_number": "A-1", "email": "a@example.com",
+            },
+            {
+                "customer": "Butik B", "sales_person": "Olle", "customer_segment": "B",
+                "customer_number": "B-1", "email": "b@example.com",
+            },
+        ])
+        orders = FakeWorksheet("order_rows", app_module.ORDER_COLUMNS, [])
+        contacts = FakeWorksheet("sales_activities", app_module.CONTACT_COLUMNS, [])
+        messages = FakeWorksheet("email_messages", EMAIL_MESSAGES_COLUMNS, [
+            {
+                "email_id": "a-mail", "customer": "Butik A", "email_type": "new_customer",
+                "sender_name": "Sofia", "subject": "A", "is_test": "N", "status": "sent",
+                "sent_at": "2026-07-17 09:00:00",
+            },
+            {
+                "email_id": "b-mail", "customer": "Butik B", "email_type": "new_customer",
+                "sender_name": "Olle", "subject": "B", "is_test": "N", "status": "sent",
+                "sent_at": "2026-07-17 09:00:00",
+            },
+            {
+                "email_id": "historical-mail", "customer": "Historisk butik",
+                "email_type": "new_customer", "sender_name": "Olle", "subject": "Historisk",
+                "is_test": "N", "status": "sent", "sent_at": "2026-07-17 09:00:00",
+            },
+        ])
+        recipients = FakeWorksheet("email_recipients", EMAIL_RECIPIENTS_COLUMNS, [
+            {
+                "email_id": "a-mail", "customer": "Butik A", "intended_email": "a@example.com",
+                "actual_email": "a@example.com", "send_status": "sent",
+                "product_sheet_click_count": "2",
+                "product_sheet_first_clicked_at": "2026-07-18 10:00:00",
+                "product_sheet_last_clicked_at": "2026-07-19 10:00:00",
+            },
+            {
+                "email_id": "b-mail", "customer": "Butik B", "intended_email": "b@example.com",
+                "actual_email": "b@example.com", "send_status": "sent",
+                "stockfiller_click_count": "3",
+                "stockfiller_first_clicked_at": "2026-07-18 10:00:00",
+                "stockfiller_last_clicked_at": "2026-07-19 10:00:00",
+            },
+            {
+                "email_id": "historical-mail", "customer": "Historisk butik",
+                "intended_email": "historical@example.com", "actual_email": "historical@example.com",
+                "send_status": "sent", "delivered_at": "2026-07-17 09:01:00",
+            },
+        ])
+        events = FakeWorksheet("email_events", EMAIL_EVENTS_COLUMNS, [])
+        self.spreadsheet = FakeSpreadsheet([
+            customers, orders, contacts, messages, recipients, events,
+        ])
+        app_module.app.config.update(TESTING=True, SECRET_KEY="test-secret")
+        app_module._email_sheets_cache = None
+        self.spreadsheet_patcher = patch.object(
+            app_module, "get_spreadsheet_with_retry", return_value=self.spreadsheet
+        )
+        self.today_patcher = patch.object(
+            app_module, "stockholm_today", return_value=date(2026, 7, 22)
+        )
+        self.spreadsheet_patcher.start()
+        self.today_patcher.start()
+        self.client = app_module.app.test_client()
+        with self.client.session_transaction() as flask_session:
+            flask_session["user"] = {
+                "user_name": "olle", "name": "Olle", "role": "Account Manager",
+                "email": "olle@eatpolarbar.com", "phone": "070",
+            }
+
+    def tearDown(self):
+        self.today_patcher.stop()
+        self.spreadsheet_patcher.stop()
+        app_module._email_sheets_cache = None
+
+    def test_customer_insights_exposes_click_followup_fields(self):
+        response = self.client.get("/customer-insights")
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertTrue(payload["butik a"]["email_click_without_order"])
+        self.assertEqual(payload["butik a"]["email_followup_priority"], 2)
+        self.assertEqual(
+            payload["butik a"]["email_followup_label"],
+            "Produktbladsklick utan order",
+        )
+        self.assertTrue(payload["butik b"]["email_click_without_order"])
+        self.assertEqual(payload["butik b"]["email_followup_priority"], 1)
+
+    def test_followup_insights_email_report_respects_responsible_filter(self):
+        response = self.client.get("/followup-insights?responsible=Sofia")
+        self.assertEqual(response.status_code, 200)
+        report = response.get_json()["email_performance"]
+        self.assertEqual(report["unique_store_count"], 1)
+        self.assertEqual(report["product_clicked_store_count"], 1)
+        self.assertEqual(report["stockfiller_clicked_store_count"], 0)
+
+    def test_followup_insights_without_responsible_keeps_historical_customers(self):
+        response = self.client.get("/followup-insights")
+        self.assertEqual(response.status_code, 200)
+        report = response.get_json()["email_performance"]
+        self.assertEqual(report["unique_store_count"], 3)
 
 
 class ReminderSendRouteTests(unittest.TestCase):

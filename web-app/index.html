@@ -641,6 +641,8 @@
     }
     .history-date { color: #888; flex-shrink: 0; min-width: 80px; }
     .history-comment { color: #444; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .history-item.secondary .history-date,
+    .history-item.secondary .history-comment { color: #92949b; }
     .history-chevron { font-size: 0.7rem; color: #aaa; transition: transform 0.2s; flex-shrink: 0; }
     .history-item.expanded .history-chevron { transform: rotate(180deg); }
     .history-detail {
@@ -1326,6 +1328,54 @@
     }
     .insights-kpi-delta.positive { color: #14804a; }
     .insights-kpi-delta.negative { color: #c0392b; }
+    .email-report-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(138px, 1fr));
+      gap: 9px;
+    }
+    .email-report-card {
+      min-width: 0;
+      border: 1px solid #eef0f5;
+      border-radius: 11px;
+      padding: 11px;
+      background: #fff;
+    }
+    .email-report-card.intent {
+      background: linear-gradient(180deg, #fff5fa, #fff);
+      border-color: #f2d9e5;
+    }
+    .email-report-value {
+      color: #1a1a2e;
+      font-size: 1.42rem;
+      font-weight: 900;
+      line-height: 1.05;
+      overflow-wrap: anywhere;
+    }
+    .email-report-label {
+      margin-top: 5px;
+      color: #35313a;
+      font-size: 0.76rem;
+      font-weight: 820;
+    }
+    .email-report-meta {
+      margin-top: 3px;
+      color: #777;
+      font-size: 0.7rem;
+      font-weight: 650;
+      line-height: 1.35;
+    }
+    .email-report-secondary,
+    .email-report-note {
+      color: #777;
+      font-size: 0.72rem;
+      line-height: 1.45;
+    }
+    .email-report-secondary {
+      margin-top: 10px;
+      padding-top: 9px;
+      border-top: 1px solid #f0e8ee;
+    }
+    .email-report-note { margin-top: 5px; }
     .chart-card {
       border: 1px solid #eef0f5;
       border-radius: 12px;
@@ -2668,6 +2718,7 @@
       <button class="chip" id="chip-latest-contact">Senast kontakt</button>
       <button class="chip" id="chip-delivery">Senast Leverans</button>
       <button class="chip" id="chip-email-proposal">Mejl-förslag</button>
+      <button class="chip" id="chip-email-click-no-order" aria-pressed="false">Klickat – ingen order</button>
     </div>
     <div id="clear-filters-row" style="display:none">
       <button class="chip chip-clear" id="clear-filters-btn">✕ Rensa filter</button>
@@ -2783,6 +2834,19 @@
             <tr><td>Laddar...</td></tr>
           </tbody>
         </table>
+      </div>
+    </div>
+
+    <div class="insights-panel" id="email-performance-panel">
+      <div class="panel-heading">
+        <div>
+          <div class="insights-panel-title">Mejlutfall</div>
+          <p class="panel-subtitle">Klick och order väger tyngst</p>
+        </div>
+        <span class="panel-badge" id="email-performance-period">Liveutskick</span>
+      </div>
+      <div id="email-performance-report" aria-live="polite">
+        <div class="state-msg">Laddar...</div>
       </div>
     </div>
   </div>
@@ -3145,6 +3209,7 @@
   let detailReturnView = "list";
   let insights = {};
   let dailyFocusActive = false;
+  let emailClickNoOrderActive = false;
   let insightsLoaded = false;
   let insightsLoadFailed = false;
   let followupInsights = null;
@@ -3192,14 +3257,17 @@
       insightsLoadFailed = false;
       buildInsightDropdowns();
       updateDailyFocusChip();
+      updateEmailClickNoOrderChip();
       updateChip("emailProposal");
       renderList();
     } catch {
       insightsLoaded = false;
       insightsLoadFailed = true;
       dailyFocusActive = false;
+      emailClickNoOrderActive = false;
       filterState.emailProposal.clear();
       updateDailyFocusChip();
+      updateEmailClickNoOrderChip();
       updateChip("emailProposal");
       showToast("Kunde inte ladda kundinsikter – risk och uppföljning visas inte");
     }
@@ -3398,6 +3466,18 @@
     return `<span class="tag ${tagClass}"${styleAttr}>${esc(label)}</span>`;
   }
 
+  function getEmailEngagementBadgeHtml(insight, style = "") {
+    const status = insight?.email_followup_status;
+    const config = {
+      ordered_within_10_days: ["Order inom 10 dagar", "tag-green"],
+      stockfiller_clicked_no_order: ["Stockfiller klickat · ingen order", "tag-orange"],
+      product_sheet_clicked_no_order: ["Produktblad klickat · ingen order", "tag-blue"],
+    }[status];
+    if (!config) return "";
+    const styleAttr = style ? ` style="${style}"` : "";
+    return `<span class="tag ${config[1]}"${styleAttr}>${esc(config[0])}</span>`;
+  }
+
   function customerInsightKey(value) {
     return String(value || "").replace(/\u00a0/g, " ").trim().toLowerCase().replace(/\s+/g, " ");
   }
@@ -3428,6 +3508,18 @@
       (Number(ib.overdue_days ?? -999) - Number(ia.overdue_days ?? -999)) ||
       (Number(ib.total_dfp || 0) - Number(ia.total_dfp || 0)) ||
       String(a.customer || "").localeCompare(String(b.customer || ""), "sv")
+    );
+  }
+
+  function emailFollowupSort(a, b) {
+    const ia = getCustomerInsight(a);
+    const ib = getCustomerInsight(b);
+    const rankA = Number(ia.email_followup_priority ?? 99);
+    const rankB = Number(ib.email_followup_priority ?? 99);
+    return (
+      (rankA - rankB) ||
+      String(ib.email_followup_last_event_at || "").localeCompare(String(ia.email_followup_last_event_at || "")) ||
+      prioritySort(a, b)
     );
   }
 
@@ -3473,6 +3565,7 @@
     return [
       searchQuery,
       dailyFocusActive ? "daily-focus:1" : "daily-focus:0",
+      emailClickNoOrderActive ? "email-click-no-order:1" : "email-click-no-order:0",
       ...Object.keys(filterState).sort().map(key => `${key}:${[...filterState[key]].sort().join("|")}`),
     ].join(";");
   }
@@ -3506,8 +3599,16 @@
     chip.classList.add("active");
   }
 
+  function updateEmailClickNoOrderChip() {
+    const chip = document.getElementById("chip-email-click-no-order");
+    if (!chip) return;
+    chip.textContent = "Klickat – ingen order";
+    chip.classList.toggle("active", emailClickNoOrderActive);
+    chip.setAttribute("aria-pressed", String(emailClickNoOrderActive));
+  }
+
   function updateClearBtn() {
-    const anyActive = dailyFocusActive || Object.values(filterState).some(s => s.size > 0);
+    const anyActive = dailyFocusActive || emailClickNoOrderActive || Object.values(filterState).some(s => s.size > 0);
     document.getElementById("clear-filters-row").style.display = anyActive ? "block" : "none";
   }
 
@@ -3523,11 +3624,24 @@
     renderList();
   });
 
+  document.getElementById("chip-email-click-no-order").addEventListener("click", () => {
+    if (!insightsLoaded) {
+      showToast("Laddar kundinsikter – försök igen om en sekund");
+      return;
+    }
+    emailClickNoOrderActive = !emailClickNoOrderActive;
+    updateEmailClickNoOrderChip();
+    updateClearBtn();
+    renderList();
+  });
+
   document.getElementById("clear-filters-btn").addEventListener("click", () => {
     Object.keys(filterState).forEach(key => filterState[key].clear());
     dailyFocusActive = false;
+    emailClickNoOrderActive = false;
     Object.keys(_chipIds).forEach(key => updateChip(key));
     updateDailyFocusChip();
+    updateEmailClickNoOrderChip();
     document.getElementById("clear-filters-row").style.display = "none";
     renderList();
   });
@@ -3575,23 +3689,30 @@
         .sort(prioritySort);
     }
 
-    const emailProposalMatchCount = filtered.length;
+    if (emailClickNoOrderActive) {
+      filtered = filtered
+        .filter(c => Boolean(getCustomerInsight(c)?.email_click_without_order))
+        .sort(emailFollowupSort);
+    }
+
     const matchedBeforeDailyFocus = filtered.length;
 
     if (dailyFocusActive) {
       filtered = filtered
         .slice()
-        .sort(prioritySort)
+        .sort(emailClickNoOrderActive ? emailFollowupSort : prioritySort)
         .slice(0, DAILY_FOCUS_LIMIT);
     }
 
     updateDailyFocusChip(filtered.length);
-    if (dailyFocusActive && filterState.emailProposal.size) {
-      document.getElementById("subtitle").textContent = `Mejl-förslag + Förslag: visar ${filtered.length} av ${matchedBeforeDailyFocus} matchande butiker`;
-    } else if (dailyFocusActive) {
-      document.getElementById("subtitle").textContent = `Förslag: visar ${filtered.length} av ${matchedBeforeDailyFocus} matchande butiker`;
-    } else if (filterState.emailProposal.size) {
-      document.getElementById("subtitle").textContent = `Mejl-förslag: ${emailProposalMatchCount} matchande butiker`;
+    const activeViews = [];
+    if (dailyFocusActive) activeViews.push("Förslag");
+    if (filterState.emailProposal.size) activeViews.push("Mejl-förslag");
+    if (emailClickNoOrderActive) activeViews.push("Klickat – ingen order");
+    if (activeViews.length && dailyFocusActive) {
+      document.getElementById("subtitle").textContent = `${activeViews.join(" + ")}: visar ${filtered.length} av ${matchedBeforeDailyFocus} matchande butiker`;
+    } else if (activeViews.length) {
+      document.getElementById("subtitle").textContent = `${activeViews.join(" + ")}: ${filtered.length} matchande butiker`;
     } else {
       document.getElementById("subtitle").textContent = `${filtered.length} av ${customers.length} butiker`;
     }
@@ -3629,6 +3750,10 @@
             if (filterState.emailProposal.size) {
               const proposalBadge = getEmailProposalBadgeHtml(ins, "font-size:0.68rem;padding:2px 7px");
               if (proposalBadge) badges.push(proposalBadge);
+            }
+            if (emailClickNoOrderActive) {
+              const engagementBadge = getEmailEngagementBadgeHtml(ins, "font-size:0.68rem;padding:2px 7px");
+              if (engagementBadge) badges.push(engagementBadge);
             }
             if (ins.missad_uppfoljning) badges.push(`<span class="tag tag-orange" style="font-size:0.68rem;padding:2px 7px">Missad uppföljning</span>`);
             if (ins.latest_delivery_date) badges.push(`<span class="tag tag-blue" style="font-size:0.68rem;padding:2px 7px">Senast leverans ${esc(ins.latest_delivery_date)}</span>`);
@@ -3671,6 +3796,7 @@
 
   let allContacts = [];
   let allTimeline = [];
+  let latestTimelineIndex = 0;
   let historyExpanded = false;
 
   // ── Render contact list ──
@@ -3688,13 +3814,15 @@
       recipient: contact.customer_contact_person,
       details: [],
     }));
+    latestTimelineIndex = allTimeline.findIndex(item => item.importance !== "secondary");
+    if (latestTimelineIndex < 0) latestTimelineIndex = 0;
     historyExpanded = false;
     renderHistory();
 
     // Senaste aktivitet i den gemensamma tidslinjen
     const latestSection = document.getElementById("d-latest-section");
     if (allTimeline.length > 0) {
-      const lc = allTimeline[0];
+      const lc = allTimeline[latestTimelineIndex] || allTimeline[0];
       latestSection.style.display = "block";
       document.getElementById("d-act-date").textContent   = timelineDate(lc.date_time);
       document.getElementById("d-act-seller").textContent = lc.sales_person || "—";
@@ -3734,6 +3862,8 @@
     if (ins) {
       const proposalBadge = getEmailProposalBadgeHtml(ins);
       if (proposalBadge) tags.push(proposalBadge);
+      const engagementBadge = getEmailEngagementBadgeHtml(ins);
+      if (engagementBadge) tags.push(engagementBadge);
       if (ins.missad_uppfoljning) tags.push(`<span class="tag tag-orange">Missad uppföljning</span>`);
       const riskBadge = getRiskBadgeHtml(ins.customer_risk);
       if (riskBadge) tags.push(riskBadge);
@@ -3832,7 +3962,7 @@
     const showMore = document.getElementById("d-show-more");
     const title    = document.getElementById("d-history-title");
 
-    const historyContacts = allTimeline.slice(1); // skip first — shown in Senaste aktivitet
+    const historyContacts = allTimeline.filter((_, index) => index !== latestTimelineIndex);
 
     if (historyContacts.length === 0) {
       section.style.display = "none";
@@ -3843,7 +3973,7 @@
 
     const visible = historyExpanded ? historyContacts : historyContacts.slice(0, 3);
     list.innerHTML = visible.map((lc) => `
-      <div class="history-item">
+      <div class="history-item${lc.importance === "secondary" ? " secondary" : ""}">
         <div class="history-summary">
           <span class="history-date">${esc(timelineDate(lc.date_time))}</span>
           <span class="history-comment">${esc(lc.title || lc.result || "—")}</span>
@@ -4740,6 +4870,7 @@
     document.getElementById("dfp-top-weeks-2026").innerHTML = '<div class="state-msg">Laddar...</div>';
     document.getElementById("priority-customer-list").innerHTML = '<div class="state-msg">Laddar prio-lista...</div>';
     document.getElementById("freezer-summary-table").innerHTML = "<tbody><tr><td>Laddar...</td></tr></tbody>";
+    document.getElementById("email-performance-report").innerHTML = '<div class="state-msg">Laddar...</div>';
 
     try {
       const query = responsible ? `?responsible=${encodeURIComponent(responsible)}` : "";
@@ -4757,6 +4888,8 @@
         '<div class="state-msg">Kunde inte ladda prio-lista.</div>';
       document.getElementById("freezer-summary-table").innerHTML =
         '<tbody><tr><td>Kunde inte ladda frysdisken.</td></tr></tbody>';
+      document.getElementById("email-performance-report").innerHTML =
+        '<div class="state-msg">Kunde inte ladda mejlutfall.</div>';
       showToast("Kunde inte ladda uppföljning.");
     } finally {
       followupInsightsLoading = false;
@@ -4770,6 +4903,7 @@
     renderContactInsights(data.contacts);
     renderPriorityCustomers(data.priority_customers || []);
     renderFreezerSummary(data.freezer_summary);
+    renderEmailPerformance(data.email_performance || {});
 
     const selected = data.selected_responsible || "Alla ansvariga";
     document.getElementById("insights-subtitle").textContent = selected;
@@ -4945,6 +5079,89 @@
         }).join("")}
         <text class="chart-axis-label" x="8" y="${padTop + plotHeight + 4}">0</text>
       </svg>
+    `;
+  }
+
+  function formatEmailOrderValue(values) {
+    const entries = Object.entries(values || {}).filter(([, value]) => Number(value || 0) !== 0);
+    if (!entries.length) return "0";
+    return entries.map(([currency, value]) =>
+      `${Number(value || 0).toLocaleString("sv-SE", { maximumFractionDigits: 2 })} ${currency}`
+    ).join(" · ");
+  }
+
+  function renderEmailPerformance(performance) {
+    const target = document.getElementById("email-performance-report");
+    const period = document.getElementById("email-performance-period");
+    period.textContent = performance.period_label || "Liveutskick";
+
+    if (!Number(performance.live_email_count || 0)) {
+      target.innerHTML = `
+        <div class="state-msg" style="padding:8px 0">Inga liveutskick ännu.</div>
+        <div class="email-report-note">Testmejl ingår inte i rapporten.</div>
+      `;
+      return;
+    }
+
+    const stores = Number(performance.unique_store_count || 0);
+    const followup = performance.followup_counts || {};
+    const card = (value, label, meta, intent = false) => `
+      <div class="email-report-card${intent ? " intent" : ""}">
+        <div class="email-report-value">${esc(String(value))}</div>
+        <div class="email-report-label">${esc(label)}</div>
+        <div class="email-report-meta">${esc(meta)}</div>
+      </div>
+    `;
+
+    target.innerHTML = `
+      <div class="email-report-grid">
+        ${card(
+          Number(performance.ordered_store_count || 0).toLocaleString("sv-SE"),
+          "Order inom 10 dagar",
+          `${Number(performance.ordered_store_rate || 0).toLocaleString("sv-SE")} % av ${stores} mejlade butiker`,
+          true
+        )}
+        ${card(
+          Number(performance.stockfiller_clicked_store_count || 0).toLocaleString("sv-SE"),
+          "Stockfiller klickat",
+          `${Number(performance.stockfiller_clicked_store_rate || 0).toLocaleString("sv-SE")} % av ${stores} mejlade butiker`,
+          true
+        )}
+        ${card(
+          Number(performance.product_clicked_store_count || 0).toLocaleString("sv-SE"),
+          "Produktblad klickat",
+          `${Number(performance.product_clicked_store_rate || 0).toLocaleString("sv-SE")} % av ${stores} mejlade butiker`,
+          true
+        )}
+        ${card(
+          formatEmailOrderValue(performance.attributed_order_value_by_currency),
+          "Attribuerat ordervärde",
+          `${Number(performance.attributed_order_count || 0).toLocaleString("sv-SE")} order`
+        )}
+        ${card(
+          Number(performance.attributed_dfp || 0).toLocaleString("sv-SE", { maximumFractionDigits: 2 }),
+          "Attribuerad volym",
+          "DFP från order inom 10 dagar"
+        )}
+        ${card(
+          Number(performance.delivered_email_count || 0).toLocaleString("sv-SE"),
+          "Levererade mejl",
+          `av ${Number(performance.sent_email_count || 0).toLocaleString("sv-SE")} skickade mottagarmejl`
+        )}
+      </div>
+      <div class="email-report-secondary">
+        Öppnat: ${Number(performance.opened_store_count || 0).toLocaleString("sv-SE")} butiker
+        (${Number(performance.opened_store_rate || 0).toLocaleString("sv-SE")} %) · indikativt mått
+      </div>
+      <div class="email-report-secondary">
+        Uppföljningssignaler: Stockfiller ${Number(followup.stockfiller_clicked_no_order || 0).toLocaleString("sv-SE")}
+        · Produktblad ${Number(followup.product_sheet_clicked_no_order || 0).toLocaleString("sv-SE")}
+        · Öppnat utan klick ${Number(followup.opened_no_click || 0).toLocaleString("sv-SE")}
+        · Levererat utan aktivitet ${Number(followup.delivered_no_activity || 0).toLocaleString("sv-SE")}
+      </div>
+      <div class="email-report-note">
+        Unika butiker räknas en gång per mått. Testmejl ingår inte. Filtret ”Klickat – ingen order” visas efter 3 dagar.
+      </div>
     `;
   }
 

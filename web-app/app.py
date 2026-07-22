@@ -145,6 +145,8 @@ EMAIL_PROPOSAL_RECENT_DELIVERY_DAYS = 60
 EMAIL_PROPOSAL_GRACE_DAYS = 7
 EMAIL_PROPOSAL_CONTACT_COOLDOWN_DAYS = 7
 EMAIL_PROPOSAL_SENT_COOLDOWN_DAYS = 10
+EMAIL_ORDER_ATTRIBUTION_DAYS = 10
+EMAIL_CLICK_FOLLOWUP_WAIT_DAYS = 3
 # Backward-compatible names used by older tests and integrations.
 REMINDER_EMAIL_GRACE_DAYS = EMAIL_PROPOSAL_GRACE_DAYS
 REMINDER_EMAIL_CONTACT_COOLDOWN_DAYS = EMAIL_PROPOSAL_CONTACT_COOLDOWN_DAYS
@@ -2194,6 +2196,381 @@ def _timeline_contact_item(contact):
     }
 
 
+def _email_recipient_identity(recipient):
+    return normalize_email(
+        recipient.get("intended_email") or recipient.get("actual_email")
+    )
+
+
+def _email_event_datetime(value):
+    return parse_datetime_value(value)
+
+
+def build_live_email_records(message_rows, recipient_rows):
+    """Return one normalized record per live logical email proposal.
+
+    Test messages and failed recipients are intentionally excluded. Recipient and
+    event sets are unique, so repeated Brevo opens/clicks never inflate the
+    business-level metrics.
+    """
+    recipients_by_email_id = defaultdict(list)
+    for recipient in recipient_rows:
+        email_id = str(recipient.get("email_id", "")).strip()
+        if email_id:
+            recipients_by_email_id[email_id].append(recipient)
+
+    records = []
+    for message in message_rows:
+        if is_yes(message.get("is_test")):
+            continue
+        if str(message.get("status", "")).strip().casefold() not in {"sent", "partial"}:
+            continue
+
+        email_id = str(message.get("email_id", "")).strip()
+        customer = str(message.get("customer", "")).strip()
+        customer_key = normalize_key(customer)
+        sent_at = parse_datetime_value(message.get("sent_at"))
+        if not email_id or not customer_key or not sent_at:
+            continue
+
+        sent_recipients = [
+            row for row in recipients_by_email_id.get(email_id, [])
+            if str(row.get("send_status", "")).strip().casefold() == "sent"
+        ]
+        recipient_labels = {}
+        delivered_recipients = set()
+        opened_recipients = set()
+        product_clicked_recipients = set()
+        stockfiller_clicked_recipients = set()
+        delivered_times = []
+        opened_times = []
+        product_click_times = []
+        stockfiller_click_times = []
+        product_first_click_times = []
+        stockfiller_first_click_times = []
+
+        for recipient in sent_recipients:
+            identity = _email_recipient_identity(recipient)
+            if not identity:
+                continue
+            recipient_labels.setdefault(
+                identity,
+                str(recipient.get("intended_email") or recipient.get("actual_email") or "").strip(),
+            )
+
+            delivered_at = _email_event_datetime(recipient.get("delivered_at"))
+            opened_at = _email_event_datetime(recipient.get("last_opened_at"))
+            product_clicked_at = _email_event_datetime(recipient.get("product_sheet_last_clicked_at"))
+            stockfiller_clicked_at = _email_event_datetime(recipient.get("stockfiller_last_clicked_at"))
+            product_first_clicked_at = _email_event_datetime(
+                recipient.get("product_sheet_first_clicked_at")
+            ) or product_clicked_at
+            stockfiller_first_clicked_at = _email_event_datetime(
+                recipient.get("stockfiller_first_clicked_at")
+            ) or stockfiller_clicked_at
+
+            opened = parse_number_value(recipient.get("open_count"), 0) > 0 and bool(opened_at)
+            product_clicked = (
+                parse_number_value(recipient.get("product_sheet_click_count"), 0) > 0
+                and bool(product_clicked_at)
+            )
+            stockfiller_clicked = (
+                parse_number_value(recipient.get("stockfiller_click_count"), 0) > 0
+                and bool(stockfiller_clicked_at)
+            )
+
+            # A human open or click is also conclusive evidence that the message
+            # reached the recipient, even if the delivered webhook arrived late.
+            if delivered_at or opened or product_clicked or stockfiller_clicked:
+                delivered_recipients.add(identity)
+            if delivered_at:
+                delivered_times.append(delivered_at)
+            if opened:
+                opened_recipients.add(identity)
+                opened_times.append(opened_at)
+            if product_clicked:
+                product_clicked_recipients.add(identity)
+                product_click_times.append(product_clicked_at)
+                product_first_click_times.append(product_first_clicked_at)
+            if stockfiller_clicked:
+                stockfiller_clicked_recipients.add(identity)
+                stockfiller_click_times.append(stockfiller_clicked_at)
+                stockfiller_first_click_times.append(stockfiller_first_clicked_at)
+
+        if not recipient_labels:
+            continue
+
+        records.append({
+            "email_id": email_id,
+            "customer": customer,
+            "customer_key": customer_key,
+            "sent_at": sent_at,
+            "message": message,
+            "recipients": sent_recipients,
+            "recipient_labels": recipient_labels,
+            "sent_recipients": set(recipient_labels),
+            "delivered_recipients": delivered_recipients,
+            "opened_recipients": opened_recipients,
+            "product_clicked_recipients": product_clicked_recipients,
+            "stockfiller_clicked_recipients": stockfiller_clicked_recipients,
+            "delivered_at": max(delivered_times) if delivered_times else None,
+            "opened_at": max(opened_times) if opened_times else None,
+            "product_clicked_at": max(product_click_times) if product_click_times else None,
+            "stockfiller_clicked_at": max(stockfiller_click_times) if stockfiller_click_times else None,
+            "product_first_clicked_at": min(product_first_click_times)
+            if product_first_click_times else None,
+            "stockfiller_first_clicked_at": min(stockfiller_first_click_times)
+            if stockfiller_first_click_times else None,
+        })
+
+    return sorted(records, key=lambda record: record["sent_at"])
+
+
+def group_customer_orders(order_rows):
+    """Collapse product rows into logical orders before attribution."""
+    grouped = {}
+    for index, order in enumerate(order_rows):
+        customer = str(order.get("Customer", "")).strip()
+        customer_key = normalize_key(customer)
+        order_date = parse_date_value(order.get("Order date"))
+        is_ordered = (
+            parse_number_value(order.get("Quantity"), 0) > 0
+            or parse_number_value(order.get("Total"), 0) > 0
+        )
+        if not customer_key or not order_date or not is_ordered:
+            continue
+
+        reference = str(order.get("Reference", "")).strip()
+        currency = str(order.get("Currency", "")).strip().upper()
+        if reference:
+            group_key = (
+                customer_key, "reference", reference, order_date.isoformat(), currency
+            )
+        else:
+            # An order without Reference normally consists of several product
+            # rows. Group same-day rows instead of counting every SKU as an order.
+            group_key = (customer_key, "fallback", order_date.isoformat(), currency)
+
+        group = grouped.setdefault(group_key, {
+            "customer": customer,
+            "customer_key": customer_key,
+            "reference": reference,
+            "date": order_date,
+            "total": 0.0,
+            "currency": currency,
+            "dfp": 0.0,
+            "source_row": index,
+        })
+        group["total"] += parse_number_value(order.get("Total"), 0)
+        group["currency"] = group["currency"] or currency
+        if str(order.get("Unit", "")).strip().casefold() == "dfp":
+            group["dfp"] += parse_number_value(order.get("Quantity"), 0)
+
+    return sorted(
+        grouped.values(),
+        key=lambda order: (order["date"], order["customer_key"], order["reference"], order["source_row"]),
+    )
+
+
+def attribute_orders_to_live_emails(live_records, grouped_orders, window_days=EMAIL_ORDER_ATTRIBUTION_DAYS):
+    """Attribute each order once to the latest eligible live proposal."""
+    records_by_customer = defaultdict(list)
+    for record in live_records:
+        records_by_customer[record["customer_key"]].append(record)
+
+    attributed = defaultdict(list)
+    for order in grouped_orders:
+        eligible = [
+            record for record in records_by_customer.get(order["customer_key"], [])
+            if 0 <= (order["date"] - record["sent_at"].date()).days <= window_days
+        ]
+        if not eligible:
+            continue
+        latest = max(eligible, key=lambda record: record["sent_at"])
+        attributed[latest["email_id"]].append(order)
+    return attributed
+
+
+def build_email_engagement_snapshot(message_rows, recipient_rows, order_rows, today=None):
+    """Return the latest live email outcome for every customer.
+
+    Rank 1 is the most actionable. The click filter is deliberately delayed for
+    three full calendar days so sellers do not follow up immediately after a
+    recipient has shown intent.
+    """
+    today = today or stockholm_today()
+    records = build_live_email_records(message_rows, recipient_rows)
+    attributed = attribute_orders_to_live_emails(records, group_customer_orders(order_rows))
+    latest_by_customer = {}
+    for record in records:
+        current = latest_by_customer.get(record["customer_key"])
+        if current is None or record["sent_at"] > current["sent_at"]:
+            latest_by_customer[record["customer_key"]] = record
+
+    snapshots = {}
+    for customer_key, record in latest_by_customer.items():
+        status = ""
+        label = ""
+        priority = None
+        event_at = record["sent_at"]
+        has_order = bool(attributed.get(record["email_id"]))
+
+        if has_order:
+            status = "ordered_within_10_days"
+            label = "Order inom 10 dagar"
+            priority = 0
+            event_at = max(
+                datetime.combine(order["date"], datetime.min.time())
+                for order in attributed[record["email_id"]]
+            )
+        elif record["stockfiller_clicked_recipients"]:
+            status = "stockfiller_clicked_no_order"
+            label = "Stockfiller-klick utan order"
+            priority = 1
+            event_at = record["stockfiller_clicked_at"] or record["sent_at"]
+        elif record["product_clicked_recipients"]:
+            status = "product_sheet_clicked_no_order"
+            label = "Produktbladsklick utan order"
+            priority = 2
+            event_at = record["product_clicked_at"] or record["sent_at"]
+        elif record["opened_recipients"]:
+            status = "opened_no_click"
+            label = "Öppnat men inte klickat"
+            priority = 3
+            event_at = record["opened_at"] or record["sent_at"]
+        elif record["delivered_recipients"]:
+            status = "delivered_no_activity"
+            label = "Levererat men ingen aktivitet"
+            priority = 4
+            event_at = record["delivered_at"] or record["sent_at"]
+
+        clicked_without_order = status in {
+            "stockfiller_clicked_no_order", "product_sheet_clicked_no_order"
+        }
+        wait_days_remaining = 0
+        if clicked_without_order:
+            if status == "stockfiller_clicked_no_order":
+                first_clicked_at = record["stockfiller_first_clicked_at"] or event_at
+            else:
+                first_clicked_at = record["product_first_clicked_at"] or event_at
+            days_since_click = max(0, (today - first_clicked_at.date()).days)
+            wait_days_remaining = max(0, EMAIL_CLICK_FOLLOWUP_WAIT_DAYS - days_since_click)
+            clicked_without_order = wait_days_remaining == 0
+
+        snapshots[customer_key] = {
+            "email_followup_status": status,
+            "email_followup_label": label,
+            "email_followup_priority": priority,
+            "email_followup_last_event_at": event_at.isoformat(sep=" ", timespec="seconds") if event_at else "",
+            "email_click_without_order": clicked_without_order,
+            "email_clicked_without_order": clicked_without_order,
+            "email_followup_wait_days_remaining": wait_days_remaining,
+            "email_order_within_10_days": has_order,
+            "email_followup_email_id": record["email_id"],
+        }
+
+    return snapshots
+
+
+def _email_rate(numerator, denominator):
+    return round((numerator / denominator) * 100, 1) if denominator else 0.0
+
+
+def build_email_performance(message_rows, recipient_rows, order_rows, included_customer_keys=None, today=None):
+    """Build cumulative, live-only email KPIs using stores as primary grain."""
+    records = build_live_email_records(message_rows, recipient_rows)
+    if included_customer_keys is not None:
+        included = {normalize_key(key) for key in included_customer_keys}
+        records = [record for record in records if record["customer_key"] in included]
+
+    grouped_orders = group_customer_orders(order_rows)
+    attributed = attribute_orders_to_live_emails(records, grouped_orders)
+    snapshots = build_email_engagement_snapshot(
+        [record["message"] for record in records], recipient_rows, order_rows, today=today
+    )
+
+    sent_stores = {record["customer_key"] for record in records}
+    delivered_stores = {
+        record["customer_key"] for record in records if record["delivered_recipients"]
+    }
+    opened_stores = {
+        record["customer_key"] for record in records if record["opened_recipients"]
+    }
+    product_clicked_stores = {
+        record["customer_key"] for record in records if record["product_clicked_recipients"]
+    }
+    stockfiller_clicked_stores = {
+        record["customer_key"] for record in records if record["stockfiller_clicked_recipients"]
+    }
+
+    delivered_email_keys = set()
+    sent_email_keys = set()
+    opened_recipient_keys = set()
+    product_recipient_keys = set()
+    stockfiller_recipient_keys = set()
+    record_by_email_id = {record["email_id"]: record for record in records}
+    for record in records:
+        for recipient in record["sent_recipients"]:
+            sent_email_keys.add((record["email_id"], recipient))
+        for recipient in record["delivered_recipients"]:
+            delivered_email_keys.add((record["email_id"], recipient))
+        for recipient in record["opened_recipients"]:
+            opened_recipient_keys.add((record["customer_key"], recipient))
+        for recipient in record["product_clicked_recipients"]:
+            product_recipient_keys.add((record["customer_key"], recipient))
+        for recipient in record["stockfiller_clicked_recipients"]:
+            stockfiller_recipient_keys.add((record["customer_key"], recipient))
+
+    ordered_email_ids = {email_id for email_id, orders in attributed.items() if orders}
+    ordered_stores = {
+        record_by_email_id[email_id]["customer_key"]
+        for email_id in ordered_email_ids if email_id in record_by_email_id
+    }
+    attributed_orders = [order for orders in attributed.values() for order in orders]
+    order_value_by_currency = defaultdict(float)
+    attributed_dfp = 0.0
+    for order in attributed_orders:
+        if order["currency"]:
+            order_value_by_currency[order["currency"]] += order["total"]
+        attributed_dfp += order["dfp"]
+
+    followup_counts = defaultdict(int)
+    for customer_key in sent_stores:
+        status = snapshots.get(customer_key, {}).get("email_followup_status", "")
+        if status:
+            followup_counts[status] += 1
+
+    store_count = len(sent_stores)
+    return {
+        "period_label": "Alla liveutskick",
+        "attribution_days": EMAIL_ORDER_ATTRIBUTION_DAYS,
+        "click_followup_wait_days": EMAIL_CLICK_FOLLOWUP_WAIT_DAYS,
+        "live_email_count": len(records),
+        "sent_email_count": len(sent_email_keys),
+        "delivered_email_count": len(delivered_email_keys),
+        "unique_store_count": store_count,
+        "delivered_store_count": len(delivered_stores),
+        "opened_store_count": len(opened_stores),
+        "opened_store_rate": _email_rate(len(opened_stores), store_count),
+        "product_clicked_store_count": len(product_clicked_stores),
+        "product_clicked_store_rate": _email_rate(len(product_clicked_stores), store_count),
+        "stockfiller_clicked_store_count": len(stockfiller_clicked_stores),
+        "stockfiller_clicked_store_rate": _email_rate(len(stockfiller_clicked_stores), store_count),
+        "opened_recipient_count": len(opened_recipient_keys),
+        "product_clicked_recipient_count": len(product_recipient_keys),
+        "stockfiller_clicked_recipient_count": len(stockfiller_recipient_keys),
+        "ordered_store_count": len(ordered_stores),
+        "ordered_store_rate": _email_rate(len(ordered_stores), store_count),
+        "attributed_order_count": len(attributed_orders),
+        "attributed_order_value_by_currency": {
+            currency: round(value, 2)
+            for currency, value in sorted(order_value_by_currency.items())
+        },
+        "attributed_dfp": round(attributed_dfp, 2),
+        "followup_counts": dict(followup_counts),
+    }
+
+
 def build_customer_timeline(customer_name, order_rows, contact_rows, sheets):
     """Build the customer-specific, user-facing activity stream.
 
@@ -2217,124 +2594,97 @@ def build_customer_timeline(customer_name, order_rows, contact_rows, sheets):
     recipient_rows = worksheet_to_dicts(
         sheets[EMAIL_RECIPIENTS_SHEET], expected_columns=EMAIL_RECIPIENTS_COLUMNS
     )
-    messages = []
-    recipients_by_email_id = {}
-    for recipient in recipient_rows:
-        recipients_by_email_id.setdefault(str(recipient.get("email_id", "")).strip(), []).append(recipient)
+    live_records = [
+        record for record in build_live_email_records(message_rows, recipient_rows)
+        if record["customer_key"] == customer_key
+    ]
+    attributed_orders = attribute_orders_to_live_emails(
+        live_records,
+        [order for order in group_customer_orders(order_rows) if order["customer_key"] == customer_key],
+    )
 
-    for message in message_rows:
-        if normalize_key(message.get("customer")) != customer_key or is_yes(message.get("is_test")):
-            continue
-        if str(message.get("status", "")).strip().casefold() not in {"sent", "partial"}:
-            continue
-        sent_at = parse_datetime_value(message.get("sent_at"))
-        if not sent_at:
-            continue
-        messages.append((sent_at, message))
-        email_id = str(message.get("email_id", "")).strip()
-        sent_recipients = [
-            row for row in recipients_by_email_id.get(email_id, [])
-            if str(row.get("send_status", "")).strip().casefold() == "sent"
-        ]
-        recipient_label = ", ".join(row.get("intended_email", "") for row in sent_recipients if row.get("intended_email"))
+    event_specs = (
+        ("opened_recipients", "opened_at", "email_proposal_opened", "Öppnat", "secondary"),
+        ("product_clicked_recipients", "product_clicked_at", "product_sheet_clicked", "Produktblad klickat", "primary"),
+        ("stockfiller_clicked_recipients", "stockfiller_clicked_at", "stockfiller_clicked", "Stockfiller klickat", "primary"),
+    )
+    for record in live_records:
+        message = record["message"]
         partial = str(message.get("status", "")).strip().casefold() == "partial"
         email_type = normalize_proposal_type(message.get("email_type"))
         type_label = EMAIL_PROPOSAL_TYPES[email_type]
+        recipient_label = ", ".join(
+            record["recipient_labels"].get(identity, identity)
+            for identity in sorted(record["sent_recipients"])
+        )
         timeline.append({
             "date_time": message.get("sent_at", ""),
             "event_type": "email_proposal_sent",
+            "importance": "primary",
             "title": f"{type_label} skickad" + (" delvis" if partial else ""),
             "sales_person": message.get("sender_name", ""),
             "channel": "Mejl",
             "result": f"Mejlförslag skickat – {type_label}" + (" delvis" if partial else ""),
             "recipient": recipient_label,
             "comment": message.get("subject", ""),
-            "email_id": email_id,
+            "email_id": record["email_id"],
             "details": [
                 {"label": "Ämne", "value": message.get("subject", "") or "—"},
             ],
         })
 
-        for recipient in sent_recipients:
-            intended_email = str(recipient.get("intended_email", "")).strip()
-            event_specs = (
-                ("open_count", "last_opened_at", "email_proposal_opened", "Öppnat"),
-                ("product_sheet_click_count", "product_sheet_last_clicked_at", "product_sheet_clicked", "Produktblad klickat"),
-                ("stockfiller_click_count", "stockfiller_last_clicked_at", "stockfiller_clicked", "Stockfiller klickat"),
+        for recipients_field, time_field, event_type, label, importance in event_specs:
+            identities = record[recipients_field]
+            event_time = record[time_field]
+            if not identities or not event_time:
+                continue
+            event_recipients = ", ".join(
+                record["recipient_labels"].get(identity, identity)
+                for identity in sorted(identities)
             )
-            for count_field, time_field, event_type, label in event_specs:
-                count = int(parse_number_value(recipient.get(count_field), 0))
-                event_time = str(recipient.get(time_field, "")).strip()
-                if count < 1 or not event_time:
-                    continue
-                title = f"{label} {count} gånger" if count > 1 else label
-                timeline.append({
-                    "date_time": event_time,
-                    "event_type": event_type,
-                    "title": title,
-                    "sales_person": message.get("sender_name", ""),
-                    "channel": "Mejl",
-                    "result": title,
-                    "recipient": intended_email,
-                    "comment": "",
-                    "email_id": email_id,
-                    "details": [
-                        {"label": "Antal", "value": str(count)},
-                    ],
+            timeline.append({
+                "date_time": event_time.isoformat(sep=" ", timespec="seconds"),
+                "event_type": event_type,
+                "importance": importance,
+                "title": label,
+                "sales_person": message.get("sender_name", ""),
+                "channel": "Mejl",
+                "result": label,
+                "recipient": event_recipients,
+                "comment": "",
+                "email_id": record["email_id"],
+                "details": [],
+            })
+
+    for record in live_records:
+        attributed_message = record["message"]
+        for order in attributed_orders.get(record["email_id"], []):
+            value = round(order["total"], 2)
+            value_text = f"{value:,.2f}".replace(",", " ").replace(".", ",")
+            if order["currency"]:
+                value_text += f" {order['currency']}"
+            details = [
+                {"label": "Orderreferens", "value": order["reference"] or "—"},
+                {"label": "Ordervärde", "value": value_text},
+            ]
+            if order["dfp"]:
+                details.append({
+                    "label": "Antal DFP",
+                    "value": str(int(order["dfp"]) if order["dfp"].is_integer() else order["dfp"]),
                 })
-
-    # Attribute each order to the latest live email proposal sent 0–10 days earlier.
-    grouped_orders = {}
-    for index, order in enumerate(order_rows):
-        if normalize_key(order.get("Customer")) != customer_key:
-            continue
-        order_date = parse_date_value(order.get("Order date"))
-        if not order_date:
-            continue
-        reference = str(order.get("Reference", "")).strip()
-        group_key = reference or f"{order_date.isoformat()}:{index}"
-        group = grouped_orders.setdefault(group_key, {
-            "reference": reference,
-            "date": order_date,
-            "total": 0.0,
-            "currency": "",
-            "dfp": 0.0,
-        })
-        group["total"] += parse_number_value(order.get("Total"), 0)
-        group["currency"] = group["currency"] or str(order.get("Currency", "")).strip()
-        if str(order.get("Unit", "")).strip().casefold() == "dfp":
-            group["dfp"] += parse_number_value(order.get("Quantity"), 0)
-
-    for order in grouped_orders.values():
-        eligible = [
-            (sent_at, message) for sent_at, message in messages
-            if 0 <= (order["date"] - sent_at.date()).days <= 10
-        ]
-        if not eligible:
-            continue
-        _, attributed_message = max(eligible, key=lambda item: item[0])
-        value = round(order["total"], 2)
-        value_text = f"{value:,.2f}".replace(",", " ").replace(".", ",")
-        if order["currency"]:
-            value_text += f" {order['currency']}"
-        details = [
-            {"label": "Orderreferens", "value": order["reference"] or "—"},
-            {"label": "Ordervärde", "value": value_text},
-        ]
-        if order["dfp"]:
-            details.append({"label": "Antal DFP", "value": str(int(order["dfp"]) if order["dfp"].is_integer() else order["dfp"])})
-        timeline.append({
-            "date_time": f"{order['date'].isoformat()} 12:00:00",
-            "event_type": "subsequent_order",
-            "title": "Efterföljande order",
-            "sales_person": attributed_message.get("sender_name", ""),
-            "channel": "Order",
-            "result": "Order inom 10 dagar",
-            "recipient": "",
-            "comment": f"Order {order['reference']}" if order["reference"] else "Ny order",
-            "email_id": attributed_message.get("email_id", ""),
-            "details": details,
-        })
+            timeline.append({
+                "date_time": f"{order['date'].isoformat()} 12:00:00",
+                "event_type": "subsequent_order",
+                "importance": "primary",
+                "title": "Efterföljande order",
+                "sales_person": attributed_message.get("sender_name", ""),
+                "channel": "Order",
+                "result": "Order inom 10 dagar",
+                "recipient": "",
+                "comment": f"Order {order['reference']}" if order["reference"] else "Ny order",
+                "email_id": record["email_id"],
+                "details": details,
+            })
 
     timeline.sort(key=_timeline_sort_value, reverse=True)
     return timeline
@@ -2435,6 +2785,9 @@ def get_customer_insights():
 
     order_features = build_order_features(order_rows)
     contact_features = build_contact_features(contact_rows, order_features)
+    email_engagement_by_customer = build_email_engagement_snapshot(
+        message_rows, recipient_rows, order_rows, today=today
+    )
     priority_customers = build_priority_customers(
         customers,
         order_features,
@@ -2500,6 +2853,7 @@ def get_customer_insights():
             blocked_recipients,
             today,
         )
+        email_engagement = email_engagement_by_customer.get(normalize_key(name), {})
         insights[name] = {
             "missad_uppfoljning": missad,
             "customer_risk": risk,
@@ -2533,6 +2887,14 @@ def get_customer_insights():
             "email_proposal_blockers": email_proposal["blockers"],
             "email_proposal_recipient_count": email_proposal["eligible_recipient_count"],
             "email_proposal_latest_sent_at": email_proposal["latest_sent_at"],
+            "email_followup_status": email_engagement.get("email_followup_status", ""),
+            "email_followup_label": email_engagement.get("email_followup_label", ""),
+            "email_followup_priority": email_engagement.get("email_followup_priority"),
+            "email_followup_last_event_at": email_engagement.get("email_followup_last_event_at", ""),
+            "email_click_without_order": email_engagement.get("email_click_without_order", False),
+            "email_clicked_without_order": email_engagement.get("email_clicked_without_order", False),
+            "email_followup_wait_days_remaining": email_engagement.get("email_followup_wait_days_remaining", 0),
+            "email_order_within_10_days": email_engagement.get("email_order_within_10_days", False),
             # Compatibility for clients deployed before the broader proposal flow.
             "reminder_email_due": email_proposal["due"] and email_type == "reminder",
             "reminder_email_reason": email_proposal["reason"] if email_type == "reminder" else "",
@@ -2561,6 +2923,7 @@ def get_followup_insights():
 
     contact_rows = get_contact_rows(spreadsheet)
     order_rows = get_order_rows(spreadsheet)
+    message_rows, recipient_rows, _ = get_email_rows(spreadsheet)
     dfp_top_weeks_2026 = build_dfp_top_weeks(order_rows, year=2026, limit=5)
 
     responsible_options = sorted({
@@ -2691,6 +3054,20 @@ def get_followup_insights():
         today,
         limit=30,
     )
+    included_customer_keys = None
+    if selected_responsible:
+        included_customer_keys = {
+            customer_key
+            for customer_key, customer in customers_by_name.items()
+            if customer.get("sales_person") == selected_responsible
+        }
+    email_performance = build_email_performance(
+        message_rows,
+        recipient_rows,
+        order_rows,
+        included_customer_keys=included_customer_keys,
+        today=today,
+    )
 
     return jsonify({
         "generated_at": stockholm_now().isoformat(timespec="minutes"),
@@ -2715,6 +3092,7 @@ def get_followup_insights():
             ],
         },
         "priority_customers": priority_customers,
+        "email_performance": email_performance,
     })
 
 
