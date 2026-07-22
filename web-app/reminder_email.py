@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from email.utils import parseaddr
 from hashlib import sha256
 from html import escape
 import json
 import re
 from urllib.parse import urlparse
+from zoneinfo import ZoneInfo
 
 
 EMAIL_MESSAGES_COLUMNS = [
@@ -63,6 +64,7 @@ VISIBLE_EMAIL_EVENT_TYPES = {
 }
 
 BLOCKING_SEND_STATUSES = {"hardbounce", "blocked", "invalid", "spam", "unsubscribed"}
+STOCKHOLM_TIMEZONE = ZoneInfo("Europe/Stockholm")
 
 
 def is_yes(value):
@@ -614,29 +616,95 @@ def normalize_brevo_event(payload):
     raw_type = str(payload.get("event") or payload.get("type") or "").strip()
     event_type = raw_type.replace("_", "").replace("-", "").casefold()
     aliases = {
-        "request": "sent", "sent": "sent", "delivered": "delivered",
-        "opened": "opened", "uniqueopened": "opened", "click": "clicked", "clicked": "clicked",
-        "hardbounce": "hardbounce", "softbounce": "softbounce", "blocked": "blocked",
+        "request": "sent", "requests": "sent", "sent": "sent", "delivered": "delivered",
+        "opened": "opened", "uniqueopened": "opened", "click": "clicked",
+        "clicks": "clicked", "clicked": "clicked",
+        "hardbounce": "hardbounce", "hardbounces": "hardbounce",
+        "softbounce": "softbounce", "softbounces": "softbounce", "blocked": "blocked",
         "invalid": "invalid", "spam": "spam", "complaint": "spam",
         "unsubscribed": "unsubscribed", "deferred": "deferred", "error": "error",
     }
     return aliases.get(event_type, raw_type.casefold() or "unknown")
 
 
-def brevo_event_time(payload):
-    value = payload.get("date") or payload.get("event_time") or payload.get("ts_event") or payload.get("ts")
-    if isinstance(value, (int, float)) or (isinstance(value, str) and value.isdigit()):
+def stockholm_now():
+    return datetime.now(STOCKHOLM_TIMEZONE)
+
+
+def stockholm_today():
+    return stockholm_now().date()
+
+
+def stockholm_time_text(value=None):
+    """Return a stable local timestamp for Sheets, regardless of source timezone."""
+    if value is None or value == "":
+        parsed = stockholm_now()
+    elif isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, (int, float)) or (isinstance(value, str) and value.isdigit()):
         try:
-            return datetime.fromtimestamp(float(value)).strftime("%Y-%m-%d %H:%M:%S")
+            parsed = datetime.fromtimestamp(float(value), tz=timezone.utc)
         except (ValueError, OSError, OverflowError):
-            pass
-    text = str(value or "").strip()
-    return text[:19].replace("T", " ") if text else datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            parsed = stockholm_now()
+    else:
+        text = str(value).strip()
+        if not text:
+            parsed = stockholm_now()
+        else:
+            iso_text = text.replace("Z", "+00:00")
+            try:
+                parsed = datetime.fromisoformat(iso_text)
+            except ValueError:
+                parsed = None
+                for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+                    try:
+                        parsed = datetime.strptime(text, fmt)
+                        break
+                    except ValueError:
+                        pass
+                if parsed is None:
+                    parsed = stockholm_now()
+
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=STOCKHOLM_TIMEZONE)
+    else:
+        parsed = parsed.astimezone(STOCKHOLM_TIMEZONE)
+    return parsed.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def brevo_event_time(payload):
+    # Brevo's epoch values are unambiguous and should win over formatted UTC dates.
+    value = payload.get("ts_event") or payload.get("ts") or payload.get("event_time") or payload.get("date")
+    if isinstance(value, str):
+        text = value.strip()
+        has_explicit_timezone = bool(
+            text.endswith("Z") or re.search(r"[+-]\d{2}:?\d{2}$", text)
+        )
+        if text and not text.isdigit() and not has_explicit_timezone:
+            # Brevo documents and returns its formatted event dates in UTC.
+            value = f"{text}+00:00"
+    return stockholm_time_text(value)
+
+
+def email_event_key(message_id, event_type, event_time, url="", email=""):
+    """Create the same idempotency key for webhook and Brevo API representations."""
+    canonical = json.dumps({
+        "message_id": normalize_message_id(message_id),
+        "event_type": str(event_type or "").strip().casefold(),
+        "event_time": stockholm_time_text(event_time),
+        "url": str(url or "").strip(),
+    }, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def brevo_event_key(payload):
-    canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return sha256(canonical.encode("utf-8")).hexdigest()
+    return email_event_key(
+        payload.get("message-id") or payload.get("messageId") or payload.get("message_id"),
+        normalize_brevo_event(payload),
+        brevo_event_time(payload),
+        payload.get("link") or payload.get("url"),
+        payload.get("email"),
+    )
 
 
 def classify_clicked_url(url, product_sheet_url, stockfiller_url):

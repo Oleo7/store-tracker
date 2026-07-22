@@ -23,7 +23,9 @@ from reminder_email import (  # noqa: E402
     build_latest_order_context,
     canonicalize_proposal_order_rows,
     classify_customer_relationship,
+    brevo_event_time,
     first_name,
+    normalize_brevo_event,
     render_reminder_email,
     round_store_count_to_ten,
     split_email_values,
@@ -47,6 +49,9 @@ class FakeWorksheet:
     def append_row(self, values, value_input_option=None):
         self.values.append(list(values))
 
+    def append_rows(self, values, value_input_option=None):
+        self.values.extend([list(row) for row in values])
+
     def update_cell(self, row, column, value):
         while len(self.values) < row:
             self.values.append([])
@@ -59,6 +64,16 @@ class FakeWorksheet:
         if range_name.startswith("A1:"):
             self.values[0] = list(values[0])
 
+    def batch_update(self, data, value_input_option=None):
+        for item in data:
+            match = __import__("re").match(r"A(\d+):[A-Z]+(\d+)", item["range"])
+            if not match:
+                continue
+            row_number = int(match.group(1))
+            while len(self.values) < row_number:
+                self.values.append([])
+            self.values[row_number - 1] = list(item["values"][0])
+
 
 class FakeSpreadsheet:
     def __init__(self, sheets):
@@ -69,6 +84,14 @@ class FakeSpreadsheet:
 
 
 class ReminderEmailHelperTests(unittest.TestCase):
+    def test_brevo_api_event_aliases_and_utc_time_are_normalized(self):
+        self.assertEqual(normalize_brevo_event({"event": "requests"}), "sent")
+        self.assertEqual(normalize_brevo_event({"event": "clicks"}), "clicked")
+        self.assertEqual(
+            brevo_event_time({"date": "2026-07-21T05:00:00Z"}),
+            "2026-07-21 07:00:00",
+        )
+
     def test_recipient_values_are_split_validated_and_deduplicated(self):
         result = split_email_values(
             "Buyer@Example.com; info@example.com\ninvalid",
@@ -314,8 +337,48 @@ class TimelineAndWebhookTests(unittest.TestCase):
         self.assertTrue(app_module.process_brevo_event(spreadsheet, sheets, payload))
         self.assertFalse(app_module.process_brevo_event(spreadsheet, sheets, payload))
         recipient = app_module.worksheet_to_dicts(sheets[app_module.EMAIL_RECIPIENTS_SHEET], expected_columns=EMAIL_RECIPIENTS_COLUMNS)[0]
-        self.assertEqual(recipient["open_count"], 4)
+        self.assertEqual(recipient["open_count"], 1)
         self.assertEqual(len(sheets[app_module.EMAIL_EVENTS_SHEET].values), 2)
+
+    def test_duplicate_event_repairs_summary_after_partial_sheet_failure(self):
+        sheets = self._sheets()
+        spreadsheet = FakeSpreadsheet(list(sheets.values()))
+        payload = {
+            "event": "delivered", "message-id": "msg-1",
+            "email": "buyer@example.com", "date": "2026-07-04T10:00:00Z",
+        }
+        self.assertTrue(app_module.process_brevo_event(spreadsheet, sheets, payload))
+        recipient_headers = sheets[app_module.EMAIL_RECIPIENTS_SHEET].values[0]
+        delivered_index = recipient_headers.index("delivered_at")
+        sheets[app_module.EMAIL_RECIPIENTS_SHEET].values[1][delivered_index] = ""
+
+        self.assertFalse(app_module.process_brevo_event(spreadsheet, sheets, payload))
+        recipient = app_module.worksheet_to_dicts(
+            sheets[app_module.EMAIL_RECIPIENTS_SHEET], expected_columns=EMAIL_RECIPIENTS_COLUMNS
+        )[0]
+        self.assertEqual(recipient["delivered_at"], "2026-07-04 12:00:00")
+
+    def test_reconciliation_backfills_delivery_open_and_product_click(self):
+        sheets = self._sheets()
+        spreadsheet = FakeSpreadsheet(list(sheets.values()))
+        events = [
+            {"event": "delivered", "messageId": "msg-1", "email": "buyer@example.com", "date": "2026-07-02T08:00:00Z"},
+            {"event": "opened", "messageId": "msg-1", "email": "buyer@example.com", "date": "2026-07-02T09:00:00Z"},
+            {"event": "clicks", "messageId": "msg-1", "email": "buyer@example.com", "date": "2026-07-02T10:00:00Z", "link": "https://drive.google.com/p"},
+        ]
+        app_module._brevo_reconcile_lock = __import__("threading").Lock()
+        with patch.object(app_module, "get_spreadsheet_with_retry", return_value=spreadsheet), \
+             patch.object(app_module, "ensure_email_worksheets", return_value=sheets), \
+             patch.object(app_module, "fetch_brevo_events", return_value=events):
+            result = app_module.reconcile_recent_brevo_events(days=30)
+
+        self.assertEqual(result["inserted_events"], 3)
+        recipient = app_module.worksheet_to_dicts(
+            sheets[app_module.EMAIL_RECIPIENTS_SHEET], expected_columns=EMAIL_RECIPIENTS_COLUMNS
+        )[0]
+        self.assertEqual(recipient["delivered_at"], "2026-07-02 10:00:00")
+        self.assertEqual(recipient["open_count"], 1)
+        self.assertEqual(recipient["product_sheet_click_count"], 1)
 
     def test_order_is_attributed_to_latest_prior_reminder(self):
         sheets = self._sheets()

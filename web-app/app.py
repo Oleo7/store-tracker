@@ -7,12 +7,14 @@ from urllib.parse import unquote
 from datetime import datetime, date, timedelta
 from collections import defaultdict
 from io import BytesIO
+from queue import Empty, Full, Queue
 import os
 import json
 import math
 import re
 import requests
 import threading
+import time
 import unicodedata
 import uuid
 from zipfile import ZIP_DEFLATED, ZipFile
@@ -34,7 +36,6 @@ from reminder_email import (
     EMAIL_RECIPIENTS_COLUMNS,
     SETTINGS_COLUMNS,
     USER_COLUMNS,
-    brevo_event_key,
     brevo_event_time,
     build_email_proposal_copy,
     build_new_customer_order_rows,
@@ -46,6 +47,7 @@ from reminder_email import (
     classify_clicked_url,
     count_unique_order_customers,
     first_name,
+    email_event_key,
     is_valid_email,
     is_yes,
     normalize_brevo_event,
@@ -56,6 +58,9 @@ from reminder_email import (
     render_email_proposal,
     safe_http_url,
     split_email_values,
+    stockholm_now,
+    stockholm_time_text,
+    stockholm_today,
 )
 
 load_dotenv()
@@ -125,8 +130,16 @@ EMAIL_EVENTS_SHEET = "email_events"
 USERS_SHEET = "users"
 SETTINGS_SHEET = "settings"
 BREVO_SEND_URL = "https://api.brevo.com/v3/smtp/email"
+BREVO_EVENTS_URL = "https://api.brevo.com/v3/smtp/statistics/events"
 EMAIL_SEND_MODE = (os.environ.get("EMAIL_SEND_MODE") or "test").strip().casefold()
 EMAIL_TEST_RECIPIENT = (os.environ.get("EMAIL_TEST_RECIPIENT") or "olle@eatpolarbar.com").strip()
+BREVO_RECONCILE_INTERVAL_SECONDS = max(
+    60, int(os.environ.get("BREVO_RECONCILE_INTERVAL_SECONDS") or 900)
+)
+BREVO_RECONCILE_DAYS = max(1, min(30, int(os.environ.get("BREVO_RECONCILE_DAYS") or 3)))
+BREVO_RECONCILE_MAX_RECIPIENTS = max(
+    1, min(500, int(os.environ.get("BREVO_RECONCILE_MAX_RECIPIENTS") or 100))
+)
 EMAIL_PROPOSAL_RECENT_DELIVERY_DAYS = 60
 EMAIL_PROPOSAL_GRACE_DAYS = 7
 EMAIL_PROPOSAL_CONTACT_COOLDOWN_DAYS = 7
@@ -137,6 +150,13 @@ REMINDER_EMAIL_CONTACT_COOLDOWN_DAYS = EMAIL_PROPOSAL_CONTACT_COOLDOWN_DAYS
 REMINDER_EMAIL_SENT_COOLDOWN_DAYS = EMAIL_PROPOSAL_SENT_COOLDOWN_DAYS
 _active_send_ids = set()
 _active_send_lock = threading.Lock()
+_brevo_event_queue = Queue(maxsize=1000)
+_brevo_worker_start_lock = threading.Lock()
+_brevo_workers_started = False
+_brevo_processing_lock = threading.Lock()
+_brevo_reconcile_lock = threading.Lock()
+_email_sheets_cache = None
+_email_sheets_cache_lock = threading.Lock()
 
 
 _spreadsheet_cache = None
@@ -313,13 +333,21 @@ def get_or_create_worksheet(spreadsheet, title, columns, rows=1000):
 
 
 def ensure_email_worksheets(spreadsheet):
-    contact_sheet = spreadsheet.worksheet("sales_activities")
-    ensure_contact_worksheet_schema(contact_sheet)
-    return {
-        EMAIL_MESSAGES_SHEET: get_or_create_worksheet(spreadsheet, EMAIL_MESSAGES_SHEET, EMAIL_MESSAGES_COLUMNS),
-        EMAIL_RECIPIENTS_SHEET: get_or_create_worksheet(spreadsheet, EMAIL_RECIPIENTS_SHEET, EMAIL_RECIPIENTS_COLUMNS),
-        EMAIL_EVENTS_SHEET: get_or_create_worksheet(spreadsheet, EMAIL_EVENTS_SHEET, EMAIL_EVENTS_COLUMNS),
-    }
+    global _email_sheets_cache
+    spreadsheet_identity = id(spreadsheet)
+    with _email_sheets_cache_lock:
+        if _email_sheets_cache and _email_sheets_cache[0] == spreadsheet_identity:
+            return _email_sheets_cache[1]
+
+        contact_sheet = spreadsheet.worksheet("sales_activities")
+        ensure_contact_worksheet_schema(contact_sheet)
+        sheets = {
+            EMAIL_MESSAGES_SHEET: get_or_create_worksheet(spreadsheet, EMAIL_MESSAGES_SHEET, EMAIL_MESSAGES_COLUMNS),
+            EMAIL_RECIPIENTS_SHEET: get_or_create_worksheet(spreadsheet, EMAIL_RECIPIENTS_SHEET, EMAIL_RECIPIENTS_COLUMNS),
+            EMAIL_EVENTS_SHEET: get_or_create_worksheet(spreadsheet, EMAIL_EVENTS_SHEET, EMAIL_EVENTS_COLUMNS),
+        }
+        _email_sheets_cache = (spreadsheet_identity, sheets)
+        return sheets
 
 
 def get_user_rows(spreadsheet):
@@ -386,6 +414,48 @@ def update_sheet_row(sheet, row_index, headers, updates):
         if key not in headers:
             continue
         sheet.update_cell(row_index, headers.index(key) + 1, value)
+
+
+def worksheet_snapshot(sheet, expected_columns=None):
+    values = sheet.get_all_values()
+    if not values:
+        return list(expected_columns or []), []
+    headers = [str(header).strip() for header in values[0]]
+    rows = []
+    for row_index, row in enumerate(values[1:], start=2):
+        padded = row + [""] * (len(headers) - len(row))
+        item = dict(zip(headers, padded))
+        if expected_columns:
+            item = {column: item.get(column, "") for column in expected_columns}
+        rows.append((row_index, item))
+    return headers, rows
+
+
+def batch_update_sheet_rows(sheet, headers, row_updates):
+    data = []
+    for row_index, row in row_updates:
+        values = [row.get(header, "") for header in headers]
+        data.append({
+            "range": f"A{row_index}:{rowcol_to_a1(row_index, len(headers))}",
+            "values": [values],
+        })
+    if data:
+        sheet.batch_update(data, value_input_option="RAW")
+
+
+def run_with_retry(operation, *, attempts=5, base_delay=0.5, label="Google Sheets"):
+    last_error = None
+    for attempt in range(attempts):
+        try:
+            return operation()
+        except Exception as exc:
+            last_error = exc
+            if attempt >= attempts - 1:
+                break
+            delay = base_delay * (2 ** attempt)
+            app.logger.warning("%s failed (attempt %s/%s): %s", label, attempt + 1, attempts, exc)
+            time.sleep(delay)
+    raise last_error
 
 
 def current_user():
@@ -1008,7 +1078,7 @@ def segment_sort_key(segment):
 
 
 def now_text():
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return stockholm_time_text()
 
 
 def format_datetime_value(value, fallback=""):
@@ -1087,7 +1157,7 @@ def build_recipient_options(customer, latest_order, recipient_rows):
 def build_email_proposal_warnings(customer_name, latest_order, contact_rows, message_rows, created_at=None):
     warnings = []
     customer_key = normalize_key(customer_name)
-    today = date.today()
+    today = stockholm_today()
 
     recent_contacts = []
     for row in contact_rows:
@@ -1269,7 +1339,7 @@ def build_email_proposal_draft(spreadsheet, row_number, draft_id=None, created_a
     relationship = classify_customer_relationship(
         order_rows,
         customer.get("customer"),
-        today=date.today(),
+        today=stockholm_today(),
         recent_days=EMAIL_PROPOSAL_RECENT_DELIVERY_DAYS,
     )
     proposal_type = relationship["email_type"]
@@ -1423,7 +1493,9 @@ def build_sales_activity_for_email(spreadsheet, *, email_id, email_type, custome
 
 @app.before_request
 def require_authenticated_session():
-    public_endpoints = {"index", "images", "login", "get_session", "brevo_webhook"}
+    public_endpoints = {
+        "index", "images", "login", "get_session", "brevo_webhook", "brevo_reconcile"
+    }
     if request.method == "OPTIONS" or request.endpoint in public_endpoints:
         return None
     user = current_user()
@@ -1737,84 +1809,267 @@ def send_email_proposal(row):
             _active_send_ids.discard(draft_id)
 
 
-def process_brevo_event(spreadsheet, sheets, payload):
-    event_key = brevo_event_key(payload)
-    existing, _, _ = find_sheet_row(sheets[EMAIL_EVENTS_SHEET], "event_key", event_key)
-    if existing:
-        return False
-
-    message_id = normalize_message_id(
-        payload.get("message-id") or payload.get("messageId") or payload.get("message_id")
+def _event_semantic_key(event):
+    return email_event_key(
+        event.get("brevo_message_id"),
+        event.get("event_type"),
+        event.get("event_time"),
+        event.get("url"),
+        event.get("actual_email"),
     )
-    recipient_row, recipient_headers, recipient = find_sheet_row(
-        sheets[EMAIL_RECIPIENTS_SHEET],
-        "brevo_message_id",
-        message_id,
-        normalizer=normalize_message_id,
-    )
-    email_id = recipient.get("email_id", "") if recipient else ""
-    message = {}
-    if email_id:
-        _, _, message = find_sheet_row(sheets[EMAIL_MESSAGES_SHEET], "email_id", email_id)
 
-    event_type = normalize_brevo_event(payload)
-    url = str(payload.get("link") or payload.get("url") or "").strip()
-    if event_type == "clicked":
-        event_type = classify_clicked_url(
-            url,
-            message.get("product_sheet_url", ""),
-            message.get("stockfiller_url", ""),
+
+def _recipient_summary(recipient, event_rows):
+    """Derive summary fields from the append-only raw log, making retries idempotent."""
+    ordered = sorted(event_rows, key=lambda row: str(row.get("event_time") or ""))
+    times_by_type = defaultdict(list)
+    for event in ordered:
+        event_type = str(event.get("event_type") or "").strip().casefold()
+        event_time = str(event.get("event_time") or "").strip()
+        if event_time:
+            times_by_type[event_type].append(event_time)
+
+    updates = {
+        "delivered_at": (times_by_type["delivered"] or [""])[0],
+        "first_opened_at": (times_by_type["opened"] or [""])[0],
+        "last_opened_at": (times_by_type["opened"] or [""])[-1],
+        "open_count": len(times_by_type["opened"]),
+        "product_sheet_first_clicked_at": (times_by_type["product_sheet_clicked"] or [""])[0],
+        "product_sheet_last_clicked_at": (times_by_type["product_sheet_clicked"] or [""])[-1],
+        "product_sheet_click_count": len(times_by_type["product_sheet_clicked"]),
+        "stockfiller_first_clicked_at": (times_by_type["stockfiller_clicked"] or [""])[0],
+        "stockfiller_last_clicked_at": (times_by_type["stockfiller_clicked"] or [""])[-1],
+        "stockfiller_click_count": len(times_by_type["stockfiller_clicked"]),
+        "bounce_type": "",
+        "blocked_at": "",
+        "unsubscribed_at": (times_by_type["unsubscribed"] or [""])[-1],
+        "last_event_at": str(ordered[-1].get("event_time") or "") if ordered else "",
+    }
+    for event in ordered:
+        event_type = str(event.get("event_type") or "").strip().casefold()
+        if event_type in {"hardbounce", "invalid", "blocked", "spam"}:
+            updates["bounce_type"] = event_type
+        if event_type in {"blocked", "spam"}:
+            updates["blocked_at"] = str(event.get("event_time") or "")
+    return {**recipient, **updates}
+
+
+def process_brevo_events(spreadsheet, sheets, payloads):
+    """Persist a batch with one read/append/update cycle and semantic deduplication."""
+    message_headers, message_rows = worksheet_snapshot(
+        sheets[EMAIL_MESSAGES_SHEET], expected_columns=EMAIL_MESSAGES_COLUMNS
+    )
+    recipient_headers, recipient_rows = worksheet_snapshot(
+        sheets[EMAIL_RECIPIENTS_SHEET], expected_columns=EMAIL_RECIPIENTS_COLUMNS
+    )
+    _, stored_event_rows = worksheet_snapshot(
+        sheets[EMAIL_EVENTS_SHEET], expected_columns=EMAIL_EVENTS_COLUMNS
+    )
+    messages_by_email_id = {row.get("email_id", ""): row for _, row in message_rows}
+    recipients_by_message_id = {
+        normalize_message_id(row.get("brevo_message_id")): (row_index, row)
+        for row_index, row in recipient_rows
+        if normalize_message_id(row.get("brevo_message_id"))
+    }
+    all_events = [row for _, row in stored_event_rows]
+    existing_keys = {_event_semantic_key(row) for row in all_events}
+    new_events = []
+    affected_message_ids = set()
+
+    for payload in payloads:
+        if not isinstance(payload, dict):
+            continue
+        message_id = normalize_message_id(
+            payload.get("message-id") or payload.get("messageId") or payload.get("message_id")
         )
-    event_time = brevo_event_time(payload)
-    received_at = now_text()
-    append_dict_row(sheets[EMAIL_EVENTS_SHEET], EMAIL_EVENTS_COLUMNS, {
-        "event_key": event_key,
-        "received_at": received_at,
-        "event_time": event_time,
-        "email_id": email_id,
-        "brevo_message_id": message_id,
-        "intended_email": recipient.get("intended_email", "") if recipient else "",
-        "actual_email": recipient.get("actual_email", payload.get("email", "")) if recipient else payload.get("email", ""),
-        "event_type": event_type,
-        "url": url,
-        "payload_json": json.dumps(payload, ensure_ascii=False, sort_keys=True)[:45000],
-    })
-    if not recipient_row:
-        return True
+        recipient_info = recipients_by_message_id.get(message_id)
+        recipient = recipient_info[1] if recipient_info else {}
+        email_id = recipient.get("email_id", "")
+        message = messages_by_email_id.get(email_id, {})
+        event_type = normalize_brevo_event(payload)
+        url = str(payload.get("link") or payload.get("url") or "").strip()
+        if event_type == "clicked":
+            event_type = classify_clicked_url(
+                url,
+                message.get("product_sheet_url", ""),
+                message.get("stockfiller_url", ""),
+            )
+        actual_email = recipient.get("actual_email") or payload.get("email", "")
+        event = {
+            "received_at": now_text(),
+            "event_time": brevo_event_time(payload),
+            "email_id": email_id,
+            "brevo_message_id": message_id,
+            "intended_email": recipient.get("intended_email", ""),
+            "actual_email": actual_email,
+            "event_type": event_type,
+            "url": url,
+            "payload_json": json.dumps(payload, ensure_ascii=False, sort_keys=True)[:45000],
+        }
+        event["event_key"] = _event_semantic_key(event)
+        if message_id:
+            affected_message_ids.add(message_id)
+        if event["event_key"] in existing_keys:
+            continue
+        existing_keys.add(event["event_key"])
+        new_events.append(event)
+        all_events.append(event)
 
-    updates = {"last_event_at": event_time}
-    if event_type == "delivered":
-        updates["delivered_at"] = recipient.get("delivered_at") or event_time
-    elif event_type == "opened":
-        count = int(parse_number_value(recipient.get("open_count"), 0)) + 1
-        updates.update({
-            "first_opened_at": recipient.get("first_opened_at") or event_time,
-            "last_opened_at": event_time,
-            "open_count": count,
-        })
-    elif event_type == "product_sheet_clicked":
-        count = int(parse_number_value(recipient.get("product_sheet_click_count"), 0)) + 1
-        updates.update({
-            "product_sheet_first_clicked_at": recipient.get("product_sheet_first_clicked_at") or event_time,
-            "product_sheet_last_clicked_at": event_time,
-            "product_sheet_click_count": count,
-        })
-    elif event_type == "stockfiller_clicked":
-        count = int(parse_number_value(recipient.get("stockfiller_click_count"), 0)) + 1
-        updates.update({
-            "stockfiller_first_clicked_at": recipient.get("stockfiller_first_clicked_at") or event_time,
-            "stockfiller_last_clicked_at": event_time,
-            "stockfiller_click_count": count,
-        })
-    elif event_type in {"hardbounce", "invalid"}:
-        updates["bounce_type"] = event_type
-    elif event_type in {"blocked", "spam"}:
-        updates["blocked_at"] = event_time
-        updates["bounce_type"] = event_type
-    elif event_type == "unsubscribed":
-        updates["unsubscribed_at"] = event_time
-    update_sheet_row(sheets[EMAIL_RECIPIENTS_SHEET], recipient_row, recipient_headers, updates)
-    return True
+    if new_events:
+        event_sheet = sheets[EMAIL_EVENTS_SHEET]
+        event_sheet.append_rows(
+            [build_worksheet_row(EMAIL_EVENTS_COLUMNS, event) for event in new_events],
+            value_input_option="RAW",
+        )
+
+    events_by_message_id = defaultdict(list)
+    for event in all_events:
+        message_id = normalize_message_id(event.get("brevo_message_id"))
+        if message_id in affected_message_ids:
+            events_by_message_id[message_id].append(event)
+
+    recipient_updates = []
+    for message_id in affected_message_ids:
+        recipient_info = recipients_by_message_id.get(message_id)
+        if not recipient_info:
+            continue
+        row_index, recipient = recipient_info
+        recipient_updates.append((row_index, _recipient_summary(recipient, events_by_message_id[message_id])))
+    batch_update_sheet_rows(sheets[EMAIL_RECIPIENTS_SHEET], recipient_headers, recipient_updates)
+    return len(new_events)
+
+
+def process_brevo_event(spreadsheet, sheets, payload):
+    return bool(process_brevo_events(spreadsheet, sheets, [payload]))
+
+
+def _process_brevo_batch_with_retry(payloads):
+    def operation():
+        spreadsheet = get_spreadsheet_with_retry()
+        sheets = ensure_email_worksheets(spreadsheet)
+        with _brevo_processing_lock:
+            return process_brevo_events(spreadsheet, sheets, payloads)
+
+    return run_with_retry(operation, label="Brevo event batch")
+
+
+def _brevo_event_worker():
+    while True:
+        first = _brevo_event_queue.get()
+        batch = [first]
+        try:
+            # Small coalescing window greatly reduces Sheets calls during webhook bursts.
+            time.sleep(0.05)
+            while len(batch) < 100:
+                try:
+                    batch.append(_brevo_event_queue.get_nowait())
+                except Empty:
+                    break
+            _process_brevo_batch_with_retry(batch)
+        except Exception:
+            app.logger.exception("Brevo event batch failed after retries")
+        finally:
+            for _ in batch:
+                _brevo_event_queue.task_done()
+
+
+def fetch_brevo_events(message_id):
+    api_key = str(os.environ.get("BREVO_API_KEY", "")).strip()
+    if not api_key:
+        raise RuntimeError("BREVO_API_KEY is missing")
+    normalized_id = normalize_message_id(message_id)
+
+    def operation():
+        response = requests.get(
+            BREVO_EVENTS_URL,
+            headers={"api-key": api_key, "accept": "application/json"},
+            params={"messageId": f"<{normalized_id}>", "limit": 500, "sort": "asc"},
+            timeout=20,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        events = payload.get("events", []) if isinstance(payload, dict) else []
+        for event in events:
+            event.setdefault("messageId", normalized_id)
+        return events
+
+    return run_with_retry(operation, attempts=4, base_delay=1, label=f"Brevo API {normalized_id}")
+
+
+def reconcile_recent_brevo_events(*, days=None, max_recipients=None):
+    if not _brevo_reconcile_lock.acquire(blocking=False):
+        return {"ok": True, "status": "already_running"}
+    try:
+        days = int(days or BREVO_RECONCILE_DAYS)
+        max_recipients = int(max_recipients or BREVO_RECONCILE_MAX_RECIPIENTS)
+
+        def load_recent_recipients():
+            spreadsheet = get_spreadsheet_with_retry()
+            sheets = ensure_email_worksheets(spreadsheet)
+            return worksheet_snapshot(
+                sheets[EMAIL_RECIPIENTS_SHEET], expected_columns=EMAIL_RECIPIENTS_COLUMNS
+            )[1]
+
+        recipient_rows = run_with_retry(
+            load_recent_recipients, label="Brevo reconciliation Sheets read"
+        )
+        cutoff = stockholm_today() - timedelta(days=max(1, min(30, days)))
+        candidates = []
+        for _, recipient in recipient_rows:
+            message_id = normalize_message_id(recipient.get("brevo_message_id"))
+            sent_at = parse_datetime_value(recipient.get("sent_at"))
+            if (
+                message_id
+                and str(recipient.get("send_status") or "").casefold() == "sent"
+                and sent_at
+                and sent_at.date() >= cutoff
+            ):
+                candidates.append((sent_at, message_id))
+        candidates.sort(reverse=True)
+
+        fetched = []
+        failures = []
+        seen_message_ids = set()
+        for _, message_id in candidates:
+            if message_id in seen_message_ids or len(seen_message_ids) >= max_recipients:
+                continue
+            seen_message_ids.add(message_id)
+            try:
+                fetched.extend(fetch_brevo_events(message_id))
+            except Exception as exc:
+                failures.append({"message_id": message_id, "error": str(exc)[:250]})
+                app.logger.warning("Could not reconcile Brevo message %s: %s", message_id, exc)
+
+        inserted = _process_brevo_batch_with_retry(fetched) if fetched else 0
+        return {
+            "ok": True,
+            "status": "completed",
+            "checked_recipients": len(seen_message_ids),
+            "fetched_events": len(fetched),
+            "inserted_events": inserted,
+            "failures": failures,
+        }
+    finally:
+        _brevo_reconcile_lock.release()
+
+
+def _brevo_reconcile_worker():
+    while True:
+        time.sleep(BREVO_RECONCILE_INTERVAL_SECONDS)
+        try:
+            reconcile_recent_brevo_events()
+        except Exception:
+            app.logger.exception("Scheduled Brevo reconciliation failed")
+
+
+def start_brevo_background_workers():
+    global _brevo_workers_started
+    with _brevo_worker_start_lock:
+        if _brevo_workers_started:
+            return
+        threading.Thread(target=_brevo_event_worker, name="brevo-events", daemon=True).start()
+        threading.Thread(target=_brevo_reconcile_worker, name="brevo-reconcile", daemon=True).start()
+        _brevo_workers_started = True
 
 
 @app.route("/api/brevo/webhook/<secret>", methods=["POST"])
@@ -1826,10 +2081,29 @@ def brevo_webhook(secret):
         return jsonify({"ok": False, "error": "not_found"}), 404
     payload = request.get_json(silent=True)
     events = payload if isinstance(payload, list) else [payload or {}]
-    spreadsheet = get_spreadsheet_with_retry()
-    sheets = ensure_email_worksheets(spreadsheet)
-    processed = sum(1 for event in events if process_brevo_event(spreadsheet, sheets, event))
-    return jsonify({"ok": True, "processed": processed})
+    start_brevo_background_workers()
+    queued = 0
+    try:
+        for event in events:
+            _brevo_event_queue.put_nowait(event)
+            queued += 1
+    except Full:
+        return jsonify({"ok": False, "error": "event_queue_full", "queued": queued}), 503
+    return jsonify({"ok": True, "queued": queued}), 202
+
+
+@app.route("/api/brevo/reconcile/<secret>", methods=["POST"])
+def brevo_reconcile(secret):
+    expected = str(os.environ.get("BREVO_WEBHOOK_SECRET", "")).strip()
+    if not expected:
+        return jsonify({"ok": False, "error": "webhook_not_configured"}), 503
+    if secret != expected:
+        return jsonify({"ok": False, "error": "not_found"}), 404
+    result = reconcile_recent_brevo_events(
+        days=request.args.get("days", type=int),
+        max_recipients=request.args.get("max_recipients", type=int),
+    )
+    return jsonify(result), (202 if result.get("status") == "already_running" else 200)
 
 
 @app.route("/customers", methods=["GET"])
@@ -1887,7 +2161,7 @@ def export_contact_log():
     filters = get_contact_log_filter_values(request.args)
     payload = build_contact_log_payload(contact_rows, filters)
     workbook = build_xlsx(payload["columns"], payload["rows"])
-    filename = f"kontaktlogg_{date.today().isoformat()}.xlsx"
+    filename = f"kontaktlogg_{stockholm_today().isoformat()}.xlsx"
     return Response(
         workbook,
         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -2125,7 +2399,7 @@ def get_customer_stats(customer_name):
 @app.route("/customer-insights", methods=["GET"])
 def get_customer_insights():
     spreadsheet = get_spreadsheet_with_retry()
-    today = date.today()
+    today = stockholm_today()
     customers = get_customer_rows(spreadsheet)
 
     contact_rows = get_contact_rows(spreadsheet)
@@ -2271,7 +2545,7 @@ def get_customer_insights():
 @app.route("/followup-insights", methods=["GET"])
 def get_followup_insights():
     spreadsheet = get_spreadsheet_with_retry()
-    today = date.today()
+    today = stockholm_today()
     weeks = build_recent_weeks(today)
     week_keys = {w["key"] for w in weeks}
     current_week_key = weeks[-1]["key"]
@@ -2417,7 +2691,7 @@ def get_followup_insights():
     )
 
     return jsonify({
-        "generated_at": datetime.now().isoformat(timespec="minutes"),
+        "generated_at": stockholm_now().isoformat(timespec="minutes"),
         "selected_responsible": selected_responsible,
         "responsible_options": responsible_options,
         "weeks": weeks,
@@ -2538,7 +2812,7 @@ def add_contact(customer_name):
         return jsonify({"ok": False, "error": "freezer_selection_required"}), 400
 
     row_data = {
-        "date_time": data.get("date_time", datetime.now().strftime("%Y-%m-%d %H:%M")),
+        "date_time": data.get("date_time", stockholm_now().strftime("%Y-%m-%d %H:%M")),
         "sales_person": data.get("sales_person", ""),
         "customer": customer_name,
         "contact_channel": data.get("contact_channel", ""),
@@ -2559,4 +2833,5 @@ def config():
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    start_brevo_background_workers()
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT") or 5000), debug=False)

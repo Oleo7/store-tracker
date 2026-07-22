@@ -72,3 +72,26 @@ Byt till `EMAIL_SEND_MODE=live` först när:
 2. testmejl från samtliga avsändardomäner har godkänts,
 3. öppnings- och klickhändelser når kundens tidslinje,
 4. Reply-To och den personliga signaturen har verifierats.
+
+## Robust eventhantering och avstämning
+
+Webhooken svarar snabbt och lägger händelser i en intern kö. En bakgrundstråd
+skriver dem batchat till Google Sheets med exponentiella omförsök. Råloggen
+dedupliceras semantiskt och mottagarsammanfattningen byggs om från råloggen,
+så en halvfärdig Sheets-skrivning kan köras igen utan dubbla räknare.
+
+Store Tracker stämmer dessutom automatiskt av nyligen skickade Message ID:n mot
+Brevos event-API. Det reparerar leverans-, öppnings- och klickhändelser som inte
+nådde webhooken. Följande miljövariabler är valfria:
+
+- `BREVO_RECONCILE_INTERVAL_SECONDS` (standard `900`)
+- `BREVO_RECONCILE_DAYS` (standard `3`)
+- `BREVO_RECONCILE_MAX_RECIPIENTS` (standard `100`)
+
+En omedelbar manuell avstämning kan startas med ett `POST`-anrop till:
+
+```text
+https://<store-tracker-host>/api/brevo/reconcile/<BREVO_WEBHOOK_SECRET>
+```
+
+Alla nya tider i mejltabellerna normaliseras till `Europe/Stockholm`.
