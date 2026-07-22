@@ -71,7 +71,8 @@ PLACEHOLDER_NAME_WORDS = {
 }
 GENERIC_EMAIL_WORDS = PLACEHOLDER_NAME_WORDS | {
     "bestallning", "beställning", "butikschef", "bc", "ekonomi", "faktura", "gem",
-    "kolonial", "mail", "reception", "sc", "scvaruflode", "varuflode", "varuflöde",
+    "djupfryst", "frys", "frysansvarig", "kolonial", "lager", "mail", "mejeri",
+    "reception", "sc", "scvaruflode", "service", "varuflode", "varuflöde",
 }
 
 
@@ -571,7 +572,7 @@ def render_reminder_email(*, greeting_name, subject, intro_text, closing_text, o
                           product_sheet_url, stockfiller_url, sender,
                           product_sheet_label="Se Produktblad",
                           stockfiller_label="Beställ direkt via Stockfiller"):
-    greeting = f"Hej {first_name(greeting_name)}," if first_name(greeting_name) else "Hej!"
+    greeting = f"Hej {first_name(greeting_name)}," if first_name(greeting_name) else "Hej,"
     personalized_intro = _personalize_intro_text(intro_text, greeting)
     product_sheet_url = safe_http_url(product_sheet_url)
     stockfiller_url = safe_http_url(stockfiller_url)

@@ -102,6 +102,14 @@ class ReminderEmailHelperTests(unittest.TestCase):
             recipient_greeting_name("stenungsund.bc@coopvast.se", ""),
             "",
         )
+        self.assertEqual(
+            recipient_greeting_name("djupfryst.mora@maxi.ica.se", "Jonathan"),
+            "Jonathan",
+        )
+        self.assertEqual(
+            recipient_greeting_name("djupfryst.mora@maxi.ica.se", ""),
+            "",
+        )
         self.assertEqual(first_name("Kund ICA Nära Ahlgrens Torg"), "")
         self.assertEqual(first_name(". ICA Maxi Nyköping"), "")
 
@@ -171,6 +179,19 @@ class ReminderEmailHelperTests(unittest.TestCase):
         self.assertIn("<strong>Fri frakt ingår fortfarande.</strong>", rendered["html"])
         self.assertNotIn("**Fri frakt", rendered["text"])
         self.assertIn("Olle", rendered["text"])
+
+        without_name = render_reminder_email(
+            greeting_name="",
+            subject="Test",
+            intro_text="Hej (namn)\n\nKontroll",
+            closing_text="Klart",
+            order_rows=[],
+            product_sheet_url="",
+            stockfiller_url="",
+            sender={"name": "Olle"},
+        )
+        self.assertIn("Hej,", without_name["text"])
+        self.assertNotIn("Hej!", without_name["text"])
 
     def test_reminder_filter_requires_due_customer_without_recent_contact_or_email(self):
         customer = {

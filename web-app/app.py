@@ -1123,10 +1123,8 @@ def blocked_recipient_reasons(recipient_rows):
 
 def build_recipient_options(customer, latest_order, recipient_rows):
     order_emails = split_email_values(customer.get("email_last_order"))
-    customer_emails = split_email_values(customer.get("email"))
     combined = split_email_values(customer.get("email_last_order"), customer.get("email"))
     order_keys = {normalize_email(item["email"]) for item in order_emails}
-    customer_keys = {normalize_email(item["email"]) for item in customer_emails}
     blocked = blocked_recipient_reasons(recipient_rows)
     recipients = []
     for item in combined:
@@ -1137,7 +1135,7 @@ def build_recipient_options(customer, latest_order, recipient_rows):
         source = "email_last_order" if key in order_keys else "email"
         greeting = recipient_greeting_name(
             email,
-            customer.get("name") if key in customer_keys else "",
+            customer.get("name", ""),
         )
         blocked_reason = blocked.get(key, "")
         recipients.append({
