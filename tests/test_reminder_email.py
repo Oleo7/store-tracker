@@ -25,6 +25,7 @@ from reminder_email import (  # noqa: E402
     classify_customer_relationship,
     brevo_event_time,
     first_name,
+    recipient_greeting_name,
     normalize_brevo_event,
     render_reminder_email,
     round_store_count_to_ten,
@@ -84,6 +85,26 @@ class FakeSpreadsheet:
 
 
 class ReminderEmailHelperTests(unittest.TestCase):
+    def test_recipient_greeting_prefers_personal_email_and_rejects_placeholders(self):
+        self.assertEqual(
+            recipient_greeting_name("rebecca.rydberg@nara.ica.se", ""),
+            "Rebecca",
+        )
+        self.assertEqual(
+            recipient_greeting_name("hanna.dahlberg@nara.ica.se", ""),
+            "Hanna",
+        )
+        self.assertEqual(
+            recipient_greeting_name("coopsimrishamn.gem@coop.se", ""),
+            "",
+        )
+        self.assertEqual(
+            recipient_greeting_name("stenungsund.bc@coopvast.se", ""),
+            "",
+        )
+        self.assertEqual(first_name("Kund ICA Nära Ahlgrens Torg"), "")
+        self.assertEqual(first_name(". ICA Maxi Nyköping"), "")
+
     def test_brevo_api_event_aliases_and_utc_time_are_normalized(self):
         self.assertEqual(normalize_brevo_event({"event": "requests"}), "sent")
         self.assertEqual(normalize_brevo_event({"event": "clicks"}), "clicked")
@@ -357,6 +378,25 @@ class TimelineAndWebhookTests(unittest.TestCase):
             sheets[app_module.EMAIL_RECIPIENTS_SHEET], expected_columns=EMAIL_RECIPIENTS_COLUMNS
         )[0]
         self.assertEqual(recipient["delivered_at"], "2026-07-04 12:00:00")
+
+    def test_brevo_security_scanner_open_is_kept_raw_but_not_counted(self):
+        sheets = self._sheets()
+        spreadsheet = FakeSpreadsheet(list(sheets.values()))
+        scanner = {
+            "event": "opened", "message-id": "msg-1", "email": "buyer@example.com",
+            "date": "2026-07-04T10:00:00Z",
+            "user_agent": "Brevo/1.0 (transac-phishing-consumer 2.33.4)",
+        }
+        human = {
+            "event": "opened", "message-id": "msg-1", "email": "buyer@example.com",
+            "date": "2026-07-04T10:01:00Z", "user_agent": "Mozilla/5.0",
+        }
+        self.assertEqual(app_module.process_brevo_events(spreadsheet, sheets, [scanner, human]), 2)
+        recipient = app_module.worksheet_to_dicts(
+            sheets[app_module.EMAIL_RECIPIENTS_SHEET], expected_columns=EMAIL_RECIPIENTS_COLUMNS
+        )[0]
+        self.assertEqual(recipient["open_count"], 1)
+        self.assertEqual(len(sheets[app_module.EMAIL_EVENTS_SHEET].values), 3)
 
     def test_reconciliation_backfills_delivery_open_and_product_click(self):
         sheets = self._sheets()

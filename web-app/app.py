@@ -56,6 +56,7 @@ from reminder_email import (
     normalize_proposal_type,
     round_store_count_to_ten,
     render_email_proposal,
+    recipient_greeting_name,
     safe_http_url,
     split_email_values,
     stockholm_now,
@@ -1127,8 +1128,6 @@ def build_recipient_options(customer, latest_order, recipient_rows):
     order_keys = {normalize_email(item["email"]) for item in order_emails}
     customer_keys = {normalize_email(item["email"]) for item in customer_emails}
     blocked = blocked_recipient_reasons(recipient_rows)
-    latest_buyer_key = normalize_email(latest_order.get("buyer_email"))
-
     recipients = []
     for item in combined:
         if not item["valid"]:
@@ -1136,12 +1135,10 @@ def build_recipient_options(customer, latest_order, recipient_rows):
         email = item["email"]
         key = normalize_email(email)
         source = "email_last_order" if key in order_keys else "email"
-        if key == latest_buyer_key or source == "email_last_order":
-            greeting = first_name(latest_order.get("placed_by"))
-        elif key in customer_keys:
-            greeting = first_name(customer.get("name"))
-        else:
-            greeting = ""
+        greeting = recipient_greeting_name(
+            email,
+            customer.get("name") if key in customer_keys else "",
+        )
         blocked_reason = blocked.get(key, "")
         recipients.append({
             "email": email,
@@ -1825,6 +1822,13 @@ def _recipient_summary(recipient, event_rows):
     times_by_type = defaultdict(list)
     for event in ordered:
         event_type = str(event.get("event_type") or "").strip().casefold()
+        if (
+            event_type == "opened"
+            and "transac-phishing-consumer" in str(event.get("payload_json") or "").casefold()
+        ):
+            # Brevo's own security scanner loads the tracking pixel immediately.
+            # Keep the raw event for audit, but do not count it as a customer open.
+            continue
         event_time = str(event.get("event_time") or "").strip()
         if event_time:
             times_by_type[event_type].append(event_time)

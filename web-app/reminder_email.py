@@ -65,6 +65,14 @@ VISIBLE_EMAIL_EVENT_TYPES = {
 
 BLOCKING_SEND_STATUSES = {"hardbounce", "blocked", "invalid", "spam", "unsubscribed"}
 STOCKHOLM_TIMEZONE = ZoneInfo("Europe/Stockholm")
+PLACEHOLDER_NAME_WORDS = {
+    "butik", "butiken", "customer", "inköp", "info", "kontakt", "kontaktperson",
+    "kund", "order", "sales",
+}
+GENERIC_EMAIL_WORDS = PLACEHOLDER_NAME_WORDS | {
+    "bestallning", "beställning", "butikschef", "bc", "ekonomi", "faktura", "gem",
+    "kolonial", "mail", "reception", "sc", "scvaruflode", "varuflode", "varuflöde",
+}
 
 
 def is_yes(value):
@@ -104,9 +112,34 @@ def first_name(value):
     text = re.sub(r"\s+", " ", str(value or "").strip())
     if not text or "@" in text or not re.search(r"[a-zåäö]", text, re.IGNORECASE):
         return ""
-    if text.casefold() in {"butik", "kund", "inköp", "info", "order"}:
+    first = text.split(" ", 1)[0].strip(".,:;–—-_()[]")
+    if (
+        not first
+        or not re.search(r"[a-zåäö]", first, re.IGNORECASE)
+        or first.casefold() in PLACEHOLDER_NAME_WORDS
+    ):
         return ""
-    return text.split(" ", 1)[0]
+    return first
+
+
+def greeting_name_from_email(value):
+    """Infer a first name only when the mailbox looks personal, never store-generic."""
+    email = normalize_email(value)
+    if not is_valid_email(email):
+        return ""
+    local = email.rsplit("@", 1)[0].split("+", 1)[0]
+    words = [word for word in re.split(r"[._-]+", local) if word]
+    if not words or any(word in GENERIC_EMAIL_WORDS for word in words):
+        return ""
+    first = words[0]
+    if not re.fullmatch(r"[a-zåäö]{2,}(?:-[a-zåäö]{2,})?", first, re.IGNORECASE):
+        return ""
+    return "-".join(part[:1].upper() + part[1:] for part in first.split("-"))
+
+
+def recipient_greeting_name(email, customer_name=""):
+    """Choose the safest editable greeting: personal mailbox, then explicit CRM name."""
+    return greeting_name_from_email(email) or first_name(customer_name)
 
 
 def safe_http_url(value):
