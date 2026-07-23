@@ -50,10 +50,12 @@ EMAIL_PROPOSAL_PRODUCT_SETTINGS = {
 }
 
 EMAIL_PROPOSAL_CTA_LABELS = {
-    "reminder": "Se Produktblad",
-    "reactivation": "Se Produktblad",
-    "new_customer": "Se nykundserbjudande",
+    "reminder": "Se sortiment och priser",
+    "reactivation": "Se sortiment och priser",
+    "new_customer": "Se sortiment och priser",
 }
+
+STOCKFILLER_CTA_LABEL = "Beställ i Stockfiller"
 
 STANDARD_PROPOSAL_SKUS = ("sku_10003", "sku_10005", "sku_10002", "sku_10006")
 
@@ -450,72 +452,82 @@ def build_latest_order_context(order_rows, customer_name):
 
 
 def build_email_proposal_copy(proposal_type, customer_name, latest_delivery_date="",
-                              has_order_rows=False, unique_store_count=0, untried_count=0):
+                              has_order_rows=False, unique_store_count=0, untried_count=0,
+                              today=None):
     proposal_type = normalize_proposal_type(proposal_type)
     customer_name = str(customer_name or "").strip()
     rounded_store_count = round_store_count_to_ten(unique_store_count)
+    today = today or stockholm_today()
+    delivery_date = _parse_date(latest_delivery_date)
+    days_since_delivery = (
+        max(0, (today - delivery_date).days)
+        if delivery_date else None
+    )
     if proposal_type == "reactivation":
-        subject = "Polarbär växer och sänker priserna!"
+        subject = "Lägre priser på Polarbär! Dags att ta in?"
+        if days_since_delivery is not None:
+            weeks_since_delivery = max(1, (days_since_delivery + 3) // 7)
+            delivery_sentence = (
+                f"Det var {weeks_since_delivery} veckor sedan vi senast levererade Polarbär till er."
+            )
+        else:
+            delivery_sentence = "Det var ett tag sedan vi senast levererade Polarbär till er."
         intro = (
             "Hej (namn)\n\n"
-            "Det var ett tag sedan vi senast levererade Polarbär till er.\n\n"
-            f"Sedan er senaste beställning har Polarbär köpts in av över {rounded_store_count} butiker.\n"
-            "De större volymerna gör att vi nu har kunnat **sänka inköpspriset till 31,50 kr "
-            "per bägare redan från 12 DFP**, ända ned till **29 kr vid större volymer**.\n\n"
-            "**Fri frakt ingår fortfarande.**\n\n"
-            "För att göra det enkelt föreslår jag en mindre order med våra fyra mest populära smaker:"
+            f"{delivery_sentence} Sedan dess har vi sänkt ordinarie pris **från 35 kr/KFP till "
+            "32 kr/KFP!** Och ner till **29 kr** vid större order.\n\n"
+            "Jag föreslår en mindre omstart med våra mest lättsålda smaker.\n\n"
+            "**Svara bara KÖR så lägger jag ordern,** eller klicka in på Stockfiller för att "
+            "beställa själv.\n"
+            "**Fri frakt** som vanligt!"
         )
-        closing = (
-            "Svara bara på det här mejlet med ”kör”, så ordnar jag beställningen.\n\n"
-            "I produktbladet ser du de nya priserna och vårt återaktiveringserbjudande. "
-            "Du kan också beställa direkt i Stockfiller via länken nedan."
-        )
+        closing = "I produktbladet finns nya priser, marginaler och hela sortimentet."
     elif proposal_type == "new_customer":
-        subject = f"Ta in Polarbär hos {customer_name}?"
+        subject = "Testa Polarbär för 29 kr/KFP – fri frakt"
         store_sentence = (
-            f"Totalt har nu över {rounded_store_count} butiker köpt in Polarbär och vi fortsätter växa."
+            f"Över {rounded_store_count} butiker har köpt in Polarbär"
             if rounded_store_count
-            else "Polarbär finns redan i butiker runt om i Sverige och vi fortsätter växa."
+            else "Butiker runt om i Sverige har köpt in Polarbär"
         )
         intro = (
-            f"Hej (namn)\n\n{store_sentence}\n"
-            "Varumärket har blivit populärt på sociala medier och våra större volymer gör att vi nu "
-            "har kunnat **sänka inköpspriset till 31,50 kr per bägare redan från 12 DFP**, ända ned "
-            "till **29 kr vid större volymer**.\n\n"
-            "**Fri frakt ingår fortfarande.**\n\n"
-            "För att göra det enkelt föreslår jag en mindre order med våra fyra mest populära smaker:"
+            "Hej (namn)\n\n"
+            "För att göra det enkelt för alla att testa Polarbär erbjuder vi nya butiker "
+            "**29 kr/KFP på hela första ordern**.\n"
+            "Med **83% återköpsgrad** är vi trygga i att rekommendera ett startpaket med våra "
+            "fyra populäraste smaker."
         )
         closing = (
-            "Svara bara på det här mejlet med ”kör”, så ordnar jag en första beställning.\n\n"
-            "I produktbladet ser du vårt nykundserbjudande. Du kan också beställa direkt i "
-            "Stockfiller via länken nedan."
+            "**Svara bara KÖR så lägger jag ordern. Fri frakt,** som alltid!\n\n"
+            f"{store_sentence} och varumärket har blivit populärt på sociala medier. Större "
+            "volymer gör att vi nu även kan **sänka ordinarie pris rejält**, så att fler butiker "
+            "kan ha Polarbär i ordinarie hylla.\n\n"
+            "Se produktbladet för nya priser, marginaler och hela sortimentet."
         )
     else:
-        subject = f"Dags att fylla på Polarbär hos {customer_name}?"
-        delivery_text = swedish_short_date(latest_delivery_date)
-        if delivery_text:
+        subject = "Polarbär sänker priset! Dags att fylla på?"
+        if days_since_delivery is not None:
             intro = (
                 "Hej (namn)\n\n"
-                f"Jag ville bara stämma av hur Polarbär-lagret ser ut efter er senaste leverans "
-                f"den {delivery_text}. Börjar det bli dags att fylla på?"
+                f"Det är {days_since_delivery} dagar sedan er senaste Polarbär-leverans. "
+                "Jag har därför lagt ett påfyllnadsförslag utifrån er senaste order."
             )
         else:
             intro = (
                 "Hej (namn)\n\n"
-                "Jag ville bara stämma av hur Polarbär-lagret ser ut hos er. Börjar det bli dags att fylla på?"
+                "Jag har lagt ett påfyllnadsförslag utifrån er senaste order."
             )
-        if has_order_rows:
-            intro += "\n\nBaserat på er senaste order föreslår jag:"
-        closing = (
-            "Svara bara på det här mejlet med ”kör”, så ordnar jag beställningen.\n\n"
-            "Kika gärna in vårt produktblad eller beställ själv i Stockfiller via länken nedan."
+        intro += (
+            "\n\n**Svara bara KÖR så lägger jag ordern,** eller klicka in på Stockfiller för "
+            "att beställa själv.\n"
+            "**Fri frakt** som vanligt!"
         )
+        closing = "I produktbladet finns nya priser, marginaler och hela sortimentet."
     return {
         "subject": subject,
         "intro_text": intro,
         "closing_text": closing,
         "product_sheet_label": EMAIL_PROPOSAL_CTA_LABELS[proposal_type],
-        "stockfiller_label": "Beställ direkt via Stockfiller",
+        "stockfiller_label": STOCKFILLER_CTA_LABEL,
     }
 
 
@@ -570,8 +582,8 @@ def _personalize_intro_text(intro_text, greeting):
 
 def render_reminder_email(*, greeting_name, subject, intro_text, closing_text, order_rows,
                           product_sheet_url, stockfiller_url, sender,
-                          product_sheet_label="Se Produktblad",
-                          stockfiller_label="Beställ direkt via Stockfiller"):
+                          product_sheet_label="Se sortiment och priser",
+                          stockfiller_label=STOCKFILLER_CTA_LABEL):
     greeting = f"Hej {first_name(greeting_name)}," if first_name(greeting_name) else "Hej,"
     personalized_intro = _personalize_intro_text(intro_text, greeting)
     product_sheet_url = safe_http_url(product_sheet_url)
@@ -588,15 +600,15 @@ def render_reminder_email(*, greeting_name, subject, intro_text, closing_text, o
         "display:inline-block;background:#1a1a2e;color:#ffffff;text-decoration:none;"
         "font-weight:700;padding:12px 16px;border-radius:10px;margin:0 8px 10px 0"
     )
-    if product_sheet_url:
-        buttons.append(
-            f'<a href="{escape(product_sheet_url, quote=True)}" style="{button_style}">'
-            f"{escape(str(product_sheet_label or 'Se Produktblad'))}</a>"
-        )
     if stockfiller_url:
         buttons.append(
             f'<a href="{escape(stockfiller_url, quote=True)}" style="{button_style}">'
-            f"{escape(str(stockfiller_label or 'Beställ direkt via Stockfiller'))}</a>"
+            f"{escape(str(stockfiller_label or STOCKFILLER_CTA_LABEL))}</a>"
+        )
+    if product_sheet_url:
+        buttons.append(
+            f'<a href="{escape(product_sheet_url, quote=True)}" style="{button_style}">'
+            f"{escape(str(product_sheet_label or 'Se sortiment och priser'))}</a>"
         )
 
     sender_name = str(sender.get("name", "")).strip()
@@ -622,10 +634,10 @@ def render_reminder_email(*, greeting_name, subject, intro_text, closing_text, o
     if order_lines:
         text_parts.extend(["", *order_lines])
     text_parts.extend(["", _plain_text_markup(closing_text).strip()])
-    if product_sheet_url:
-        text_parts.extend(["", f"{product_sheet_label}: {product_sheet_url}"])
     if stockfiller_url:
-        text_parts.append(f"{stockfiller_label}: {stockfiller_url}")
+        text_parts.extend(["", f"{stockfiller_label}: {stockfiller_url}"])
+    if product_sheet_url:
+        text_parts.append(f"{product_sheet_label}: {product_sheet_url}")
     text_parts.extend(["", "Vänliga hälsningar,", sender_name, sender_role])
     if sender_phone:
         text_parts.append(f"📞 {sender_phone}")

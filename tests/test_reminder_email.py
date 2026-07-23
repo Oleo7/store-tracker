@@ -147,14 +147,13 @@ class ReminderEmailHelperTests(unittest.TestCase):
 
     def test_default_copy_has_generic_fallback(self):
         copy = build_default_copy("Testbutiken", "", False)
-        self.assertIn("Testbutiken", copy["subject"])
+        self.assertEqual(copy["subject"], "Polarbär sänker priset! Dags att fylla på?")
         self.assertTrue(copy["intro_text"].startswith("Hej (namn)\n\n"))
-        self.assertIn("hos er", copy["intro_text"])
-        self.assertNotIn("senaste leverans den", copy["intro_text"])
+        self.assertIn("påfyllnadsförslag utifrån er senaste order", copy["intro_text"])
+        self.assertIn("**Svara bara KÖR så lägger jag ordern,**", copy["intro_text"])
         self.assertEqual(
             copy["closing_text"],
-            "Svara bara på det här mejlet med ”kör”, så ordnar jag beställningen.\n\n"
-            "Kika gärna in vårt produktblad eller beställ själv i Stockfiller via länken nedan.",
+            "I produktbladet finns nya priser, marginaler och hela sortimentet.",
         )
 
     def test_html_and_text_rendering_escape_content_and_include_ctas(self):
@@ -175,7 +174,16 @@ class ReminderEmailHelperTests(unittest.TestCase):
         self.assertIn("Hej Anna,", rendered["html"])
         self.assertNotIn("Hej (namn)", rendered["html"])
         self.assertEqual(rendered["html"].count("Hej Anna,"), 1)
-        self.assertIn("Se Produktblad", rendered["html"])
+        self.assertIn("Se sortiment och priser", rendered["html"])
+        self.assertIn("Beställ i Stockfiller", rendered["html"])
+        self.assertLess(
+            rendered["html"].index("Beställ i Stockfiller"),
+            rendered["html"].index("Se sortiment och priser"),
+        )
+        self.assertLess(
+            rendered["text"].index("Beställ i Stockfiller"),
+            rendered["text"].index("Se sortiment och priser"),
+        )
         self.assertIn("<strong>Fri frakt ingår fortfarande.</strong>", rendered["html"])
         self.assertNotIn("**Fri frakt", rendered["text"])
         self.assertIn("Olle", rendered["text"])
@@ -281,23 +289,44 @@ class ReminderEmailHelperTests(unittest.TestCase):
         self.assertEqual(current[0]["product"], settings["sku_10003"])
         self.assertEqual(current[0]["quantity"], "2")
 
-    def test_proposal_copy_rounds_unique_store_count_half_up_and_uses_new_copy(self):
+    def test_proposal_copy_uses_new_sales_copy_and_calculated_intervals(self):
         self.assertEqual(round_store_count_to_ten(344), 340)
         self.assertEqual(round_store_count_to_ten(345), 350)
         self.assertEqual(round_store_count_to_ten(348), 350)
-        copy = build_email_proposal_copy(
-            "new_customer", "Nya butiken", has_order_rows=True, unique_store_count=345
+
+        reminder = build_email_proposal_copy(
+            "reminder", "Aktiv butik", latest_delivery_date="2026-07-10",
+            has_order_rows=True, today=date(2026, 7, 20),
         )
-        self.assertIn("över 350 butiker", copy["intro_text"])
-        self.assertIn("**Fri frakt ingår fortfarande.**", copy["intro_text"])
-        self.assertEqual(copy["product_sheet_label"], "Se nykundserbjudande")
+        self.assertEqual(reminder["subject"], "Polarbär sänker priset! Dags att fylla på?")
+        self.assertIn("Det är 10 dagar sedan", reminder["intro_text"])
+        self.assertEqual(reminder["intro_text"].count("påfyllnadsförslag"), 1)
+        self.assertIn("**Fri frakt** som vanligt!", reminder["intro_text"])
 
         reactivation = build_email_proposal_copy(
-            "reactivation", "Gamla butiken", has_order_rows=True, unique_store_count=348
+            "reactivation", "Gamla butiken", latest_delivery_date="2026-05-11",
+            has_order_rows=True, unique_store_count=348, today=date(2026, 7, 20),
         )
-        self.assertEqual(reactivation["subject"], "Polarbär växer och sänker priserna!")
-        self.assertIn("över 350 butiker", reactivation["intro_text"])
-        self.assertEqual(reactivation["product_sheet_label"], "Se Produktblad")
+        self.assertEqual(reactivation["subject"], "Lägre priser på Polarbär! Dags att ta in?")
+        self.assertIn("Det var 10 veckor sedan", reactivation["intro_text"])
+        self.assertIn("**från 35 kr/KFP till 32 kr/KFP!**", reactivation["intro_text"])
+        self.assertIn("**Fri frakt** som vanligt!", reactivation["intro_text"])
+
+        new_customer = build_email_proposal_copy(
+            "new_customer", "Nya butiken", has_order_rows=True, unique_store_count=345,
+            today=date(2026, 7, 20),
+        )
+        self.assertEqual(
+            new_customer["subject"], "Testa Polarbär för 29 kr/KFP – fri frakt"
+        )
+        self.assertIn("**29 kr/KFP på hela första ordern**", new_customer["intro_text"])
+        self.assertIn("**83% återköpsgrad**", new_customer["intro_text"])
+        self.assertIn("Över 350 butiker", new_customer["closing_text"])
+        self.assertIn("**Svara bara KÖR så lägger jag ordern. Fri frakt,**", new_customer["closing_text"])
+
+        for copy in (reminder, reactivation, new_customer):
+            self.assertEqual(copy["stockfiller_label"], "Beställ i Stockfiller")
+            self.assertEqual(copy["product_sheet_label"], "Se sortiment och priser")
 
 
 class AuthenticationTests(unittest.TestCase):
@@ -950,8 +979,8 @@ class ReminderSendRouteTests(unittest.TestCase):
             reactivation["links"]["product_sheet_url"],
             "https://drive.google.com/reactivation",
         )
-        self.assertEqual(reactivation["subject"], "Polarbär växer och sänker priserna!")
-        self.assertIn("sänka inköpspriset", reactivation["intro_text"])
+        self.assertEqual(reactivation["subject"], "Lägre priser på Polarbär! Dags att ta in?")
+        self.assertIn("sänkt ordinarie pris", reactivation["intro_text"])
         self.assertEqual([row["quantity"] for row in reactivation["order_rows"]], ["4"] * 4)
         self.assertTrue(all("new_for_customer" not in row for row in reactivation["order_rows"]))
 
@@ -963,7 +992,8 @@ class ReminderSendRouteTests(unittest.TestCase):
             new_customer["links"]["product_sheet_url"],
             "https://drive.google.com/new-customer",
         )
-        self.assertIn("populärt på sociala medier", new_customer["intro_text"])
+        self.assertIn("83% återköpsgrad", new_customer["intro_text"])
+        self.assertIn("populärt på sociala medier", new_customer["closing_text"])
         self.assertEqual(len(new_customer["order_rows"]), 4)
         self.assertEqual([row["quantity"] for row in new_customer["order_rows"]], ["3"] * 4)
         self.assertEqual(len(new_customer["product_catalog"]), 6)

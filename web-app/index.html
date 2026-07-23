@@ -4097,9 +4097,9 @@
     const notices = draft.notices || [];
     const recipients = draft.recipients || [];
     const productButton = draft.links?.product_sheet_url
-      ? `<span class="email-protected-button">${esc(draft.cta_labels?.product_sheet || "Se Produktblad")}</span>` : "";
+      ? `<span class="email-protected-button">${esc(draft.cta_labels?.product_sheet || "Se sortiment och priser")}</span>` : "";
     const stockfillerButton = draft.links?.stockfiller_url
-      ? `<span class="email-protected-button">${esc(draft.cta_labels?.stockfiller || "Beställ via Stockfiller")}</span>` : "";
+      ? `<span class="email-protected-button">${esc(draft.cta_labels?.stockfiller || "Beställ i Stockfiller")}</span>` : "";
     document.getElementById("email-modal-title").textContent = `Mejlförslag · ${draft.email_type_label || ""}`.trim();
     document.getElementById("email-modal-subtitle").textContent = draft.customer?.customer || "";
     emailModalContent.innerHTML = `
@@ -4143,7 +4143,7 @@
           <textarea id="email-closing" maxlength="5000">${esc(draft.closing_text || "")}</textarea>
         </div>
         <div class="email-protected">
-          <div class="email-protected-buttons">${productButton}${stockfillerButton}</div>
+          <div class="email-protected-buttons">${stockfillerButton}${productButton}</div>
           <div class="email-signature">${esc(signatureText(draft.signature))}</div>
         </div>
       </div>

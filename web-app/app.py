@@ -1672,8 +1672,12 @@ def send_email_proposal(row):
 
         product_sheet_url = safe_http_url(current_draft["links"].get("product_sheet_url"))
         stockfiller_url = safe_http_url(current_draft["links"].get("stockfiller_url"))
-        product_sheet_label = current_draft["cta_labels"].get("product_sheet") or "Se Produktblad"
-        stockfiller_label = current_draft["cta_labels"].get("stockfiller") or "Beställ direkt via Stockfiller"
+        product_sheet_label = (
+            current_draft["cta_labels"].get("product_sheet") or "Se sortiment och priser"
+        )
+        stockfiller_label = (
+            current_draft["cta_labels"].get("stockfiller") or "Beställ i Stockfiller"
+        )
         email_type = current_draft["email_type"]
         user = current_user()
         if not is_valid_email(user.get("email")):
