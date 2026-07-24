@@ -163,6 +163,7 @@ _brevo_reconcile_lock = threading.Lock()
 _email_sheets_cache = None
 _email_sheets_cache_lock = threading.Lock()
 _settings_write_lock = threading.Lock()
+_worksheet_append_lock = threading.RLock()
 
 
 _spreadsheet_cache = None
@@ -516,9 +517,55 @@ def get_email_rows(spreadsheet):
     )
 
 
-def append_dict_row(sheet, columns, values):
-    headers = ensure_worksheet_columns(sheet, sheet.row_values(1), columns)
-    sheet.append_row(build_worksheet_row(headers, values), value_input_option="RAW")
+def append_dict_row(sheet, columns, values, value_input_option="RAW", single_value_columns=None):
+    return append_dict_rows(
+        sheet,
+        columns,
+        [values],
+        value_input_option=value_input_option,
+        single_value_columns=single_value_columns,
+    )[0]
+
+
+def append_dict_rows(sheet, columns, values, value_input_option="RAW", single_value_columns=None):
+    """Append rows to an explicit A-based range instead of relying on Sheets table detection.
+
+    Google Sheets' append endpoint searches for a "logical table". A blank row or an
+    orphaned value in a later column can make that table start somewhere other than
+    column A, which shifts the entire appended row. Resolving the next row while
+    holding a process-wide lock and updating an explicit A1 range keeps every value
+    aligned with the worksheet headers.
+    """
+    if not values:
+        return []
+
+    with _worksheet_append_lock:
+        headers = ensure_worksheet_columns(sheet, sheet.row_values(1), columns)
+        rendered_rows = [
+            build_worksheet_row(
+                headers,
+                row,
+                single_value_columns=single_value_columns,
+            )
+            for row in values
+        ]
+        existing_rows = sheet.get_all_values()
+        first_row = max(2, len(existing_rows) + 1)
+        last_row = first_row + len(rendered_rows) - 1
+
+        grid_rows = getattr(sheet, "row_count", 0) or 0
+        if grid_rows and last_row > grid_rows:
+            sheet.resize(rows=max(last_row, grid_rows + 100))
+
+        end_cell = rowcol_to_a1(last_row, len(headers))
+        sheet.batch_update(
+            [{
+                "range": f"A{first_row}:{end_cell}",
+                "values": rendered_rows,
+            }],
+            value_input_option=value_input_option,
+        )
+        return list(range(first_row, last_row + 1))
 
 
 def find_sheet_row(sheet, column, value, normalizer=lambda item: str(item or "").strip()):
@@ -1608,7 +1655,13 @@ def build_sales_activity_for_email(spreadsheet, *, email_id, email_type, custome
         "follow_up_date": "",
         "email_id": email_id,
     }
-    sheet.append_row(build_worksheet_row(headers, row_data, single_value_columns=FREEZER_COLUMNS), value_input_option="USER_ENTERED")
+    append_dict_row(
+        sheet,
+        headers,
+        row_data,
+        value_input_option="USER_ENTERED",
+        single_value_columns=FREEZER_COLUMNS,
+    )
 
 
 @app.before_request
@@ -2124,8 +2177,10 @@ def process_brevo_events(spreadsheet, sheets, payloads):
 
     if new_events:
         event_sheet = sheets[EMAIL_EVENTS_SHEET]
-        event_sheet.append_rows(
-            [build_worksheet_row(EMAIL_EVENTS_COLUMNS, event) for event in new_events],
+        append_dict_rows(
+            event_sheet,
+            EMAIL_EVENTS_COLUMNS,
+            new_events,
             value_input_option="RAW",
         )
 

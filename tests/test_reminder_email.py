@@ -71,10 +71,12 @@ class FakeWorksheet:
             match = __import__("re").match(r"A(\d+):[A-Z]+(\d+)", item["range"])
             if not match:
                 continue
-            row_number = int(match.group(1))
-            while len(self.values) < row_number:
-                self.values.append([])
-            self.values[row_number - 1] = list(item["values"][0])
+            first_row = int(match.group(1))
+            for offset, row in enumerate(item["values"]):
+                row_number = first_row + offset
+                while len(self.values) < row_number:
+                    self.values.append([])
+                self.values[row_number - 1] = list(row)
 
 
 class FakeSpreadsheet:
@@ -86,6 +88,48 @@ class FakeSpreadsheet:
 
 
 class ReminderEmailHelperTests(unittest.TestCase):
+    def test_append_dict_row_starts_in_column_a_despite_blank_and_orphan_rows(self):
+        sheet = FakeWorksheet("email_messages", EMAIL_MESSAGES_COLUMNS)
+        sheet.values.append([])
+        sheet.values.append(
+            [""] * (len(EMAIL_MESSAGES_COLUMNS) - 1) + ["orphaned-email-type"]
+        )
+
+        row_index = app_module.append_dict_row(sheet, EMAIL_MESSAGES_COLUMNS, {
+            "email_id": "mail-live-1",
+            "customer": "Coop Test",
+            "status": "pending",
+            "email_type": "reactivation",
+        })
+
+        self.assertEqual(row_index, 4)
+        self.assertEqual(sheet.values[3][0], "mail-live-1")
+        self.assertEqual(sheet.values[3][1], "Coop Test")
+        self.assertEqual(
+            sheet.values[3][EMAIL_MESSAGES_COLUMNS.index("email_type")],
+            "reactivation",
+        )
+        self.assertEqual(len(sheet.values[3]), len(EMAIL_MESSAGES_COLUMNS))
+
+    def test_append_dict_rows_writes_a_contiguous_explicit_range(self):
+        sheet = FakeWorksheet("email_events", EMAIL_EVENTS_COLUMNS)
+        row_indexes = app_module.append_dict_rows(
+            sheet,
+            EMAIL_EVENTS_COLUMNS,
+            [
+                {"event_key": "event-1", "event_type": "sent"},
+                {"event_key": "event-2", "event_type": "delivered"},
+            ],
+        )
+
+        self.assertEqual(row_indexes, [2, 3])
+        self.assertEqual(sheet.values[1][0], "event-1")
+        self.assertEqual(sheet.values[2][0], "event-2")
+        self.assertEqual(
+            sheet.values[2][EMAIL_EVENTS_COLUMNS.index("event_type")],
+            "delivered",
+        )
+
     def test_recipient_greeting_prefers_personal_email_and_rejects_placeholders(self):
         self.assertEqual(
             recipient_greeting_name("rebecca.rydberg@nara.ica.se", ""),
