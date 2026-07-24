@@ -850,6 +850,244 @@ class EmailPerformanceTests(unittest.TestCase):
         self.assertIn("#email-order-list .email-order-row", html)
 
 
+class EmailPriorityScoringTests(unittest.TestCase):
+    TODAY = date(2026, 7, 24)
+
+    @staticmethod
+    def _customer(name):
+        return {
+            "row": 2,
+            "customer": name,
+            "customer_number": "",
+            "sales_person": "Sofia",
+            "customer_segment": "A",
+            "cancelled_flag": "",
+        }
+
+    @staticmethod
+    def _email(status, *, wait_days=0, sent_at="2026-07-20 09:00:00",
+               event_at="2026-07-21 09:00:00"):
+        return {
+            "email_followup_status": status,
+            "email_followup_wait_days_remaining": wait_days,
+            "email_followup_sent_at": sent_at,
+            "email_followup_last_event_at": event_at,
+        }
+
+    def test_automated_email_does_not_replace_latest_human_contact(self):
+        activities = [
+            {
+                "date_time": "2026-07-20 10:00:00",
+                "customer": "Butiken",
+                "result": "Positiv",
+                "contact_channel": "Telefon",
+                "polarbar": "1",
+                "email_id": "",
+            },
+            {
+                "date_time": "2026-07-24 09:00:00",
+                "customer": "Butiken",
+                "result": "Mejlförslag skickat – Påminnelse",
+                "contact_channel": "Mejl",
+                "email_id": "mail-1",
+            },
+        ]
+
+        features = app_module.build_contact_features(activities, {})
+
+        self.assertEqual(features["butiken"]["latest_contact_date"], date(2026, 7, 20))
+        self.assertEqual(features["butiken"]["latest_contact_class"], "Positiv")
+        self.assertEqual(features["butiken"]["latest_freezer_fields"], ("polarbar",))
+        self.assertEqual(features["butiken"]["contact_count_30d"], 1)
+
+    def test_email_intent_ranks_value_creating_actions_above_wait_states(self):
+        names = ["Stock", "Product", "Baseline", "Opened", "Delivered", "Ordered"]
+        customers = [self._customer(name) for name in names]
+        email_features = {
+            "stock": self._email("stockfiller_clicked_no_order"),
+            "product": self._email("product_sheet_clicked_no_order"),
+            "opened": self._email("opened_no_click"),
+            "delivered": self._email("delivered_no_activity"),
+            "ordered": self._email("ordered_within_10_days"),
+        }
+
+        priority = app_module.build_priority_customers(
+            customers,
+            {},
+            {},
+            None,
+            self.TODAY,
+            limit=len(customers),
+            email_features=email_features,
+        )
+        by_customer = {item["customer"]: item for item in priority}
+
+        self.assertGreater(
+            by_customer["Stock"]["priority_score"],
+            by_customer["Product"]["priority_score"],
+        )
+        self.assertGreater(
+            by_customer["Product"]["priority_score"],
+            by_customer["Baseline"]["priority_score"],
+        )
+        self.assertGreater(
+            by_customer["Baseline"]["priority_score"],
+            by_customer["Opened"]["priority_score"],
+        )
+        self.assertGreater(
+            by_customer["Opened"]["priority_score"],
+            by_customer["Delivered"]["priority_score"],
+        )
+        self.assertGreater(
+            by_customer["Delivered"]["priority_score"],
+            by_customer["Ordered"]["priority_score"],
+        )
+        self.assertEqual(
+            by_customer["Stock"]["next_action"]["action_type"],
+            "stockfiller_click_followup",
+        )
+        self.assertEqual(
+            by_customer["Product"]["next_action"]["action_type"],
+            "product_sheet_click_followup",
+        )
+        self.assertEqual(
+            by_customer["Ordered"]["next_action"]["action_type"],
+            "email_order_monitor",
+        )
+
+    def test_click_waits_three_days_and_later_human_contact_handles_signal(self):
+        customers = [self._customer("Waiting"), self._customer("Handled")]
+        handled_contact = {
+            "handled": {
+                "latest_contact_date": date(2026, 7, 23),
+                "latest_contact_datetime": datetime(2026, 7, 23, 10, 0),
+                "latest_contact_class": "Neutral",
+                "latest_contact_result": "Neutral",
+                "latest_freezer_fields": [],
+                "latest_follow_up_date": None,
+            }
+        }
+        email_features = {
+            "waiting": self._email(
+                "stockfiller_clicked_no_order",
+                wait_days=2,
+                event_at="2026-07-22 09:00:00",
+            ),
+            "handled": self._email(
+                "stockfiller_clicked_no_order",
+                event_at="2026-07-22 09:00:00",
+            ),
+        }
+
+        result = app_module.build_priority_customers(
+            customers,
+            {},
+            handled_contact,
+            None,
+            self.TODAY,
+            limit=2,
+            email_features=email_features,
+        )
+        by_customer = {item["customer"]: item for item in result}
+        handled_without_email = app_module.build_priority_customers(
+            [self._customer("Handled")],
+            {},
+            handled_contact,
+            None,
+            self.TODAY,
+            limit=1,
+        )[0]
+
+        self.assertLessEqual(by_customer["Waiting"]["priority_score"], 49)
+        self.assertEqual(
+            by_customer["Waiting"]["next_action"]["action_type"],
+            "email_click_wait",
+        )
+        self.assertTrue(by_customer["Handled"]["email_priority_handled"])
+        self.assertFalse(by_customer["Handled"]["email_priority_active"])
+        self.assertEqual(
+            by_customer["Handled"]["priority_score"],
+            handled_without_email["priority_score"],
+        )
+
+    def test_low_value_click_does_not_outrank_high_value_overdue_customer(self):
+        customers = [
+            self._customer("High Value"),
+            {
+                **self._customer("Low Value Click"),
+                "customer_segment": "C",
+            },
+        ]
+        order_features = {
+            "high value": {
+                "customer_key": "high value",
+                "order_count": 4,
+                "total_dfp": 160,
+                "expected_order_dfp": 40,
+                "expected_order_value": 16000,
+                "last_order_date": date(2026, 5, 1),
+                "last_delivery_date": date(2026, 5, 1),
+                "expected_cycle_days": 30,
+                "expected_next_order_date": date(2026, 5, 31),
+            }
+        }
+        email_features = {
+            "low value click": self._email("stockfiller_clicked_no_order"),
+        }
+
+        result = app_module.build_priority_customers(
+            customers,
+            order_features,
+            {},
+            None,
+            self.TODAY,
+            limit=2,
+            email_features=email_features,
+        )
+        by_customer = {item["customer"]: item for item in result}
+
+        self.assertGreater(
+            by_customer["High Value"]["priority_score"],
+            by_customer["Low Value Click"]["priority_score"],
+        )
+        self.assertGreaterEqual(by_customer["High Value"]["priority_score"], 80)
+        self.assertGreaterEqual(by_customer["Low Value Click"]["priority_score"], 60)
+
+    def test_attributed_order_only_suppresses_priority_for_ten_days(self):
+        customer = self._customer("Ordered")
+        recent = self._email(
+            "ordered_within_10_days",
+            event_at="2026-07-20 09:00:00",
+        )
+        stale = self._email(
+            "ordered_within_10_days",
+            event_at="2026-07-10 09:00:00",
+        )
+
+        recent_result = app_module.build_priority_customers(
+            [customer], {}, {}, None, self.TODAY, limit=1,
+            email_features={"ordered": recent},
+        )[0]
+        stale_result = app_module.build_priority_customers(
+            [customer], {}, {}, None, self.TODAY, limit=1,
+            email_features={"ordered": stale},
+        )[0]
+        baseline = app_module.build_priority_customers(
+            [customer], {}, {}, None, self.TODAY, limit=1,
+        )[0]
+
+        self.assertLess(recent_result["priority_score"], baseline["priority_score"])
+        self.assertEqual(
+            recent_result["next_action"]["action_type"],
+            "email_order_monitor",
+        )
+        self.assertEqual(stale_result["priority_score"], baseline["priority_score"])
+        self.assertEqual(
+            stale_result["next_action"]["action_type"],
+            baseline["next_action"]["action_type"],
+        )
+
+
 class EmailInsightsEndpointTests(unittest.TestCase):
     def setUp(self):
         customer_headers = [
@@ -945,6 +1183,14 @@ class EmailInsightsEndpointTests(unittest.TestCase):
         )
         self.assertTrue(payload["butik b"]["email_click_without_order"])
         self.assertEqual(payload["butik b"]["email_followup_priority"], 1)
+        self.assertEqual(
+            payload["butik a"]["next_action"]["action_type"],
+            "product_sheet_click_followup",
+        )
+        self.assertEqual(
+            payload["butik b"]["next_action"]["action_type"],
+            "stockfiller_click_followup",
+        )
 
     def test_followup_insights_email_report_respects_responsible_filter(self):
         response = self.client.get("/followup-insights?responsible=Sofia")
@@ -957,8 +1203,21 @@ class EmailInsightsEndpointTests(unittest.TestCase):
     def test_followup_insights_without_responsible_keeps_historical_customers(self):
         response = self.client.get("/followup-insights")
         self.assertEqual(response.status_code, 200)
-        report = response.get_json()["email_performance"]
+        payload = response.get_json()
+        report = payload["email_performance"]
         self.assertEqual(report["unique_store_count"], 3)
+        priority = {
+            item["customer"]: item
+            for item in payload["priority_customers"]
+        }
+        self.assertEqual(
+            priority["Butik A"]["next_action"]["action_type"],
+            "product_sheet_click_followup",
+        )
+        self.assertEqual(
+            priority["Butik B"]["next_action"]["action_type"],
+            "stockfiller_click_followup",
+        )
 
 
 class ReminderSendRouteTests(unittest.TestCase):

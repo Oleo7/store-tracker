@@ -2719,6 +2719,9 @@ def build_email_engagement_snapshot(message_rows, recipient_rows, order_rows, to
             "email_followup_status": status,
             "email_followup_label": label,
             "email_followup_priority": priority,
+            "email_followup_sent_at": record["sent_at"].isoformat(
+                sep=" ", timespec="seconds"
+            ),
             "email_followup_last_event_at": event_at.isoformat(sep=" ", timespec="seconds") if event_at else "",
             "email_click_without_order": clicked_without_order,
             "email_clicked_without_order": clicked_without_order,
@@ -3053,6 +3056,7 @@ def get_customer_insights():
         None,
         today,
         limit=len(customers),
+        email_features=email_engagement_by_customer,
     )
     priority_by_name = {
         normalize_key(customer["customer"]): customer
@@ -3148,6 +3152,7 @@ def get_customer_insights():
             "email_followup_status": email_engagement.get("email_followup_status", ""),
             "email_followup_label": email_engagement.get("email_followup_label", ""),
             "email_followup_priority": email_engagement.get("email_followup_priority"),
+            "email_followup_sent_at": email_engagement.get("email_followup_sent_at", ""),
             "email_followup_last_event_at": email_engagement.get("email_followup_last_event_at", ""),
             "email_click_without_order": email_engagement.get("email_click_without_order", False),
             "email_clicked_without_order": email_engagement.get("email_clicked_without_order", False),
@@ -3304,6 +3309,12 @@ def get_followup_insights():
 
     order_features = build_order_features(order_rows)
     contact_features = build_contact_features(contact_rows, order_features)
+    email_engagement_by_customer = build_email_engagement_snapshot(
+        message_rows,
+        recipient_rows,
+        order_rows,
+        today=today,
+    )
     priority_customers = build_priority_customers(
         customers,
         order_features,
@@ -3311,6 +3322,7 @@ def get_followup_insights():
         selected_responsible or None,
         today,
         limit=30,
+        email_features=email_engagement_by_customer,
     )
     included_customer_keys = None
     if selected_responsible:

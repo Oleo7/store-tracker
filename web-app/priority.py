@@ -222,6 +222,12 @@ def build_contact_features(sales_activities: list[dict], order_features: dict) -
     today = date.today()
 
     for row in sales_activities:
+        # Automated email proposals have their own engagement model. Treating them
+        # as the latest human contact would erase richer sales signals such as a
+        # positive dialogue, a planned follow-up or observed freezer contents.
+        if str(row.get("email_id") or "").strip():
+            continue
+
         contact_dt = parse_datetime(row.get("date_time"))
         if not contact_dt:
             continue
@@ -271,7 +277,9 @@ def build_priority_customers(
     responsible: str | None,
     today: date,
     limit: int = 30,
+    email_features: dict | None = None,
 ) -> list[dict]:
+    email_features = email_features or {}
     number_index = {
         normalize_customer_key(feature.get("customer_number")): feature
         for feature in order_features.values()
@@ -296,6 +304,7 @@ def build_priority_customers(
         customer_number_key = normalize_customer_key(customer.get("customer_number"))
         order_feature = number_index.get(customer_number_key) or order_features.get(customer_key) or {}
         contact_feature = contact_features.get(customer_key) or {}
+        email_feature = email_features.get(customer_key) or {}
         segment = _segment_value(customer)
         segment_defaults = _segment_defaults(benchmarks, segment)
         enriched_order = dict(order_feature)
@@ -361,6 +370,11 @@ def build_priority_customers(
             self_ordering_signal=contact_feature.get("self_ordering_signal"),
             today=today,
         )
+        email_signal = _email_priority_signal(
+            email_feature=email_feature,
+            latest_human_contact=contact_feature.get("latest_contact_datetime"),
+            today=today,
+        )
 
         score = _priority_score(
             segment=segment,
@@ -379,6 +393,7 @@ def build_priority_customers(
             self_ordering_followup=self_ordering_followup,
             future_follow_up_days=future_follow_up_days,
             freezer_fields=contact_feature.get("latest_freezer_fields"),
+            email_signal=email_signal,
             today=today,
         )
         priority_type = _priority_type(
@@ -426,6 +441,9 @@ def build_priority_customers(
                 "follow_up_due": follow_up_due,
                 "has_order_after_latest_contact": has_order_after_latest_contact,
                 "self_ordering_signal": bool(contact_feature.get("self_ordering_signal")),
+                "email_priority_status": email_signal.get("status", ""),
+                "email_priority_active": bool(email_signal.get("active")),
+                "email_priority_handled": bool(email_signal.get("handled")),
                 "next_action": _next_action(
                     priority_type=priority_type,
                     follow_up_due=follow_up_due,
@@ -442,6 +460,7 @@ def build_priority_customers(
                     last_order_date=last_order,
                     segment=segment,
                     self_ordering_followup=self_ordering_followup,
+                    email_signal=email_signal,
                     today=today,
                 ),
                 "reasons": _priority_reasons(
@@ -458,6 +477,7 @@ def build_priority_customers(
                     latest_contact_date=latest_contact_date,
                     self_ordering_followup=self_ordering_followup,
                     freezer_fields=contact_feature.get("latest_freezer_fields"),
+                    email_signal=email_signal,
                 ),
             }
         )
@@ -496,6 +516,7 @@ def _priority_score(
     self_ordering_followup,
     future_follow_up_days,
     freezer_fields,
+    email_signal,
     today,
 ) -> int:
     value_index = _value_index(expected_order_value, expected_order_dfp, benchmarks)
@@ -570,6 +591,8 @@ def _priority_score(
     if negative_contact_cap is not None:
         score = min(score, negative_contact_cap)
 
+    score = _apply_email_priority_score(score, email_signal)
+
     return max(0, min(100, int(round(score))))
 
 
@@ -643,6 +666,7 @@ def _next_action(
     last_order_date,
     segment,
     self_ordering_followup,
+    email_signal,
     today,
 ) -> dict:
     if latest_contact_class == "Negativ" and not has_order_after_latest_contact:
@@ -663,6 +687,10 @@ def _next_action(
             "reason": "Försenad uppföljning · ingen order efter senaste kontakt",
             "primary_cta": "Ring",
         }
+
+    email_action = _email_next_action(email_signal)
+    if email_action:
+        return email_action
 
     if scheduled_followup or self_ordering_followup:
         reason = "Framtida uppföljning finns"
@@ -766,8 +794,12 @@ def _priority_reasons(
     latest_contact_date,
     self_ordering_followup,
     freezer_fields,
+    email_signal,
 ) -> list[str]:
     reasons = []
+    email_reason = _email_priority_reason(email_signal)
+    if email_reason:
+        reasons.append(email_reason)
     if latest_contact_class == "Negativ" and not has_order_after_latest_contact:
         if days_since_contact is None:
             reasons.append("Negativ kontakt senast")
@@ -801,6 +833,168 @@ def _priority_reasons(
     if latest_contact_class == "Ej anträffbar":
         reasons.append("Ej anträffbar senast")
     return reasons[:3]
+
+
+def _email_priority_signal(*, email_feature, latest_human_contact, today) -> dict:
+    """Normalize the latest email outcome and mark it handled by later human work."""
+    status = str(email_feature.get("email_followup_status") or "").strip()
+    event_at = parse_datetime(
+        email_feature.get("email_followup_last_event_at")
+        or email_feature.get("email_followup_sent_at")
+    )
+    sent_at = parse_datetime(email_feature.get("email_followup_sent_at"))
+    wait_days = max(0, int(_parse_number(email_feature.get("email_followup_wait_days_remaining"))))
+    handled = bool(
+        status
+        and latest_human_contact
+        and event_at
+        and latest_human_contact > event_at
+    )
+    return {
+        "status": status,
+        "active": bool(status) and not handled,
+        "handled": handled,
+        "event_at": event_at,
+        "sent_at": sent_at,
+        "wait_days": wait_days,
+        "days_since_sent": (
+            max(0, (today - sent_at.date()).days)
+            if sent_at else None
+        ),
+        "days_since_event": (
+            max(0, (today - event_at.date()).days)
+            if event_at else None
+        ),
+    }
+
+
+def _apply_email_priority_score(score: float, email_signal: dict) -> float:
+    """Apply intent and cooldown without replacing the customer's business value."""
+    if not email_signal.get("active"):
+        return score
+
+    status = email_signal.get("status")
+    wait_days = email_signal.get("wait_days", 0)
+    days_since_sent = email_signal.get("days_since_sent")
+    days_since_event = email_signal.get("days_since_event")
+
+    if status == "ordered_within_10_days":
+        return (
+            max(0, min(score - 15, 20))
+            if days_since_event is not None and days_since_event <= 10
+            else score
+        )
+
+    if status in {"stockfiller_clicked_no_order", "product_sheet_clicked_no_order"}:
+        if wait_days > 0:
+            return max(0, min(score - 6, 49))
+        boost = 18 if status == "stockfiller_clicked_no_order" else 12
+        floor = 60 if status == "stockfiller_clicked_no_order" else 55
+        return max(score + boost, floor)
+
+    if days_since_sent is not None and days_since_sent <= 10:
+        if status == "opened_no_click":
+            return max(0, min(score - 8, 45))
+        if status == "delivered_no_activity":
+            return max(0, min(score - 12, 35))
+
+    return score
+
+
+def _email_next_action(email_signal: dict) -> dict | None:
+    if not email_signal.get("active"):
+        return None
+
+    status = email_signal.get("status")
+    wait_days = email_signal.get("wait_days", 0)
+    days_since_sent = email_signal.get("days_since_sent")
+    days_since_event = email_signal.get("days_since_event")
+
+    if (
+        status == "ordered_within_10_days"
+        and days_since_event is not None
+        and days_since_event <= 10
+    ):
+        return {
+            "label": "Bevaka ny order",
+            "action_type": "email_order_monitor",
+            "tone": "low",
+            "reason": "Order registrerad inom 10 dagar efter mejlet",
+            "primary_cta": "Bevaka",
+        }
+
+    if status in {"stockfiller_clicked_no_order", "product_sheet_clicked_no_order"}:
+        if wait_days > 0:
+            return {
+                "label": "Avvakta efter mejlklick",
+                "action_type": "email_click_wait",
+                "tone": "low",
+                "reason": f"Följ upp om {wait_days} dagar om order saknas",
+                "primary_cta": "Bevaka",
+            }
+        stockfiller = status == "stockfiller_clicked_no_order"
+        return {
+            "label": (
+                "Följ upp Stockfiller-klick"
+                if stockfiller else "Följ upp produktbladsintresse"
+            ),
+            "action_type": (
+                "stockfiller_click_followup"
+                if stockfiller else "product_sheet_click_followup"
+            ),
+            "tone": "urgent" if stockfiller else "warning",
+            "reason": "Tydlig köpintention men ingen order registrerad",
+            "primary_cta": "Ring",
+        }
+
+    if days_since_sent is not None and days_since_sent <= 10:
+        if status == "opened_no_click":
+            return {
+                "label": "Avvakta mejlutfall",
+                "action_type": "email_open_wait",
+                "tone": "low",
+                "reason": "Mejlet är öppnat men ingen stark köpsignal finns ännu",
+                "primary_cta": "Bevaka",
+            }
+        if status == "delivered_no_activity":
+            return {
+                "label": "Avvakta mejlutfall",
+                "action_type": "email_delivery_wait",
+                "tone": "low",
+                "reason": "Mejlet är nyligen levererat",
+                "primary_cta": "Bevaka",
+            }
+
+    return None
+
+
+def _email_priority_reason(email_signal: dict) -> str:
+    if not email_signal.get("active"):
+        return ""
+    status = email_signal.get("status")
+    wait_days = email_signal.get("wait_days", 0)
+    days_since_event = email_signal.get("days_since_event")
+    if (
+        status == "ordered_within_10_days"
+        and days_since_event is not None
+        and days_since_event <= 10
+    ):
+        return "Order efter mejl – ingen ny aktivitet behövs"
+    if status == "stockfiller_clicked_no_order":
+        return (
+            f"Stockfiller-klick – avvakta {wait_days} dagar"
+            if wait_days else "Stockfiller-klick utan order"
+        )
+    if status == "product_sheet_clicked_no_order":
+        return (
+            f"Produktbladsklick – avvakta {wait_days} dagar"
+            if wait_days else "Produktbladsklick utan order"
+        )
+    if status == "opened_no_click":
+        return "Mejl öppnat utan klick"
+    if status == "delivered_no_activity":
+        return "Mejl levererat utan aktivitet"
+    return ""
 
 
 def _is_self_ordering_followup(
