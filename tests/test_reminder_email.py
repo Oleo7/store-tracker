@@ -16,6 +16,7 @@ from reminder_email import (  # noqa: E402
     EMAIL_RECIPIENTS_COLUMNS,
     USER_COLUMNS,
     build_email_proposal_copy,
+    build_email_proposal_template_defaults,
     build_new_customer_order_rows,
     build_reactivation_order_rows,
     build_settings_product_catalog,
@@ -308,9 +309,15 @@ class ReminderEmailHelperTests(unittest.TestCase):
             has_order_rows=True, unique_store_count=348, today=date(2026, 7, 20),
         )
         self.assertEqual(reactivation["subject"], "Lägre priser på Polarbär! Dags att ta in?")
-        self.assertIn("Det var 10 veckor sedan", reactivation["intro_text"])
-        self.assertIn("**från 35 kr/KFP till 32 kr/KFP!**", reactivation["intro_text"])
-        self.assertIn("**Fri frakt** som vanligt!", reactivation["intro_text"])
+        self.assertIn("Tiden springer! Det var hela 10 veckor sedan", reactivation["intro_text"])
+        self.assertIn("**sänkt ordinarie pris** **till 32 kr/KFP!**", reactivation["intro_text"])
+        self.assertIn("**83% återköpsgrad**", reactivation["intro_text"])
+        self.assertIn("**Svara bara KÖR så hjälper jag med ordern.**", reactivation["intro_text"])
+        self.assertEqual(
+            reactivation["closing_text"],
+            "Klicka bara in på Stockfiller för att beställa själv eller se hela sortimentet, "
+            "priser och logistik i produktbladet nedan.",
+        )
 
         new_customer = build_email_proposal_copy(
             "new_customer", "Nya butiken", has_order_rows=True, unique_store_count=345,
@@ -327,6 +334,30 @@ class ReminderEmailHelperTests(unittest.TestCase):
         for copy in (reminder, reactivation, new_customer):
             self.assertEqual(copy["stockfiller_label"], "Beställ i Stockfiller")
             self.assertEqual(copy["product_sheet_label"], "Se sortiment och priser")
+
+    def test_template_overrides_keep_dynamic_customer_values(self):
+        defaults = build_email_proposal_template_defaults("reactivation")
+        self.assertIn("{{veckor}}", defaults["intro_text"])
+        custom = {
+            **defaults,
+            "subject": "Nytt ämne för {{butiksnamn}}",
+            "intro_text": "Hej (namn)\n\nDet var {{veckor}} veckor sedan.",
+            "closing_text": "Klart för {{butiksnamn}}.",
+            "stockfiller_label": "Beställ här",
+            "product_sheet_label": "Se allt",
+        }
+        copy = build_email_proposal_copy(
+            "reactivation",
+            "Butik X",
+            latest_delivery_date="2026-05-11",
+            today=date(2026, 7, 20),
+            template=custom,
+        )
+        self.assertEqual(copy["subject"], "Nytt ämne för Butik X")
+        self.assertIn("Det var 10 veckor sedan.", copy["intro_text"])
+        self.assertEqual(copy["closing_text"], "Klart för Butik X.")
+        self.assertEqual(copy["stockfiller_label"], "Beställ här")
+        self.assertEqual(copy["product_sheet_label"], "Se allt")
 
 
 class AuthenticationTests(unittest.TestCase):
@@ -768,6 +799,11 @@ class EmailPerformanceTests(unittest.TestCase):
         self.assertIn('id="email-performance-report"', html)
         self.assertIn("renderEmailPerformance", html)
         self.assertIn('item.importance !== "secondary"', html)
+        self.assertIn('id="settings-btn"', html)
+        self.assertIn('id="view-settings"', html)
+        self.assertIn("saveEmailTemplateSettings", html)
+        self.assertIn("/email-proposal-settings/", html)
+        self.assertIn("#email-order-list .email-order-row", html)
 
 
 class EmailInsightsEndpointTests(unittest.TestCase):
@@ -980,7 +1016,10 @@ class ReminderSendRouteTests(unittest.TestCase):
             "https://drive.google.com/reactivation",
         )
         self.assertEqual(reactivation["subject"], "Lägre priser på Polarbär! Dags att ta in?")
+        self.assertIn("Tiden springer!", reactivation["intro_text"])
         self.assertIn("sänkt ordinarie pris", reactivation["intro_text"])
+        self.assertIn("83% återköpsgrad", reactivation["intro_text"])
+        self.assertIn("Klicka bara in på Stockfiller", reactivation["closing_text"])
         self.assertEqual([row["quantity"] for row in reactivation["order_rows"]], ["4"] * 4)
         self.assertTrue(all("new_for_customer" not in row for row in reactivation["order_rows"]))
 
@@ -997,6 +1036,72 @@ class ReminderSendRouteTests(unittest.TestCase):
         self.assertEqual(len(new_customer["order_rows"]), 4)
         self.assertEqual([row["quantity"] for row in new_customer["order_rows"]], ["3"] * 4)
         self.assertEqual(len(new_customer["product_catalog"]), 6)
+
+    def test_template_settings_are_saved_and_used_by_new_customer_drafts(self):
+        response = self.client.get("/email-proposal-settings")
+        self.assertEqual(response.status_code, 200)
+        settings = response.get_json()
+        self.assertEqual(set(settings["templates"]), {"reminder", "reactivation", "new_customer"})
+        self.assertEqual(settings["templates"]["reminder"]["order_mode"], "latest_order")
+        self.assertEqual(
+            [row["quantity"] for row in settings["templates"]["reactivation"]["order_rows"]],
+            ["4"] * 4,
+        )
+
+        payload = {
+            "subject": "Välkommen tillbaka {{butiksnamn}}",
+            "intro_text": "Hej (namn)\n\nDet var {{veckor}} veckor sedan.",
+            "closing_text": "Beställ när det passar.",
+            "stockfiller_label": "Öppna Stockfiller",
+            "product_sheet_label": "Öppna produktbladet",
+            "order_mode": "fixed",
+            "order_rows": [{
+                "product": "Mango i mjölkchoklad + vit choklad",
+                "quantity": "7",
+                "unit": "DFP",
+            }],
+        }
+        update = self.client.put("/email-proposal-settings/reactivation", json=payload)
+        self.assertEqual(update.status_code, 200)
+        saved = update.get_json()["template"]
+        self.assertTrue(saved["customized"])
+        self.assertEqual(saved["stockfiller_label"], "Öppna Stockfiller")
+        self.assertEqual(saved["order_rows"][0]["quantity"], "7")
+
+        draft_response = self.client.get("/customers/3/email-proposal-draft")
+        self.assertEqual(draft_response.status_code, 200)
+        draft = draft_response.get_json()["draft"]
+        self.assertEqual(draft["subject"], "Välkommen tillbaka Gamla butiken")
+        self.assertNotIn("{{veckor}}", draft["intro_text"])
+        self.assertEqual(draft["closing_text"], "Beställ när det passar.")
+        self.assertEqual(draft["cta_labels"]["stockfiller"], "Öppna Stockfiller")
+        self.assertEqual(draft["cta_labels"]["product_sheet"], "Öppna produktbladet")
+        self.assertEqual(draft["order_rows"], [{
+            "product": "Mango i mjölkchoklad + vit choklad",
+            "quantity": "7",
+            "unit": "DFP",
+        }])
+
+    def test_template_settings_validate_live_email_defaults(self):
+        base = {
+            "subject": "Ämne",
+            "intro_text": "Hej (namn)",
+            "closing_text": "",
+            "stockfiller_label": "Beställ",
+            "product_sheet_label": "Läs mer",
+            "order_mode": "fixed",
+            "order_rows": [],
+        }
+        missing_rows = self.client.put("/email-proposal-settings/new_customer", json=base)
+        self.assertEqual(missing_rows.status_code, 400)
+        self.assertEqual(missing_rows.get_json()["error"], "missing_order_rows")
+
+        missing_subject = self.client.put(
+            "/email-proposal-settings/new_customer",
+            json={**base, "subject": "", "order_rows": [{"product": "Mango", "quantity": "1"}]},
+        )
+        self.assertEqual(missing_subject.status_code, 400)
+        self.assertEqual(missing_subject.get_json()["error"], "missing_email_content")
 
     def test_test_mode_redirects_two_recipients_and_keeps_sales_timeline_clean(self):
         draft = self._draft()

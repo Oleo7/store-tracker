@@ -57,6 +57,14 @@ EMAIL_PROPOSAL_CTA_LABELS = {
 
 STOCKFILLER_CTA_LABEL = "Beställ i Stockfiller"
 
+EMAIL_PROPOSAL_TEMPLATE_FIELDS = (
+    "subject",
+    "intro_text",
+    "closing_text",
+    "stockfiller_label",
+    "product_sheet_label",
+)
+
 STANDARD_PROPOSAL_SKUS = ("sku_10003", "sku_10005", "sku_10002", "sku_10006")
 
 VISIBLE_EMAIL_EVENT_TYPES = {
@@ -451,9 +459,75 @@ def build_latest_order_context(order_rows, customer_name):
     }
 
 
+def build_email_proposal_template_defaults(proposal_type):
+    """Return editable defaults with runtime values represented as named placeholders."""
+    proposal_type = normalize_proposal_type(proposal_type)
+    common = {
+        "product_sheet_label": EMAIL_PROPOSAL_CTA_LABELS[proposal_type],
+        "stockfiller_label": STOCKFILLER_CTA_LABEL,
+    }
+    if proposal_type == "reactivation":
+        return {
+            **common,
+            "subject": "Lägre priser på Polarbär! Dags att ta in?",
+            "intro_text": (
+                "Hej (namn)\n\n"
+                "Tiden springer! Det var hela {{veckor}} veckor sedan vi levererade Polarbär "
+                "till er. Sedan dess har vi **sänkt ordinarie pris** **till 32 kr/KFP!** "
+                "Och ner till **29 kr** vid större order.\n\n"
+                "Med **83% återköpsgrad** kan jag tryggt rekommendera att ta in våra mest "
+                "lättsålda smaker.\n\n"
+                "**Svara bara KÖR så hjälper jag med ordern.** Fri frakt, som vanligt!"
+            ),
+            "closing_text": (
+                "Klicka bara in på Stockfiller för att beställa själv eller se hela sortimentet, "
+                "priser och logistik i produktbladet nedan."
+            ),
+        }
+    if proposal_type == "new_customer":
+        return {
+            **common,
+            "subject": "Testa Polarbär för 29 kr/KFP – fri frakt",
+            "intro_text": (
+                "Hej (namn)\n\n"
+                "För att göra det enkelt för alla att testa Polarbär erbjuder vi nya butiker "
+                "**29 kr/KFP på hela första ordern**.\n"
+                "Med **83% återköpsgrad** är vi trygga i att rekommendera ett startpaket med våra "
+                "fyra populäraste smaker."
+            ),
+            "closing_text": (
+                "**Svara bara KÖR så lägger jag ordern. Fri frakt,** som alltid!\n\n"
+                "Över {{antal_butiker}} butiker har köpt in Polarbär och varumärket har blivit "
+                "populärt på sociala medier. Större volymer gör att vi nu även kan **sänka "
+                "ordinarie pris rejält**, så att fler butiker kan ha Polarbär i ordinarie hylla.\n\n"
+                "Se produktbladet för nya priser, marginaler och hela sortimentet."
+            ),
+        }
+    return {
+        **common,
+        "subject": "Polarbär sänker priset! Dags att fylla på?",
+        "intro_text": (
+            "Hej (namn)\n\n"
+            "Det är {{dagar}} dagar sedan er senaste Polarbär-leverans. Jag har därför lagt ett "
+            "påfyllnadsförslag utifrån er senaste order.\n\n"
+            "**Svara bara KÖR så lägger jag ordern,** eller klicka in på Stockfiller för att "
+            "beställa själv.\n"
+            "**Fri frakt** som vanligt!"
+        ),
+        "closing_text": "I produktbladet finns nya priser, marginaler och hela sortimentet.",
+    }
+
+
+def _resolve_template_placeholders(value, replacements):
+    text = str(value or "")
+    for key, replacement in replacements.items():
+        text = text.replace("{{" + key + "}}", str(replacement))
+    return text
+
+
 def build_email_proposal_copy(proposal_type, customer_name, latest_delivery_date="",
                               has_order_rows=False, unique_store_count=0, untried_count=0,
-                              today=None):
+                              today=None, template=None):
     proposal_type = normalize_proposal_type(proposal_type)
     customer_name = str(customer_name or "").strip()
     rounded_store_count = round_store_count_to_ten(unique_store_count)
@@ -463,71 +537,26 @@ def build_email_proposal_copy(proposal_type, customer_name, latest_delivery_date
         max(0, (today - delivery_date).days)
         if delivery_date else None
     )
-    if proposal_type == "reactivation":
-        subject = "Lägre priser på Polarbär! Dags att ta in?"
-        if days_since_delivery is not None:
-            weeks_since_delivery = max(1, (days_since_delivery + 3) // 7)
-            delivery_sentence = (
-                f"Det var {weeks_since_delivery} veckor sedan vi senast levererade Polarbär till er."
-            )
-        else:
-            delivery_sentence = "Det var ett tag sedan vi senast levererade Polarbär till er."
-        intro = (
-            "Hej (namn)\n\n"
-            f"{delivery_sentence} Sedan dess har vi sänkt ordinarie pris **från 35 kr/KFP till "
-            "32 kr/KFP!** Och ner till **29 kr** vid större order.\n\n"
-            "Jag föreslår en mindre omstart med våra mest lättsålda smaker.\n\n"
-            "**Svara bara KÖR så lägger jag ordern,** eller klicka in på Stockfiller för att "
-            "beställa själv.\n"
-            "**Fri frakt** som vanligt!"
-        )
-        closing = "I produktbladet finns nya priser, marginaler och hela sortimentet."
-    elif proposal_type == "new_customer":
-        subject = "Testa Polarbär för 29 kr/KFP – fri frakt"
-        store_sentence = (
-            f"Över {rounded_store_count} butiker har köpt in Polarbär"
-            if rounded_store_count
-            else "Butiker runt om i Sverige har köpt in Polarbär"
-        )
-        intro = (
-            "Hej (namn)\n\n"
-            "För att göra det enkelt för alla att testa Polarbär erbjuder vi nya butiker "
-            "**29 kr/KFP på hela första ordern**.\n"
-            "Med **83% återköpsgrad** är vi trygga i att rekommendera ett startpaket med våra "
-            "fyra populäraste smaker."
-        )
-        closing = (
-            "**Svara bara KÖR så lägger jag ordern. Fri frakt,** som alltid!\n\n"
-            f"{store_sentence} och varumärket har blivit populärt på sociala medier. Större "
-            "volymer gör att vi nu även kan **sänka ordinarie pris rejält**, så att fler butiker "
-            "kan ha Polarbär i ordinarie hylla.\n\n"
-            "Se produktbladet för nya priser, marginaler och hela sortimentet."
-        )
-    else:
-        subject = "Polarbär sänker priset! Dags att fylla på?"
-        if days_since_delivery is not None:
-            intro = (
-                "Hej (namn)\n\n"
-                f"Det är {days_since_delivery} dagar sedan er senaste Polarbär-leverans. "
-                "Jag har därför lagt ett påfyllnadsförslag utifrån er senaste order."
-            )
-        else:
-            intro = (
-                "Hej (namn)\n\n"
-                "Jag har lagt ett påfyllnadsförslag utifrån er senaste order."
-            )
-        intro += (
-            "\n\n**Svara bara KÖR så lägger jag ordern,** eller klicka in på Stockfiller för "
-            "att beställa själv.\n"
-            "**Fri frakt** som vanligt!"
-        )
-        closing = "I produktbladet finns nya priser, marginaler och hela sortimentet."
+    weeks_since_delivery = (
+        max(1, (days_since_delivery + 3) // 7)
+        if days_since_delivery is not None else "ett antal"
+    )
+    values = build_email_proposal_template_defaults(proposal_type)
+    for field in EMAIL_PROPOSAL_TEMPLATE_FIELDS:
+        if template is not None and field in template:
+            values[field] = str(template.get(field, "") or "").strip()
+    replacements = {
+        "dagar": days_since_delivery if days_since_delivery is not None else "ett antal",
+        "veckor": weeks_since_delivery,
+        "antal_butiker": rounded_store_count if rounded_store_count else "många",
+        "butiksnamn": customer_name,
+    }
     return {
-        "subject": subject,
-        "intro_text": intro,
-        "closing_text": closing,
-        "product_sheet_label": EMAIL_PROPOSAL_CTA_LABELS[proposal_type],
-        "stockfiller_label": STOCKFILLER_CTA_LABEL,
+        "subject": _resolve_template_placeholders(values["subject"], replacements),
+        "intro_text": _resolve_template_placeholders(values["intro_text"], replacements),
+        "closing_text": _resolve_template_placeholders(values["closing_text"], replacements),
+        "product_sheet_label": values["product_sheet_label"],
+        "stockfiller_label": values["stockfiller_label"],
     }
 
 

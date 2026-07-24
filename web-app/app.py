@@ -30,6 +30,7 @@ from priority import (
 )
 from reminder_email import (
     EMAIL_PROPOSAL_PRODUCT_SETTINGS,
+    EMAIL_PROPOSAL_TEMPLATE_FIELDS,
     EMAIL_PROPOSAL_TYPES,
     EMAIL_EVENTS_COLUMNS,
     EMAIL_MESSAGES_COLUMNS,
@@ -38,6 +39,7 @@ from reminder_email import (
     USER_COLUMNS,
     brevo_event_time,
     build_email_proposal_copy,
+    build_email_proposal_template_defaults,
     build_new_customer_order_rows,
     build_reactivation_order_rows,
     build_settings_product_catalog,
@@ -160,6 +162,7 @@ _brevo_processing_lock = threading.Lock()
 _brevo_reconcile_lock = threading.Lock()
 _email_sheets_cache = None
 _email_sheets_cache_lock = threading.Lock()
+_settings_write_lock = threading.Lock()
 
 
 _spreadsheet_cache = None
@@ -383,6 +386,125 @@ def get_settings(spreadsheet):
         str(row.get("key", "")).strip(): str(row.get("value", "")).strip()
         for row in rows if str(row.get("key", "")).strip()
     }
+
+
+def email_proposal_template_setting_key(proposal_type, field):
+    proposal_type = normalize_proposal_type(proposal_type)
+    return f"email_proposal_{proposal_type}_{field}"
+
+
+def sanitize_template_order_rows(rows, product_catalog):
+    sanitized = []
+    for row in (rows or [])[:20]:
+        product = str(row.get("product", "")).strip()[:250]
+        quantity = str(row.get("quantity", "")).strip()[:30]
+        unit = str(row.get("unit", "DFP")).strip()[:20] or "DFP"
+        if not product:
+            continue
+        sanitized.append({"product": product, "quantity": quantity, "unit": unit})
+    return canonicalize_proposal_order_rows(sanitized, product_catalog)
+
+
+def get_email_proposal_template_config(settings, proposal_type, product_catalog):
+    proposal_type = normalize_proposal_type(proposal_type)
+    defaults = build_email_proposal_template_defaults(proposal_type)
+    result = {
+        "email_type": proposal_type,
+        "email_type_label": EMAIL_PROPOSAL_TYPES[proposal_type],
+        **defaults,
+    }
+    customized_fields = []
+    for field in EMAIL_PROPOSAL_TEMPLATE_FIELDS:
+        key = email_proposal_template_setting_key(proposal_type, field)
+        if key in settings:
+            result[field] = str(settings.get(key, "")).strip()
+            customized_fields.append(field)
+
+    order_key = email_proposal_template_setting_key(proposal_type, "order_config")
+    order_config = None
+    if settings.get(order_key):
+        try:
+            parsed = json.loads(settings[order_key])
+            if isinstance(parsed, dict):
+                order_config = parsed
+        except (TypeError, ValueError):
+            order_config = None
+
+    if proposal_type == "reminder":
+        default_mode = "latest_order"
+        default_rows = []
+    elif proposal_type == "reactivation":
+        default_mode = "fixed"
+        default_rows = build_reactivation_order_rows(product_catalog)
+    else:
+        default_mode = "fixed"
+        default_rows = build_new_customer_order_rows(product_catalog)
+
+    mode = str((order_config or {}).get("mode", default_mode)).strip().casefold()
+    if proposal_type != "reminder":
+        mode = "fixed"
+    elif mode not in {"latest_order", "fixed"}:
+        mode = default_mode
+    rows = sanitize_template_order_rows(
+        (order_config or {}).get("rows", default_rows),
+        product_catalog,
+    )
+    if mode == "latest_order":
+        rows = []
+    result.update({
+        "order_mode": mode,
+        "order_rows": rows,
+        "customized": bool(customized_fields or order_config),
+    })
+    return result
+
+
+def save_email_proposal_template_config(spreadsheet, proposal_type, config):
+    sheet = spreadsheet.worksheet(SETTINGS_SHEET)
+    descriptions = {
+        "subject": "Standardämne för mejlförslag",
+        "intro_text": "Standardbrödtext för mejlförslag",
+        "closing_text": "Standardavslutning för mejlförslag",
+        "stockfiller_label": "Knapptext för Stockfiller",
+        "product_sheet_label": "Knapptext för produktblad",
+        "order_config": "Standardprodukter och antal för mejlförslag",
+    }
+    values = {
+        email_proposal_template_setting_key(proposal_type, field): (
+            config[field],
+            f"{descriptions[field]} – {EMAIL_PROPOSAL_TYPES[proposal_type]}",
+        )
+        for field in EMAIL_PROPOSAL_TEMPLATE_FIELDS
+    }
+    values[email_proposal_template_setting_key(proposal_type, "order_config")] = (
+        json.dumps({
+            "mode": config["order_mode"],
+            "rows": config["order_rows"],
+        }, ensure_ascii=False, separators=(",", ":")),
+        f"{descriptions['order_config']} – {EMAIL_PROPOSAL_TYPES[proposal_type]}",
+    )
+
+    with _settings_write_lock:
+        headers = ensure_worksheet_columns(sheet, sheet.row_values(1), SETTINGS_COLUMNS)
+        key_column = headers.index("key")
+        rows = sheet.get_all_values()
+        row_by_key = {}
+        for row_index, row in enumerate(rows[1:], start=2):
+            key = str(row[key_column] if key_column < len(row) else "").strip()
+            if key and key not in row_by_key:
+                row_by_key[key] = row_index
+        for key, (value, description) in values.items():
+            row_index = row_by_key.get(key)
+            if row_index:
+                sheet.update_cell(row_index, headers.index("value") + 1, value)
+                sheet.update_cell(row_index, headers.index("description") + 1, description)
+            else:
+                append_dict_row(sheet, SETTINGS_COLUMNS, {
+                    "key": key,
+                    "value": value,
+                    "description": description,
+                })
+                row_by_key[key] = len(sheet.get_all_values())
 
 
 def get_email_rows(spreadsheet):
@@ -1342,13 +1464,13 @@ def build_email_proposal_draft(spreadsheet, row_number, draft_id=None, created_a
     proposal_type = relationship["email_type"]
     settings = get_settings(spreadsheet)
     product_catalog = build_settings_product_catalog(settings)
-    suggested_rows = canonicalize_proposal_order_rows(
-        latest_order.get("order_rows", []), product_catalog
-    )
-    if proposal_type == "reactivation":
-        suggested_rows = build_reactivation_order_rows(product_catalog)
-    elif proposal_type == "new_customer":
-        suggested_rows = build_new_customer_order_rows(product_catalog)
+    template = get_email_proposal_template_config(settings, proposal_type, product_catalog)
+    if template["order_mode"] == "fixed":
+        suggested_rows = template["order_rows"]
+    else:
+        suggested_rows = canonicalize_proposal_order_rows(
+            latest_order.get("order_rows", []), product_catalog
+        )
 
     unique_store_count = count_unique_order_customers(order_rows)
     copy = build_email_proposal_copy(
@@ -1357,6 +1479,7 @@ def build_email_proposal_draft(spreadsheet, row_number, draft_id=None, created_a
         latest_delivery_date=latest_order.get("delivery_date"),
         has_order_rows=bool(suggested_rows),
         unique_store_count=unique_store_count,
+        template=template,
     )
     created_at = created_at or now_text()
     product_setting = EMAIL_PROPOSAL_PRODUCT_SETTINGS[proposal_type]
@@ -1550,6 +1673,82 @@ def get_session():
 def logout():
     session.clear()
     return jsonify({"ok": True})
+
+
+@app.route("/email-proposal-settings", methods=["GET"])
+def get_email_proposal_settings():
+    spreadsheet = get_spreadsheet_with_retry()
+    settings = get_settings(spreadsheet)
+    product_catalog = build_settings_product_catalog(settings)
+    templates = {
+        proposal_type: get_email_proposal_template_config(
+            settings, proposal_type, product_catalog
+        )
+        for proposal_type in EMAIL_PROPOSAL_TYPES
+    }
+    return jsonify({
+        "ok": True,
+        "templates": templates,
+        "product_catalog": product_catalog,
+        "placeholders": {
+            "{{dagar}}": "Dagar sedan senaste leverans",
+            "{{veckor}}": "Veckor sedan senaste leverans",
+            "{{antal_butiker}}": "Avrundat antal butiker med order",
+            "{{butiksnamn}}": "Butikens namn",
+            "(namn)": "Mottagarens valda hälsningsnamn",
+        },
+    })
+
+
+@app.route("/email-proposal-settings/<proposal_type>", methods=["PUT"])
+def update_email_proposal_settings(proposal_type):
+    proposal_type = str(proposal_type or "").strip().casefold()
+    if proposal_type not in EMAIL_PROPOSAL_TYPES:
+        return jsonify({"ok": False, "error": "invalid_email_type"}), 404
+
+    data = request.get_json(silent=True) or {}
+    values = {
+        field: str(data.get(field) or "").strip()
+        for field in EMAIL_PROPOSAL_TEMPLATE_FIELDS
+    }
+    if not values["subject"] or not values["intro_text"]:
+        return jsonify({"ok": False, "error": "missing_email_content"}), 400
+    if not values["stockfiller_label"] or not values["product_sheet_label"]:
+        return jsonify({"ok": False, "error": "missing_cta_label"}), 400
+    if len(values["subject"]) > 250:
+        return jsonify({"ok": False, "error": "subject_too_long"}), 400
+    if len(values["intro_text"]) > 5000 or len(values["closing_text"]) > 5000:
+        return jsonify({"ok": False, "error": "body_too_long"}), 400
+    if len(values["stockfiller_label"]) > 80 or len(values["product_sheet_label"]) > 80:
+        return jsonify({"ok": False, "error": "cta_label_too_long"}), 400
+
+    spreadsheet = get_spreadsheet_with_retry()
+    settings = get_settings(spreadsheet)
+    product_catalog = build_settings_product_catalog(settings)
+    order_mode = str(data.get("order_mode") or "fixed").strip().casefold()
+    if proposal_type != "reminder":
+        order_mode = "fixed"
+    elif order_mode not in {"latest_order", "fixed"}:
+        return jsonify({"ok": False, "error": "invalid_order_mode"}), 400
+    order_rows = sanitize_template_order_rows(data.get("order_rows"), product_catalog)
+    if order_mode == "fixed" and (
+        not order_rows or any(not str(row.get("quantity", "")).strip() for row in order_rows)
+    ):
+        return jsonify({"ok": False, "error": "missing_order_rows"}), 400
+    if order_mode == "latest_order":
+        order_rows = []
+
+    config = {
+        **values,
+        "order_mode": order_mode,
+        "order_rows": order_rows,
+    }
+    save_email_proposal_template_config(spreadsheet, proposal_type, config)
+    updated_settings = get_settings(spreadsheet)
+    updated = get_email_proposal_template_config(
+        updated_settings, proposal_type, product_catalog
+    )
+    return jsonify({"ok": True, "template": updated})
 
 
 @app.route("/customers/<int:row>/email-proposal-draft", methods=["GET"])
