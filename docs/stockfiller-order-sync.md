@@ -6,8 +6,12 @@ It replaces rows by Stockfiller order `Reference`, which makes repeated runs ide
 The order columns `placedBy`, `buyerEmail`, and `placedAs` are written immediately after
 `Customer`. After a successful production write, the sync also updates
 `customers_enriched.email_last_order` with `buyerEmail` from each customer's last physical
-row in `order_rows`. The customer column is inserted between `email` and `city_google` on
+row in `order_rows`. The `email_last_order` column is inserted between `email` and `city_google` on
 the first run and reused on later runs.
+
+The same job also runs the customer master reconciliation after writing `order_rows`.
+It defaults to a read-only report. See [CRM Customer Master Sync](customer-master-sync.md)
+for matching rules, review handling, and the production rollout.
 
 ## Required Variables
 
@@ -28,8 +32,25 @@ Optional variables:
 ```text
 STOCKFILLER_SYNC_LOOKBACK_HOURS=48
 STOCKFILLER_SYNC_OVERLAP_HOURS=2
+STOCKFILLER_CREATED_REFRESH_DAYS=45
 STOCKFILLER_TIMEOUT_SECONDS=30
+CRM_CUSTOMER_SYNC_MODE=dry_run
 ```
+
+Every incremental run combines two API windows:
+
+- orders updated since the previous successful stop, with the normal two-hour
+  overlap
+- orders created during the latest 45 days
+
+The results are deduplicated by order `Reference` before `order_rows` is
+updated. The created-date refresh catches customer numbers that Stockfiller
+adds several weeks after delivery even when that change does not move the
+order's `updatedDateTime`. Current CRM customer numbers are also reapplied to
+retained historical rows by exact normalized customer name.
+
+Keep `CRM_CUSTOMER_SYNC_MODE=dry_run` until the reconciliation report has been
+reviewed. Change it to `apply` only after the initial backup and approval.
 
 ## Run Locally
 

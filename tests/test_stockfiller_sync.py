@@ -292,6 +292,30 @@ class StockfillerSyncTests(TestCase):
 
         self.assertEqual(order_params_for_window(window), [window.params])
 
+    def test_order_params_for_incremental_adds_rolling_created_refresh(self):
+        window = SyncWindow(
+            mode="incremental",
+            params={
+                "updatedDateTimeStart": "2026-05-28T08:00:00Z",
+                "updatedDateTimeStop": "2026-05-28T12:00:00Z",
+            },
+            stop_value="2026-05-28T12:00:00Z",
+            created_refresh_days=45,
+        )
+
+        params = order_params_for_window(window)
+
+        self.assertEqual(params[0], window.params)
+        self.assertEqual(len(params), 3)
+        self.assertEqual(
+            params[1]["createdDateTimeStart"],
+            "2026-04-13T12:00:00Z",
+        )
+        self.assertEqual(
+            params[-1]["createdDateTimeStop"],
+            "2026-05-28T12:00:00Z",
+        )
+
     def test_dedupe_orders_by_reference_keeps_latest_updated_order(self):
         orders = dedupe_orders_by_reference(
             [
@@ -379,6 +403,40 @@ class StockfillerSyncTests(TestCase):
         self.assertEqual(spreadsheet.worksheet("order_rows").get_all_values()[1][0], "OLDREF")
         self.assertEqual(spreadsheet.worksheet(STATE_SHEET_NAME).get_all_values()[1][1], "old")
 
+    def test_sync_orders_reapplies_crm_numbers_to_retained_rows(self):
+        existing = _sheet_row("OLDREF", customer="Existing Store")
+        existing[ORDER_COLUMNS.index("Customer number")] = "7300120154304"
+        spreadsheet = FakeSpreadsheet(
+            {
+                "order_rows": [ORDER_COLUMNS, existing],
+                "customers_enriched": [
+                    ["customer", "customer_number", "email", "city_google"],
+                    ["Existing Store", "1001", "", "Stockholm"],
+                ],
+                STATE_SHEET_NAME: [["key", "value", "updated_at"]],
+            }
+        )
+        window = SyncWindow(
+            mode="incremental",
+            params={},
+            stop_value="2026-05-28T12:00:00Z",
+        )
+
+        with patch(
+            "stockfiller_orders.sync.StockfillerClient",
+            return_value=FakeClient([]),
+        ):
+            sync_orders(
+                _config(),
+                window,
+                spreadsheet=spreadsheet,
+                customer_sync_mode="off",
+            )
+
+        values = spreadsheet.worksheet("order_rows").get_all_values()
+        number_index = values[0].index("Customer number")
+        self.assertEqual(values[1][number_index], "1001")
+
     def test_sync_orders_preview_target_does_not_update_state(self):
         spreadsheet = FakeSpreadsheet(
             {
@@ -402,6 +460,62 @@ class StockfillerSyncTests(TestCase):
         self.assertEqual(result.target_worksheet, "order_rows_preview")
         self.assertEqual(spreadsheet.worksheet("order_rows_preview").get_all_values()[1][0], "NEWREF")
         self.assertEqual(spreadsheet.worksheet(STATE_SHEET_NAME).get_all_values()[1][1], "old")
+
+    def test_sync_orders_runs_customer_master_dry_run_after_order_write(self):
+        customer_headers = [
+            "customer",
+            "cancelled_flag",
+            "customer_number",
+            "address_google",
+            "address_number_google",
+            "postal_code_google",
+            "email",
+            "email_last_order",
+            "city_google",
+        ]
+        spreadsheet = FakeSpreadsheet(
+            {
+                "order_rows": [ORDER_COLUMNS],
+                "customers_enriched": [
+                    customer_headers,
+                    [
+                        "Store A",
+                        "",
+                        "CRM-1001",
+                        "Hantverkargatan",
+                        "1",
+                        "11152",
+                        "contact@example.com",
+                        "",
+                        "Stockholm",
+                    ],
+                ],
+                STATE_SHEET_NAME: [["key", "value", "updated_at"]],
+            }
+        )
+        window = SyncWindow(
+            mode="incremental",
+            params={},
+            stop_value="2026-05-28T12:00:00Z",
+        )
+
+        with patch(
+            "stockfiller_orders.sync.StockfillerClient",
+            return_value=FakeClient([_api_order("NEWREF")]),
+        ):
+            result = sync_orders(
+                _config(),
+                window,
+                spreadsheet=spreadsheet,
+                customer_sync_mode="dry_run",
+            )
+
+        self.assertIsNotNone(result.customer_sync)
+        self.assertEqual(result.customer_sync.mode, "dry_run")
+        self.assertEqual(result.customer_sync.exact_matches, 1)
+        self.assertEqual(result.customer_sync.needs_review, 0)
+        customer_values = spreadsheet.worksheet("customers_enriched").get_all_values()
+        self.assertEqual(customer_values[1][0], "Store A")
 
     def test_build_incremental_window_uses_state_with_overlap(self):
         args = Namespace(

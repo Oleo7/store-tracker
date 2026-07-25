@@ -88,6 +88,58 @@ class FakeSpreadsheet:
 
 
 class ReminderEmailHelperTests(unittest.TestCase):
+    def test_customer_timeline_uses_customer_number_for_historical_order_name(self):
+        order_rows = [{
+            "Reference": "ORDER-1",
+            "Order date": "2026-07-05",
+            "Customer": "Old Store Name",
+            "Customer number": "1001",
+            "Quantity": "2",
+            "Total": "200",
+            "Currency": "SEK",
+            "Unit": "DFP",
+        }]
+        message = {
+            "email_id": "mail-1",
+            "customer": "New Store Name",
+            "customer_number": "1001",
+            "email_type": "reactivation",
+            "sender_name": "Sofia",
+            "subject": "Hej",
+            "is_test": "",
+            "status": "sent",
+            "sent_at": "2026-07-01 09:00:00",
+        }
+        recipient = {
+            "email_id": "mail-1",
+            "customer": "New Store Name",
+            "intended_email": "buyer@example.com",
+            "actual_email": "buyer@example.com",
+            "send_status": "sent",
+            "sent_at": "2026-07-01 09:00:00",
+            "delivered_at": "2026-07-01 09:01:00",
+        }
+        sheets = {
+            app_module.EMAIL_MESSAGES_SHEET: FakeWorksheet(
+                "email_messages", EMAIL_MESSAGES_COLUMNS, [message]
+            ),
+            app_module.EMAIL_RECIPIENTS_SHEET: FakeWorksheet(
+                "email_recipients", EMAIL_RECIPIENTS_COLUMNS, [recipient]
+            ),
+        }
+
+        timeline = app_module.build_customer_timeline(
+            "New Store Name",
+            order_rows,
+            [],
+            sheets,
+            customer_number="1001",
+        )
+
+        event_types = {item["event_type"] for item in timeline}
+        self.assertIn("email_proposal_sent", event_types)
+        self.assertIn("subsequent_order", event_types)
+
     def test_append_dict_row_starts_in_column_a_despite_blank_and_orphan_rows(self):
         sheet = FakeWorksheet("email_messages", EMAIL_MESSAGES_COLUMNS)
         sheet.values.append([])

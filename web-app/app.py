@@ -683,6 +683,19 @@ def normalize_key(value):
     return normalize_customer_key(value)
 
 
+def customer_identity_matches(
+    left_name,
+    left_number,
+    right_name,
+    right_number,
+):
+    left_number_key = normalize_key(left_number)
+    right_number_key = normalize_key(right_number)
+    if left_number_key and right_number_key:
+        return left_number_key == right_number_key
+    return normalize_key(left_name) == normalize_key(right_name)
+
+
 def parse_date_value(value):
     text = str(value or "").strip()
     if not text:
@@ -2486,6 +2499,7 @@ def build_live_email_records(message_rows, recipient_rows):
 
         email_id = str(message.get("email_id", "")).strip()
         customer = str(message.get("customer", "")).strip()
+        customer_number = str(message.get("customer_number", "")).strip()
         customer_key = normalize_key(customer)
         sent_at = parse_datetime_value(message.get("sent_at"))
         if not email_id or not customer_key or not sent_at:
@@ -2562,6 +2576,7 @@ def build_live_email_records(message_rows, recipient_rows):
             "email_id": email_id,
             "customer": customer,
             "customer_key": customer_key,
+            "customer_number": customer_number,
             "sent_at": sent_at,
             "message": message,
             "recipients": sent_recipients,
@@ -2590,6 +2605,12 @@ def group_customer_orders(order_rows):
     for index, order in enumerate(order_rows):
         customer = str(order.get("Customer", "")).strip()
         customer_key = normalize_key(customer)
+        customer_number = str(order.get("Customer number", "")).strip()
+        identity_key = (
+            f"number:{normalize_key(customer_number)}"
+            if normalize_key(customer_number)
+            else f"name:{customer_key}"
+        )
         order_date = parse_date_value(order.get("Order date"))
         is_ordered = (
             parse_number_value(order.get("Quantity"), 0) > 0
@@ -2602,16 +2623,18 @@ def group_customer_orders(order_rows):
         currency = str(order.get("Currency", "")).strip().upper()
         if reference:
             group_key = (
-                customer_key, "reference", reference, order_date.isoformat(), currency
+                identity_key, "reference", reference, order_date.isoformat(), currency
             )
         else:
             # An order without Reference normally consists of several product
             # rows. Group same-day rows instead of counting every SKU as an order.
-            group_key = (customer_key, "fallback", order_date.isoformat(), currency)
+            group_key = (identity_key, "fallback", order_date.isoformat(), currency)
 
         group = grouped.setdefault(group_key, {
             "customer": customer,
             "customer_key": customer_key,
+            "customer_number": customer_number,
+            "identity_key": identity_key,
             "reference": reference,
             "date": order_date,
             "total": 0.0,
@@ -2632,15 +2655,17 @@ def group_customer_orders(order_rows):
 
 def attribute_orders_to_live_emails(live_records, grouped_orders, window_days=EMAIL_ORDER_ATTRIBUTION_DAYS):
     """Attribute each order once to the latest eligible live proposal."""
-    records_by_customer = defaultdict(list)
-    for record in live_records:
-        records_by_customer[record["customer_key"]].append(record)
-
     attributed = defaultdict(list)
     for order in grouped_orders:
         eligible = [
-            record for record in records_by_customer.get(order["customer_key"], [])
-            if 0 <= (order["date"] - record["sent_at"].date()).days <= window_days
+            record for record in live_records
+            if customer_identity_matches(
+                record.get("customer"),
+                record.get("customer_number"),
+                order.get("customer"),
+                order.get("customer_number"),
+            )
+            and 0 <= (order["date"] - record["sent_at"].date()).days <= window_days
         ]
         if not eligible:
             continue
@@ -2832,7 +2857,13 @@ def build_email_performance(message_rows, recipient_rows, order_rows, included_c
     }
 
 
-def build_customer_timeline(customer_name, order_rows, contact_rows, sheets):
+def build_customer_timeline(
+    customer_name,
+    order_rows,
+    contact_rows,
+    sheets,
+    customer_number="",
+):
     """Build the customer-specific, user-facing activity stream.
 
     Raw delivery, bounce and other technical Brevo events remain in email_events;
@@ -2857,11 +2888,25 @@ def build_customer_timeline(customer_name, order_rows, contact_rows, sheets):
     )
     live_records = [
         record for record in build_live_email_records(message_rows, recipient_rows)
-        if record["customer_key"] == customer_key
+        if customer_identity_matches(
+            customer_name,
+            customer_number,
+            record.get("customer"),
+            record.get("customer_number"),
+        )
     ]
     attributed_orders = attribute_orders_to_live_emails(
         live_records,
-        [order for order in group_customer_orders(order_rows) if order["customer_key"] == customer_key],
+        [
+            order
+            for order in group_customer_orders(order_rows)
+            if customer_identity_matches(
+                customer_name,
+                customer_number,
+                order.get("customer"),
+                order.get("customer_number"),
+            )
+        ],
     )
 
     event_specs = (
@@ -2953,8 +2998,15 @@ def build_customer_timeline(customer_name, order_rows, contact_rows, sheets):
 
 @app.route("/customers/<customer_name>/stats", methods=["GET"])
 def get_customer_stats(customer_name):
-    customer_name = unquote(customer_name).strip().lower()
+    customer_name = unquote(customer_name).strip()
+    customer_key = normalize_key(customer_name)
     spreadsheet = get_spreadsheet_with_retry()
+    customer_number = ""
+    for customer in get_customer_rows(spreadsheet):
+        if normalize_key(customer.get("customer")) == customer_key:
+            customer_name = customer.get("customer", customer_name)
+            customer_number = customer.get("customer_number", "")
+            break
 
     # Orders
     order_rows = get_order_rows(spreadsheet)
@@ -2964,7 +3016,12 @@ def get_customer_stats(customer_name):
 
     unique_references = set()
     for o in order_rows:
-        if o["Customer"].strip().lower() != customer_name:
+        if not customer_identity_matches(
+            customer_name,
+            customer_number,
+            o.get("Customer"),
+            o.get("Customer number"),
+        ):
             continue
         try:
             cleaned = "".join(c for c in o["Total"] if c.isdigit() or c in ".,").replace(",", ".")
@@ -2984,7 +3041,7 @@ def get_customer_stats(customer_name):
     contact_rows = get_contact_rows(spreadsheet)
     contacts = []
     for c in contact_rows:
-        if c["customer"].strip().lower() != customer_name:
+        if normalize_key(c.get("customer")) != normalize_key(customer_name):
             continue
         contact = {k: c[k] for k in ("customer", "date_time", "sales_person", "contact_channel", "result", "comment", "customer_contact_person", "follow_up_date",
                                      *FREEZER_COLUMNS)}
@@ -2997,7 +3054,13 @@ def get_customer_stats(customer_name):
         contact.pop("_sort_date", None)
 
     sheets = ensure_email_worksheets(spreadsheet)
-    timeline = build_customer_timeline(customer_name, order_rows, contact_rows, sheets)
+    timeline = build_customer_timeline(
+        customer_name,
+        order_rows,
+        contact_rows,
+        sheets,
+        customer_number=customer_number,
+    )
 
     return jsonify({
         "total_sales": round(total_sales, 2),

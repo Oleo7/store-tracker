@@ -16,6 +16,12 @@ from dotenv import load_dotenv
 from google.oauth2.service_account import Credentials
 from gspread.exceptions import WorksheetNotFound
 
+from customer_master_sync.sync import (
+    CustomerSyncResult,
+    normalize_mode as normalize_customer_sync_mode,
+    run_customer_sync,
+)
+
 
 ORDER_COLUMNS = [
     "Reference",
@@ -60,6 +66,7 @@ PRODUCTION_BASE_URL = "https://api.stockfiller.com/v1"
 SANDBOX_BASE_URL = "https://public-api.staging.stockfillertech.com/v1"
 DEFAULT_LOOKBACK_HOURS = 48
 DEFAULT_TIMEOUT_SECONDS = 30
+DEFAULT_CREATED_REFRESH_DAYS = 45
 BACKFILL_CHUNK_DAYS = 31
 NUMERIC_COLUMNS = {
     "Weight",
@@ -132,6 +139,7 @@ class SyncWindow:
     mode: str
     params: dict[str, str]
     stop_value: str | None
+    created_refresh_days: int = 0
 
 
 @dataclass(frozen=True)
@@ -146,6 +154,8 @@ class SyncResult:
     kept_existing_rows: int
     final_rows: int
     stop_value: str | None
+    created_refresh_days: int = 0
+    customer_sync: CustomerSyncResult | None = None
 
 
 class StockfillerClient:
@@ -215,6 +225,7 @@ def build_sync_window(args: argparse.Namespace, state: dict[str, str], now: date
                 "createdDateTimeStop": to_stockfiller_datetime(stop),
             },
             stop_value=to_stockfiller_datetime(stop),
+            created_refresh_days=0,
         )
 
     if args.start:
@@ -231,6 +242,16 @@ def build_sync_window(args: argparse.Namespace, state: dict[str, str], now: date
             "updatedDateTimeStop": to_stockfiller_datetime(stop),
         },
         stop_value=to_stockfiller_datetime(stop),
+        created_refresh_days=max(
+            0,
+            int(
+                getattr(
+                    args,
+                    "created_refresh_days",
+                    DEFAULT_CREATED_REFRESH_DAYS,
+                )
+            ),
+        ),
     )
 
 
@@ -241,6 +262,7 @@ def sync_orders(
     spreadsheet=None,
     target_worksheet: str = "order_rows",
     update_state: bool = True,
+    customer_sync_mode: str | None = None,
 ) -> SyncResult:
     spreadsheet = spreadsheet or open_spreadsheet(config)
     order_sheet = get_or_create_worksheet(spreadsheet, target_worksheet, rows=1000, cols=len(ORDER_COLUMNS))
@@ -251,15 +273,25 @@ def sync_orders(
     orders = dedupe_orders_by_reference(fetch_orders_for_window(client, window))
     replace_references = {text(order.get("reference")) for order in orders if text(order.get("reference"))}
     output_rows = flatten_orders(orders)
-    apply_crm_customer_numbers(output_rows, load_crm_customer_numbers(spreadsheet))
 
     merged_headers = merge_headers(headers)
     kept_existing_rows = [row for row in existing_rows if text(row.get("Reference")) not in replace_references]
     final_rows = kept_existing_rows + output_rows
+    # Reapply the current CRM number map to every retained order row as well as
+    # newly fetched rows. This makes a delayed customer-number assignment
+    # converge without requiring a full historical backfill.
+    apply_crm_customer_numbers(final_rows, load_crm_customer_numbers(spreadsheet))
 
+    customer_sync_result = None
     if not dry_run:
         write_rows(order_sheet, merged_headers, final_rows)
         if target_worksheet == "order_rows":
+            mode = normalize_customer_sync_mode(customer_sync_mode, default="off")
+            customer_sync_result = run_customer_sync(
+                spreadsheet,
+                mode=mode,
+                order_rows=final_rows,
+            )
             sync_latest_order_emails(spreadsheet, final_rows)
         if update_state:
             state = read_sync_state(spreadsheet)
@@ -271,8 +303,13 @@ def sync_orders(
             )
             if window.mode == "incremental":
                 state["last_successful_updated_stop"] = window.stop_value or ""
+                state["last_created_refresh_days"] = str(
+                    window.created_refresh_days
+                )
             else:
                 state["last_successful_backfill_created_stop"] = window.stop_value or ""
+            if customer_sync_result is not None:
+                state.update(customer_sync_result.state_values())
             write_sync_state(spreadsheet, state)
 
     return SyncResult(
@@ -286,6 +323,8 @@ def sync_orders(
         kept_existing_rows=len(kept_existing_rows),
         final_rows=len(final_rows),
         stop_value=window.stop_value,
+        created_refresh_days=window.created_refresh_days,
+        customer_sync=customer_sync_result,
     )
 
 
@@ -308,7 +347,30 @@ def order_params_for_window(window: SyncWindow) -> list[dict[str, str]]:
             stop_key="createdDateTimeStop",
             chunk_days=BACKFILL_CHUNK_DAYS,
         )
-    return [window.params]
+    params = [window.params]
+    if (
+        window.mode == "incremental"
+        and window.created_refresh_days > 0
+        and window.stop_value
+    ):
+        refresh_stop = parse_datetime_arg(window.stop_value)
+        refresh_start = refresh_stop - timedelta(
+            days=window.created_refresh_days
+        )
+        params.extend(
+            chunk_datetime_params(
+                {
+                    "createdDateTimeStart": to_stockfiller_datetime(
+                        refresh_start
+                    ),
+                    "createdDateTimeStop": to_stockfiller_datetime(refresh_stop),
+                },
+                start_key="createdDateTimeStart",
+                stop_key="createdDateTimeStop",
+                chunk_days=BACKFILL_CHUNK_DAYS,
+            )
+        )
+    return params
 
 
 def chunk_datetime_params(params: dict[str, str], start_key: str, stop_key: str, chunk_days: int) -> list[dict[str, str]]:
@@ -470,6 +532,23 @@ def latest_order_emails_by_customer(order_rows: Iterable[dict[str, Any]]) -> dic
     return latest_emails
 
 
+def latest_order_emails_by_identity(
+    order_rows: Iterable[dict[str, Any]],
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Return latest emails keyed by customer number and normalized name."""
+    by_number: dict[str, str] = {}
+    by_name: dict[str, str] = {}
+    for row in order_rows:
+        email = text(row.get("buyerEmail"))
+        customer_number = normalize_key(row.get("Customer number"))
+        customer_name = normalize_key(row.get("Customer"))
+        if customer_number:
+            by_number[customer_number] = email
+        if customer_name:
+            by_name[customer_name] = email
+    return by_number, by_name
+
+
 def sync_latest_order_emails(spreadsheet, order_rows: Iterable[dict[str, Any]]) -> None:
     worksheet = spreadsheet.worksheet("customers_enriched")
     values = worksheet.get_all_values()
@@ -481,13 +560,28 @@ def sync_latest_order_emails(spreadsheet, order_rows: Iterable[dict[str, Any]]) 
     values = worksheet.get_all_values()
     headers = [text(header) for header in values[0]]
     customer_index = required_header_index(headers, "customer", "customers_enriched")
+    customer_number_index = (
+        headers.index("customer_number") if "customer_number" in headers else None
+    )
     email_index = required_header_index(headers, CUSTOMER_EMAIL_COLUMN, "customers_enriched")
-    latest_emails = latest_order_emails_by_customer(order_rows)
+    emails_by_number, emails_by_name = latest_order_emails_by_identity(order_rows)
 
     email_values = []
     for row in values[1:]:
         customer = row[customer_index] if customer_index < len(row) else ""
-        email_values.append([latest_emails.get(normalize_key(customer), "")])
+        customer_number = (
+            row[customer_number_index]
+            if customer_number_index is not None and customer_number_index < len(row)
+            else ""
+        )
+        email = (
+            emails_by_number.get(normalize_key(customer_number))
+            if normalize_key(customer_number)
+            else None
+        )
+        if email is None:
+            email = emails_by_name.get(normalize_key(customer), "")
+        email_values.append([email])
 
     if email_values:
         column = column_name(email_index)
@@ -775,6 +869,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--target-worksheet", default="order_rows", help="Worksheet to update. Defaults to order_rows.")
     parser.add_argument("--lookback-hours", type=int, default=int(os.environ.get("STOCKFILLER_SYNC_LOOKBACK_HOURS", DEFAULT_LOOKBACK_HOURS)))
     parser.add_argument("--overlap-hours", type=int, default=int(os.environ.get("STOCKFILLER_SYNC_OVERLAP_HOURS", 2)))
+    parser.add_argument(
+        "--created-refresh-days",
+        type=int,
+        default=int(
+            os.environ.get(
+                "STOCKFILLER_CREATED_REFRESH_DAYS",
+                DEFAULT_CREATED_REFRESH_DAYS,
+            )
+        ),
+        help=(
+            "For incremental runs, also refetch orders created within this "
+            "rolling window. Defaults to 45 days."
+        ),
+    )
     return parser
 
 
@@ -794,6 +902,11 @@ def main(argv: list[str] | None = None) -> int:
             spreadsheet=spreadsheet,
             target_worksheet=args.target_worksheet,
             update_state=args.target_worksheet == "order_rows",
+            customer_sync_mode=(
+                os.environ.get("CRM_CUSTOMER_SYNC_MODE", "dry_run")
+                if args.target_worksheet == "order_rows"
+                else "off"
+            ),
         )
     except Exception as exc:
         print(f"Stockfiller sync failed: {exc}", file=sys.stderr)
@@ -810,6 +923,23 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Final rows: {result.final_rows}")
     if result.stop_value:
         print(f"Window stop: {result.stop_value}")
+    if result.mode == "incremental":
+        print(f"Created-date refresh days: {result.created_refresh_days}")
+    if result.customer_sync is not None:
+        customer_sync = result.customer_sync
+        print(f"Customer sync mode: {customer_sync.mode}")
+        print(f"Customer names to update: {customer_sync.updated_names}")
+        print(f"Customer numbers to backfill: {customer_sync.backfilled_customer_numbers}")
+        print(
+            "GLN identifiers ignored for customer-number backfill: "
+            f"{customer_sync.ignored_gln_identifiers}"
+        )
+        print(
+            "Organization identifiers ignored for customer-number backfill: "
+            f"{customer_sync.ignored_organization_identifiers}"
+        )
+        print(f"Customers to append: {customer_sync.appended_customers}")
+        print(f"Customer rows needing review: {customer_sync.needs_review}")
     return 0
 
 
