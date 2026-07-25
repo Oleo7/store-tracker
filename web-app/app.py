@@ -28,6 +28,15 @@ from priority import (
     build_priority_customers,
     normalize_customer_key,
 )
+from route_proposal import (
+    Coordinate,
+    GoogleRoutesTravelTimeProvider,
+    RouteCandidate,
+    RouteProposalError,
+    TravelTimeConfigurationError,
+    calculate_route_proposal,
+    seconds_to_minutes,
+)
 from reminder_email import (
     EMAIL_PROPOSAL_PRODUCT_SETTINGS,
     EMAIL_PROPOSAL_TEMPLATE_FIELDS,
@@ -164,6 +173,9 @@ _email_sheets_cache = None
 _email_sheets_cache_lock = threading.Lock()
 _settings_write_lock = threading.Lock()
 _worksheet_append_lock = threading.RLock()
+_route_provider_lock = threading.Lock()
+_route_provider = None
+_route_provider_config = None
 
 
 _spreadsheet_cache = None
@@ -293,6 +305,50 @@ def get_spreadsheet_with_retry():
         return get_spreadsheet()
     except RequestsConnectionError:
         return get_spreadsheet(force_reconnect=True)
+
+
+def get_route_travel_time_provider():
+    """Return the shared backend-only Routes provider for route proposals."""
+    global _route_provider, _route_provider_config
+
+    routes_key = str(os.environ.get("GOOGLE_ROUTES_API_KEY") or "").strip()
+    maps_fallback_key = str(os.environ.get("GOOGLE_MAPS_API_KEY") or "").strip()
+    api_key = routes_key or maps_fallback_key
+    if not api_key:
+        raise TravelTimeConfigurationError()
+
+    routing_preference = str(
+        os.environ.get("ROUTE_ROUTING_PREFERENCE") or "TRAFFIC_AWARE"
+    ).strip().upper()
+    try:
+        timeout_seconds = float(
+            os.environ.get("ROUTE_MATRIX_TIMEOUT_SECONDS") or 15
+        )
+    except (TypeError, ValueError):
+        timeout_seconds = 15.0
+    try:
+        cache_ttl_seconds = float(
+            os.environ.get("ROUTE_MATRIX_CACHE_TTL_SECONDS") or 600
+        )
+    except (TypeError, ValueError):
+        cache_ttl_seconds = 600.0
+
+    config = (
+        api_key,
+        routing_preference,
+        timeout_seconds,
+        cache_ttl_seconds,
+    )
+    with _route_provider_lock:
+        if _route_provider is None or _route_provider_config != config:
+            _route_provider = GoogleRoutesTravelTimeProvider(
+                api_key,
+                routing_preference=routing_preference,
+                timeout_seconds=timeout_seconds,
+                cache_ttl_seconds=cache_ttl_seconds,
+            )
+            _route_provider_config = config
+    return _route_provider
 
 
 def worksheet_to_dicts(worksheet, expected_columns=None, required_columns=None):
@@ -3072,6 +3128,33 @@ def get_customer_stats(customer_name):
     })
 
 
+def build_current_priority_snapshot(
+    *,
+    customers,
+    order_rows,
+    contact_rows,
+    message_rows,
+    recipient_rows,
+    today,
+):
+    """Calculate the authoritative priority snapshot used by all endpoints."""
+    order_features = build_order_features(order_rows)
+    contact_features = build_contact_features(contact_rows, order_features)
+    email_engagement_by_customer = build_email_engagement_snapshot(
+        message_rows, recipient_rows, order_rows, today=today
+    )
+    priority_customers = build_priority_customers(
+        customers,
+        order_features,
+        contact_features,
+        None,
+        today,
+        limit=len(customers),
+        email_features=email_engagement_by_customer,
+    )
+    return priority_customers, email_engagement_by_customer
+
+
 @app.route("/customer-insights", methods=["GET"])
 def get_customer_insights():
     spreadsheet = get_spreadsheet_with_retry()
@@ -3107,19 +3190,13 @@ def get_customer_insights():
         if ref:
             order_references[name].add(ref)
 
-    order_features = build_order_features(order_rows)
-    contact_features = build_contact_features(contact_rows, order_features)
-    email_engagement_by_customer = build_email_engagement_snapshot(
-        message_rows, recipient_rows, order_rows, today=today
-    )
-    priority_customers = build_priority_customers(
-        customers,
-        order_features,
-        contact_features,
-        None,
-        today,
-        limit=len(customers),
-        email_features=email_engagement_by_customer,
+    priority_customers, email_engagement_by_customer = build_current_priority_snapshot(
+        customers=customers,
+        order_rows=order_rows,
+        contact_rows=contact_rows,
+        message_rows=message_rows,
+        recipient_rows=recipient_rows,
+        today=today,
     )
     priority_by_name = {
         normalize_key(customer["customer"]): customer
@@ -3230,6 +3307,258 @@ def get_customer_insights():
         }
 
     return jsonify(insights)
+
+
+def route_proposal_error(code, message, status):
+    return jsonify({
+        "ok": False,
+        "error": code,
+        "code": code,
+        "message": message,
+    }), status
+
+
+def parse_route_start(data):
+    start = data.get("start") if isinstance(data, dict) else None
+    if not isinstance(start, dict):
+        return None
+    latitude = start.get("latitude")
+    longitude = start.get("longitude")
+    if (
+        isinstance(latitude, bool)
+        or isinstance(longitude, bool)
+        or not isinstance(latitude, (int, float))
+        or not isinstance(longitude, (int, float))
+    ):
+        return None
+    latitude = float(latitude)
+    longitude = float(longitude)
+    if (
+        not math.isfinite(latitude)
+        or not math.isfinite(longitude)
+        or not -90 <= latitude <= 90
+        or not -180 <= longitude <= 180
+    ):
+        return None
+    return Coordinate(latitude=latitude, longitude=longitude)
+
+
+@app.route("/route-proposal", methods=["POST"])
+def create_route_proposal():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return route_proposal_error(
+            "invalid_request",
+            "Begäran om ruttförslag är ogiltig.",
+            400,
+        )
+
+    start = parse_route_start(data)
+    if start is None:
+        return route_proposal_error(
+            "invalid_start",
+            "Din position är ogiltig. Försök hämta positionen igen.",
+            400,
+        )
+
+    candidate_rows = data.get("candidate_rows")
+    if not isinstance(candidate_rows, list):
+        return route_proposal_error(
+            "invalid_candidate_rows",
+            "Listan med butiker är ogiltig.",
+            400,
+        )
+    # 2,400 direct road-time elements plus the 600-element shortlist matrix
+    # stay within the default 3,000 elements/minute Routes API quota.
+    if len(candidate_rows) > 2400:
+        return route_proposal_error(
+            "too_many_candidates",
+            "För många butiker skickades. Begränsa listan med ett filter och försök igen.",
+            400,
+        )
+    if any(
+        isinstance(row, bool) or not isinstance(row, int) or row < 2
+        for row in candidate_rows
+    ):
+        return route_proposal_error(
+            "invalid_candidate_rows",
+            "Listan med butiker är ogiltig.",
+            400,
+        )
+
+    requested_rows = tuple(sorted(set(candidate_rows)))
+    if not requested_rows:
+        return route_proposal_error(
+            "no_eligible_candidates",
+            "Inga butiker matchar de aktiva filtren.",
+            422,
+        )
+
+    try:
+        spreadsheet = get_spreadsheet_with_retry()
+        today = stockholm_today()
+        customers = get_customer_rows(spreadsheet)
+        contact_rows = get_contact_rows(spreadsheet)
+        order_rows = get_order_rows(spreadsheet)
+        message_rows, recipient_rows, _ = get_email_rows(spreadsheet)
+        priority_customers, _ = build_current_priority_snapshot(
+            customers=customers,
+            order_rows=order_rows,
+            contact_rows=contact_rows,
+            message_rows=message_rows,
+            recipient_rows=recipient_rows,
+            today=today,
+        )
+    except Exception:
+        app.logger.exception("Could not build priority snapshot for route proposal")
+        return route_proposal_error(
+            "priority_data_unavailable",
+            "Kundinsikterna kunde inte laddas. Försök igen.",
+            503,
+        )
+
+    customer_by_row = {
+        customer.get("row"): customer
+        for customer in customers
+        if isinstance(customer.get("row"), int)
+    }
+    priority_by_row = {
+        customer.get("row"): customer
+        for customer in priority_customers
+        if isinstance(customer.get("row"), int)
+    }
+    candidates = []
+    for row in requested_rows:
+        customer = customer_by_row.get(row)
+        priority = priority_by_row.get(row)
+        if not customer or not priority or customer_is_cancelled(customer):
+            continue
+        latitude = parse_coordinate_value(
+            customer.get("latitude_google") or customer.get("latitude"),
+            "latitude",
+        )
+        longitude = parse_coordinate_value(
+            customer.get("longitude_google") or customer.get("longitude"),
+            "longitude",
+        )
+        score = priority.get("priority_score")
+        if latitude is None or longitude is None or isinstance(score, bool):
+            continue
+        try:
+            score = int(score)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if score <= 0:
+            continue
+        candidates.append(
+            RouteCandidate(
+                row=row,
+                customer=str(customer.get("customer") or "").strip(),
+                coordinate=Coordinate(latitude=latitude, longitude=longitude),
+                priority_score=score,
+            )
+        )
+
+    if not candidates:
+        return route_proposal_error(
+            "no_eligible_candidates",
+            "Inga butiker med giltig position och prioritetspoäng matchar filtren.",
+            422,
+        )
+
+    try:
+        proposal = calculate_route_proposal(
+            start=start,
+            candidates=candidates,
+            provider=get_route_travel_time_provider(),
+        )
+    except RouteProposalError as exc:
+        if exc.http_status >= 500:
+            app.logger.warning(
+                "Route proposal failed (%s): %s", exc.code, exc
+            )
+        return route_proposal_error(
+            exc.code,
+            exc.public_message,
+            exc.http_status,
+        )
+    except Exception:
+        app.logger.exception("Unexpected route proposal failure")
+        return route_proposal_error(
+            "route_proposal_failed",
+            "Kunde inte skapa ett ruttförslag. Försök igen.",
+            500,
+        )
+
+    stops = []
+    for stop in proposal.route.stops:
+        candidate = stop.candidate
+        stops.append({
+            "row": candidate.row,
+            "customer": candidate.customer,
+            "latitude": candidate.coordinate.latitude,
+            "longitude": candidate.coordinate.longitude,
+            "sequence": stop.sequence,
+            "priority_score": candidate.priority_score,
+            "leg_drive_minutes": seconds_to_minutes(stop.leg_drive_seconds),
+            "cumulative_drive_minutes": seconds_to_minutes(
+                stop.cumulative_drive_seconds
+            ),
+            "cumulative_total_minutes": seconds_to_minutes(
+                stop.cumulative_total_seconds
+            ),
+        })
+
+    pair_count = proposal.provider_pair_count
+    cache_hit_rate = (
+        round(proposal.provider_cache_hits / pair_count, 3)
+        if pair_count
+        else 0
+    )
+    return jsonify({
+        "ok": True,
+        "generated_at": stockholm_now().isoformat(timespec="seconds"),
+        "start": {
+            "latitude": start.latitude,
+            "longitude": start.longitude,
+        },
+        "stops": stops,
+        "summary": {
+            "candidate_count": len(candidates),
+            "stop_count": len(stops),
+            "total_priority_score": proposal.route.total_priority_score,
+            "drive_minutes": seconds_to_minutes(proposal.route.drive_seconds),
+            "service_minutes": seconds_to_minutes(
+                proposal.route.service_seconds
+            ),
+            "total_minutes": seconds_to_minutes(proposal.route.total_seconds),
+        },
+        "meta": {
+            "algorithm_version": proposal.solution.algorithm,
+            "solver_status": proposal.solution.solver_status,
+            "optimality_proven": proposal.solution.optimality_proven,
+            "shortlisted": proposal.shortlisted,
+            "requested_candidate_count": len(requested_rows),
+            "eligible_candidate_count": proposal.input_candidate_count,
+            "road_reachable_candidate_count": (
+                proposal.road_reachable_candidate_count
+            ),
+            "matrix_candidate_count": proposal.matrix_candidate_count,
+            "excluded_missing_road_time": (
+                proposal.excluded_missing_road_time
+            ),
+            "excluded_over_budget": proposal.excluded_over_budget,
+            "routing_preference": proposal.routing_preference,
+            "provider_request_count": proposal.provider_request_count,
+            "cache_hit_rate": cache_hit_rate,
+            "solver_duration_ms": (
+                proposal.solution.calculation_duration_ms
+            ),
+            "calculation_duration_ms": proposal.calculation_duration_ms,
+            "max_total_minutes": 480,
+            "service_minutes_per_stop": 20,
+        },
+    })
 
 
 @app.route("/followup-insights", methods=["GET"])
