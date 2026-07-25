@@ -621,6 +621,38 @@ class RouteEndpointTests(TestCase):
         self.assertTrue(payload["message"])
 
 
+class FrontendRouteProposalFlowTests(TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.html = (WEB_APP_DIR / "index.html").read_text(encoding="utf-8")
+
+    def test_route_proposal_seeds_the_editable_map_route(self):
+        self.assertIn("function seedRouteProposalMapSelection()", self.html)
+        self.assertIn(
+            "if (routeProposal) seedRouteProposalMapSelection();",
+            self.html,
+        )
+        self.assertIn("return routeInMapStops;", self.html)
+        self.assertIn(
+            "if (!routeProposal) saveCurrentMapRouteDraft();",
+            self.html,
+        )
+
+    def test_route_proposal_uses_the_standard_map_controls(self):
+        self.assertIn(
+            'document.getElementById("map-clear-route-btn").addEventListener("click", clearMapRoute);',
+            self.html,
+        )
+        self.assertIn('googleMapsButton.textContent = "🌎 Öppna i Google Maps";', self.html)
+        self.assertIn('clearButton.textContent = "Rensa rutt";', self.html)
+
+    def test_staged_google_maps_export_is_removed(self):
+        self.assertNotIn("getRouteProposalExportStages", self.html)
+        self.assertNotIn("Google Maps-etapper", self.html)
+        self.assertNotIn("route-proposal-stage-link", self.html)
+        self.assertNotIn("Google Maps delar rutten", self.html)
+
+
 class FormulaProvider:
     def __init__(self):
         self.call_shapes = []

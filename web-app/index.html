@@ -316,38 +316,11 @@
       padding: 8px 12px;
       font-size: 0.76rem;
     }
-    .route-proposal-export {
+    .route-proposal-map-hint {
       margin-top: 11px;
-      padding-top: 10px;
-      border-top: 1px solid #eef0f4;
-    }
-    .route-proposal-export-title {
       color: #777;
       font-size: 0.74rem;
       line-height: 1.4;
-    }
-    .route-proposal-stage-links {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 7px;
-      margin-top: 7px;
-    }
-    .route-proposal-stage-link {
-      display: inline-flex;
-      align-items: center;
-      min-height: 34px;
-      padding: 6px 10px;
-      border: 1px solid #d9e2f2;
-      border-radius: 999px;
-      background: #f7faff;
-      color: #355983;
-      font-size: 0.72rem;
-      font-weight: 750;
-      text-decoration: none;
-    }
-    .route-proposal-stage-link:focus-visible {
-      outline: 2px solid #355983;
-      outline-offset: 2px;
     }
     .route-stop-number {
       width: 28px;
@@ -3483,6 +3456,7 @@
   let insightsLoadFailed = false;
   let insightsRevision = 0;
   let routeProposal = null;
+  let routeProposalMapSeededSignature = "";
   let routeProposalLoading = false;
   let routeProposalMessage = null;
   let routeProposalRequestSerial = 0;
@@ -4078,59 +4052,6 @@
     return Number(value || 0).toLocaleString("sv-SE", { maximumFractionDigits: 1 });
   }
 
-  function formatRouteCoordinate(value) {
-    return Number(Number(value).toFixed(6)).toString();
-  }
-
-  function buildGoogleMapsRouteUrl(stops, origin = null) {
-    if (!Array.isArray(stops) || stops.length < 1) return "";
-    const destination = stops[stops.length - 1];
-    const destinationPosition = getRouteCoordinatePair(destination);
-    if (!destinationPosition) return "";
-
-    const params = new URLSearchParams({
-      api: "1",
-      destination: `${formatRouteCoordinate(destinationPosition.latitude)},${formatRouteCoordinate(destinationPosition.longitude)}`,
-      travelmode: "driving",
-    });
-    const originPosition = getRouteCoordinatePair(origin);
-    if (originPosition) {
-      params.set(
-        "origin",
-        `${formatRouteCoordinate(originPosition.latitude)},${formatRouteCoordinate(originPosition.longitude)}`
-      );
-    }
-    const waypoints = stops.slice(0, -1)
-      .map(getRouteCoordinatePair)
-      .filter(Boolean);
-    if (waypoints.length) {
-      params.set(
-        "waypoints",
-        waypoints
-          .map(point => `${formatRouteCoordinate(point.latitude)},${formatRouteCoordinate(point.longitude)}`)
-          .join("|")
-      );
-    }
-    return `https://www.google.com/maps/dir/?${params.toString()}`;
-  }
-
-  function getRouteProposalExportStages(proposal = routeProposal) {
-    if (!proposal?.stops?.length) return [];
-    const stages = [];
-    let origin = proposal.start;
-    for (let index = 0; index < proposal.stops.length; index += 4) {
-      const stops = proposal.stops.slice(index, index + 4);
-      stages.push({
-        number: stages.length + 1,
-        firstSequence: stops[0].sequence,
-        lastSequence: stops[stops.length - 1].sequence,
-        url: buildGoogleMapsRouteUrl(stops, origin),
-      });
-      origin = stops[stops.length - 1];
-    }
-    return stages;
-  }
-
   function updateRouteProposalChip() {
     const chip = document.getElementById("chip-route-proposal");
     if (!chip) return;
@@ -4163,15 +4084,6 @@
 
     if (routeProposal) {
       const summary = routeProposal.summary;
-      const stages = getRouteProposalExportStages(routeProposal);
-      const stageTitle = stages.length > 1
-        ? `Google Maps delar rutten i ${stages.length} etapper för att alla stopp ska följa med på mobil.`
-        : "Öppna stoppordningen i Google Maps.";
-      const stageLinks = stages.map(stage => `
-        <a class="route-proposal-stage-link" href="${escAttr(stage.url)}" target="_blank" rel="noopener noreferrer">
-          Etapp ${stage.number} · stopp ${stage.firstSequence}${stage.lastSequence !== stage.firstSequence ? `–${stage.lastSequence}` : ""}
-        </a>
-      `).join("");
       panel.className = "route-proposal-panel visible";
       panel.innerHTML = `
         <div class="route-proposal-heading">
@@ -4202,10 +4114,7 @@
             <div class="route-proposal-metric-value">${summary.candidate_count}</div>
           </div>
         </div>
-        <div class="route-proposal-export">
-          <div class="route-proposal-export-title">${esc(stageTitle)}</div>
-          <div class="route-proposal-stage-links">${stageLinks}</div>
-        </div>
+        <div class="route-proposal-map-hint">Öppna kartan för att ta bort eller lägga tillbaka stopp. Fortsätt sedan till Google Maps med den vanliga knappen.</div>
         <div class="route-proposal-actions">
           <button class="action-btn secondary" id="route-proposal-clear-btn" type="button">Rensa ruttförslag</button>
           <button class="action-btn" id="route-proposal-map-btn" type="button">Visa på karta</button>
@@ -4261,6 +4170,12 @@
     if (detailReturnView === "map") detailReturnView = "list";
   }
 
+  function resetRouteProposalMapSelection() {
+    routeProposalMapSeededSignature = "";
+    routeInMapStops = [];
+    hasStoredRouteOutsideCurrentMap = false;
+  }
+
   function invalidateRouteProposalIfNeeded(currentSignature) {
     const proposalIsStale = routeProposal && routeProposal.signature !== currentSignature;
     const requestIsStale = routeProposalLoading
@@ -4270,6 +4185,7 @@
 
     cancelRouteProposalRequest();
     routeProposal = null;
+    resetRouteProposalMapSelection();
     routeProposalMessage = {
       title: "Ruttförslaget togs bort",
       text: "Filtren ändrades. Skapa ett nytt ruttförslag.",
@@ -4284,6 +4200,7 @@
     const hadRoute = Boolean(routeProposal || routeProposalLoading);
     cancelRouteProposalRequest();
     routeProposal = null;
+    resetRouteProposalMapSelection();
     routeProposalMessage = null;
     leaveInvalidatedRouteMap();
     renderList();
@@ -4522,6 +4439,7 @@
     }
 
     routeProposal = null;
+    resetRouteProposalMapSelection();
     routeProposalMessage = null;
     routeProposalLoading = true;
     routeProposalRequestSignature = context.signature;
@@ -4582,6 +4500,7 @@
         signature: context.signature,
         ...normalized,
       };
+      resetRouteProposalMapSelection();
       routeProposalMessage = null;
       routeProposalLoading = false;
       routeProposalAbortController = null;
@@ -6505,13 +6424,7 @@
   });
 
   document.getElementById("map-gmaps-btn").addEventListener("click", openInGoogleMaps);
-  document.getElementById("map-clear-route-btn").addEventListener("click", () => {
-    if (routeProposal) {
-      clearRouteProposal({ announce: true });
-    } else {
-      clearMapRoute();
-    }
-  });
+  document.getElementById("map-clear-route-btn").addEventListener("click", clearMapRoute);
 
   function getRouteDraftRows(rows) {
     const seen = new Set();
@@ -6576,10 +6489,22 @@
     hasStoredRouteOutsideCurrentMap = true;
   }
 
+  function seedRouteProposalMapSelection() {
+    if (!routeProposal || routeProposalMapSeededSignature === routeProposal.signature) return;
+    const stopsByRow = new Map(mapStops.map(stop => [Number(stop.row), stop]));
+    routeInMapStops = routeProposal.rows
+      .map(row => stopsByRow.get(Number(row)))
+      .filter(Boolean);
+    routeProposalMapSeededSignature = routeProposal.signature;
+    hasStoredRouteOutsideCurrentMap = false;
+  }
+
   function clearMapRoute() {
     routeInMapStops = [];
     hasStoredRouteOutsideCurrentMap = false;
-    try { localStorage.removeItem(MAP_ROUTE_DRAFT_KEY); } catch {}
+    if (!routeProposal) {
+      try { localStorage.removeItem(MAP_ROUTE_DRAFT_KEY); } catch {}
+    }
     renderMapMarkers();
     renderMapStopList();
     showToast("Rutten rensad");
@@ -6590,11 +6515,7 @@
   }
 
   function getEffectiveMapRouteStops() {
-    if (!routeProposal) return routeInMapStops;
-    const stopsByRow = new Map(mapStops.map(stop => [Number(stop.row), stop]));
-    return routeProposal.rows
-      .map(row => stopsByRow.get(Number(row)))
-      .filter(Boolean);
+    return routeInMapStops;
   }
 
   function getDailyFocusRank(c) {
@@ -6614,7 +6535,8 @@
       return;
     }
 
-    if (!routeProposal) restoreMapRouteDraft();
+    if (routeProposal) seedRouteProposalMapSelection();
+    else restoreMapRouteDraft();
     showView("map");
     try {
       await initGoogleMap();
@@ -6628,7 +6550,7 @@
     const missingCoordinates = Math.max(0, filteredCustomers.length - total);
     if (routeProposal) {
       document.getElementById("map-subtitle").textContent =
-        `Ruttförslag · ${mapStops.length} butiker · ${formatRouteMinutes(routeProposal.summary.total_minutes)}`;
+        `Ruttförslag · ${mapStops.length} butiker i urvalet · justera stoppen nedan`;
       setMyLocationMarker(routeProposal.start);
       fitMapToBounds(mapStops, routeProposal.start);
     } else if (dailyFocusActive) {
@@ -6793,10 +6715,6 @@
   }
 
   function toggleMapStop(row) {
-    if (routeProposal) {
-      showToast("Rensa ruttförslaget för att planera manuellt");
-      return;
-    }
     const c = mapStops.find(s => Number(s.row) === Number(row));
     if (!c) return;
     const idx = routeInMapStops.findIndex(s => Number(s.row) === Number(row));
@@ -6805,7 +6723,7 @@
     } else {
       routeInMapStops.push(c);
     }
-    saveCurrentMapRouteDraft();
+    if (!routeProposal) saveCurrentMapRouteDraft();
     renderMapMarkers();
     renderMapStopList();
     updateMapRouteBar();
@@ -6818,27 +6736,14 @@
     const googleMapsButton = document.getElementById("map-gmaps-btn");
     const clearButton = document.getElementById("map-clear-route-btn");
 
-    if (routeProposal) {
-      const stages = getRouteProposalExportStages(routeProposal);
-      routeCount.textContent =
-        `Ruttförslag · ${n} butiker · ${formatRouteMinutes(routeProposal.summary.total_minutes)}`;
-      googleMapsButton.disabled = n < 1;
-      googleMapsButton.textContent = stages.length > 1
-        ? `🌎 ${stages.length} Google Maps-etapper`
-        : "🌎 Öppna i Google Maps";
-      clearButton.disabled = false;
-      clearButton.textContent = "Rensa ruttförslag";
-      return;
-    }
-
     googleMapsButton.textContent = "🌎 Öppna i Google Maps";
     clearButton.textContent = "Rensa rutt";
     routeCount.textContent =
       n === 0
         ? (hasStoredRouteOutsideCurrentMap ? "Sparad rutt utanför filtret" : "Välj butiker nedan för rutt")
         : `${n} butik${n !== 1 ? "er" : ""} vald${n !== 1 ? "a" : ""} för rutt`;
-    googleMapsButton.disabled = routeInMapStops.length < 1;
-    clearButton.disabled = routeInMapStops.length < 1 && !hasStoredRouteOutsideCurrentMap;
+    googleMapsButton.disabled = n < 1;
+    clearButton.disabled = n < 1 && !hasStoredRouteOutsideCurrentMap;
   }
 
   function renderMapStopList() {
@@ -6857,10 +6762,7 @@
         : hasPriorityScore(ins)
         ? `${ins.priority_score} poäng`
         : (ins.priority_type || "");
-      const legLabel = routeStop
-        ? `${formatRouteMinutes(routeStop.leg_drive_minutes)} från ${routeStop.sequence === 1 ? "start" : "föregående"}`
-        : "";
-      const stopMeta = [c.city, actionLabel, priorityLabel, legLabel].filter(Boolean).join(" · ");
+      const stopMeta = [c.city, actionLabel, priorityLabel].filter(Boolean).join(" · ");
       const badge = inRoute
         ? `<div style="width:22px;height:22px;border-radius:50%;background:#22c55e;color:#fff;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0">${routeIdx + 1}</div>`
         : dailyFocusActive && focusRank
@@ -6893,23 +6795,6 @@
 
 
   function openInGoogleMaps() {
-    if (routeProposal) {
-      const stages = getRouteProposalExportStages(routeProposal);
-      if (stages.length < 1) return;
-      if (stages.length > 1) {
-        showView("list");
-        renderRouteProposalPanel();
-        setTimeout(() => {
-          document.getElementById("route-proposal-panel").scrollIntoView({ behavior: "smooth", block: "start" });
-        }, 0);
-        showToast("Öppna rutten etappvis så följer alla stopp med");
-        return;
-      }
-      const opened = window.open(stages[0].url, "_blank");
-      if (opened) opened.opener = null;
-      return;
-    }
-
     const stops = routeInMapStops.length > 0 ? routeInMapStops : mapStops;
     if (stops.length < 1) return;
     const dest      = stops[stops.length - 1];
