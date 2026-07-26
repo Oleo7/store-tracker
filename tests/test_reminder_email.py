@@ -926,7 +926,7 @@ class EmailPriorityScoringTests(unittest.TestCase):
             "email_followup_last_event_at": event_at,
         }
 
-    def test_automated_email_does_not_replace_latest_human_contact(self):
+    def test_automated_email_updates_latest_contact_but_preserves_human_signals(self):
         activities = [
             {
                 "date_time": "2026-07-20 10:00:00",
@@ -947,10 +947,10 @@ class EmailPriorityScoringTests(unittest.TestCase):
 
         features = app_module.build_contact_features(activities, {})
 
-        self.assertEqual(features["butiken"]["latest_contact_date"], date(2026, 7, 20))
+        self.assertEqual(features["butiken"]["latest_contact_date"], date(2026, 7, 24))
         self.assertEqual(features["butiken"]["latest_contact_class"], "Positiv")
         self.assertEqual(features["butiken"]["latest_freezer_fields"], ("polarbar",))
-        self.assertEqual(features["butiken"]["contact_count_30d"], 1)
+        self.assertEqual(features["butiken"]["contact_count_30d"], 2)
 
     def test_email_intent_ranks_value_creating_actions_above_wait_states(self):
         names = ["Stock", "Product", "Baseline", "Opened", "Delivered", "Ordered"]
@@ -1258,18 +1258,7 @@ class EmailInsightsEndpointTests(unittest.TestCase):
         payload = response.get_json()
         report = payload["email_performance"]
         self.assertEqual(report["unique_store_count"], 3)
-        priority = {
-            item["customer"]: item
-            for item in payload["priority_customers"]
-        }
-        self.assertEqual(
-            priority["Butik A"]["next_action"]["action_type"],
-            "product_sheet_click_followup",
-        )
-        self.assertEqual(
-            priority["Butik B"]["next_action"]["action_type"],
-            "stockfiller_click_followup",
-        )
+        self.assertNotIn("priority_customers", payload)
 
 
 class ReminderSendRouteTests(unittest.TestCase):
@@ -1330,7 +1319,7 @@ class ReminderSendRouteTests(unittest.TestCase):
         with self.client.session_transaction() as flask_session:
             flask_session["user"] = {
                 "user_name": "olle", "name": "Olle", "role": "Account Manager",
-                "email": "olle@eatpolarbar.com", "phone": "070",
+                "email": "olle@eatpolarbar.com", "phone": "070", "admin": True,
             }
 
     def tearDown(self):

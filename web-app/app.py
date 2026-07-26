@@ -3291,7 +3291,6 @@ def get_customer_insights():
     customers = get_customer_rows(spreadsheet)
 
     contact_rows = get_contact_rows(spreadsheet)
-    latest_contact_followup = build_latest_contact_followups(contact_rows)
     message_rows, recipient_rows, _ = get_email_rows(spreadsheet)
     latest_live_proposals = latest_live_email_proposals_by_customer(message_rows)
     blocked_recipients = blocked_recipient_reasons(recipient_rows)
@@ -3338,7 +3337,7 @@ def get_customer_insights():
 
     # Compute insights for all customers
     all_names = (
-        set(latest_contact_followup.keys())
+        {normalize_key(c.get("customer")) for c in contact_rows if normalize_key(c.get("customer"))}
         | set(latest_order.keys())
         | set(order_references.keys())
         | set(latest_delivery.keys())
@@ -3346,10 +3345,6 @@ def get_customer_insights():
     )
     insights = {}
     for name in all_names:
-        # missad_uppfoljning
-        nf = latest_contact_followup.get(normalize_key(name))
-        missad = bool(nf and nf < today)
-
         # customer_risk — based on most recent of order date or delivery date
         lo = latest_order.get(name)
         ld_check = latest_delivery.get(name)
@@ -3359,6 +3354,7 @@ def get_customer_insights():
         ld = latest_delivery.get(name)
         latest_delivery_date = format_date_value(ld)
         priority = priority_by_name.get(normalize_key(name), {})
+        missad = bool(priority.get("missad_uppfoljning", False))
         customer = customers_by_name.get(normalize_key(name), {"customer": name})
         has_prior_order = bool(priority.get("order_count", 0) or name in order_references)
         days_since_delivery = (today - ld).days if ld else None
@@ -3385,6 +3381,12 @@ def get_customer_insights():
             today,
         )
         email_engagement = email_engagement_by_customer.get(normalize_key(name), {})
+        recommended_channel = priority.get("recommended_channel", "avvakta")
+        if (
+            email_proposal["due"]
+            and priority.get("next_action", {}).get("action_type") in {"route_fill", "new_ab"}
+        ):
+            recommended_channel = "email"
         insights[name] = {
             "missad_uppfoljning": missad,
             "customer_risk": risk,
@@ -3409,7 +3411,9 @@ def get_customer_insights():
             "latest_contact_result": priority.get("latest_contact_result", ""),
             "latest_contact_class": priority.get("latest_contact_class", ""),
             "latest_contact_channel": priority.get("latest_contact_channel", ""),
+            "latest_follow_up_date": priority.get("latest_follow_up_date", ""),
             "follow_up_due": priority.get("follow_up_due", False),
+            "recommended_channel": recommended_channel,
             "has_order_after_latest_contact": priority.get("has_order_after_latest_contact", False),
             "email_proposal_due": email_proposal["due"],
             "email_proposal_type": email_proposal["email_type"],
@@ -3965,23 +3969,6 @@ def get_followup_insights():
         if 0 <= (order_date - latest_prior_contact).days <= 10:
             orders_after_contact_by_week[key].add(ref)
 
-    order_features = build_order_features(order_rows)
-    contact_features = build_contact_features(contact_rows, order_features)
-    email_engagement_by_customer = build_email_engagement_snapshot(
-        message_rows,
-        recipient_rows,
-        order_rows,
-        today=today,
-    )
-    priority_customers = build_priority_customers(
-        customers,
-        order_features,
-        contact_features,
-        selected_responsible or None,
-        today,
-        limit=30,
-        email_features=email_engagement_by_customer,
-    )
     included_customer_keys = None
     if selected_responsible:
         included_customer_keys = {
@@ -4019,7 +4006,6 @@ def get_followup_insights():
                 for w in weeks
             ],
         },
-        "priority_customers": priority_customers,
         "email_performance": email_performance,
     })
 

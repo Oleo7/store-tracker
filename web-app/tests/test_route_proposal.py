@@ -610,6 +610,20 @@ class RouteEndpointTests(TestCase):
         self.assertIn("route_date", payload)
         self.save_route_mock.assert_called_once()
 
+    def test_phone_recommendation_does_not_exclude_high_score_route_candidate(self):
+        self.login()
+        self.priorities[0]["recommended_channel"] = "telefon"
+
+        response = self.client.post("/route-proposal", json={
+            "start": {"latitude": 57.7089, "longitude": 11.9746},
+            "candidate_rows": [2],
+        })
+        payload = response.get_json()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([stop["row"] for stop in payload["stops"]], [2])
+        self.assertEqual(payload["stops"][0]["priority_score"], 88)
+
     def test_only_requested_rows_can_be_selected(self):
         self.login(role="Administratör")
         response = self.client.post("/route-proposal", json={
@@ -818,6 +832,51 @@ class FrontendRouteProposalFlowTests(TestCase):
             "const waypoints = routeProposal ? stops : stops.slice(0, -1);",
             self.html,
         )
+
+    def test_priority_sorted_list_replaces_daily_focus(self):
+        self.assertNotIn('id="chip-daily-focus"', self.html)
+        self.assertNotIn("dailyFocusActive", self.html)
+        self.assertNotIn("DAILY_FOCUS_LIMIT", self.html)
+        self.assertIn("const LIST_BATCH_SIZE = 20;", self.html)
+        self.assertIn(
+            "return getFilteredCustomers().slice().sort(prioritySort);",
+            self.html,
+        )
+
+    def test_customer_cards_use_one_priority_guidance_layout(self):
+        self.assertIn("getPrioritySummaryHtml(c)", self.html)
+        self.assertIn("getNextActionHtml(c)", self.html)
+        self.assertIn("getPotentialHtml(c)", self.html)
+        self.assertIn("getCardDatesHtml(c)", self.html)
+        self.assertIn("getCustomerCardAriaLabel(c, routeStop)", self.html)
+        self.assertIn('"besök": "Besök"', self.html)
+        self.assertIn('"telefon": "Telefon"', self.html)
+        self.assertIn("Potential ej beräknad", self.html)
+        self.assertNotIn("Missad uppföljning</span>", self.html)
+
+    def test_route_candidates_ignore_recommended_channel(self):
+        start = self.html.index("function getRouteProposalCandidates(")
+        end = self.html.index("function getStockholmRouteDate()", start)
+        candidate_source = self.html[start:end]
+        self.assertIn("score > 0", candidate_source)
+        self.assertNotIn("recommended_channel", candidate_source)
+
+    def test_route_card_does_not_repeat_priority_score(self):
+        start = self.html.index('const routeSummary = routeStop ? `')
+        end = self.html.index("` : \"\";", start)
+        route_summary_source = self.html[start:end]
+        self.assertNotIn("routeStop.priority_score", route_summary_source)
+
+    def test_watchlist_panel_is_removed_from_insights(self):
+        self.assertNotIn("Butiker värda att bevaka", self.html)
+        self.assertNotIn("priority-customer-list", self.html)
+        self.assertNotIn("renderPriorityCustomers", self.html)
+
+    def test_initial_list_waits_for_insights_and_has_error_fallback(self):
+        self.assertIn("await loadInsights({ render: false });", self.html)
+        self.assertIn("applyDefaultResponsibleFilter();", self.html)
+        self.assertIn("Kundprioriteringen kunde inte laddas.", self.html)
+        self.assertIn("priority-neutral", self.html)
 
 
 class FormulaProvider:

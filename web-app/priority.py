@@ -217,17 +217,11 @@ def build_order_features(order_rows: list[dict]) -> dict:
 
 
 def build_contact_features(sales_activities: list[dict], order_features: dict) -> dict:
-    latest_by_customer = {}
+    activities_by_customer = defaultdict(list)
     contact_count_30d = defaultdict(int)
     today = date.today()
 
-    for row in sales_activities:
-        # Automated email proposals have their own engagement model. Treating them
-        # as the latest human contact would erase richer sales signals such as a
-        # positive dialogue, a planned follow-up or observed freezer contents.
-        if str(row.get("email_id") or "").strip():
-            continue
-
+    for idx, row in enumerate(sales_activities):
         contact_dt = parse_datetime(row.get("date_time"))
         if not contact_dt:
             continue
@@ -239,35 +233,81 @@ def build_contact_features(sales_activities: list[dict], order_features: dict) -
         if (today - contact_dt.date()).days <= 30:
             contact_count_30d[customer_key] += 1
 
-        if customer_key not in latest_by_customer or contact_dt > latest_by_customer[customer_key]["latest_contact_datetime"]:
-            follow_up_date = parse_date(row.get("follow_up_date"))
-            order_feature = order_features.get(customer_key, {})
-            latest_order_date = order_feature.get("last_order_date")
-            has_order_after_latest_contact = bool(latest_order_date and latest_order_date >= contact_dt.date())
-            result = str(row.get("result") or "").replace("\xa0", " ").strip()
-            comment = str(row.get("comment") or "").replace("\xa0", " ").strip()
-            freezer_fields = _freezer_fields(row)
-            latest_by_customer[customer_key] = {
-                "latest_contact_date": contact_dt.date(),
-                "latest_contact_datetime": contact_dt,
-                "latest_contact_sales_person": str(row.get("sales_person") or "").strip(),
-                "latest_contact_channel": str(row.get("contact_channel") or "").strip(),
-                "latest_contact_result": result,
-                "latest_contact_class": normalize_contact_result(result),
-                "latest_contact_comment": comment,
-                "latest_freezer_fields": freezer_fields,
-                "latest_follow_up_date": follow_up_date,
-                "contact_count_30d": 0,
-                "has_order_after_latest_contact": has_order_after_latest_contact,
-                "self_ordering_signal": _has_self_ordering_signal(comment),
-                "days_since_contact": None,
-                "follow_up_due": False,
+        activities_by_customer[customer_key].append(
+            {
+                "sort_key": (contact_dt, idx),
+                "datetime": contact_dt,
+                "row": row,
+                "is_email": bool(str(row.get("email_id") or "").strip()),
+                "follow_up_date": parse_date(row.get("follow_up_date")),
             }
+        )
 
-    for customer_key, feature in latest_by_customer.items():
-        feature["contact_count_30d"] = contact_count_30d.get(customer_key, 0)
+    features = {}
+    for customer_key, activities in activities_by_customer.items():
+        activities.sort(key=lambda activity: activity["sort_key"])
+        latest_activity = activities[-1]
+        human_activities = [activity for activity in activities if not activity["is_email"]]
+        latest_human = human_activities[-1] if human_activities else None
+        planned_followups = [
+            activity
+            for activity in human_activities
+            if activity["follow_up_date"]
+        ]
+        latest_plan = planned_followups[-1] if planned_followups else None
+        follow_up_date = latest_plan["follow_up_date"] if latest_plan else None
 
-    return latest_by_customer
+        contact_resolved_followup = bool(
+            latest_plan
+            and any(
+                activity["sort_key"] > latest_plan["sort_key"]
+                and activity["datetime"].date() >= follow_up_date
+                for activity in activities
+            )
+        )
+        latest_order_date = order_features.get(customer_key, {}).get("last_order_date")
+        order_resolved_followup = bool(
+            follow_up_date
+            and latest_order_date
+            and latest_order_date >= follow_up_date
+        )
+
+        latest_human_row = latest_human["row"] if latest_human else {}
+        result = str(latest_human_row.get("result") or "").replace("\xa0", " ").strip()
+        comment = str(latest_human_row.get("comment") or "").replace("\xa0", " ").strip()
+        latest_activity_row = latest_activity["row"]
+        features[customer_key] = {
+            "latest_contact_date": latest_activity["datetime"].date(),
+            "latest_contact_datetime": latest_activity["datetime"],
+            "latest_human_contact_datetime": (
+                latest_human["datetime"] if latest_human else None
+            ),
+            "latest_human_contact_date": (
+                latest_human["datetime"].date() if latest_human else None
+            ),
+            "latest_contact_sales_person": str(
+                latest_activity_row.get("sales_person") or ""
+            ).strip(),
+            "latest_contact_channel": str(
+                latest_activity_row.get("contact_channel") or ""
+            ).strip(),
+            "latest_contact_result": result,
+            "latest_contact_class": normalize_contact_result(result) if result else "",
+            "latest_contact_comment": comment,
+            "latest_freezer_fields": _freezer_fields(latest_human_row),
+            "latest_follow_up_date": follow_up_date,
+            "follow_up_resolved": contact_resolved_followup or order_resolved_followup,
+            "contact_count_30d": contact_count_30d.get(customer_key, 0),
+            "has_order_after_latest_contact": bool(
+                latest_order_date
+                and latest_order_date >= latest_activity["datetime"].date()
+            ),
+            "self_ordering_signal": _has_self_ordering_signal(comment),
+            "days_since_contact": None,
+            "follow_up_due": False,
+        }
+
+    return features
 
 
 def build_priority_customers(
@@ -339,24 +379,29 @@ def build_priority_customers(
         days_since_delivery = (today - last_delivery).days if last_delivery else None
 
         latest_contact_date = contact_feature.get("latest_contact_date")
-        days_since_contact = (today - latest_contact_date).days if latest_contact_date else None
+        latest_human_contact_date = contact_feature.get("latest_human_contact_date")
+        contact_signal_date = latest_human_contact_date or latest_contact_date
+        days_since_contact = (
+            (today - contact_signal_date).days if contact_signal_date else None
+        )
         has_order_after_latest_contact = bool(
             latest_contact_date
             and last_order
             and last_order >= latest_contact_date
         )
         latest_follow_up_date = contact_feature.get("latest_follow_up_date")
+        follow_up_resolved = bool(contact_feature.get("follow_up_resolved"))
         follow_up_due = bool(
             latest_follow_up_date
             and latest_follow_up_date <= today
-            and not has_order_after_latest_contact
+            and not follow_up_resolved
         )
         latest_contact_class = contact_feature.get("latest_contact_class")
         future_follow_up_days = _future_follow_up_days(
             latest_contact_date=latest_contact_date,
             latest_follow_up_date=latest_follow_up_date,
             follow_up_due=follow_up_due,
-            has_order_after_latest_contact=has_order_after_latest_contact,
+            follow_up_resolved=follow_up_resolved,
             today=today,
         )
         scheduled_followup = future_follow_up_days is not None
@@ -366,13 +411,16 @@ def build_priority_customers(
             days_since_contact=days_since_contact,
             latest_follow_up_date=latest_follow_up_date,
             follow_up_due=follow_up_due,
-            has_order_after_latest_contact=has_order_after_latest_contact,
+            follow_up_resolved=follow_up_resolved,
             self_ordering_signal=contact_feature.get("self_ordering_signal"),
             today=today,
         )
         email_signal = _email_priority_signal(
             email_feature=email_feature,
-            latest_human_contact=contact_feature.get("latest_contact_datetime"),
+            latest_human_contact=(
+                contact_feature.get("latest_human_contact_datetime")
+                or contact_feature.get("latest_contact_datetime")
+            ),
             today=today,
         )
 
@@ -408,6 +456,25 @@ def build_priority_customers(
             self_ordering_followup=self_ordering_followup,
         )
         priority_level = _priority_level(score)
+        next_action = _next_action(
+            priority_type=priority_type,
+            follow_up_due=follow_up_due,
+            scheduled_followup=scheduled_followup,
+            future_follow_up_days=future_follow_up_days,
+            overdue_days=overdue_days,
+            total_dfp=total_dfp,
+            expected_order_dfp=expected_order_dfp,
+            order_count=order_count,
+            latest_contact_class=latest_contact_class,
+            has_order_after_latest_contact=has_order_after_latest_contact,
+            days_since_contact=days_since_contact,
+            latest_contact_date=latest_contact_date,
+            last_order_date=last_order,
+            segment=segment,
+            self_ordering_followup=self_ordering_followup,
+            email_signal=email_signal,
+            today=today,
+        )
 
         result.append(
             {
@@ -439,29 +506,19 @@ def build_priority_customers(
                 "future_follow_up_days": future_follow_up_days,
                 "latest_freezer_fields": list(contact_feature.get("latest_freezer_fields") or []),
                 "follow_up_due": follow_up_due,
+                "missad_uppfoljning": bool(
+                    follow_up_due
+                    and latest_follow_up_date
+                    and latest_follow_up_date < today
+                ),
                 "has_order_after_latest_contact": has_order_after_latest_contact,
                 "self_ordering_signal": bool(contact_feature.get("self_ordering_signal")),
                 "email_priority_status": email_signal.get("status", ""),
                 "email_priority_active": bool(email_signal.get("active")),
                 "email_priority_handled": bool(email_signal.get("handled")),
-                "next_action": _next_action(
-                    priority_type=priority_type,
-                    follow_up_due=follow_up_due,
-                    scheduled_followup=scheduled_followup,
-                    future_follow_up_days=future_follow_up_days,
-                    overdue_days=overdue_days,
-                    total_dfp=total_dfp,
-                    expected_order_dfp=expected_order_dfp,
-                    order_count=order_count,
-                    latest_contact_class=latest_contact_class,
-                    has_order_after_latest_contact=has_order_after_latest_contact,
-                    days_since_contact=days_since_contact,
-                    latest_contact_date=latest_contact_date,
-                    last_order_date=last_order,
-                    segment=segment,
-                    self_ordering_followup=self_ordering_followup,
-                    email_signal=email_signal,
-                    today=today,
+                "next_action": next_action,
+                "recommended_channel": _recommended_channel(
+                    next_action.get("action_type")
                 ),
                 "reasons": _priority_reasons(
                     follow_up_due=follow_up_due,
@@ -610,7 +667,7 @@ def _priority_type(
 ) -> str:
     if latest_contact_class == "Negativ" and not has_order_after_latest_contact:
         return "Återaktivera efter negativt besked"
-    if follow_up_due and not has_order_after_latest_contact:
+    if follow_up_due:
         return "Försenad uppföljning"
     if scheduled_followup or self_ordering_followup:
         return "Planerad uppföljning"
@@ -649,6 +706,21 @@ def _recommended_action(priority_type: str) -> str:
     }[priority_type]
 
 
+def _recommended_channel(action_type: str | None) -> str:
+    if action_type in {"new_ab", "trial_reorder", "reorder", "route_fill"}:
+        return "besök"
+    if action_type in {
+        "follow_up",
+        "warm_lead",
+        "retry",
+        "negative_reactivation",
+        "stockfiller_click_followup",
+        "product_sheet_click_followup",
+    }:
+        return "telefon"
+    return "avvakta"
+
+
 def _next_action(
     *,
     priority_type,
@@ -679,12 +751,12 @@ def _next_action(
             "primary_cta": "Öppna",
         }
 
-    if follow_up_due and not has_order_after_latest_contact:
+    if follow_up_due:
         return {
             "label": "Följ upp idag",
             "action_type": "follow_up",
             "tone": "urgent",
-            "reason": "Försenad uppföljning · ingen order efter senaste kontakt",
+            "reason": "Uppföljning missad · ingen senare kontakt eller order",
             "primary_cta": "Ring",
         }
 
@@ -711,7 +783,7 @@ def _next_action(
             "label": "Följ upp första ordern",
             "action_type": "trial_reorder",
             "tone": "urgent" if overdue_days >= 21 else "warning",
-            "reason": f"Första ordern är redo för uppföljning · potential ca {_format_dfp(expected_order_dfp)}",
+            "reason": "Första ordern är redo för uppföljning",
             "primary_cta": "Ring",
         }
 
@@ -720,7 +792,7 @@ def _next_action(
             "label": "Ring för återorder",
             "action_type": "reorder",
             "tone": "urgent" if overdue_days >= 21 else "warning",
-            "reason": f"Över normal återköpstid +{overdue_days} dagar · potential ca {_format_dfp(expected_order_dfp or total_dfp)}",
+            "reason": f"Över normal återköpstid +{overdue_days} dagar",
             "primary_cta": "Ring",
         }
 
@@ -729,7 +801,7 @@ def _next_action(
             "label": "Stäng positiv dialog",
             "action_type": "warm_lead",
             "tone": "positive",
-            "reason": f"Positiv dialog · potential ca {_format_dfp(expected_order_dfp)}",
+            "reason": "Positiv dialog utan order",
             "primary_cta": "Följ upp",
         }
 
@@ -807,7 +879,7 @@ def _priority_reasons(
             reasons.append(f"Negativ kontakt för {days_since_contact} dagar sedan")
     if expected_order_dfp:
         reasons.append(f"Orderpotential ca {_format_dfp(expected_order_dfp)}")
-    if follow_up_due and not has_order_after_latest_contact:
+    if follow_up_due:
         reasons.append("Försenad uppföljning")
     if future_follow_up_days is not None:
         reasons.append(f"Planerad uppföljning om {future_follow_up_days} dagar")
@@ -1004,7 +1076,7 @@ def _is_self_ordering_followup(
     days_since_contact,
     latest_follow_up_date,
     follow_up_due,
-    has_order_after_latest_contact,
+    follow_up_resolved,
     self_ordering_signal,
     today,
 ) -> bool:
@@ -1015,7 +1087,7 @@ def _is_self_ordering_followup(
         and latest_follow_up_date
         and latest_follow_up_date > today
         and not follow_up_due
-        and not has_order_after_latest_contact
+        and not follow_up_resolved
         and latest_contact_class in {"Positiv", "Neutral"}
     )
 
@@ -1025,12 +1097,12 @@ def _future_follow_up_days(
     latest_contact_date,
     latest_follow_up_date,
     follow_up_due,
-    has_order_after_latest_contact,
+    follow_up_resolved,
     today,
 ) -> int | None:
     if not latest_contact_date or not latest_follow_up_date:
         return None
-    if follow_up_due or has_order_after_latest_contact:
+    if follow_up_due or follow_up_resolved:
         return None
     if latest_follow_up_date <= today:
         return None
