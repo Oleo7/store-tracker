@@ -791,6 +791,17 @@
       cursor: pointer;
       text-align: center;
     }
+    .email-tracking-recipient {
+      padding: 10px 0;
+      border-top: 1px solid #f0f2f5;
+    }
+    .email-tracking-recipient:first-child { border-top: none; }
+    .email-tracking-address {
+      margin-bottom: 4px;
+      font-size: 0.84rem;
+      font-weight: 700;
+      overflow-wrap: anywhere;
+    }
 
     .action-btn {
       width: 100%;
@@ -1962,15 +1973,27 @@
     }
 
     .card-dates {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 5px 12px;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: start;
+      gap: 5px 8px;
       margin-top: 8px;
       padding-top: 7px;
       border-top: 1px solid #f0e8ee;
       color: var(--pb-muted);
       font-size: 0.7rem;
       font-weight: 700;
+    }
+    .card-date-primary {
+      min-width: 0;
+    }
+    .card-date-secondary {
+      display: flex;
+      min-width: 0;
+      flex-direction: column;
+      align-items: flex-end;
+      gap: 4px;
+      text-align: right;
     }
 
     .card-date-followup.missed {
@@ -3114,6 +3137,11 @@
       <button class="show-more-btn" id="d-show-more" style="display:none">Visa fler ›</button>
     </div>
 
+    <div class="detail-section" id="d-email-tracking-section" style="display:none">
+      <div class="detail-section-title">Senaste mejlförslaget</div>
+      <div id="d-email-tracking-list"></div>
+    </div>
+
   </div>
 </div>
 
@@ -3681,9 +3709,8 @@
 
   function getCardDateHtml(value) {
     const date = String(value || "").trim().slice(0, 10);
-    const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date);
-    if (!match) return "—";
-    return `<time datetime="${escAttr(date)}">${esc(`${match[1].slice(2)}-${match[2]}-${match[3]}`)}</time>`;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return "—";
+    return `<time datetime="${escAttr(date)}">${esc(date)}</time>`;
   }
 
   function getCardDatesHtml(c) {
@@ -3700,9 +3727,11 @@
 
     return `
       <div class="card-dates">
-        <span>Leverans ${delivery}</span>
-        <span>Kontakt ${contact}</span>
-        ${followUp}
+        <span class="card-date-primary">Leverans ${delivery}</span>
+        <span class="card-date-secondary">
+          <span>Kontakt ${contact}</span>
+          ${followUp}
+        </span>
       </div>
     `;
   }
@@ -4572,6 +4601,40 @@
     return String(value || "").replace("T", " ").slice(0, 16) || "—";
   }
 
+  function emailTrackingDateHtml(value) {
+    const label = timelineDate(value);
+    if (label === "—") return "—";
+    const dateTime = String(value || "").trim().replace(" ", "T");
+    return `<time datetime="${escAttr(dateTime)}">${esc(label)}</time>`;
+  }
+
+  function renderLatestEmailTracking() {
+    const section = document.getElementById("d-email-tracking-section");
+    const list = document.getElementById("d-email-tracking-list");
+    const latestEmail = allTimeline.find(item =>
+      item.event_type === "email_proposal_sent"
+      && Array.isArray(item.recipient_tracking)
+      && item.recipient_tracking.length > 0
+    );
+    const recipients = latestEmail?.recipient_tracking || [];
+
+    if (recipients.length === 0) {
+      section.style.display = "none";
+      list.innerHTML = "";
+      return;
+    }
+
+    list.innerHTML = recipients.map(recipient => `
+      <div class="email-tracking-recipient">
+        <div class="email-tracking-address">${esc(recipient.email) || "Mottagare"}</div>
+        <div class="activity-row"><span class="activity-label">Mejl öppnat</span><span class="activity-value">${emailTrackingDateHtml(recipient.last_opened_at)}</span></div>
+        <div class="activity-row"><span class="activity-label">Klickat produktblad</span><span class="activity-value">${emailTrackingDateHtml(recipient.product_sheet_last_clicked_at)}</span></div>
+        <div class="activity-row"><span class="activity-label">Klickat Stockfiller</span><span class="activity-value">${emailTrackingDateHtml(recipient.stockfiller_last_clicked_at)}</span></div>
+      </div>
+    `).join("");
+    section.style.display = "block";
+  }
+
   function renderContactList(contacts, timeline) {
     allContacts = contacts || [];
     allTimeline = timeline || allContacts.map(contact => ({
@@ -4586,6 +4649,7 @@
     if (latestTimelineIndex < 0) latestTimelineIndex = 0;
     historyExpanded = false;
     renderHistory();
+    renderLatestEmailTracking();
 
     // Senaste aktivitet i den gemensamma tidslinjen
     const latestSection = document.getElementById("d-latest-section");
@@ -5470,6 +5534,7 @@
       document.getElementById("d-freezer-latest").textContent = "—";
       document.getElementById("d-contact-section").style.display = "none";
       document.getElementById("d-latest-section").style.display = "none";
+      document.getElementById("d-email-tracking-section").style.display = "none";
     }
 
     showView("detail");

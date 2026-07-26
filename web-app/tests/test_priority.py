@@ -1230,7 +1230,7 @@ class PriorityTests(TestCase):
             {"besök", "telefon", "email", "avvakta"},
         )
 
-    def test_customer_insights_recommends_email_for_due_new_customer_proposal(self):
+    def test_due_email_proposal_does_not_override_visit_recommendations(self):
         customers = [
             [
                 "customer",
@@ -1258,6 +1258,19 @@ class PriorityTests(TestCase):
                 "Stockholm",
                 "Stockholms län",
             ],
+            [
+                "Customer C",
+                "",
+                "Daniel",
+                "C",
+                "1002",
+                "Klara",
+                "",
+                "klara@example.com",
+                "",
+                "Göteborg",
+                "Västra Götalands län",
+            ],
         ]
         fake_spreadsheet = FakeSpreadsheet(
             {
@@ -1273,12 +1286,18 @@ class PriorityTests(TestCase):
             return_value=fake_spreadsheet,
         ):
             response = app_module.app.test_client().get("/customer-insights")
-            insight = response.get_json()["customer a"]
+            insights = response.get_json()
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(insight["next_action"]["action_type"], "new_ab")
-        self.assertTrue(insight["email_proposal_due"])
-        self.assertEqual(insight["recommended_channel"], "email")
+        for customer_key, action_type in (
+            ("customer a", "new_ab"),
+            ("customer c", "route_fill"),
+        ):
+            with self.subTest(action_type=action_type):
+                insight = insights[customer_key]
+                self.assertEqual(insight["next_action"]["action_type"], action_type)
+                self.assertTrue(insight["email_proposal_due"])
+                self.assertEqual(insight["recommended_channel"], "besök")
 
     def test_customer_insights_later_contact_clears_old_missed_followup(self):
         customers = [

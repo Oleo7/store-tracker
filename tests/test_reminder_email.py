@@ -504,6 +504,7 @@ class TimelineAndWebhookTests(unittest.TestCase):
                 "actual_email": "buyer@example.com", "brevo_message_id": "msg-1", "send_status": "sent",
                 "sent_at": "2026-07-01 09:00:00", "open_count": "3", "last_opened_at": "2026-07-02 10:00:00",
                 "product_sheet_click_count": "1", "product_sheet_last_clicked_at": "2026-07-03 11:00:00",
+                "stockfiller_click_count": "1", "stockfiller_last_clicked_at": "2026-07-04 12:00:00",
             },
             {
                 "email_id": "mail-1", "customer": "Butiken", "intended_email": "owner@example.com",
@@ -541,6 +542,21 @@ class TimelineAndWebhookTests(unittest.TestCase):
         self.assertEqual(opened["importance"], "secondary")
         self.assertNotIn("gånger", opened["title"])
         self.assertFalse(any(detail.get("label") == "Antal" for detail in opened.get("details", [])))
+        sent = next(item for item in timeline if item["event_type"] == "email_proposal_sent")
+        self.assertEqual(sent["recipient_tracking"], [
+            {
+                "email": "buyer@example.com",
+                "last_opened_at": "2026-07-02 10:00:00",
+                "product_sheet_last_clicked_at": "2026-07-03 11:00:00",
+                "stockfiller_last_clicked_at": "2026-07-04 12:00:00",
+            },
+            {
+                "email": "owner@example.com",
+                "last_opened_at": "2026-07-02 12:00:00",
+                "product_sheet_last_clicked_at": "2026-07-03 13:00:00",
+                "stockfiller_last_clicked_at": "",
+            },
+        ])
 
         attributed = [item for item in timeline if item["event_type"] == "subsequent_order"]
         references = {
@@ -900,6 +916,13 @@ class EmailPerformanceTests(unittest.TestCase):
         self.assertIn("saveEmailTemplateSettings", html)
         self.assertIn("/email-proposal-settings/", html)
         self.assertIn("#email-order-list .email-order-row", html)
+        self.assertIn('id="d-email-tracking-section"', html)
+        self.assertIn("recipient.last_opened_at", html)
+        self.assertIn("recipient.product_sheet_last_clicked_at", html)
+        self.assertIn("recipient.stockfiller_last_clicked_at", html)
+        self.assertIn('<span class="card-date-primary">Leverans ${delivery}</span>', html)
+        self.assertIn('<span class="card-date-secondary">', html)
+        self.assertNotIn("match[1].slice(2)", html)
 
 
 class EmailPriorityScoringTests(unittest.TestCase):

@@ -2662,6 +2662,18 @@ def _email_event_datetime(value):
     return parse_datetime_value(value)
 
 
+def _latest_email_recipient_event(recipient_rows, field):
+    values = [
+        _email_event_datetime(recipient.get(field))
+        for recipient in recipient_rows
+    ]
+    values = [value for value in values if value]
+    return (
+        max(values).isoformat(sep=" ", timespec="seconds")
+        if values else ""
+    )
+
+
 def build_live_email_records(message_rows, recipient_rows):
     """Return one normalized record per live logical email proposal.
 
@@ -3108,6 +3120,27 @@ def build_customer_timeline(
             record["recipient_labels"].get(identity, identity)
             for identity in sorted(record["sent_recipients"])
         )
+        recipient_tracking = []
+        for identity in sorted(record["sent_recipients"]):
+            identity_rows = [
+                recipient
+                for recipient in record["recipients"]
+                if _email_recipient_identity(recipient) == identity
+            ]
+            recipient_tracking.append({
+                "email": record["recipient_labels"].get(identity, identity),
+                "last_opened_at": _latest_email_recipient_event(
+                    identity_rows, "last_opened_at"
+                ),
+                "product_sheet_last_clicked_at": _latest_email_recipient_event(
+                    identity_rows,
+                    "product_sheet_last_clicked_at"
+                ),
+                "stockfiller_last_clicked_at": _latest_email_recipient_event(
+                    identity_rows,
+                    "stockfiller_last_clicked_at"
+                ),
+            })
         timeline.append({
             "date_time": message.get("sent_at", ""),
             "event_type": "email_proposal_sent",
@@ -3119,6 +3152,7 @@ def build_customer_timeline(
             "recipient": recipient_label,
             "comment": message.get("subject", ""),
             "email_id": record["email_id"],
+            "recipient_tracking": recipient_tracking,
             "details": [
                 {"label": "Ämne", "value": message.get("subject", "") or "—"},
             ],
@@ -3381,12 +3415,6 @@ def get_customer_insights():
             today,
         )
         email_engagement = email_engagement_by_customer.get(normalize_key(name), {})
-        recommended_channel = priority.get("recommended_channel", "avvakta")
-        if (
-            email_proposal["due"]
-            and priority.get("next_action", {}).get("action_type") in {"route_fill", "new_ab"}
-        ):
-            recommended_channel = "email"
         insights[name] = {
             "missad_uppfoljning": missad,
             "customer_risk": risk,
@@ -3413,7 +3441,7 @@ def get_customer_insights():
             "latest_contact_channel": priority.get("latest_contact_channel", ""),
             "latest_follow_up_date": priority.get("latest_follow_up_date", ""),
             "follow_up_due": priority.get("follow_up_due", False),
-            "recommended_channel": recommended_channel,
+            "recommended_channel": priority.get("recommended_channel", "avvakta"),
             "has_order_after_latest_contact": priority.get("has_order_after_latest_contact", False),
             "email_proposal_due": email_proposal["due"],
             "email_proposal_type": email_proposal["email_type"],
