@@ -10,10 +10,11 @@ from typing import Callable, Protocol, Sequence
 import requests
 
 
-MAX_TOTAL_SECONDS = 8 * 60 * 60
+MAX_TOTAL_SECONDS = 7 * 60 * 60
 SERVICE_SECONDS_PER_STOP = 20 * 60
 SHORTLIST_LIMIT = 24
 EXACT_SOLVER_LIMIT = 15
+MAX_ROUTE_STOPS = 15
 LOCAL_CLUSTER_RADIUS_KM = 40.0
 LOCAL_CLUSTER_CELL_KM = 20.0
 LOCAL_CLUSTER_CELL_REACH = 3
@@ -56,7 +57,7 @@ class TravelTimeUnavailable(RouteProposalError):
 
 class NoFeasibleRoute(RouteProposalError):
     code = "no_feasible_route"
-    message = "Ingen genomförbar rutt hittades inom åtta timmar."
+    message = "Ingen genomförbar rutt hittades under sju timmar inklusive retur till start."
     http_status = 422
 
 
@@ -86,7 +87,7 @@ class TravelTimeResult:
     cache_hits: int = 0
     pair_count: int = 0
     request_count: int = 0
-    routing_preference: str = "TRAFFIC_AWARE"
+    routing_preference: str = "TRAFFIC_UNAWARE"
 
 
 @dataclass(frozen=True)
@@ -112,6 +113,7 @@ class VerifiedRoute:
     stops: tuple[VerifiedStop, ...]
     total_priority_score: int
     drive_seconds: int
+    return_drive_seconds: int
     service_seconds: int
     total_seconds: int
 
@@ -151,7 +153,7 @@ class GoogleRoutesTravelTimeProvider:
         self,
         api_key: str,
         *,
-        routing_preference: str = "TRAFFIC_AWARE",
+        routing_preference: str = "TRAFFIC_UNAWARE",
         timeout_seconds: float = 15.0,
         cache_ttl_seconds: float = 600.0,
         max_attempts: int = 2,
@@ -163,9 +165,9 @@ class GoogleRoutesTravelTimeProvider:
         if not key:
             raise TravelTimeConfigurationError()
 
-        preference = str(routing_preference or "TRAFFIC_AWARE").strip().upper()
+        preference = str(routing_preference or "TRAFFIC_UNAWARE").strip().upper()
         if preference not in SUPPORTED_ROUTING_PREFERENCES:
-            preference = "TRAFFIC_AWARE"
+            preference = "TRAFFIC_UNAWARE"
 
         self.api_key = key
         self.routing_preference = preference
@@ -474,6 +476,7 @@ def calculate_route_proposal(
     service_seconds_per_stop: int = SERVICE_SECONDS_PER_STOP,
     shortlist_limit: int = SHORTLIST_LIMIT,
     exact_solver_limit: int = EXACT_SOLVER_LIMIT,
+    max_route_stops: int = MAX_ROUTE_STOPS,
     beam_width: int = 512,
     beam_max_expansions: int = 150_000,
     beam_time_limit_seconds: float = 2.0,
@@ -503,7 +506,7 @@ def calculate_route_proposal(
         for candidate in ordered_candidates
         if direct_seconds[candidate.row] is not None
         and direct_seconds[candidate.row] + service_seconds_per_stop
-        <= max_total_seconds
+        < max_total_seconds
     )
     if not road_reachable:
         raise NoFeasibleRoute()
@@ -526,12 +529,25 @@ def calculate_route_proposal(
         expected_rows=len(shortlist) + 1,
         expected_columns=len(shortlist),
     )
+    return_result = provider.get_matrix_seconds(
+        [candidate.coordinate for candidate in shortlist],
+        [start],
+        ephemeral_origin_indexes=frozenset(range(len(shortlist))),
+    )
+    _validate_provider_matrix(
+        return_result.seconds,
+        expected_rows=len(shortlist),
+        expected_columns=1,
+    )
+    return_seconds = tuple(row[0] for row in return_result.seconds)
     solution = solve_route(
         shortlist,
         matrix_result.seconds,
+        return_seconds=return_seconds,
         max_total_seconds=max_total_seconds,
         service_seconds_per_stop=service_seconds_per_stop,
         exact_solver_limit=exact_solver_limit,
+        max_route_stops=max_route_stops,
         beam_width=beam_width,
         beam_max_expansions=beam_max_expansions,
         beam_time_limit_seconds=beam_time_limit_seconds,
@@ -546,15 +562,25 @@ def calculate_route_proposal(
     verified = verify_route(
         candidates=shortlist,
         drive_seconds=matrix_result.seconds,
+        return_seconds=return_seconds,
         route_indices=solution.route_indices,
         max_total_seconds=max_total_seconds,
         service_seconds_per_stop=service_seconds_per_stop,
+        max_route_stops=max_route_stops,
     )
     if not verified.stops:
         raise NoFeasibleRoute()
 
-    provider_hits = direct_result.cache_hits + matrix_result.cache_hits
-    provider_pairs = direct_result.pair_count + matrix_result.pair_count
+    provider_hits = (
+        direct_result.cache_hits
+        + matrix_result.cache_hits
+        + return_result.cache_hits
+    )
+    provider_pairs = (
+        direct_result.pair_count
+        + matrix_result.pair_count
+        + return_result.pair_count
+    )
     elapsed_ms = max(0, int(round((monotonic() - started) * 1000)))
     return RouteProposalResult(
         route=verified,
@@ -570,11 +596,13 @@ def calculate_route_proposal(
         excluded_over_budget=sum(
             direct_seconds[candidate.row] is not None
             and direct_seconds[candidate.row] + service_seconds_per_stop
-            > max_total_seconds
+            >= max_total_seconds
             for candidate in ordered_candidates
         ),
         provider_request_count=(
-            direct_result.request_count + matrix_result.request_count
+            direct_result.request_count
+            + matrix_result.request_count
+            + return_result.request_count
         ),
         provider_cache_hits=provider_hits,
         provider_pair_count=provider_pairs,
@@ -680,9 +708,11 @@ def solve_route(
     candidates: Sequence[RouteCandidate],
     drive_seconds: Sequence[Sequence[int | None]],
     *,
+    return_seconds: Sequence[int | None] | None = None,
     max_total_seconds: int = MAX_TOTAL_SECONDS,
     service_seconds_per_stop: int = SERVICE_SECONDS_PER_STOP,
     exact_solver_limit: int = EXACT_SOLVER_LIMIT,
+    max_route_stops: int = MAX_ROUTE_STOPS,
     beam_width: int = 512,
     beam_max_expansions: int = 150_000,
     beam_time_limit_seconds: float = 2.0,
@@ -690,19 +720,25 @@ def solve_route(
 ) -> RouteSolution:
     candidates = tuple(candidates)
     _validate_matrix_shape(candidates, drive_seconds)
+    return_seconds = _normalize_return_seconds(candidates, return_seconds)
+    max_route_stops = max(1, min(int(max_route_stops), MAX_ROUTE_STOPS))
     if len(candidates) <= exact_solver_limit:
         return _solve_exact_dp(
             candidates,
             drive_seconds,
+            return_seconds=return_seconds,
             max_total_seconds=max_total_seconds,
             service_seconds_per_stop=service_seconds_per_stop,
+            max_route_stops=max_route_stops,
             monotonic=monotonic,
         )
     return _solve_beam(
         candidates,
         drive_seconds,
+        return_seconds=return_seconds,
         max_total_seconds=max_total_seconds,
         service_seconds_per_stop=service_seconds_per_stop,
+        max_route_stops=max_route_stops,
         beam_width=beam_width,
         max_expansions=beam_max_expansions,
         time_limit_seconds=beam_time_limit_seconds,
@@ -715,11 +751,16 @@ def verify_route(
     candidates: Sequence[RouteCandidate],
     drive_seconds: Sequence[Sequence[int | None]],
     route_indices: Sequence[int],
+    return_seconds: Sequence[int | None] | None = None,
     max_total_seconds: int = MAX_TOTAL_SECONDS,
     service_seconds_per_stop: int = SERVICE_SECONDS_PER_STOP,
+    max_route_stops: int = MAX_ROUTE_STOPS,
 ) -> VerifiedRoute:
     candidates = tuple(candidates)
     _validate_matrix_shape(candidates, drive_seconds)
+    return_seconds = _normalize_return_seconds(candidates, return_seconds)
+    if len(route_indices) > max(1, min(int(max_route_stops), MAX_ROUTE_STOPS)):
+        raise RouteVerificationError()
     seen: set[int] = set()
     stops: list[VerifiedStop] = []
     cumulative_drive = 0
@@ -745,7 +786,7 @@ def verify_route(
         cumulative_total = (
             cumulative_drive + sequence * service_seconds_per_stop
         )
-        if cumulative_total > max_total_seconds:
+        if cumulative_total >= max_total_seconds:
             raise RouteVerificationError()
 
         candidate = candidates[candidate_index]
@@ -761,14 +802,23 @@ def verify_route(
         )
         origin_matrix_index = candidate_index + 1
 
+    return_drive_seconds = 0
+    if stops:
+        return_drive_seconds = _valid_road_seconds(
+            return_seconds[route_indices[-1]]
+        )
+        if return_drive_seconds is None:
+            raise RouteVerificationError()
     service_seconds = len(stops) * service_seconds_per_stop
-    total_seconds = cumulative_drive + service_seconds
-    if total_seconds > max_total_seconds:
+    drive_seconds_total = cumulative_drive + return_drive_seconds
+    total_seconds = drive_seconds_total + service_seconds
+    if total_seconds >= max_total_seconds:
         raise RouteVerificationError()
     return VerifiedRoute(
         stops=tuple(stops),
         total_priority_score=total_score,
-        drive_seconds=cumulative_drive,
+        drive_seconds=drive_seconds_total,
+        return_drive_seconds=return_drive_seconds,
         service_seconds=service_seconds,
         total_seconds=total_seconds,
     )
@@ -778,8 +828,10 @@ def _solve_exact_dp(
     candidates: tuple[RouteCandidate, ...],
     drive_seconds: Sequence[Sequence[int | None]],
     *,
+    return_seconds: tuple[int | None, ...],
     max_total_seconds: int,
     service_seconds_per_stop: int,
+    max_route_stops: int,
     monotonic: Callable[[], float],
 ) -> RouteSolution:
     started = monotonic()
@@ -808,7 +860,7 @@ def _solve_exact_dp(
     path_code_base = count + 1
     for index in range(count):
         leg = drive_seconds[0][index]
-        if leg is None or leg + service_seconds_per_stop > max_total_seconds:
+        if leg is None or leg + service_seconds_per_stop >= max_total_seconds:
             continue
         mask = 1 << index
         costs[mask][index] = leg
@@ -821,17 +873,36 @@ def _solve_exact_dp(
         if not costs[mask]:
             continue
         stop_count = mask.bit_count()
+        if stop_count > max_route_stops:
+            continue
         service_seconds = stop_count * service_seconds_per_stop
         for last in sorted(costs[mask]):
             drive = costs[mask][last]
-            total = drive + service_seconds
-            route_indices = _reconstruct_path(mask, last, predecessors)
-            row_sequence = tuple(candidates[index].row for index in route_indices)
-            key = (-subset_scores[mask], drive, total, row_sequence)
-            if key < best_key:
-                best_key = key
-                best_indices = route_indices
+            return_leg = return_seconds[last]
+            if return_leg is not None:
+                round_trip_drive = drive + return_leg
+                total = round_trip_drive + service_seconds
+                if total < max_total_seconds:
+                    route_indices = _reconstruct_path(
+                        mask,
+                        last,
+                        predecessors,
+                    )
+                    row_sequence = tuple(
+                        candidates[index].row for index in route_indices
+                    )
+                    key = (
+                        -subset_scores[mask],
+                        round_trip_drive,
+                        total,
+                        row_sequence,
+                    )
+                    if key < best_key:
+                        best_key = key
+                        best_indices = route_indices
 
+            if stop_count >= max_route_stops:
+                continue
             remaining = ((1 << count) - 1) ^ mask
             next_index = 0
             while remaining:
@@ -844,7 +915,7 @@ def _solve_exact_dp(
                             new_drive
                             + new_mask.bit_count() * service_seconds_per_stop
                         )
-                        if new_total <= max_total_seconds:
+                        if new_total < max_total_seconds:
                             current = costs[new_mask].get(next_index)
                             new_path_code = (
                                 path_codes[mask][last] * path_code_base
@@ -883,8 +954,10 @@ def _solve_beam(
     candidates: tuple[RouteCandidate, ...],
     drive_seconds: Sequence[Sequence[int | None]],
     *,
+    return_seconds: tuple[int | None, ...],
     max_total_seconds: int,
     service_seconds_per_stop: int,
+    max_route_stops: int,
     beam_width: int,
     max_expansions: int,
     time_limit_seconds: float,
@@ -909,7 +982,7 @@ def _solve_beam(
     status = "beam_complete"
     expansion_count = 0
 
-    for _depth in range(min(count, SHORTLIST_LIMIT)):
+    for _depth in range(min(count, max_route_stops)):
         depth_expansions = sum(
             count - mask.bit_count()
             for mask, _last, _drive, _score, _path in states
@@ -932,6 +1005,7 @@ def _solve_beam(
                     expansion_count += 1
                     origin_index = 0 if last < 0 else last + 1
                     leg = drive_seconds[origin_index][next_index]
+                    return_leg = return_seconds[next_index]
                     if leg is not None:
                         new_drive = drive + leg
                         new_mask = mask | (1 << next_index)
@@ -940,7 +1014,7 @@ def _solve_beam(
                             new_drive
                             + new_stop_count * service_seconds_per_stop
                         )
-                        if new_total <= max_total_seconds:
+                        if new_total < max_total_seconds:
                             new_state = (
                                 new_mask,
                                 next_index,
@@ -954,20 +1028,28 @@ def _solve_beam(
                                 new_state,
                                 candidates,
                                 service_seconds_per_stop,
+                                return_seconds,
                             ) < _beam_exact_key(
                                 current,
                                 candidates,
                                 service_seconds_per_stop,
+                                return_seconds,
                             ):
                                 next_by_state[state_key] = new_state
-                            if _beam_exact_key(
-                                new_state,
-                                candidates,
-                                service_seconds_per_stop,
-                            ) < _beam_exact_key(
-                                best_state,
-                                candidates,
-                                service_seconds_per_stop,
+                            if (
+                                return_leg is not None
+                                and new_total + return_leg < max_total_seconds
+                                and _beam_exact_key(
+                                    new_state,
+                                    candidates,
+                                    service_seconds_per_stop,
+                                    return_seconds,
+                                ) < _beam_exact_key(
+                                    best_state,
+                                    candidates,
+                                    service_seconds_per_stop,
+                                    return_seconds,
+                                )
                             ):
                                 best_state = new_state
                 remaining >>= 1
@@ -982,6 +1064,8 @@ def _solve_beam(
                 ordered_scores,
                 max_total_seconds,
                 service_seconds_per_stop,
+                return_seconds,
+                max_route_stops,
             ),
         )[:beam_width]
 
@@ -999,11 +1083,18 @@ def _beam_exact_key(
     state: tuple[int, int, int, int, tuple[int, ...]],
     candidates: Sequence[RouteCandidate],
     service_seconds_per_stop: int,
+    return_seconds: Sequence[int | None],
 ) -> tuple:
-    _mask, _last, drive, score, path = state
-    total = drive + len(path) * service_seconds_per_stop
+    _mask, last, drive, score, path = state
+    return_drive = (
+        return_seconds[last]
+        if last >= 0 and return_seconds[last] is not None
+        else (0 if last < 0 else MAX_TOTAL_SECONDS)
+    )
+    round_trip_drive = drive + return_drive
+    total = round_trip_drive + len(path) * service_seconds_per_stop
     rows = tuple(candidates[index].row for index in path)
-    return (-score, drive, total, rows)
+    return (-score, round_trip_drive, total, rows)
 
 
 def _beam_rank_key(
@@ -1012,13 +1103,24 @@ def _beam_rank_key(
     ordered_scores: Sequence[tuple[int, int]],
     max_total_seconds: int,
     service_seconds_per_stop: int,
+    return_seconds: Sequence[int | None],
+    max_route_stops: int,
 ) -> tuple:
-    mask, _last, drive, score, path = state
+    mask, last, drive, score, path = state
+    return_drive = (
+        return_seconds[last]
+        if last >= 0 and return_seconds[last] is not None
+        else 0
+    )
     remaining_stop_capacity = max(
         0,
         min(
-            SHORTLIST_LIMIT - len(path),
-            (max_total_seconds - drive) // service_seconds_per_stop - len(path),
+            max_route_stops - len(path),
+            (
+                (max_total_seconds - drive - return_drive)
+                // service_seconds_per_stop
+                - len(path)
+            ),
         ),
     )
     remaining_scores = [
@@ -1058,6 +1160,23 @@ def _validate_matrix_shape(
         raise RouteVerificationError()
     if any(len(row) != expected_columns for row in drive_seconds):
         raise RouteVerificationError()
+
+
+def _normalize_return_seconds(
+    candidates: Sequence[RouteCandidate],
+    return_seconds: Sequence[int | None] | None,
+) -> tuple[int | None, ...]:
+    if return_seconds is None:
+        return tuple(0 for _candidate in candidates)
+    if len(return_seconds) != len(candidates):
+        raise RouteVerificationError()
+    normalized = tuple(return_seconds)
+    if any(
+        value is not None and _valid_road_seconds(value) is None
+        for value in normalized
+    ):
+        raise RouteVerificationError()
+    return normalized
 
 
 def _validate_provider_matrix(

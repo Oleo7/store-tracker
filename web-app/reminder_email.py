@@ -34,7 +34,7 @@ EMAIL_EVENTS_COLUMNS = [
     "intended_email", "actual_email", "event_type", "url", "payload_json",
 ]
 
-USER_COLUMNS = ["user_name", "name", "role", "email", "phone", "password", "active"]
+USER_COLUMNS = ["user_name", "name", "role", "email", "phone", "password", "active", "admin"]
 SETTINGS_COLUMNS = ["key", "value", "description"]
 
 EMAIL_PROPOSAL_TYPES = {

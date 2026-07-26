@@ -64,24 +64,32 @@ class SolverTests(TestCase):
         self.assertIsNone(_duration_to_ceiling_seconds("-1s"))
         self.assertIsNone(_duration_to_ceiling_seconds("bad"))
 
-    def test_exact_solver_handles_one_stop_without_return_leg(self):
+    def test_exact_solver_includes_return_leg(self):
         candidates = [candidate(2, 50)]
         matrix = [[60], [999999]]
-        solution = solve_route(candidates, matrix)
+        solution = solve_route(candidates, matrix, return_seconds=[120])
         route = verify_route(
             candidates=candidates,
             drive_seconds=matrix,
+            return_seconds=[120],
             route_indices=solution.route_indices,
         )
 
         self.assertEqual(solution.route_indices, (0,))
         self.assertTrue(solution.optimality_proven)
-        self.assertEqual(route.drive_seconds, 60)
-        self.assertEqual(route.total_seconds, 1260)
+        self.assertEqual(route.drive_seconds, 180)
+        self.assertEqual(route.return_drive_seconds, 120)
+        self.assertEqual(route.total_seconds, 1380)
 
-    def test_exact_solver_accepts_exactly_480_minutes(self):
+    def test_exact_solver_rejects_exactly_seven_hours(self):
         candidates = [candidate(2, 75)]
-        matrix = [[27600], [0]]
+        matrix = [[24000], [0]]
+        solution = solve_route(candidates, matrix)
+        self.assertEqual(solution.route_indices, ())
+
+    def test_exact_solver_accepts_one_second_under_seven_hours(self):
+        candidates = [candidate(2, 75)]
+        matrix = [[23999], [0]]
         solution = solve_route(candidates, matrix)
         route = verify_route(
             candidates=candidates,
@@ -89,11 +97,11 @@ class SolverTests(TestCase):
             route_indices=solution.route_indices,
         )
 
-        self.assertEqual(route.total_seconds, 28800)
+        self.assertEqual(route.total_seconds, 25199)
 
     def test_exact_solver_rejects_route_one_second_over_budget(self):
         candidates = [candidate(2, 75)]
-        matrix = [[27601], [0]]
+        matrix = [[24001], [0]]
         solution = solve_route(candidates, matrix)
         self.assertEqual(solution.route_indices, ())
 
@@ -210,13 +218,14 @@ class SolverTests(TestCase):
         self.assertEqual(first.route_indices, second.route_indices)
         self.assertFalse(first.optimality_proven)
         self.assertLessEqual(verified.total_seconds, 28800)
+        self.assertEqual(len(first.route_indices), 15)
 
     def test_post_verifier_rejects_an_overlong_solver_result(self):
         candidates = [candidate(2, 100)]
         with self.assertRaises(RouteVerificationError):
             verify_route(
                 candidates=candidates,
-                drive_seconds=[[27601], [0]],
+                drive_seconds=[[24000], [0]],
                 route_indices=[0],
             )
 
@@ -305,7 +314,7 @@ class SolverTests(TestCase):
         # machine-specific wall-clock timing.
         self.assertLessEqual(haversine_calls, len(candidates) * 24 * 4)
 
-    def test_two_stage_calculation_caps_full_matrix_at_600_elements(self):
+    def test_two_stage_calculation_caps_matrix_and_adds_return_elements(self):
         candidates = [candidate(index + 2, 100 - index) for index in range(30)]
         provider = FormulaProvider()
         proposal = calculate_route_proposal(
@@ -319,9 +328,11 @@ class SolverTests(TestCase):
 
         self.assertEqual(provider.call_shapes[0], (1, 30))
         self.assertEqual(provider.call_shapes[1], (25, 24))
+        self.assertEqual(provider.call_shapes[2], (24, 1))
         self.assertLessEqual(provider.call_shapes[1][0] * provider.call_shapes[1][1], 600)
         self.assertTrue(proposal.shortlisted)
-        self.assertLessEqual(proposal.route.total_seconds, 28800)
+        self.assertLess(proposal.route.total_seconds, 25200)
+        self.assertLessEqual(len(proposal.route.stops), 15)
 
     def test_shortlisting_prevents_global_optimality_claim(self):
         candidates = [candidate(index + 2, 100 - index) for index in range(20)]
@@ -338,6 +349,26 @@ class SolverTests(TestCase):
 
 
 class ProviderTests(TestCase):
+    def test_routes_provider_defaults_to_traffic_unaware(self):
+        http = FormulaHttp()
+        provider = GoogleRoutesTravelTimeProvider(
+            "secret",
+            max_attempts=1,
+            http_session=http,
+            cache_ttl_seconds=0,
+        )
+        result = provider.get_matrix_seconds(
+            [START],
+            [Coordinate(57.71, 11.98)],
+            ephemeral_origin_indexes=frozenset({0}),
+        )
+
+        self.assertEqual(result.routing_preference, "TRAFFIC_UNAWARE")
+        self.assertEqual(
+            http.calls[0]["json"]["routingPreference"],
+            "TRAFFIC_UNAWARE",
+        )
+
     def test_routes_provider_reads_element_status_and_ceil_duration(self):
         http = FormulaHttp()
         provider = GoogleRoutesTravelTimeProvider(
@@ -487,6 +518,7 @@ class RouteEndpointTests(TestCase):
                 "row": 2,
                 "customer": "Authoritative Store",
                 "cancelled_flag": "",
+                "sales_person": "Route User",
                 "latitude_google": "57.7000",
                 "longitude_google": "11.9000",
             },
@@ -494,6 +526,7 @@ class RouteEndpointTests(TestCase):
                 "row": 3,
                 "customer": "Other Store",
                 "cancelled_flag": "",
+                "sales_person": "Other Seller",
                 "latitude_google": "57.7100",
                 "longitude_google": "11.9100",
             },
@@ -519,20 +552,29 @@ class RouteEndpointTests(TestCase):
                 "get_route_travel_time_provider",
                 return_value=self.provider,
             ),
+            patch.object(
+                app_module,
+                "get_saved_route_proposal",
+                return_value=None,
+            ),
+            patch.object(app_module, "save_route_proposal"),
         ]
+        self.mocks = []
         for patcher in self.patchers:
-            patcher.start()
+            self.mocks.append(patcher.start())
+        self.saved_route_mock = self.mocks[-2]
+        self.save_route_mock = self.mocks[-1]
 
     def tearDown(self):
         for patcher in reversed(self.patchers):
             patcher.stop()
 
-    def login(self):
+    def login(self, *, role="Säljare", name="Route User"):
         with self.client.session_transaction() as flask_session:
             flask_session["user"] = {
                 "user_name": "route-user",
-                "name": "Route User",
-                "role": "Säljare",
+                "name": name,
+                "role": role,
             }
 
     def test_authentication_is_required(self):
@@ -560,11 +602,16 @@ class RouteEndpointTests(TestCase):
         self.assertEqual(payload["stops"][0]["priority_score"], 88)
         self.assertEqual(payload["stops"][0]["latitude"], 57.7)
         self.assertEqual(payload["stops"][0]["longitude"], 11.9)
-        self.assertEqual(payload["meta"]["max_total_minutes"], 480)
+        self.assertEqual(payload["meta"]["max_total_minutes"], 420)
+        self.assertEqual(payload["meta"]["max_route_stops"], 15)
         self.assertEqual(payload["meta"]["service_minutes_per_stop"], 20)
+        self.assertTrue(payload["meta"]["includes_return_to_start"])
+        self.assertEqual(payload["route_owner"], "Route User")
+        self.assertIn("route_date", payload)
+        self.save_route_mock.assert_called_once()
 
     def test_only_requested_rows_can_be_selected(self):
-        self.login()
+        self.login(role="Administratör")
         response = self.client.post("/route-proposal", json={
             "start": {"latitude": 57.7089, "longitude": 11.9746},
             "candidate_rows": [3],
@@ -573,6 +620,56 @@ class RouteEndpointTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual([stop["row"] for stop in payload["stops"]], [3])
         self.assertEqual(payload["stops"][0]["priority_score"], 42)
+
+    def test_seller_scope_ignores_client_rows_and_uses_only_owned_customers(self):
+        self.login()
+        response = self.client.post("/route-proposal", json={
+            "start": {"latitude": 57.7089, "longitude": 11.9746},
+            "candidate_rows": [3],
+        })
+        payload = response.get_json()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([stop["row"] for stop in payload["stops"]], [2])
+        self.assertEqual(payload["meta"]["requested_candidate_count"], 1)
+
+    def test_saved_daily_route_is_returned_without_new_provider_calls(self):
+        self.login()
+        saved = {}
+
+        def load_saved(_spreadsheet, _user_name, _route_date):
+            if not saved:
+                return None
+            return {
+                **saved,
+                "cached": True,
+                "meta": {**saved["meta"], "daily_cache_hit": True},
+            }
+
+        def persist_saved(_spreadsheet, **kwargs):
+            saved.update(kwargs["payload"])
+
+        self.saved_route_mock.side_effect = load_saved
+        self.save_route_mock.side_effect = persist_saved
+        first = self.client.post("/route-proposal", json={
+            "start": {"latitude": 57.7089, "longitude": 11.9746},
+            "candidate_rows": [2],
+        })
+        calls_after_first = len(self.provider.call_shapes)
+        second = self.client.post("/route-proposal", json={
+            "start": {"latitude": 58.0, "longitude": 12.0},
+            "candidate_rows": [3],
+        })
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        self.assertTrue(second.get_json()["cached"])
+        self.assertEqual(
+            second.get_json()["start"],
+            first.get_json()["start"],
+        )
+        self.assertEqual(len(self.provider.call_shapes), calls_after_first)
+        self.assertEqual(self.save_route_mock.call_count, 1)
 
     def test_invalid_start_is_rejected(self):
         self.login()
@@ -621,6 +718,42 @@ class RouteEndpointTests(TestCase):
         self.assertTrue(payload["message"])
 
 
+class RouteProposalStorageTests(TestCase):
+    def test_saved_route_round_trips_through_daily_sheet(self):
+        sheet = RouteStorageWorksheet()
+        spreadsheet = RouteStorageSpreadsheet(sheet)
+        payload = {
+            "ok": True,
+            "cached": False,
+            "generated_at": "2026-07-26T09:00:00+02:00",
+            "route_date": "2026-07-26",
+            "route_owner": "Sofia",
+            "start": {"latitude": 57.7, "longitude": 11.9},
+            "stops": [{"row": 2, "sequence": 1}],
+            "summary": {"stop_count": 1},
+            "meta": {"daily_cache_hit": False},
+        }
+
+        app_module.save_route_proposal(
+            spreadsheet,
+            user_name="sofia",
+            user_display_name="Sofia",
+            route_date=app_module.date(2026, 7, 26),
+            payload=payload,
+        )
+        loaded = app_module.get_saved_route_proposal(
+            spreadsheet,
+            "SOFIA",
+            app_module.date(2026, 7, 26),
+        )
+
+        self.assertTrue(loaded["cached"])
+        self.assertTrue(loaded["meta"]["daily_cache_hit"])
+        self.assertEqual(loaded["route_owner"], "Sofia")
+        self.assertEqual(loaded["start"], payload["start"])
+        self.assertEqual(len(sheet.values), 2)
+
+
 class FrontendRouteProposalFlowTests(TestCase):
     @classmethod
     def setUpClass(cls):
@@ -652,6 +785,40 @@ class FrontendRouteProposalFlowTests(TestCase):
         self.assertNotIn("route-proposal-stage-link", self.html)
         self.assertNotIn("Google Maps delar rutten", self.html)
 
+    def test_daily_route_is_checked_before_geolocation(self):
+        get_index = self.html.index('fetch(`${API}/route-proposal`, {\n        method: "GET"')
+        position_index = self.html.index(
+            "const currentPosition = await getCurrentPositionForRoute();"
+        )
+        self.assertLess(get_index, position_index)
+
+    def test_seller_route_context_uses_owned_customers(self):
+        self.assertIn("function currentUserIsSeller()", self.html)
+        self.assertIn("function getRouteProposalBaseCustomers()", self.html)
+        self.assertIn(
+            "normalizeRouteIdentity(customer?.sales_person) === sellerName",
+            self.html,
+        )
+
+    def test_route_ui_shows_owner_date_and_return_to_start(self):
+        self.assertIn(
+            "Ruttförslag för ${owner} (${routeDate})",
+            self.html,
+        )
+        self.assertIn("Retur till start", self.html)
+        self.assertIn("const ROUTE_MAX_STOPS = 15;", self.html)
+        self.assertIn("const ROUTE_MAX_TOTAL_MINUTES = 420;", self.html)
+
+    def test_google_maps_export_returns_to_route_start(self):
+        self.assertIn(
+            "const returnPoint = routeProposal ? getRouteCoordinatePair(routeProposal.start) : null;",
+            self.html,
+        )
+        self.assertIn(
+            "const waypoints = routeProposal ? stops : stops.slice(0, -1);",
+            self.html,
+        )
+
 
 class FormulaProvider:
     def __init__(self):
@@ -674,7 +841,7 @@ class FormulaProvider:
             seconds=tuple(seconds),
             pair_count=len(origins) * len(destinations),
             request_count=1,
-            routing_preference="TRAFFIC_AWARE",
+            routing_preference="TRAFFIC_UNAWARE",
         )
 
 
@@ -735,6 +902,47 @@ class ErrorProvider:
         self, origins, destinations, *, ephemeral_origin_indexes=frozenset()
     ):
         raise self.error
+
+
+class RouteStorageWorksheet:
+    title = app_module.ROUTE_PROPOSALS_SHEET
+    col_count = 10
+    row_count = 500
+
+    def __init__(self):
+        self.values = [list(app_module.ROUTE_PROPOSAL_COLUMNS)]
+
+    def get_all_values(self):
+        return [list(row) for row in self.values]
+
+    def row_values(self, row):
+        index = row - 1
+        return list(self.values[index]) if index < len(self.values) else []
+
+    def update_cell(self, row, column, value):
+        while len(self.values) < row:
+            self.values.append([])
+        while len(self.values[row - 1]) < column:
+            self.values[row - 1].append("")
+        self.values[row - 1][column - 1] = value
+
+    def resize(self, **_kwargs):
+        return None
+
+    def batch_update(self, updates, value_input_option="RAW"):
+        del value_input_option
+        for update in updates:
+            self.values.extend([list(row) for row in update["values"]])
+
+
+class RouteStorageSpreadsheet:
+    def __init__(self, sheet):
+        self.sheet = sheet
+
+    def worksheet(self, title):
+        if title != app_module.ROUTE_PROPOSALS_SHEET:
+            raise AssertionError(title)
+        return self.sheet
 
 
 def brute_force_route(candidates, matrix, max_seconds, service_seconds):

@@ -1111,11 +1111,31 @@
 
     /* ── Follow-up insights ── */
     .insights-body {
-      padding: 12px 14px 40px;
+      padding: 12px 14px 24px;
       display: flex;
       flex-direction: column;
       gap: 12px;
     }
+    .insights-session-footer {
+      display: flex;
+      justify-content: flex-end;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 2px 2px;
+      color: #777;
+      font-size: 0.78rem;
+    }
+    .insights-session-footer button {
+      border: 1px solid #e3d6dc;
+      border-radius: 999px;
+      padding: 8px 13px;
+      color: #694554;
+      background: #fff;
+      cursor: pointer;
+      font: inherit;
+      font-weight: 700;
+    }
+    .insights-session-footer button:active { background: #f9edf2; }
     .insights-panel {
       background: #fff;
       border-radius: 14px;
@@ -2895,7 +2915,6 @@
 <div class="session-control" id="session-control">
   <span id="session-user-name"></span>
   <button id="settings-btn" type="button">Inställningar</button>
-  <button id="logout-btn" type="button">Logga ut</button>
 </div>
 
 <!-- ═══════════════ LIST VIEW ═══════════════ -->
@@ -3062,6 +3081,10 @@
       <div id="email-performance-report" aria-live="polite">
         <div class="state-msg">Laddar...</div>
       </div>
+    </div>
+    <div class="insights-session-footer">
+      <span id="insights-session-user-name"></span>
+      <button id="logout-btn" type="button">Logga ut</button>
     </div>
   </div>
 </div>
@@ -3439,7 +3462,8 @@
   const FREEZER_LABELS = { Franui: "Franui", Schufrulade: "Schufrulade", Boujee: "Boujee", polarbar: "Polarbär", none: "Inget" };
   const LIST_BATCH_SIZE = 80;
   const DAILY_FOCUS_LIMIT = 20;
-  const ROUTE_MAX_TOTAL_MINUTES = 480;
+  const ROUTE_MAX_TOTAL_MINUTES = 420;
+  const ROUTE_MAX_STOPS = 15;
   const ROUTE_SERVICE_MINUTES_PER_STOP = 20;
   const MAP_ROUTE_DRAFT_KEY = "st_map_route_draft_v1";
   const MAP_ROUTE_DRAFT_TTL_MS = 12 * 60 * 60 * 1000;
@@ -3980,7 +4004,23 @@
     return new Set(["1", "y", "yes", "ja", "true", "cancelled", "canceled", "avslutad"]).has(value);
   }
 
-  function getRouteProposalCandidates(baseCustomers = getBaseFilteredCustomers()) {
+  function normalizeRouteIdentity(value) {
+    return String(value || "").replace(/\s+/g, " ").trim().toLocaleLowerCase("sv-SE");
+  }
+
+  function currentUserIsSeller() {
+    return normalizeRouteIdentity(currentUser?.role) === "säljare";
+  }
+
+  function getRouteProposalBaseCustomers() {
+    if (!currentUserIsSeller()) return getBaseFilteredCustomers();
+    const sellerName = normalizeRouteIdentity(currentUser?.name || currentUser?.user_name);
+    return customers.filter(customer =>
+      normalizeRouteIdentity(customer?.sales_person) === sellerName
+    );
+  }
+
+  function getRouteProposalCandidates(baseCustomers = getRouteProposalBaseCustomers()) {
     if (!insightsLoaded) return [];
     return baseCustomers.filter(customer => {
       const score = Number(getCustomerInsight(customer)?.priority_score);
@@ -3991,32 +4031,30 @@
     });
   }
 
-  function getRouteProposalSignature(candidates) {
-    const candidateSnapshot = candidates
-      .map(customer => {
-        const position = getRouteCoordinatePair(customer);
-        return {
-          row: Number(customer.row),
-          latitude: position?.latitude,
-          longitude: position?.longitude,
-          priorityScore: Number(getCustomerInsight(customer)?.priority_score),
-        };
-      })
-      .sort((a, b) => a.row - b.row);
-    return JSON.stringify({
-      filters: getListSignature(),
-      insightsRevision,
-      candidates: candidateSnapshot,
-    });
+  function getStockholmRouteDate() {
+    return new Intl.DateTimeFormat("sv-SE", {
+      timeZone: "Europe/Stockholm",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).format(new Date());
+  }
+
+  function getRouteProposalSignature() {
+    return [
+      "daily-route",
+      getStockholmRouteDate(),
+      normalizeRouteIdentity(currentUser?.user_name),
+    ].join(":");
   }
 
   function getRouteProposalContext() {
-    const baseCustomers = getBaseFilteredCustomers();
+    const baseCustomers = getRouteProposalBaseCustomers();
     const candidates = getRouteProposalCandidates(baseCustomers);
     return {
       baseCustomers,
       candidates,
-      signature: getRouteProposalSignature(candidates),
+      signature: getRouteProposalSignature(),
     };
   }
 
@@ -4052,6 +4090,22 @@
     return Number(value || 0).toLocaleString("sv-SE", { maximumFractionDigits: 1 });
   }
 
+  function formatRouteDate(value) {
+    const text = String(value || "").trim();
+    const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(text);
+    if (!match) return text;
+    return new Date(
+      Number(match[1]),
+      Number(match[2]) - 1,
+      Number(match[3]),
+      12
+    ).toLocaleDateString("sv-SE", {
+      day: "numeric",
+      month: "long",
+      year: "numeric",
+    });
+  }
+
   function updateRouteProposalChip() {
     const chip = document.getElementById("chip-route-proposal");
     if (!chip) return;
@@ -4077,19 +4131,24 @@
       panel.className = "route-proposal-panel visible loading";
       panel.innerHTML = `
         <div class="route-proposal-title">Beräknar bästa rutt…</div>
-        <div class="route-proposal-copy">Vi utgår från din position och butikerna som matchar de aktiva filtren.</div>
+        <div class="route-proposal-copy">Vi kontrollerar först om dagens rutt redan är sparad. En ny rutt utgår från din position och dina kunder.</div>
       `;
       return;
     }
 
     if (routeProposal) {
       const summary = routeProposal.summary;
+      const owner = esc(routeProposal.routeOwner || currentUser?.name || currentUser?.user_name || "");
+      const routeDate = esc(formatRouteDate(routeProposal.routeDate));
+      const savedCopy = routeProposal.cached
+        ? "Dagens sparade rutt visas utan en ny Routes API-beräkning."
+        : "Rutten har beräknats och sparats för resten av dagen.";
       panel.className = "route-proposal-panel visible";
       panel.innerHTML = `
         <div class="route-proposal-heading">
           <div>
-            <div class="route-proposal-title">Ruttförslag · ${summary.stop_count} butiker</div>
-            <div class="route-proposal-copy">Start: Din position · stoppen visas i rekommenderad körordning.</div>
+            <div class="route-proposal-title">Ruttförslag för ${owner} (${routeDate})</div>
+            <div class="route-proposal-copy">${summary.stop_count} butiker · start och mål: Din position · ${savedCopy}</div>
           </div>
         </div>
         <div class="route-proposal-metrics">
@@ -4110,11 +4169,11 @@
             <div class="route-proposal-metric-value">${formatRouteMinutes(summary.total_minutes)}</div>
           </div>
           <div class="route-proposal-metric">
-            <div class="route-proposal-metric-label">Kandidater</div>
-            <div class="route-proposal-metric-value">${summary.candidate_count}</div>
+            <div class="route-proposal-metric-label">Retur till start</div>
+            <div class="route-proposal-metric-value">${formatRouteMinutes(summary.return_drive_minutes)}</div>
           </div>
         </div>
-        <div class="route-proposal-map-hint">Öppna kartan för att ta bort eller lägga tillbaka stopp. Fortsätt sedan till Google Maps med den vanliga knappen.</div>
+        <div class="route-proposal-map-hint">Total tid är under 7 timmar inklusive 20 minuters besök per butik och retur till start. Öppna kartan för att ta bort eller lägga tillbaka stopp.</div>
         <div class="route-proposal-actions">
           <button class="action-btn secondary" id="route-proposal-clear-btn" type="button">Rensa ruttförslag</button>
           <button class="action-btn" id="route-proposal-map-btn" type="button">Visa på karta</button>
@@ -4222,7 +4281,7 @@
     const start = getRouteCoordinatePair(payload.start);
     if (!start) throw routeProposalError("invalid_route_response", "Ruttens startposition saknas.");
 
-    const candidateByRow = new Map(context.candidates.map(customer => [Number(customer.row), customer]));
+    const candidateByRow = new Map(customers.map(customer => [Number(customer.row), customer]));
     const seenRows = new Set();
     const stops = payload.stops.map(rawStop => {
       const row = Number(rawStop?.row);
@@ -4266,6 +4325,10 @@
       };
     }).sort((a, b) => a.sequence - b.sequence || a.row - b.row);
 
+    if (stops.length > ROUTE_MAX_STOPS) {
+      throw routeProposalError("invalid_route_response", "Ruttjänsten returnerade för många stopp.");
+    }
+
     stops.forEach((stop, index) => {
       if (stop.sequence !== index + 1) {
         throw routeProposalError("invalid_route_response", "Stoppordningen är inte sammanhängande.");
@@ -4286,14 +4349,17 @@
       stop_count: Number(payload.summary.stop_count),
       total_priority_score: Number(payload.summary.total_priority_score),
       drive_minutes: Number(payload.summary.drive_minutes),
+      return_drive_minutes: Number(payload.summary.return_drive_minutes),
       service_minutes: Number(payload.summary.service_minutes),
       total_minutes: Number(payload.summary.total_minutes),
     };
     if (
-      !Number.isInteger(summary.candidate_count) || summary.candidate_count < 0 || summary.candidate_count > context.candidates.length
+      !Number.isInteger(summary.candidate_count) || summary.candidate_count < 0 || summary.candidate_count > customers.length
       || !Number.isInteger(summary.stop_count) || summary.stop_count !== stops.length
       || !Number.isFinite(summary.total_priority_score) || summary.total_priority_score < 0
       || !Number.isFinite(summary.drive_minutes) || summary.drive_minutes < 0
+      || !Number.isFinite(summary.return_drive_minutes) || summary.return_drive_minutes < 0
+      || summary.return_drive_minutes > summary.drive_minutes + 0.01
       || !Number.isFinite(summary.service_minutes) || summary.service_minutes < 0
       || !Number.isFinite(summary.total_minutes) || summary.total_minutes < 0
     ) {
@@ -4309,6 +4375,8 @@
       || calculatedTotalMinutes > ROUTE_MAX_TOTAL_MINUTES + 0.01
       || Math.abs(summary.total_minutes - calculatedTotalMinutes) > 1
       || Math.abs(summary.total_priority_score - calculatedPriorityScore) > 0.1
+      || payload.meta?.includes_return_to_start !== true
+      || Number(payload.meta?.max_route_stops) !== ROUTE_MAX_STOPS
     ) {
       throw routeProposalError("invalid_route_response", "Ruttens tids- eller poängvillkor kunde inte verifieras.");
     }
@@ -4316,8 +4384,16 @@
     if (stops.length) {
       const lastStop = stops[stops.length - 1];
       if (
-        Math.abs(lastStop.cumulative_drive_minutes - summary.drive_minutes) > 1
-        || Math.abs(lastStop.cumulative_total_minutes - summary.total_minutes) > 1
+        Math.abs(
+          lastStop.cumulative_drive_minutes
+          + summary.return_drive_minutes
+          - summary.drive_minutes
+        ) > 1
+        || Math.abs(
+          lastStop.cumulative_total_minutes
+          + summary.return_drive_minutes
+          - summary.total_minutes
+        ) > 1
       ) {
         throw routeProposalError("invalid_route_response", "Ruttens stopptider stämmer inte med summeringen.");
       }
@@ -4325,6 +4401,9 @@
 
     return {
       generatedAt: String(payload.generated_at || ""),
+      routeDate: String(payload.route_date || ""),
+      routeOwner: String(payload.route_owner || ""),
+      cached: payload.cached === true,
       start: { latitude: start.latitude, longitude: start.longitude },
       stops,
       rows: stops.map(stop => stop.row),
@@ -4388,7 +4467,7 @@
       return "Inga butiker matchar de aktiva filtren.";
     }
     if (normalizedCode.includes("no_feasible") || normalizedCode.includes("route_not_found")) {
-      return "Ingen genomförbar rutt hittades inom åtta timmar.";
+      return "Ingen genomförbar rutt hittades under sju timmar inklusive retur till start.";
     }
     if (
       normalizedCode.includes("travel")
@@ -4412,27 +4491,12 @@
   async function proposeRoute() {
     if (routeProposalLoading) return;
 
-    if (!insightsLoaded && insightsLoadFailed) {
-      setRouteProposalMessage("Laddar om kundinsikterna…", { canRetry: false });
-      await loadInsights();
-    }
-    if (!insightsLoaded) {
-      setRouteProposalMessage(
-        insightsLoadFailed
-          ? "Kunde inte ladda aktuella kundinsikter. Försök igen."
-          : "Kundinsikterna laddas fortfarande. Försök igen om en stund."
-      );
-      return;
-    }
-
-    const context = getRouteProposalContext();
+    let context = getRouteProposalContext();
     if (context.baseCustomers.length < 1) {
-      setRouteProposalMessage("Inga butiker matchar de aktiva filtren.", { canRetry: false });
-      return;
-    }
-    if (context.candidates.length < 1) {
       setRouteProposalMessage(
-        "Inga matchande butiker har både giltiga koordinater och en prioritetspoäng över noll.",
+        currentUserIsSeller()
+          ? "Du har inga egna butiker att skapa ett ruttförslag för."
+          : "Inga butiker matchar de aktiva filtren.",
         { canRetry: false }
       );
       return;
@@ -4448,43 +4512,69 @@
     renderRouteProposalPanel();
 
     try {
-      const currentPosition = await getCurrentPositionForRoute();
-      if (requestSerial !== routeProposalRequestSerial) return;
-
-      const beforeRequestContext = getRouteProposalContext();
-      if (beforeRequestContext.signature !== context.signature) {
-        invalidateRouteProposalIfNeeded(beforeRequestContext.signature);
-        return;
-      }
-
-      const response = await fetch(`${API}/route-proposal`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          start: {
-            latitude: currentPosition.latitude,
-            longitude: currentPosition.longitude,
-          },
-          candidate_rows: context.candidates.map(customer => Number(customer.row)),
-          max_total_minutes: ROUTE_MAX_TOTAL_MINUTES,
-          service_minutes_per_stop: ROUTE_SERVICE_MINUTES_PER_STOP,
-        }),
+      let payload = null;
+      const savedResponse = await fetch(`${API}/route-proposal`, {
+        method: "GET",
         signal: routeProposalAbortController?.signal,
       });
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok || payload.ok !== true) {
+      const savedPayload = await savedResponse.json().catch(() => ({}));
+      if (savedResponse.ok && savedPayload.ok === true) {
+        payload = savedPayload;
+      } else if (
+        savedResponse.status !== 404
+        || String(savedPayload.code || savedPayload.error) !== "no_daily_route"
+      ) {
         throw routeProposalError(
-          String(payload.code || payload.error || "route_request_failed"),
-          payload.message,
-          { ...payload, status: response.status }
+          String(savedPayload.code || savedPayload.error || "route_request_failed"),
+          savedPayload.message,
+          { ...savedPayload, status: savedResponse.status }
         );
       }
       if (requestSerial !== routeProposalRequestSerial) return;
 
-      const currentContext = getRouteProposalContext();
-      if (currentContext.signature !== context.signature) {
-        invalidateRouteProposalIfNeeded(currentContext.signature);
-        return;
+      if (!payload) {
+        if (!insightsLoaded && insightsLoadFailed) {
+          await loadInsights();
+        }
+        if (!insightsLoaded) {
+          throw routeProposalError(
+            "priority_data_unavailable",
+            insightsLoadFailed
+              ? "Kunde inte ladda aktuella kundinsikter. Försök igen."
+              : "Kundinsikterna laddas fortfarande. Försök igen om en stund."
+          );
+        }
+
+        context = getRouteProposalContext();
+        if (context.candidates.length < 1) {
+          throw routeProposalError(
+            "no_eligible_candidates",
+            "Inga tillgängliga butiker har både giltiga koordinater och en prioritetspoäng över noll."
+          );
+        }
+
+        const currentPosition = await getCurrentPositionForRoute();
+        if (requestSerial !== routeProposalRequestSerial) return;
+        const response = await fetch(`${API}/route-proposal`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            start: {
+              latitude: currentPosition.latitude,
+              longitude: currentPosition.longitude,
+            },
+            candidate_rows: context.candidates.map(customer => Number(customer.row)),
+          }),
+          signal: routeProposalAbortController?.signal,
+        });
+        payload = await response.json().catch(() => ({}));
+        if (!response.ok || payload.ok !== true) {
+          throw routeProposalError(
+            String(payload.code || payload.error || "route_request_failed"),
+            payload.message,
+            { ...payload, status: response.status }
+          );
+        }
       }
 
       const normalized = normalizeRouteProposalResponse(payload, context);
@@ -4492,7 +4582,7 @@
         routeProposalLoading = false;
         routeProposalAbortController = null;
         routeProposalRequestSignature = "";
-        setRouteProposalMessage("Ingen genomförbar rutt hittades inom åtta timmar.");
+        setRouteProposalMessage("Ingen genomförbar rutt hittades under sju timmar inklusive retur till start.");
         return;
       }
 
@@ -4542,7 +4632,7 @@
     invalidateRouteProposalIfNeeded(currentRouteSignature);
 
     const filtered = routeProposal
-      ? getRouteProposalCustomers(baseFilteredCustomers, routeProposal)
+      ? getRouteProposalCustomers(customers, routeProposal)
       : baseFilteredCustomers;
 
     updateDailyFocusChip(baseFilteredCustomers.length);
@@ -4553,7 +4643,7 @@
     if (emailClickNoOrderActive) activeViews.push("Klickat – ingen order");
     if (routeProposal) {
       document.getElementById("subtitle").textContent =
-        `Ruttförslag: ${filtered.length} butiker · ${formatRouteScore(routeProposal.summary.total_priority_score)} prioritetspoäng`;
+        `Ruttförslag för ${routeProposal.routeOwner}: ${filtered.length} butiker · ${formatRouteScore(routeProposal.summary.total_priority_score)} prioritetspoäng`;
     } else if (activeViews.length && dailyFocusActive) {
       document.getElementById("subtitle").textContent = `${activeViews.join(" + ")}: visar ${filtered.length} av ${matchedBeforeDailyFocus} matchande butiker`;
     } else if (activeViews.length) {
@@ -5389,6 +5479,7 @@
   }
 
   async function openEmailSettings() {
+    if (!userIsAdmin()) return;
     const currentView = activeViewName();
     if (currentView !== "settings") settingsReturnView = currentView;
     showView("settings");
@@ -6550,7 +6641,7 @@
     const missingCoordinates = Math.max(0, filteredCustomers.length - total);
     if (routeProposal) {
       document.getElementById("map-subtitle").textContent =
-        `Ruttförslag · ${mapStops.length} butiker i urvalet · justera stoppen nedan`;
+        `Ruttförslag för ${routeProposal.routeOwner} · ${mapStops.length} butiker · retur till start · justera stoppen nedan`;
       setMyLocationMarker(routeProposal.start);
       fitMapToBounds(mapStops, routeProposal.start);
     } else if (dailyFocusActive) {
@@ -6797,8 +6888,10 @@
   function openInGoogleMaps() {
     const stops = routeInMapStops.length > 0 ? routeInMapStops : mapStops;
     if (stops.length < 1) return;
-    const dest      = stops[stops.length - 1];
-    const waypoints = stops.slice(0, -1);
+    const returnPoint = routeProposal ? getRouteCoordinatePair(routeProposal.start) : null;
+    const dest = returnPoint || getRouteCoordinatePair(stops[stops.length - 1]);
+    const waypoints = routeProposal ? stops : stops.slice(0, -1);
+    if (!dest) return;
     const destParam = `${dest.latitude},${dest.longitude}`;
     const wpParam   = waypoints.length > 0
       ? `&waypoints=${waypoints.map(c => `${c.latitude},${c.longitude}`).join("|")}`
@@ -6811,11 +6904,19 @@
   // ── Login ──
   const loginScreen = document.getElementById("login-screen");
 
+  function userIsAdmin() {
+    const value = currentUser?.admin;
+    return value === true || ["y", "yes", "ja", "1", "true", "on"].includes(String(value || "").trim().toLowerCase());
+  }
+
   function setSessionUser(user) {
     currentUser = user || null;
     const control = document.getElementById("session-control");
-    document.getElementById("session-user-name").textContent = currentUser?.name || currentUser?.user_name || "";
-    control.classList.toggle("visible", Boolean(currentUser));
+    const displayName = currentUser?.name || currentUser?.user_name || "";
+    document.getElementById("session-user-name").textContent = displayName;
+    document.getElementById("insights-session-user-name").textContent =
+      displayName ? `Inloggad som ${displayName}` : "";
+    control.classList.toggle("visible", Boolean(currentUser) && userIsAdmin());
   }
 
   async function checkLogin() {
