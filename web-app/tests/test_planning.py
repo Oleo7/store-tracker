@@ -1315,7 +1315,7 @@ class PlanningActivityApiTests(PlanningApiTestCase):
             },
         )
 
-    def test_global_followup_queue_keeps_separate_same_customer_items(self):
+    def test_later_same_customer_contact_resolves_older_overdue_item(self):
         self.append_contact_row(
             contact_id="followup-overdue",
             customer_id="11111111-1111-4111-8111-111111111111",
@@ -1335,15 +1335,74 @@ class PlanningActivityApiTests(PlanningApiTestCase):
 
         self.assertEqual(response.status_code, 200, response.get_json())
         body = response.get_json()
-        self.assertEqual(
-            [item["source_contact_id"] for item in body["unscheduled_followups_overdue"]],
-            ["followup-overdue"],
+        self.assertNotIn(
+            "followup-overdue",
+            [
+                item["source_contact_id"]
+                for item in body["unscheduled_followups_overdue"]
+            ],
         )
         self.assertIn(
             "followup-outside-week",
             [
                 item["source_contact_id"]
                 for item in body["unscheduled_followups_upcoming"]
+            ],
+        )
+
+    def test_overdue_followup_is_hidden_after_a_later_contact(self):
+        self.append_contact_row(
+            contact_id="followup-resolved-by-contact",
+            customer_id="11111111-1111-4111-8111-111111111111",
+            date_time="2026-05-01 09:00",
+            follow_up_date="2026-05-15",
+        )
+        self.append_contact_row(
+            contact_id="later-contact",
+            customer_id="11111111-1111-4111-8111-111111111111",
+            date_time="2026-06-01 09:00",
+            follow_up_date="",
+        )
+
+        response = self.client.get(
+            "/planning/activities?start=2026-07-27&end=2026-08-02"
+        )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertNotIn(
+            "followup-resolved-by-contact",
+            [
+                item["source_contact_id"]
+                for item in response.get_json()["unscheduled_followups_overdue"]
+            ],
+        )
+
+    def test_overdue_followup_is_hidden_by_a_future_planned_activity(self):
+        self.append_contact_row(
+            contact_id="followup-resolved-by-plan",
+            customer_id="11111111-1111-4111-8111-111111111111",
+            date_time="2026-05-01 09:00",
+            follow_up_date="2026-05-15",
+        )
+        created = self.client.post(
+            "/planning/activities",
+            json=self.manual_payload(
+                client_request_id="future-plan-resolves-overdue",
+                scheduled_at="2026-08-03T09:00:00+02:00",
+            ),
+        )
+        self.assertEqual(created.status_code, 201, created.get_json())
+
+        response = self.client.get(
+            "/planning/activities?start=2026-07-27&end=2026-08-02"
+        )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertNotIn(
+            "followup-resolved-by-plan",
+            [
+                item["source_contact_id"]
+                for item in response.get_json()["unscheduled_followups_overdue"]
             ],
         )
 

@@ -77,6 +77,27 @@ class PlanningFrontendContractTests(TestCase):
         self.assertIn("Kommande uppföljningar", self.html)
         self.assertIn("Visa alla (${rows.length})", self.html)
 
+    def test_planning_error_preserves_admin_owner_and_backend_message(self):
+        self.assertIn(
+            "error?.details || error?.payload || {}",
+            self.html,
+        )
+        owner_select = re.search(
+            r"function renderPlanningOwnerSelect\(\) \{(.*?)\n  \}",
+            self.html,
+            flags=re.DOTALL,
+        )
+        self.assertIsNotNone(owner_select)
+        self.assertIn("planningActiveUsersCache", owner_select.group(1))
+        load_week = re.search(
+            r"async function loadPlanningWeek\(\) \{(.*?)\n  \}",
+            self.html,
+            flags=re.DOTALL,
+        )
+        self.assertIsNotNone(load_week)
+        error_handler = load_week.group(1).split("} catch (error) {", 1)[1]
+        self.assertNotIn("planningData = null", error_handler)
+
     def test_route_edit_explains_manual_conversion(self):
         self.assertIn(
             "När du sparar blir aktiviteten manuellt planerad och behålls vid nästa automatiska ruttberäkning.",

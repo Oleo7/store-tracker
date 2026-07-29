@@ -5277,7 +5277,7 @@
   }
 
   function getRouteProposalFailureMessage(error) {
-    const details = error?.details || {};
+    const details = error?.details || error?.payload || {};
     const rawCode = details.code ?? details.error ?? error?.code ?? "";
     const code = typeof rawCode === "object"
       ? String(rawCode.code || rawCode.error || "")
@@ -7153,7 +7153,6 @@
       renderPlanning();
     } catch (error) {
       if (requestSerial !== planningLoadSerial) return;
-      planningData = null;
       renderPlanningLoadError(error);
     } finally {
       if (requestSerial === planningLoadSerial) planningLoading = false;
@@ -7198,7 +7197,11 @@
     const isAdmin = userIsAdmin();
     wrap.classList.toggle("visible", isAdmin);
     if (!isAdmin) return;
-    const available = (planningData?.available_users || []).map(normalizePlanningUser).filter(user => user.user_name);
+    const available = (
+      planningData?.available_users?.length
+        ? planningData.available_users
+        : planningActiveUsersCache
+    ).map(normalizePlanningUser).filter(user => user.user_name);
     select.innerHTML = available.map(user =>
       `<option value="${escAttr(user.user_name)}">${esc(user.name || user.user_name)}</option>`
     ).join("");

@@ -2602,6 +2602,37 @@ def build_unscheduled_followup_groups(
     for customer in customers:
         customers_by_name[normalize_key(customer.get("customer"))].append(customer)
 
+    def customer_identity(row):
+        customer_id = str(row.get("customer_id") or "").strip()
+        if customer_id:
+            return ("id", customer_id)
+        name_key = normalize_key(row.get("customer"))
+        matches = customers_by_name.get(name_key, [])
+        if len(matches) == 1:
+            matched_id = str(matches[0].get("customer_id") or "").strip()
+            if matched_id:
+                return ("id", matched_id)
+        return ("name", name_key) if name_key and len(matches) <= 1 else None
+
+    latest_contact_by_customer = {}
+    for row_index, row in indexed_contacts:
+        identity = customer_identity(row)
+        contact_date = parse_date_value(row.get("date_time"))
+        if identity is None or contact_date is None:
+            continue
+        marker = (contact_date, row_index)
+        if marker > latest_contact_by_customer.get(identity, (date.min, 0)):
+            latest_contact_by_customer[identity] = marker
+
+    future_planned_customers = set()
+    for activity in activities:
+        if str(activity.get("status") or "planned").strip().casefold() != "planned":
+            continue
+        scheduled = parse_planning_datetime(activity.get("scheduled_at"))
+        identity = customer_identity(activity)
+        if identity is not None and scheduled and scheduled.date() >= today:
+            future_planned_customers.add(identity)
+
     booked_source_ids = set()
     booked_legacy = set()
     for activity in activities:
@@ -2631,6 +2662,16 @@ def build_unscheduled_followup_groups(
     for row_index, row in indexed_contacts:
         follow_up_date = parse_date_value(row.get("follow_up_date"))
         if not follow_up_date:
+            continue
+        identity = customer_identity(row)
+        latest_contact = latest_contact_by_customer.get(identity)
+        if (
+            latest_contact
+            and latest_contact[0] >= follow_up_date
+            and latest_contact[1] != row_index
+        ):
+            continue
+        if identity in future_planned_customers:
             continue
         source_contact_id = str(row.get("contact_id") or "").strip()
         if source_contact_id and source_contact_id in booked_source_ids:
