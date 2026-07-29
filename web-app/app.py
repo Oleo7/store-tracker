@@ -1195,6 +1195,24 @@ def user_route_display_name(user):
     )
 
 
+def user_route_identity_keys(user):
+    return {
+        value
+        for value in (
+            normalize_key((user or {}).get("user_name")),
+            normalize_key((user or {}).get("name")),
+        )
+        if value
+    }
+
+
+def customer_owned_by_user(customer, user):
+    return (
+        normalize_key((customer or {}).get("sales_person"))
+        in user_route_identity_keys(user)
+    )
+
+
 def planning_error(code, message, status=400, *, field=None, **extra):
     payload = {
         "ok": False,
@@ -5750,13 +5768,12 @@ def calculate_route_proposal_for_user(
     required_rows = tuple(sorted(set(required_rows or ())))
     requested_rows = tuple(sorted(set(client_requested_rows or ())))
     if user_is_seller(user):
-        owner_key = normalize_key(user_route_display_name(user))
         owned_rows = {
             customer.get("row")
             for customer in customers
             if (
                 isinstance(customer.get("row"), int)
-                and normalize_key(customer.get("sales_person")) == owner_key
+                and customer_owned_by_user(customer, user)
             )
         }
         requested_rows = tuple(sorted(
@@ -5804,8 +5821,7 @@ def calculate_route_proposal_for_user(
             continue
         if (
             user_is_seller(user)
-            and normalize_key(customer.get("sales_person"))
-            != normalize_key(user_route_display_name(user))
+            and not customer_owned_by_user(customer, user)
             and row not in required_set
         ):
             continue
@@ -6728,13 +6744,12 @@ def build_planning_route_preview(
 
     explicitly_requested_rows = set(candidate_rows or ())
     if not candidate_rows:
-        owner_name = normalize_key(user_route_display_name(owner))
         candidate_rows = tuple(
             customer.get("row")
             for customer in customers
             if (
                 isinstance(customer.get("row"), int)
-                and normalize_key(customer.get("sales_person")) == owner_name
+                and customer_owned_by_user(customer, owner)
             )
         )
     def activity_customer_identity(row):

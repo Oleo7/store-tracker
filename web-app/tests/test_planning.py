@@ -1877,6 +1877,47 @@ class PlanningRouteApiTests(PlanningApiTestCase):
             )
         return response, calculate
 
+    def test_route_ownership_uses_user_name_when_display_name_is_full_name(self):
+        users = self.spreadsheet.worksheet(app_module.USERS_SHEET)
+        headers = users.row_values(1)
+        name_column = headers.index("name") + 1
+        sofia_row = next(
+            index
+            for index, row in enumerate(users.dict_rows(), start=2)
+            if row["user_name"] == "sofia"
+        )
+        users.update_cell(sofia_row, name_column, "Sofia Andersson")
+        self.login("sofia")
+        priorities = [
+            {"row": 3, "customer": "Butik B", "priority_score": 50},
+        ]
+
+        with (
+            patch.object(
+                app_module,
+                "build_current_priority_snapshot",
+                return_value=(priorities, {}),
+            ),
+            patch.object(
+                app_module,
+                "get_route_travel_time_provider",
+                return_value=ConstantRoadProvider(),
+            ),
+        ):
+            response = self.client.post(
+                "/planning/route-preview",
+                json={
+                    "route_date": "2026-07-28",
+                    "start": {"latitude": 57.7, "longitude": 11.9},
+                },
+            )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertEqual(
+            [stop["customer_row"] for stop in response.get_json()["stops"]],
+            [3],
+        )
+
     def test_preview_requires_fixed_visit_and_reserves_phone_email_capacity(self):
         self.append_planning_row(
             planned_activity_id="fixed-phone",
