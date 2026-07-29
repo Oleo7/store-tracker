@@ -3775,7 +3775,7 @@
       <p id="planning-subtitle">Veckans kundkontakter</p>
     </div>
     <div class="header-actions">
-      <button class="route-mode-btn" id="planning-new-btn" type="button">+ Aktivitet</button>
+      <button class="route-mode-btn" id="planning-day-map-btn" type="button">&#128205; Karta</button>
     </div>
   </div>
 
@@ -3816,8 +3816,7 @@
       <aside class="planning-backlog-card" aria-labelledby="planning-backlog-title">
         <div class="planning-backlog-heading">
           <div>
-            <h2 class="planning-section-title" id="planning-backlog-title">Att planera</h2>
-            <p class="planning-section-subtitle">Kontakter och uppföljningar utan tid.</p>
+            <h2 class="planning-section-title" id="planning-backlog-title">Gamla uppföljningar att planera in</h2>
           </div>
         </div>
         <div id="planning-backlog" aria-live="polite">
@@ -7398,6 +7397,22 @@
     return String(item?.reason ?? item?.latest_contact_date ?? item?.message ?? "Kontakt saknar planerad tid");
   }
 
+  function planningBacklogPriorityScore(item) {
+    const customer = planningCustomerForItem(item);
+    const insight = customer ? getCustomerInsight(customer) : {};
+    if (hasPriorityScore(insight)) return Number(insight.priority_score);
+    const fallback = Number(item?.priority_score);
+    return Number.isFinite(fallback) ? fallback : Number.NEGATIVE_INFINITY;
+  }
+
+  function planningSortBacklog(rows) {
+    return [...(rows || [])].sort((left, right) =>
+      planningBacklogPriorityScore(right) - planningBacklogPriorityScore(left) ||
+      String(left?.follow_up_date || "").localeCompare(String(right?.follow_up_date || "")) ||
+      String(left?.customer || "").localeCompare(String(right?.customer || ""), "sv")
+    );
+  }
+
   function renderPlanningBacklogRows(rows, kind) {
     const visibleRows = planningBacklogExpanded[kind] ? rows : rows.slice(0, 20);
     if (!rows.length) return '<div class="planning-state" style="padding:14px 4px">Inga just nu.</div>';
@@ -7437,8 +7452,8 @@
   }
 
   function renderPlanningBacklogHardened() {
-    const overdue = planningData?.unscheduled_followups_overdue || [];
-    const upcoming = planningData?.unscheduled_followups_upcoming || [];
+    const overdue = planningSortBacklog(planningData?.unscheduled_followups_overdue);
+    const upcoming = planningSortBacklog(planningData?.unscheduled_followups_upcoming);
     const target = document.getElementById("planning-backlog");
     target.innerHTML = `
       <section class="planning-backlog-section">
@@ -8156,9 +8171,7 @@
 
   document.getElementById("planning-mode-btn").addEventListener("click", () => openPlanningView());
   document.getElementById("planning-back-btn").addEventListener("click", () => showView("list"));
-  document.getElementById("planning-new-btn").addEventListener("click", () =>
-    openPlanningEditor({ date: planningSelectedDate || planningTodayKey() })
-  );
+  document.getElementById("planning-day-map-btn").addEventListener("click", showPlanningDayMap);
   document.getElementById("planning-add-day-btn").addEventListener("click", () =>
     openPlanningEditor({ date: planningSelectedDate || planningTodayKey() })
   );
@@ -8850,12 +8863,14 @@
   let mapStops = [];        // all stores shown on the map
   let routeInMapStops = []; // selection for Google Maps route
   let hasStoredRouteOutsideCurrentMap = false;
+  let mapContext = "list";
+  let mapReturnView = "list";
 
   document.getElementById("route-mode-btn").addEventListener("click", showMapView);
 
   document.getElementById("map-back-btn").addEventListener("click", () => {
-    showView("list");
-    renderRouteProposalPanel();
+    showView(mapReturnView);
+    if (mapReturnView === "list") renderRouteProposalPanel();
   });
 
   document.getElementById("map-gmaps-btn").addEventListener("click", openInGoogleMaps);
@@ -8955,6 +8970,8 @@
 
   // ── Show map with all selected stores (no route yet) ──
   async function showMapView() {
+    mapContext = "list";
+    mapReturnView = "list";
     const MAP_LIMIT = 150;
     const customersWithCoordinates = filteredCustomers.filter(hasMapCoordinates);
     mapStops = customersWithCoordinates.slice(0, MAP_LIMIT);
@@ -8989,6 +9006,51 @@
     }
     renderMapStopList();
     if (!routeProposal) showMyLocation();
+  }
+
+  function planningVisitStopsForDate(dateKey) {
+    const seen = new Set();
+    return planningActivitiesForDate(dateKey)
+      .filter(activity =>
+        activity.contact_type === "visit" &&
+        !["cancelled", "skipped"].includes(activity.status)
+      )
+      .map(activity => planningCustomerForItem(activity))
+      .filter(customer => {
+        if (!customer || !hasMapCoordinates(customer)) return false;
+        const identity = String(customer.customer_id || customer.row || "");
+        if (!identity || seen.has(identity)) return false;
+        seen.add(identity);
+        return true;
+      });
+  }
+
+  async function showPlanningDayMap() {
+    const visitStops = planningVisitStopsForDate(planningSelectedDate);
+    if (!visitStops.length) {
+      showToast("Inga planerade besök med kartposition den här dagen");
+      return;
+    }
+
+    mapContext = "planning";
+    mapReturnView = "planning";
+    mapStops = visitStops;
+    routeInMapStops = [...visitStops];
+    hasStoredRouteOutsideCurrentMap = false;
+    showView("map");
+    try {
+      await initGoogleMap();
+    } catch {
+      showView("planning");
+      showToast("Kunde inte ladda kartan. Försök igen.");
+      return;
+    }
+    renderMapMarkers();
+    document.getElementById("map-subtitle").textContent =
+      `${planningFormatDate(planningSelectedDate, { year: true })} · ${visitStops.length} besök i planeringsordning`;
+    fitMapToBounds(mapStops);
+    renderMapStopList();
+    showMyLocation();
   }
 
   async function initGoogleMap() {
@@ -9129,6 +9191,7 @@
   }
 
   function toggleMapStop(row) {
+    if (mapContext === "planning") return;
     const c = mapStops.find(s => Number(s.row) === Number(row));
     if (!c) return;
     const idx = routeInMapStops.findIndex(s => Number(s.row) === Number(row));
@@ -9152,6 +9215,13 @@
 
     googleMapsButton.textContent = "🌎 Öppna i Google Maps";
     clearButton.textContent = "Rensa rutt";
+    clearButton.hidden = mapContext === "planning";
+    if (mapContext === "planning") {
+      routeCount.textContent = `${n} besök i planeringsordning`;
+      googleMapsButton.disabled = n < 1;
+      clearButton.disabled = true;
+      return;
+    }
     routeCount.textContent =
       n === 0
         ? (hasStoredRouteOutsideCurrentMap ? "Sparad rutt utanför filtret" : "Välj butiker nedan för rutt")
@@ -9208,9 +9278,10 @@
   function openInGoogleMaps() {
     const stops = routeInMapStops.length > 0 ? routeInMapStops : mapStops;
     if (stops.length < 1) return;
-    const returnPoint = routeProposal ? getRouteCoordinatePair(routeProposal.start) : null;
+    const useRouteProposal = mapContext !== "planning" && routeProposal;
+    const returnPoint = useRouteProposal ? getRouteCoordinatePair(routeProposal.start) : null;
     const dest = returnPoint || getRouteCoordinatePair(stops[stops.length - 1]);
-    const waypoints = routeProposal ? stops : stops.slice(0, -1);
+    const waypoints = useRouteProposal ? stops : stops.slice(0, -1);
     if (!dest) return;
     const destParam = `${dest.latitude},${dest.longitude}`;
     const wpParam   = waypoints.length > 0

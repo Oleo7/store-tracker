@@ -1037,11 +1037,15 @@ class FrontendRouteProposalFlowTests(TestCase):
 
     def test_google_maps_export_returns_to_route_start(self):
         self.assertIn(
-            "const returnPoint = routeProposal ? getRouteCoordinatePair(routeProposal.start) : null;",
+            'const useRouteProposal = mapContext !== "planning" && routeProposal;',
             self.html,
         )
         self.assertIn(
-            "const waypoints = routeProposal ? stops : stops.slice(0, -1);",
+            "const returnPoint = useRouteProposal ? getRouteCoordinatePair(routeProposal.start) : null;",
+            self.html,
+        )
+        self.assertIn(
+            "const waypoints = useRouteProposal ? stops : stops.slice(0, -1);",
             self.html,
         )
 

@@ -77,6 +77,29 @@ class PlanningFrontendContractTests(TestCase):
         self.assertIn("Kommande uppföljningar", self.html)
         self.assertIn("Visa alla (${rows.length})", self.html)
 
+    def test_planning_backlog_title_and_priority_sort(self):
+        self.assertIn("Gamla uppföljningar att planera in", self.html)
+        self.assertNotIn("Kontakter och uppföljningar utan tid.", self.html)
+        self.assertIn("function planningBacklogPriorityScore(item)", self.html)
+        self.assertIn("function planningSortBacklog(rows)", self.html)
+        self.assertIn(
+            "planningBacklogPriorityScore(right) - planningBacklogPriorityScore(left)",
+            self.html,
+        )
+
+    def test_planning_header_map_uses_ordered_day_visits(self):
+        self.assertNotIn('id="planning-new-btn"', self.html)
+        self.assertIn('id="planning-day-map-btn"', self.html)
+        self.assertIn("function planningVisitStopsForDate(dateKey)", self.html)
+        self.assertIn('activity.contact_type === "visit"', self.html)
+        self.assertIn(
+            '!["cancelled", "skipped"].includes(activity.status)',
+            self.html,
+        )
+        self.assertIn("routeInMapStops = [...visitStops]", self.html)
+        self.assertIn('mapReturnView = "planning"', self.html)
+        self.assertIn("showPlanningDayMap", self.html)
+
     def test_planning_error_preserves_admin_owner_and_backend_message(self):
         self.assertIn(
             "error?.details || error?.payload || {}",
