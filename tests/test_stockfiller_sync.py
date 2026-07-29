@@ -465,6 +465,7 @@ class StockfillerSyncTests(TestCase):
         customer_headers = [
             "customer",
             "cancelled_flag",
+            "customer_id",
             "customer_number",
             "address_google",
             "address_number_google",
@@ -481,6 +482,7 @@ class StockfillerSyncTests(TestCase):
                     [
                         "Store A",
                         "",
+                        "11111111-1111-4111-8111-111111111111",
                         "CRM-1001",
                         "Hantverkargatan",
                         "1",

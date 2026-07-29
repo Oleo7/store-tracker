@@ -4,23 +4,28 @@ import gspread
 from gspread.exceptions import WorksheetNotFound
 from google.oauth2.service_account import Credentials
 from urllib.parse import unquote
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, time as datetime_time, timedelta, timezone
 from collections import defaultdict
 from io import BytesIO
 from queue import Empty, Full, Queue
 import os
 import json
+import hashlib
 import math
 import re
 import requests
+import shlex
+import sys
 import threading
 import time
 import unicodedata
 import uuid
+from zoneinfo import ZoneInfo
 from zipfile import ZIP_DEFLATED, ZipFile
 from xml.sax.saxutils import escape as xml_escape
 from dotenv import load_dotenv
 from gspread.utils import rowcol_to_a1
+from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 from requests.exceptions import ConnectionError as RequestsConnectionError
 from priority import (
     build_contact_features,
@@ -80,22 +85,213 @@ from reminder_email import (
 
 load_dotenv()
 
+
+LOCAL_SESSION_SECRET = "store-tracker-local-session"
+PILOT_ENVIRONMENTS = {"pilot", "prod", "production", "staging"}
+PILOT_LOCK_ERROR = (
+    "Planning uses a process-local write lock. Production pilot requires "
+    "exactly one worker and one application instance."
+)
+
+
+def application_environment(environ=None):
+    environment = os.environ if environ is None else environ
+    return str(
+        environment.get("APP_ENV")
+        or environment.get("FLASK_ENV")
+        or environment.get("ENVIRONMENT")
+        or "development"
+    ).strip().casefold()
+
+
+def _positive_int(value):
+    try:
+        parsed = int(str(value or "").strip())
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 1 else None
+
+
+def _gunicorn_worker_count(value):
+    try:
+        parts = shlex.split(str(value or ""))
+    except ValueError:
+        return None
+    for index, part in enumerate(parts):
+        if part in {"--workers", "-w"} and index + 1 < len(parts):
+            return _positive_int(parts[index + 1])
+        if part.startswith("--workers="):
+            return _positive_int(part.split("=", 1)[1])
+    return None
+
+
+def planning_lock_health(environ=None):
+    environment = os.environ if environ is None else environ
+    app_env = application_environment(environment)
+    configured_worker_count = _positive_int(
+        environment.get("WEB_CONCURRENCY")
+    )
+    gunicorn_worker_count = _gunicorn_worker_count(
+        environment.get("GUNICORN_CMD_ARGS")
+    )
+    process_worker_count = _gunicorn_worker_count(
+        shlex.join(sys.argv[1:])
+    )
+    worker_values = {
+        value
+        for value in (
+            configured_worker_count,
+            gunicorn_worker_count,
+            process_worker_count,
+        )
+        if value is not None
+    }
+    distributed_lock_configured = bool(
+        str(
+            environment.get("PLANNING_DISTRIBUTED_LOCK_URL") or ""
+        ).strip()
+    )
+    instance_count = _positive_int(
+        environment.get("APP_INSTANCE_COUNT")
+        or environment.get("REPLICA_COUNT")
+    )
+
+    if len(worker_values) > 1:
+        worker_count = max(worker_values)
+        reason = "conflicting_worker_configuration"
+    elif worker_values:
+        worker_count = next(iter(worker_values))
+        reason = ""
+    elif app_env in PILOT_ENVIRONMENTS:
+        worker_count = None
+        reason = "worker_count_unknown"
+    else:
+        worker_count = 1
+        reason = ""
+
+    if distributed_lock_configured:
+        reason = "distributed_lock_not_implemented"
+    elif reason == "conflicting_worker_configuration":
+        pass
+    elif worker_count is not None and worker_count > 1:
+        reason = "multiple_workers_without_distributed_lock"
+    elif app_env in PILOT_ENVIRONMENTS and instance_count is None:
+        reason = "instance_count_unknown"
+    elif instance_count is not None and instance_count > 1:
+        reason = "multiple_instances_without_distributed_lock"
+
+    safe = not reason
+    return {
+        "mode": "process_local",
+        "worker_count": worker_count,
+        "instance_count": instance_count,
+        "safe": safe,
+        "reason": reason,
+        "distributed_lock_configured": distributed_lock_configured,
+    }
+
+
+def validate_pilot_startup(environ=None):
+    environment = os.environ if environ is None else environ
+    if application_environment(environment) not in PILOT_ENVIRONMENTS:
+        return planning_lock_health(environment)
+    health_state = planning_lock_health(environment)
+    if not health_state["safe"]:
+        raise RuntimeError(
+            f"{PILOT_LOCK_ERROR} ({health_state['reason']})"
+        )
+    return health_state
+
+
+def resolve_sheet_id(environ=None):
+    environment = os.environ if environ is None else environ
+    app_env = application_environment(environment)
+    production_key = str(
+        environment.get("PRODUCTION_SHEET_KEY") or ""
+    ).strip()
+    development_key = str(
+        environment.get("SHEET_KEY") or ""
+    ).strip()
+    staging_key = str(
+        environment.get("STAGING_SHEET_KEY") or ""
+    ).strip()
+    if app_env == "staging":
+        if not staging_key:
+            raise RuntimeError(
+                "STAGING_SHEET_KEY must be configured in staging; "
+                "staging never falls back to the production Sheet."
+            )
+        production_comparison_key = (
+            production_key or development_key
+        )
+        if (
+            production_comparison_key
+            and staging_key == production_comparison_key
+        ):
+            raise RuntimeError(
+                "STAGING_SHEET_KEY must not equal the production Sheet key."
+            )
+        return staging_key
+    if app_env in {"pilot", "prod", "production"}:
+        if not production_key:
+            raise RuntimeError(
+                "PRODUCTION_SHEET_KEY must be configured in production; "
+                "production never falls back to SHEET_KEY."
+            )
+        return production_key
+    return production_key or development_key
+
+
+def resolve_flask_secret_key(environ=None):
+    environment = os.environ if environ is None else environ
+    configured = str(environment.get("FLASK_SECRET_KEY") or "").strip()
+    render_deployment = str(
+        environment.get("RENDER") or ""
+    ).strip().casefold() in {"1", "true", "yes", "on"}
+    environment_name = application_environment(environment)
+    if not configured and (
+        render_deployment or environment_name in PILOT_ENVIRONMENTS
+    ):
+        raise RuntimeError(
+            "FLASK_SECRET_KEY must be configured for production deployments."
+        )
+    return configured or LOCAL_SESSION_SECRET
+
+
 app = Flask(__name__)
+validate_pilot_startup()
 app.config.update(
-    SECRET_KEY=(os.environ.get("FLASK_SECRET_KEY") or "store-tracker-local-session"),
+    SECRET_KEY=resolve_flask_secret_key(),
     PERMANENT_SESSION_LIFETIME=timedelta(days=30),
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Lax",
-    SESSION_COOKIE_SECURE=os.environ.get("RENDER", "").strip().lower() == "true",
+    SESSION_COOKIE_SECURE=(
+        os.environ.get("RENDER", "").strip().lower() == "true"
+        or application_environment() in PILOT_ENVIRONMENTS
+    ),
 )
 CORS(app, supports_credentials=True)
 
+
+@app.route("/health", methods=["GET"])
+def health():
+    lock_health = planning_lock_health()
+    status = 200 if lock_health["safe"] else 503
+    return jsonify({
+        "ok": lock_health["safe"],
+        "mode": lock_health["mode"],
+        "worker_count": lock_health["worker_count"],
+        "safe": lock_health["safe"],
+        "reason": lock_health["reason"],
+        "planning_write_lock": lock_health,
+    }), status
+
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
-SHEET_ID = os.environ.get("SHEET_KEY", "")
+SHEET_ID = resolve_sheet_id()
 IMAGE_DIR = os.path.abspath(os.path.join(app.root_path, "..", "images"))
 
 CUSTOMER_COLUMNS = ["customer", "cancelled_flag", "sales_person", "customer_segment",
-                    "customer_reference", "customer_number", "name", "phone", "email",
+                    "customer_reference", "customer_id", "customer_number", "name", "phone", "email",
                     "email_last_order", "comment"]
 
 ORDER_COLUMNS = ["Reference", "Order date", "Delivery date", "Customer", "placedBy", "buyerEmail",
@@ -103,7 +299,8 @@ ORDER_COLUMNS = ["Reference", "Order date", "Delivery date", "Customer", "placed
                  "Buyer number", "Customer number", "Logistics number", "Address", "Number",
                  "Postal code", "City", "Country", "Phone number", "SKU", "Product", "Weight",
                  "Quantity", "Total weight", "Unit", "Total (Pre-discount)", "Product Discount",
-                 "Total", "Currency", "Order Discount (Amount)", "Order Discount (%)", "Batch"]
+                 "Total", "Currency", "Order Discount (Amount)", "Order Discount (%)", "Batch",
+                 "customer_id"]
 ORDER_REQUIRED_COLUMNS = ["Reference", "Order date", "Delivery date", "Customer",
                           "Quantity", "Total", "Currency"]
 
@@ -133,9 +330,9 @@ CONTACT_LOG_COLUMNS = [
     "I frysdisken",
 ]
 
-CONTACT_COLUMNS = ["date_time", "sales_person", "customer", "contact_channel", "result",
+CONTACT_COLUMNS = ["date_time", "sales_person", "customer", "customer_id", "contact_channel", "result",
                    "comment", "customer_contact_person", "follow_up_date",
-                   *FREEZER_COLUMNS, "email_id"]
+                   *FREEZER_COLUMNS, "email_id", "contact_id", "planned_activity_id"]
 CONTACT_REQUIRED_COLUMNS = ["date_time", "sales_person", "customer", "contact_channel",
                             "result", "comment", "customer_contact_person", "follow_up_date"]
 
@@ -152,6 +349,52 @@ ROUTE_PROPOSAL_COLUMNS = [
     "generated_at",
     "payload_json",
 ]
+PLANNED_ACTIVITIES_SHEET = "planned_activities"
+PLANNED_ACTIVITY_COLUMNS = [
+    "planned_activity_id",
+    "user_name",
+    "sales_person",
+    "customer_id",
+    "customer_key",
+    "customer_row",
+    "customer_number",
+    "customer",
+    "contact_type",
+    "scheduled_at",
+    "duration_minutes",
+    "time_is_estimated",
+    "note",
+    "status",
+    "source",
+    "source_contact_id",
+    "completed_contact_id",
+    "route_group_id",
+    "route_sequence",
+    "client_request_id",
+    "create_fingerprint",
+    "last_mutation_request_id",
+    "last_mutation_fingerprint",
+    "revision",
+    "created_at",
+    "updated_at",
+]
+PLANNING_CONTACT_TYPES = {"visit", "phone", "email"}
+PLANNING_CONTACT_TYPE_LABELS = {
+    "visit": "Besök",
+    "phone": "Telefon",
+    "email": "Mejl",
+}
+PLANNING_CONTACT_DURATIONS = {
+    "visit": 20,
+    "phone": 10,
+    "email": 10,
+}
+PLANNING_STATUSES = {"planned", "completed", "skipped", "cancelled"}
+PLANNING_SOURCES = {"manual", "follow_up", "route"}
+PLANNING_PREVIEW_MAX_AGE_SECONDS = 30 * 60
+PLANNING_ROUTE_START_HOUR = 9
+PLANNING_ROUTE_CONFLICT_MINUTES = 15
+STOCKHOLM_ZONE = ZoneInfo("Europe/Stockholm")
 BREVO_SEND_URL = "https://api.brevo.com/v3/smtp/email"
 BREVO_EVENTS_URL = "https://api.brevo.com/v3/smtp/statistics/events"
 EMAIL_SEND_MODE = (os.environ.get("EMAIL_SEND_MODE") or "test").strip().casefold()
@@ -188,6 +431,7 @@ _route_provider_lock = threading.Lock()
 _route_provider = None
 _route_provider_config = None
 _route_proposal_daily_lock = threading.RLock()
+_planning_write_lock = threading.RLock()
 
 
 _spreadsheet_cache = None
@@ -285,8 +529,17 @@ def ensure_unique_worksheet_columns(sheet, headers, columns):
 
 
 def ensure_contact_worksheet_schema(sheet):
-    headers = ensure_worksheet_columns(sheet, sheet.row_values(1), CONTACT_COLUMNS)
-    return ensure_unique_worksheet_columns(sheet, headers, FREEZER_COLUMNS)
+    with _planning_write_lock:
+        headers = ensure_worksheet_columns(
+            sheet,
+            sheet.row_values(1),
+            CONTACT_COLUMNS,
+        )
+        return ensure_unique_worksheet_columns(
+            sheet,
+            headers,
+            FREEZER_COLUMNS,
+        )
 
 
 def build_worksheet_row(headers, row_data, single_value_columns=None):
@@ -325,6 +578,8 @@ def get_route_travel_time_provider():
 
     routes_key = str(os.environ.get("GOOGLE_ROUTES_API_KEY") or "").strip()
     maps_fallback_key = str(os.environ.get("GOOGLE_MAPS_API_KEY") or "").strip()
+    if application_environment() in PILOT_ENVIRONMENTS and not routes_key:
+        raise TravelTimeConfigurationError()
     api_key = routes_key or maps_fallback_key
     if not api_key:
         raise TravelTimeConfigurationError()
@@ -361,6 +616,17 @@ def get_route_travel_time_provider():
             )
             _route_provider_config = config
     return _route_provider
+
+
+def route_matrix_candidate_limit(environ=None):
+    environment = os.environ if environ is None else environ
+    try:
+        configured = int(
+            environment.get("ROUTE_MATRIX_CANDIDATE_LIMIT") or 60
+        )
+    except (TypeError, ValueError):
+        configured = 60
+    return max(MAX_ROUTE_STOPS, min(configured, 200))
 
 
 def worksheet_to_dicts(worksheet, expected_columns=None, required_columns=None):
@@ -405,6 +671,26 @@ def get_or_create_worksheet(spreadsheet, title, columns, rows=1000):
     else:
         ensure_worksheet_columns(sheet, headers, columns)
     return sheet
+
+
+def ensure_planned_activities_worksheet(spreadsheet):
+    with _planning_write_lock:
+        return get_or_create_worksheet(
+            spreadsheet,
+            PLANNED_ACTIVITIES_SHEET,
+            PLANNED_ACTIVITY_COLUMNS,
+            rows=2000,
+        )
+
+
+def get_planned_activity_snapshot(spreadsheet):
+    with _planning_write_lock:
+        sheet = ensure_planned_activities_worksheet(spreadsheet)
+        headers, rows = worksheet_snapshot(
+            sheet,
+            expected_columns=PLANNED_ACTIVITY_COLUMNS,
+        )
+        return sheet, headers, rows
 
 
 def get_saved_route_proposal(spreadsheet, user_name, route_date):
@@ -742,10 +1028,14 @@ def find_sheet_row(sheet, column, value, normalizer=lambda item: str(item or "")
 
 
 def update_sheet_row(sheet, row_index, headers, updates):
+    data = []
     for key, value in updates.items():
         if key not in headers:
             continue
-        sheet.update_cell(row_index, headers.index(key) + 1, value)
+        cell = rowcol_to_a1(row_index, headers.index(key) + 1)
+        data.append({"range": f"{cell}:{cell}", "values": [[value]]})
+    if data:
+        sheet.batch_update(data, value_input_option="RAW")
 
 
 def worksheet_snapshot(sheet, expected_columns=None):
@@ -773,6 +1063,39 @@ def batch_update_sheet_rows(sheet, headers, row_updates):
         })
     if data:
         sheet.batch_update(data, value_input_option="RAW")
+
+
+def batch_update_sheet_changes(sheet, headers, row_changes, new_rows=()):
+    """Commit sparse mutations and contiguous appended rows in one API call."""
+    data = []
+    for row_index, changes in row_changes:
+        for key, value in changes.items():
+            if key not in headers:
+                continue
+            cell = rowcol_to_a1(row_index, headers.index(key) + 1)
+            data.append({"range": f"{cell}:{cell}", "values": [[value]]})
+    appended_indexes = []
+    if new_rows:
+        existing = sheet.get_all_values()
+        first_row = max(2, len(existing) + 1)
+        last_row = first_row + len(new_rows) - 1
+        grid_rows = getattr(sheet, "row_count", 0) or 0
+        if grid_rows and last_row > grid_rows:
+            sheet.resize(rows=max(last_row, grid_rows + 100))
+        data.append({
+            "range": (
+                f"A{first_row}:"
+                f"{rowcol_to_a1(last_row, len(headers))}"
+            ),
+            "values": [
+                build_worksheet_row(headers, row)
+                for row in new_rows
+            ],
+        })
+        appended_indexes = list(range(first_row, last_row + 1))
+    if data:
+        sheet.batch_update(data, value_input_option="RAW")
+    return appended_indexes
 
 
 def run_with_retry(operation, *, attempts=5, base_delay=0.5, label="Google Sheets"):
@@ -823,6 +1146,7 @@ def get_customer_rows(spreadsheet):
         customers.append({
             "row": i,
             "customer": name,
+            "customer_id": d.get("customer_id", "").strip(),
             "cancelled_flag": d.get("cancelled_flag", "").strip(),
             "sales_person": d.get("sales_person", "").strip(),
             "customer_segment": d.get("customer_segment", "").strip(),
@@ -831,6 +1155,9 @@ def get_customer_rows(spreadsheet):
             "email": d.get("email", "").strip(),
             "email_last_order": d.get("email_last_order", "").strip(),
             "city_google": d.get("city_google", "").strip(),
+            "address_google": d.get("address_google", "").strip(),
+            "address_number_google": d.get("address_number_google", "").strip(),
+            "postal_code_google": d.get("postal_code_google", "").strip(),
             "region_google": d.get("region_google", "").strip(),
             "latitude_google": d.get("latitude_google", "").strip(),
             "longitude_google": d.get("longitude_google", "").strip(),
@@ -850,7 +1177,11 @@ def normalize_role(value):
 
 
 def user_is_seller(user):
-    return normalize_role((user or {}).get("role")) == "saljare"
+    return normalize_role((user or {}).get("role")) in {
+        "saljare",
+        "account manager",
+        "accountmanager",
+    }
 
 
 def user_is_admin(user):
@@ -862,6 +1193,461 @@ def user_route_display_name(user):
         str((user or {}).get("name") or "").strip()
         or str((user or {}).get("user_name") or "").strip()
     )
+
+
+def planning_error(code, message, status=400, *, field=None, **extra):
+    payload = {
+        "ok": False,
+        "error": code,
+        "code": code,
+        "message": message,
+    }
+    if field:
+        payload["field"] = field
+    payload.update(extra)
+    return jsonify(payload), status
+
+
+def normalize_client_request_id(value):
+    text = str(value or "").strip()
+    if not text or len(text) > 120 or any(ord(char) < 32 for char in text):
+        return ""
+    return text
+
+
+def stable_planning_uuid(kind, *parts):
+    identity = ":".join(
+        [str(kind or "").strip().casefold()]
+        + [str(part or "").strip() for part in parts]
+    )
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"polarbar-planning:{identity}"))
+
+
+def planning_request_scope(actor, operation, resource, request_id):
+    return stable_planning_uuid(
+        "request-scope",
+        normalize_key((actor or {}).get("user_name")),
+        str(operation or "").strip().casefold(),
+        str(resource or "").strip(),
+        str(request_id or "").strip(),
+    )
+
+
+def canonical_payload_fingerprint(payload):
+    canonical = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def planning_revision(row):
+    try:
+        return max(1, int(float(row.get("revision") or 1)))
+    except (TypeError, ValueError):
+        return 1
+
+
+def planning_create_fingerprint(*, actor, owner, customer_id, contact_type,
+                                scheduled_at, duration_minutes, note, source,
+                                source_contact_id):
+    return canonical_payload_fingerprint({
+        "operation": "planned_activity.create.v1",
+        "actor": normalize_key((actor or {}).get("user_name")),
+        "owner": normalize_key((owner or {}).get("user_name")),
+        "customer_id": str(customer_id or "").strip(),
+        "contact_type": normalize_planning_contact_type(contact_type),
+        "scheduled_at": planning_datetime_text(scheduled_at),
+        "duration_minutes": int(duration_minutes or 0),
+        "note": str(note or "").strip(),
+        "source": str(source or "").strip().casefold(),
+        "source_contact_id": str(source_contact_id or "").strip(),
+    })
+
+
+def planning_update_fingerprint(*, actor, activity_id, expected_revision, changes):
+    return canonical_payload_fingerprint({
+        "operation": "planned_activity.update.v1",
+        "actor": normalize_key((actor or {}).get("user_name")),
+        "planned_activity_id": str(activity_id or "").strip(),
+        "expected_revision": int(expected_revision),
+        "changes": changes,
+    })
+
+
+def normalize_planning_contact_type(value):
+    normalized = normalize_role(value).replace("_", " ").replace("-", " ")
+    normalized = " ".join(normalized.split())
+    aliases = {
+        "visit": "visit",
+        "besok": "visit",
+        "mote": "visit",
+        "phone": "phone",
+        "telefon": "phone",
+        "call": "phone",
+        "email": "email",
+        "e mail": "email",
+        "e post": "email",
+        "mejl": "email",
+    }
+    return aliases.get(normalized, "")
+
+
+def planning_contact_label(value):
+    return PLANNING_CONTACT_TYPE_LABELS.get(
+        normalize_planning_contact_type(value),
+        str(value or "").strip(),
+    )
+
+
+def parse_planning_date(value):
+    text = str(value or "").strip()
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+        return None
+    try:
+        return date.fromisoformat(text)
+    except ValueError:
+        return None
+
+
+def parse_planning_datetime(value):
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+
+    if parsed.tzinfo is None:
+        local = parsed.replace(tzinfo=STOCKHOLM_ZONE)
+        # ZoneInfo accepts nonexistent DST wall times. A UTC round-trip does not.
+        round_trip = local.astimezone(timezone.utc).astimezone(STOCKHOLM_ZONE)
+        if round_trip.replace(tzinfo=None) != parsed:
+            return None
+        parsed = local
+    else:
+        supplied_offset = parsed.utcoffset()
+        if supplied_offset is None:
+            return None
+        stockholm_value = parsed.astimezone(STOCKHOLM_ZONE)
+        # UTC input is an absolute timestamp and may be normalized. Other
+        # explicit offsets represent a Stockholm wall time and must match both
+        # the actual local offset and wall clock, including DST folds/gaps.
+        if supplied_offset != timedelta(0) and (
+            stockholm_value.replace(tzinfo=None)
+            != parsed.replace(tzinfo=None)
+            or stockholm_value.utcoffset() != supplied_offset
+        ):
+            return None
+        parsed = stockholm_value
+    return parsed.replace(second=0, microsecond=0)
+
+
+def planning_datetime_text(value):
+    parsed = parse_planning_datetime(value)
+    return parsed.isoformat(timespec="minutes") if parsed else ""
+
+
+def planning_timestamp(value=None):
+    parsed = value if isinstance(value, datetime) else None
+    if parsed is None:
+        parsed = stockholm_now()
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=STOCKHOLM_ZONE)
+    return parsed.astimezone(STOCKHOLM_ZONE).isoformat(timespec="seconds")
+
+
+def parse_planning_instant(value):
+    try:
+        parsed = datetime.fromisoformat(
+            str(value or "").strip().replace("Z", "+00:00")
+        )
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=STOCKHOLM_ZONE)
+    return parsed.astimezone(STOCKHOLM_ZONE)
+
+
+def next_planning_updated_at(previous_value):
+    candidate = stockholm_now()
+    if candidate.tzinfo is None:
+        candidate = candidate.replace(tzinfo=STOCKHOLM_ZONE)
+    candidate = candidate.astimezone(STOCKHOLM_ZONE)
+    try:
+        previous = datetime.fromisoformat(
+            str(previous_value or "").strip().replace("Z", "+00:00")
+        )
+    except (TypeError, ValueError):
+        previous = None
+    if previous is not None:
+        if previous.tzinfo is None:
+            previous = previous.replace(tzinfo=STOCKHOLM_ZONE)
+        previous = previous.astimezone(STOCKHOLM_ZONE)
+        if candidate <= previous:
+            candidate = previous + timedelta(microseconds=1)
+    return candidate.isoformat(timespec="microseconds")
+
+
+def route_start_datetime(route_date, now=None):
+    now = now or stockholm_now()
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=STOCKHOLM_ZONE)
+    now = now.astimezone(STOCKHOLM_ZONE)
+    if route_date == now.date():
+        minute_value = now.minute + (
+            1 if now.second or now.microsecond else 0
+        )
+        minute = ((minute_value + 4) // 5) * 5
+        rounded = now.replace(second=0, microsecond=0)
+        if minute >= 60:
+            rounded = rounded.replace(minute=0) + timedelta(hours=1)
+        else:
+            rounded = rounded.replace(minute=minute)
+        return rounded
+    return datetime.combine(
+        route_date,
+        datetime_time(hour=PLANNING_ROUTE_START_HOUR),
+        tzinfo=STOCKHOLM_ZONE,
+    )
+
+
+def resolve_planning_owner(
+    spreadsheet,
+    requested_user_name=None,
+    *,
+    default_admin_to_first_seller=False,
+):
+    caller = current_user()
+    caller_name = str(caller.get("user_name") or "").strip()
+    explicitly_requested = str(requested_user_name or "").strip()
+    requested = explicitly_requested or caller_name
+    if normalize_key(requested) != normalize_key(caller_name) and not user_is_admin(caller):
+        return None, planning_error(
+            "planning_owner_forbidden",
+            "Du får bara hantera din egen planering.",
+            403,
+        )
+
+    try:
+        if (
+            user_is_admin(caller)
+            and default_admin_to_first_seller
+            and (
+                not explicitly_requested
+                or normalize_key(requested) == normalize_key(caller_name)
+            )
+        ):
+            active_sellers = sorted(
+                (
+                    user
+                    for user in get_user_rows(spreadsheet)
+                    if is_yes(user.get("active")) and user_is_seller(user)
+                ),
+                key=lambda user: normalize_key(user.get("user_name")),
+            )
+            owner = active_sellers[0] if active_sellers else None
+        else:
+            owner = find_active_user(spreadsheet, requested)
+    except Exception:
+        app.logger.exception("Could not resolve planning owner")
+        return None, planning_error(
+            "user_store_unavailable",
+            "Användaren kunde inte verifieras. Försök igen.",
+            503,
+        )
+    if not owner:
+        return None, planning_error(
+            "planning_owner_not_found",
+            "Den valda säljaren är inte aktiv.",
+            404,
+        )
+    if not user_is_seller(owner) and not user_is_admin(caller):
+        return None, planning_error(
+            "planning_access_forbidden",
+            "Ditt konto saknar behörighet till Planering.",
+            403,
+        )
+    if not user_is_seller(owner):
+        return None, planning_error(
+            "planning_owner_not_sales_user",
+            "Den valda användaren kan inte ha en säljplanering.",
+            422,
+        )
+    return public_user(owner), None
+
+
+def planning_owner_matches(row, owner):
+    return normalize_key(row.get("user_name")) == normalize_key(
+        (owner or {}).get("user_name")
+    )
+
+
+def public_planned_activity(row, *, now=None):
+    now = now or stockholm_now()
+    scheduled_at = parse_planning_datetime(row.get("scheduled_at"))
+    status = str(row.get("status") or "planned").strip().casefold()
+    if status not in PLANNING_STATUSES:
+        status = "planned"
+    overdue = bool(
+        status == "planned"
+        and scheduled_at
+        and scheduled_at < now.astimezone(STOCKHOLM_ZONE)
+    )
+    try:
+        duration_minutes = int(float(row.get("duration_minutes") or 0))
+    except (TypeError, ValueError):
+        duration_minutes = 0
+    try:
+        customer_row = int(float(row.get("customer_row") or 0)) or None
+    except (TypeError, ValueError):
+        customer_row = None
+    try:
+        route_sequence = int(float(row.get("route_sequence") or 0)) or None
+    except (TypeError, ValueError):
+        route_sequence = None
+
+    return {
+        "planned_activity_id": str(row.get("planned_activity_id") or "").strip(),
+        "user_name": str(row.get("user_name") or "").strip(),
+        "sales_person": str(row.get("sales_person") or "").strip(),
+        "customer_id": str(row.get("customer_id") or "").strip(),
+        "customer_key": str(row.get("customer_key") or "").strip(),
+        "customer_row": customer_row,
+        "customer_number": str(row.get("customer_number") or "").strip(),
+        "customer": str(row.get("customer") or "").strip(),
+        "contact_type": normalize_planning_contact_type(row.get("contact_type")),
+        "contact_type_label": planning_contact_label(row.get("contact_type")),
+        "scheduled_at": (
+            scheduled_at.isoformat(timespec="minutes") if scheduled_at else ""
+        ),
+        "duration_minutes": duration_minutes,
+        "time_is_estimated": is_yes(row.get("time_is_estimated")),
+        "note": str(row.get("note") or "").strip(),
+        "status": status,
+        "display_status": "overdue" if overdue else status,
+        "overdue": overdue,
+        "source": str(row.get("source") or "").strip().casefold(),
+        "source_contact_id": str(row.get("source_contact_id") or "").strip(),
+        "completed_contact_id": str(row.get("completed_contact_id") or "").strip(),
+        "route_group_id": str(row.get("route_group_id") or "").strip(),
+        "route_sequence": route_sequence,
+        "client_request_id": str(row.get("client_request_id") or "").strip(),
+        "revision": planning_revision(row),
+        "created_at": str(row.get("created_at") or "").strip(),
+        "updated_at": str(row.get("updated_at") or "").strip(),
+    }
+
+
+def find_planned_activity(spreadsheet, activity_id):
+    sheet, headers, rows = get_planned_activity_snapshot(spreadsheet)
+    requested = str(activity_id or "").strip()
+    for row_index, row in rows:
+        if str(row.get("planned_activity_id") or "").strip() == requested:
+            return sheet, headers, row_index, row
+    return sheet, headers, None, {}
+
+
+class PlanningCustomerResolutionError(ValueError):
+    def __init__(self, code, message, status=409):
+        super().__init__(message)
+        self.code = code
+        self.status = status
+
+
+def resolve_planning_customer(spreadsheet, data):
+    """Resolve a customer by durable identity, treating row as a verified cache only."""
+    customers = get_customer_rows(spreadsheet)
+    requested_id = str(data.get("customer_id") or "").strip()
+    if requested_id:
+        matches = [
+            customer for customer in customers
+            if str(customer.get("customer_id") or "").strip() == requested_id
+        ]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            raise PlanningCustomerResolutionError(
+                "customer_identity_conflict",
+                "Kund-ID:t finns på flera kundrader och måste rättas innan något kan sparas.",
+            )
+        raise PlanningCustomerResolutionError(
+            "customer_id_not_found",
+            "Butikens kund-ID kunde inte hittas. Ladda om kundlistan och försök igen.",
+            404,
+        )
+
+    customer_number = normalize_key(data.get("customer_number"))
+    if customer_number:
+        matches = [
+            customer for customer in customers
+            if normalize_key(customer.get("customer_number")) == customer_number
+        ]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            raise PlanningCustomerResolutionError(
+                "ambiguous_customer",
+                "Kundnumret matchar flera butiker. Ingen aktivitet har sparats.",
+            )
+
+    customer_name = normalize_key(data.get("customer"))
+    if customer_name:
+        matches = [
+            customer for customer in customers
+            if normalize_key(customer.get("customer")) == customer_name
+        ]
+        address = normalize_key(
+            data.get("address")
+            or data.get("address_google")
+        )
+        city = normalize_key(
+            data.get("city")
+            or data.get("city_google")
+        )
+        if address or city:
+            matches = [
+                customer for customer in matches
+                if (
+                    (
+                        not address
+                        or normalize_key(" ".join(filter(None, [
+                            str(
+                                customer.get("address_google")
+                                or customer.get("address")
+                                or ""
+                            ).strip(),
+                            str(
+                                customer.get("address_number_google")
+                                or customer.get("address_number")
+                                or ""
+                            ).strip(),
+                        ]))) == address
+                    )
+                    and (
+                        not city
+                        or normalize_key(
+                            customer.get("city_google")
+                            or customer.get("city")
+                        ) == city
+                    )
+                )
+            ]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            raise PlanningCustomerResolutionError(
+                "ambiguous_customer",
+                "Kundnamnet matchar flera butiker. Välj butiken med adress eller kundnummer.",
+            )
+
+    return None
 
 
 def customer_identity_matches(
@@ -1470,6 +2256,456 @@ def customer_is_cancelled(customer):
     return value in {"1", "y", "yes", "ja", "true", "cancelled", "canceled", "avslutad"}
 
 
+def build_planned_activity_row(
+    *,
+    activity_id,
+    owner,
+    customer,
+    contact_type,
+    scheduled_at,
+    note="",
+    status="planned",
+    source="manual",
+    source_contact_id="",
+    completed_contact_id="",
+    route_group_id="",
+    route_sequence="",
+    client_request_id="",
+    time_is_estimated=False,
+    created_at=None,
+    updated_at=None,
+    create_fingerprint="",
+    last_mutation_request_id="",
+    last_mutation_fingerprint="",
+    revision=1,
+):
+    contact_type = normalize_planning_contact_type(contact_type)
+    source = str(source or "manual").strip().casefold()
+    status = str(status or "planned").strip().casefold()
+    scheduled = parse_planning_datetime(scheduled_at)
+    now_value = planning_timestamp()
+    customer_number = str(customer.get("customer_number") or "").strip()
+    customer_name = str(customer.get("customer") or "").strip()
+    return {
+        "planned_activity_id": str(activity_id or "").strip(),
+        "user_name": str(owner.get("user_name") or "").strip(),
+        "sales_person": user_route_display_name(owner),
+        "customer_id": str(customer.get("customer_id") or "").strip(),
+        "customer_key": normalize_key(customer_number) or normalize_key(customer_name),
+        "customer_row": customer.get("row") or "",
+        "customer_number": customer_number,
+        "customer": customer_name,
+        "contact_type": contact_type,
+        "scheduled_at": (
+            scheduled.isoformat(timespec="minutes") if scheduled else ""
+        ),
+        "duration_minutes": PLANNING_CONTACT_DURATIONS.get(contact_type, 0),
+        "time_is_estimated": "Y" if time_is_estimated else "N",
+        "note": text_to_sheet_value(note, max_length=300),
+        "status": status,
+        "source": source,
+        "source_contact_id": str(source_contact_id or "").strip(),
+        "completed_contact_id": str(completed_contact_id or "").strip(),
+        "route_group_id": str(route_group_id or "").strip(),
+        "route_sequence": route_sequence if route_sequence not in (None, "") else "",
+        "client_request_id": str(client_request_id or "").strip(),
+        "create_fingerprint": str(create_fingerprint or "").strip(),
+        "last_mutation_request_id": str(last_mutation_request_id or "").strip(),
+        "last_mutation_fingerprint": str(last_mutation_fingerprint or "").strip(),
+        "revision": max(1, int(revision or 1)),
+        "created_at": str(created_at or now_value).strip(),
+        "updated_at": str(updated_at or now_value).strip(),
+    }
+
+
+def owner_contact_matches(contact, owner):
+    responsible = normalize_key(contact.get("sales_person"))
+    return responsible in {
+        normalize_key((owner or {}).get("name")),
+        normalize_key((owner or {}).get("user_name")),
+    }
+
+
+def planned_contact_id_for_payload(
+    *,
+    owner,
+    planned_activity_id,
+    customer_name,
+    customer_key,
+    contact_channel,
+    data,
+    freezer_values,
+    follow_up_enabled,
+    follow_up_type,
+    follow_up_at,
+    follow_up_note,
+    mirrored_follow_up_date,
+):
+    canonical = json.dumps(
+        {
+            "owner": normalize_key((owner or {}).get("user_name")),
+            "planned_activity_id": str(
+                planned_activity_id or ""
+            ).strip(),
+            "customer": (
+                normalize_key(customer_key)
+                or normalize_key(customer_name)
+            ),
+            "contact_channel": (
+                normalize_planning_contact_type(contact_channel)
+                or normalize_role(contact_channel)
+            ),
+            "date_time": str(data.get("date_time") or "").strip(),
+            "result": str(data.get("result") or "").strip(),
+            "comment": str(data.get("comment") or "").strip(),
+            "customer_contact_person": str(
+                data.get("customer_contact_person") or ""
+            ).strip(),
+            "freezers": {
+                field: bool(is_checked_value(freezer_values.get(field)))
+                for field in FREEZER_COLUMNS
+            },
+            "follow_up": {
+                "enabled": bool(follow_up_enabled),
+                "contact_type": str(follow_up_type or "").strip(),
+                "scheduled_at": (
+                    follow_up_at.isoformat(timespec="minutes")
+                    if follow_up_at else ""
+                ),
+                "note": str(follow_up_note or "").strip(),
+                "mirrored_date": str(
+                    mirrored_follow_up_date or ""
+                ).strip(),
+            },
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    payload_fingerprint = stable_planning_uuid(
+        "planned-contact-payload",
+        canonical,
+    )
+    return stable_planning_uuid(
+        "planned-contact",
+        (owner or {}).get("user_name"),
+        planned_activity_id,
+        payload_fingerprint,
+    )
+
+
+def ensure_followup_source_contact_id(
+    spreadsheet,
+    *,
+    customer_name,
+    source_contact_id="",
+    owner=None,
+):
+    sheet = spreadsheet.worksheet("sales_activities")
+    headers = ensure_contact_worksheet_schema(sheet)
+    requested = str(source_contact_id or "").strip()
+    customer_key = normalize_key(customer_name)
+    candidate = None
+    for row_index, row in worksheet_snapshot(
+        sheet,
+        expected_columns=CONTACT_COLUMNS,
+    )[1]:
+        if normalize_key(row.get("customer")) != customer_key:
+            continue
+        if owner and not owner_contact_matches(row, owner):
+            continue
+        contact_id = str(row.get("contact_id") or "").strip()
+        if requested and contact_id == requested:
+            candidate = (row_index, row)
+            break
+        if not requested and str(row.get("follow_up_date") or "").strip():
+            if candidate is None:
+                candidate = (row_index, row)
+                continue
+            current_dt = parse_datetime_value(row.get("date_time")) or datetime.min
+            previous_dt = parse_datetime_value(candidate[1].get("date_time")) or datetime.min
+            if (current_dt, row_index) > (previous_dt, candidate[0]):
+                candidate = (row_index, row)
+
+    if candidate is None:
+        return ""
+    row_index, row = candidate
+    contact_id = str(row.get("contact_id") or "").strip()
+    if not contact_id:
+        contact_id = stable_planning_uuid(
+            "legacy-contact",
+            row_index,
+            customer_key,
+            row.get("date_time"),
+        )
+        update_sheet_row(
+            sheet,
+            row_index,
+            headers,
+            {"contact_id": contact_id},
+        )
+    return contact_id
+
+
+def sync_followup_date_to_source_contact(
+    spreadsheet,
+    source_contact_id,
+    follow_up_date,
+):
+    requested = str(source_contact_id or "").strip()
+    if not requested:
+        return False
+    sheet = spreadsheet.worksheet("sales_activities")
+    headers = ensure_contact_worksheet_schema(sheet)
+    row_index, headers, _ = find_sheet_row(
+        sheet,
+        "contact_id",
+        requested,
+    )
+    if not row_index:
+        return False
+    update_sheet_row(
+        sheet,
+        row_index,
+        headers,
+        {"follow_up_date": str(follow_up_date or "").strip()},
+    )
+    return True
+
+
+def sync_planned_followup_mirror(spreadsheet, activity):
+    if str(activity.get("source") or "").strip().casefold() != "follow_up":
+        return True
+    source_contact_id = str(
+        activity.get("source_contact_id") or ""
+    ).strip()
+    if not source_contact_id:
+        return False
+    follow_up_date = ""
+    if str(activity.get("status") or "planned").strip().casefold() == "planned":
+        scheduled = parse_planning_datetime(activity.get("scheduled_at"))
+        if scheduled is None:
+            return False
+        follow_up_date = scheduled.date().isoformat()
+    return sync_followup_date_to_source_contact(
+        spreadsheet,
+        source_contact_id,
+        follow_up_date,
+    )
+
+
+def planning_day_summaries(
+    start_date,
+    end_date,
+    activities,
+    unplanned_contacts=(),
+):
+    summaries = []
+    current = start_date
+    while current <= end_date:
+        day_items = [
+            item
+            for item in activities
+            if parse_planning_datetime(item.get("scheduled_at"))
+            and parse_planning_datetime(item.get("scheduled_at")).date() == current
+        ]
+        active = [item for item in day_items if item.get("status") != "cancelled"]
+        day_unplanned = [
+            item
+            for item in unplanned_contacts
+            if (
+                parse_date_value(
+                    item.get("latest_contact_date")
+                    or item.get("date_time")
+                )
+                == current
+            )
+        ]
+        display_count = len(active) + len(day_unplanned)
+        summary = {
+            "date": current.isoformat(),
+            "activity_count": display_count,
+            "display_count": display_count,
+            "planned_activity_count": len(active),
+            "unplanned_count": len(day_unplanned),
+            "total": display_count,
+            "visit": sum(item.get("contact_type") == "visit" for item in active),
+            "phone": sum(item.get("contact_type") == "phone" for item in active),
+            "email": sum(item.get("contact_type") == "email" for item in active),
+            "planned": sum(item.get("status") == "planned" for item in active),
+            "completed": sum(item.get("status") == "completed" for item in active),
+            "skipped": sum(item.get("status") == "skipped" for item in active),
+            "cancelled": sum(item.get("status") == "cancelled" for item in day_items),
+            "overdue": sum(bool(item.get("overdue")) for item in active),
+        }
+        summaries.append(summary)
+        current += timedelta(days=1)
+    return summaries
+
+
+def public_unplanned_contact(row, row_index):
+    parsed = parse_planning_datetime(row.get("date_time"))
+    if parsed is None:
+        parsed_naive = parse_datetime_value(row.get("date_time"))
+        if parsed_naive:
+            parsed = parsed_naive.replace(tzinfo=STOCKHOLM_ZONE)
+    contact_id = str(row.get("contact_id") or "").strip()
+    return {
+        "contact_id": contact_id or f"legacy-row-{row_index}",
+        "contact_row": row_index,
+        "planned_activity_id": "",
+        "customer": str(row.get("customer") or "").strip(),
+        "customer_id": str(row.get("customer_id") or "").strip(),
+        "customer_key": normalize_key(row.get("customer")),
+        "sales_person": str(row.get("sales_person") or "").strip(),
+        "contact_type": normalize_planning_contact_type(row.get("contact_channel")),
+        "contact_type_label": planning_contact_label(row.get("contact_channel")),
+        "contact_channel": str(row.get("contact_channel") or "").strip(),
+        "date_time": (
+            parsed.isoformat(timespec="minutes")
+            if parsed else str(row.get("date_time") or "").strip()
+        ),
+        "result": str(row.get("result") or "").strip(),
+        "comment": str(row.get("comment") or "").strip(),
+        "customer_contact_person": str(
+            row.get("customer_contact_person") or ""
+        ).strip(),
+        "unplanned": True,
+    }
+
+
+def legacy_followup_identity(row):
+    return "|".join([
+        str(row.get("customer_id") or "").strip(),
+        normalize_key(row.get("customer")),
+        str(parse_date_value(row.get("follow_up_date")) or ""),
+        normalize_key(row.get("comment")),
+    ])
+
+
+def build_unscheduled_followup_groups(
+    *,
+    indexed_contacts,
+    activities,
+    customers,
+    selected_start,
+    selected_end,
+    today,
+):
+    """Return the owner's unresolved follow-ups independently of selected week."""
+    customer_by_id = {
+        str(customer.get("customer_id") or "").strip(): customer
+        for customer in customers
+        if str(customer.get("customer_id") or "").strip()
+    }
+    customers_by_name = defaultdict(list)
+    for customer in customers:
+        customers_by_name[normalize_key(customer.get("customer"))].append(customer)
+
+    booked_source_ids = set()
+    booked_legacy = set()
+    for activity in activities:
+        if str(activity.get("status") or "planned").strip().casefold() not in {
+            "planned", "completed"
+        }:
+            continue
+        source_id = str(activity.get("source_contact_id") or "").strip()
+        if source_id:
+            booked_source_ids.add(source_id)
+        else:
+            booked_legacy.add("|".join([
+                str(activity.get("customer_id") or "").strip(),
+                normalize_key(activity.get("customer")),
+                str(
+                    (
+                        parse_planning_datetime(activity.get("scheduled_at"))
+                        or datetime.min.replace(tzinfo=STOCKHOLM_ZONE)
+                    ).date()
+                ),
+                normalize_key(activity.get("note")),
+            ]))
+
+    overdue = []
+    upcoming = []
+    upcoming_limit = today + timedelta(days=30)
+    for row_index, row in indexed_contacts:
+        follow_up_date = parse_date_value(row.get("follow_up_date"))
+        if not follow_up_date:
+            continue
+        source_contact_id = str(row.get("contact_id") or "").strip()
+        if source_contact_id and source_contact_id in booked_source_ids:
+            continue
+        if not source_contact_id and legacy_followup_identity(row) in booked_legacy:
+            continue
+        in_upcoming_window = (
+            today <= follow_up_date <= upcoming_limit
+            or selected_start <= follow_up_date <= selected_end
+        )
+        if follow_up_date >= today and not in_upcoming_window:
+            continue
+
+        customer_id = str(row.get("customer_id") or "").strip()
+        customer = customer_by_id.get(customer_id)
+        if customer is None:
+            name_matches = customers_by_name.get(
+                normalize_key(row.get("customer")), []
+            )
+            customer = name_matches[0] if len(name_matches) == 1 else None
+        item = {
+            "customer_id": (
+                str(customer.get("customer_id") or "").strip()
+                if customer else customer_id
+            ),
+            "customer": str(row.get("customer") or "").strip(),
+            "customer_key": (
+                str(customer.get("customer_id") or "").strip()
+                if customer else normalize_key(row.get("customer"))
+            ),
+            "customer_row": customer.get("row") if customer else None,
+            "customer_number": (
+                str(customer.get("customer_number") or "").strip()
+                if customer else ""
+            ),
+            "follow_up_date": follow_up_date.isoformat(),
+            "source_contact_id": source_contact_id,
+            "source_contact_row": row_index,
+            "contact_type": (
+                normalize_planning_contact_type(row.get("contact_channel"))
+                or "visit"
+            ),
+            "note": str(row.get("comment") or "").strip(),
+            "days_overdue": max(0, (today - follow_up_date).days),
+            "priority_score": {
+                "A": 3,
+                "B": 2,
+                "C": 1,
+            }.get(
+                str((customer or {}).get("customer_segment") or "")
+                .strip()
+                .upper()[:1],
+                0,
+            ),
+        }
+        (overdue if follow_up_date < today else upcoming).append(item)
+
+    overdue.sort(key=lambda item: (
+        item["follow_up_date"],
+        -float(item.get("priority_score") or 0),
+        normalize_key(item.get("customer")),
+    ))
+    upcoming.sort(key=lambda item: (
+        item["follow_up_date"],
+        -float(item.get("priority_score") or 0),
+        normalize_key(item.get("customer")),
+    ))
+    return overdue, upcoming
+
+
+def planning_preview_serializer():
+    secret = str(app.config.get("SECRET_KEY") or "").strip()
+    return URLSafeTimedSerializer(secret, salt="polarbar-planning-route-preview-v1")
+
+
 def blocked_recipient_reasons(recipient_rows):
     reasons = {}
     for row in recipient_rows:
@@ -1861,7 +3097,8 @@ def build_sales_activity_for_email(spreadsheet, *, email_id, email_type, custome
 @app.before_request
 def require_authenticated_session():
     public_endpoints = {
-        "index", "images", "login", "get_session", "brevo_webhook", "brevo_reconcile"
+        "index", "images", "login", "get_session", "health",
+        "brevo_webhook", "brevo_reconcile"
     }
     if request.method == "OPTIONS" or request.endpoint in public_endpoints:
         return None
@@ -2156,6 +3393,7 @@ def send_email_proposal(row):
             "email_id": draft_id,
             "customer": current_draft["customer"]["customer"],
             "customer_number": current_draft["customer"].get("customer_number", ""),
+            "customer_id": current_draft["customer"].get("customer_id", ""),
             "email_type": email_type,
             "sender_user_name": user.get("user_name", ""),
             "sender_name": user.get("name", ""),
@@ -2216,6 +3454,7 @@ def send_email_proposal(row):
             append_dict_row(sheets[EMAIL_RECIPIENTS_SHEET], EMAIL_RECIPIENTS_COLUMNS, {
                 "email_id": draft_id,
                 "customer": current_draft["customer"]["customer"],
+                "customer_id": current_draft["customer"].get("customer_id", ""),
                 "intended_email": intended_email,
                 "actual_email": actual_email,
                 "greeting_name": recipient.get("greeting_name", ""),
@@ -3470,6 +4709,844 @@ def get_customer_insights():
     return jsonify(insights)
 
 
+@app.route("/planning/activities", methods=["GET", "POST"])
+def planning_activities():
+    data = request.get_json(silent=True) if request.method == "POST" else {}
+    data = data if isinstance(data, dict) else {}
+    try:
+        spreadsheet = get_spreadsheet_with_retry()
+    except Exception:
+        app.logger.exception("Could not open planning store")
+        return planning_error(
+            "planning_store_unavailable",
+            "Planeringen kunde inte laddas. Försök igen.",
+            503,
+        )
+
+    requested_owner = (
+        data.get("user_name")
+        if request.method == "POST"
+        else request.args.get("user_name")
+    )
+    owner, owner_error = resolve_planning_owner(
+        spreadsheet,
+        requested_owner,
+        default_admin_to_first_seller=request.method == "GET",
+    )
+    if owner_error is not None:
+        return owner_error
+
+    if request.method == "POST":
+        client_request_id = normalize_client_request_id(
+            data.get("client_request_id")
+        )
+        if not client_request_id:
+            return planning_error(
+                "invalid_client_request_id",
+                "Ett giltigt request-ID krävs för att undvika dubbletter.",
+                400,
+                field="client_request_id",
+            )
+        contact_type = normalize_planning_contact_type(data.get("contact_type"))
+        if contact_type not in PLANNING_CONTACT_TYPES:
+            return planning_error(
+                "invalid_contact_type",
+                "Välj Besök, Telefon eller Mejl.",
+                400,
+                field="contact_type",
+            )
+        scheduled_at = parse_planning_datetime(data.get("scheduled_at"))
+        if scheduled_at is None:
+            return planning_error(
+                "invalid_scheduled_at",
+                "Ange ett giltigt datum och klockslag.",
+                400,
+                field="scheduled_at",
+            )
+        note = str(data.get("note") or "").strip()
+        if len(note) > 300:
+            return planning_error(
+                "note_too_long",
+                "Anteckningen får vara högst 300 tecken.",
+                400,
+                field="note",
+            )
+        source = str(data.get("source") or "manual").strip().casefold()
+        if source not in {"manual", "follow_up"}:
+            return planning_error(
+                "invalid_activity_source",
+                "Aktiviteten kan inte skapas med den källan.",
+                400,
+                field="source",
+            )
+        if not str(data.get("customer_id") or "").strip():
+            return planning_error(
+                "customer_id_required",
+                "customer_id krävs för nya planerade aktiviteter.",
+                422,
+                field="customer_id",
+            )
+        try:
+            customer = resolve_planning_customer(spreadsheet, data)
+        except PlanningCustomerResolutionError as exc:
+            return planning_error(
+                exc.code, str(exc), exc.status, field="customer_id"
+            )
+        if not customer:
+            return planning_error(
+                "customer_not_found",
+                "Butiken kunde inte hittas.",
+                404,
+                field="customer_row",
+            )
+        if customer_is_cancelled(customer):
+            return planning_error(
+                "customer_cancelled",
+                "Avslutade kunder kan inte få nya planerade aktiviteter.",
+                409,
+            )
+
+        resolved_source_contact_id = ""
+        if source == "follow_up":
+            resolved_source_contact_id = ensure_followup_source_contact_id(
+                spreadsheet,
+                customer_name=customer.get("customer"),
+                source_contact_id=data.get("source_contact_id"),
+                owner=owner,
+            )
+            if not resolved_source_contact_id:
+                return planning_error(
+                    "follow_up_source_not_found",
+                    "Uppföljningen kunde inte kopplas till den ursprungliga kontakten.",
+                    409,
+                    field="source_contact_id",
+                )
+
+        with _planning_write_lock:
+            sheet, _headers, existing_rows = get_planned_activity_snapshot(
+                spreadsheet
+            )
+            create_request_scope = planning_request_scope(
+                current_user(),
+                "create",
+                owner.get("user_name"),
+                client_request_id,
+            )
+            activity_id = stable_planning_uuid(
+                "activity",
+                owner.get("user_name"),
+                create_request_scope,
+            )
+            source_contact_id_for_fingerprint = resolved_source_contact_id
+            create_fingerprint = planning_create_fingerprint(
+                actor=current_user(),
+                owner=owner,
+                customer_id=customer.get("customer_id"),
+                contact_type=contact_type,
+                scheduled_at=scheduled_at,
+                duration_minutes=PLANNING_CONTACT_DURATIONS[contact_type],
+                note=note,
+                source=source,
+                source_contact_id=source_contact_id_for_fingerprint,
+            )
+            for _row_index, existing in existing_rows:
+                if (
+                    planning_owner_matches(existing, owner)
+                    and (
+                        str(
+                            existing.get("planned_activity_id") or ""
+                        ).strip() == activity_id
+                        or (
+                            str(
+                                existing.get("client_request_id") or ""
+                            ).strip() in {
+                                create_request_scope,
+                                client_request_id,
+                            }
+                            and str(
+                                existing.get("source") or ""
+                            ).strip().casefold() in {"manual", "follow_up"}
+                        )
+                    )
+                ):
+                    existing_fingerprint = str(
+                        existing.get("create_fingerprint") or ""
+                    ).strip()
+                    if (
+                        existing_fingerprint
+                        and existing_fingerprint != create_fingerprint
+                    ):
+                        return planning_error(
+                            "idempotency_payload_mismatch",
+                            "Samma request-ID har redan använts med ett annat innehåll.",
+                            409,
+                            activity=public_planned_activity(existing),
+                        )
+                    try:
+                        mirror_synced = sync_planned_followup_mirror(
+                            spreadsheet,
+                            existing,
+                        )
+                    except Exception:
+                        app.logger.exception(
+                            "Could not repair follow-up mirror on create retry"
+                        )
+                        mirror_synced = False
+                    if not mirror_synced:
+                        return planning_error(
+                            "follow_up_mirror_failed",
+                            "Aktiviteten sparades men uppföljningsdatumet kunde inte synkas. Försök igen med samma request-ID.",
+                            503,
+                        )
+                    return jsonify({
+                        "ok": True,
+                        "duplicate": True,
+                        "activity": public_planned_activity(existing),
+                    })
+
+            source_contact_id = resolved_source_contact_id
+            row_data = build_planned_activity_row(
+                activity_id=activity_id,
+                owner=owner,
+                customer=customer,
+                contact_type=contact_type,
+                scheduled_at=scheduled_at,
+                note=note,
+                source=source,
+                source_contact_id=source_contact_id,
+                client_request_id=create_request_scope,
+                create_fingerprint=planning_create_fingerprint(
+                    actor=current_user(),
+                    owner=owner,
+                    customer_id=customer.get("customer_id"),
+                    contact_type=contact_type,
+                    scheduled_at=scheduled_at,
+                    duration_minutes=PLANNING_CONTACT_DURATIONS[contact_type],
+                    note=note,
+                    source=source,
+                    source_contact_id=source_contact_id,
+                ),
+                revision=1,
+            )
+            append_dict_row(
+                sheet,
+                PLANNED_ACTIVITY_COLUMNS,
+                row_data,
+            )
+            try:
+                mirror_synced = sync_planned_followup_mirror(
+                    spreadsheet,
+                    row_data,
+                )
+            except Exception:
+                app.logger.exception(
+                    "Activity saved but follow-up mirror failed"
+                )
+                mirror_synced = False
+            if not mirror_synced:
+                return planning_error(
+                    "follow_up_mirror_failed",
+                    "Aktiviteten sparades men uppföljningsdatumet kunde inte synkas. Försök igen med samma request-ID.",
+                    503,
+                )
+        return jsonify({
+            "ok": True,
+            "duplicate": False,
+            "activity": public_planned_activity(row_data),
+        }), 201
+
+    start_date = parse_planning_date(request.args.get("start"))
+    end_date = parse_planning_date(request.args.get("end"))
+    if start_date is None:
+        return planning_error(
+            "invalid_start_date",
+            "Ange ett giltigt startdatum.",
+            400,
+            field="start",
+        )
+    if end_date is None:
+        return planning_error(
+            "invalid_end_date",
+            "Ange ett giltigt slutdatum.",
+            400,
+            field="end",
+        )
+    if end_date < start_date or (end_date - start_date).days > 62:
+        return planning_error(
+            "invalid_date_range",
+            "Datumintervallet måste vara sammanhängande och högst 63 dagar.",
+            400,
+        )
+
+    try:
+        _sheet, _headers, activity_rows = get_planned_activity_snapshot(
+            spreadsheet
+        )
+        contact_sheet = spreadsheet.worksheet("sales_activities")
+        ensure_contact_worksheet_schema(contact_sheet)
+        _contact_headers, indexed_contacts = worksheet_snapshot(
+            contact_sheet,
+            expected_columns=CONTACT_COLUMNS,
+        )
+    except Exception:
+        app.logger.exception("Could not read planning worksheets")
+        return planning_error(
+            "planning_store_unavailable",
+            "Planeringen kunde inte laddas. Försök igen.",
+            503,
+        )
+
+    now = stockholm_now()
+    owner_activities_all = [
+        (row_index, row)
+        for row_index, row in activity_rows
+        if planning_owner_matches(row, owner)
+    ]
+    activities = []
+    for _row_index, row in owner_activities_all:
+        scheduled = parse_planning_datetime(row.get("scheduled_at"))
+        if not scheduled or not start_date <= scheduled.date() <= end_date:
+            continue
+        activities.append(public_planned_activity(row, now=now))
+    activities.sort(
+        key=lambda item: (
+            item.get("scheduled_at") or "",
+            item.get("route_sequence") or 999,
+            item.get("customer") or "",
+        )
+    )
+
+    owner_contacts = [
+        (row_index, row)
+        for row_index, row in indexed_contacts
+        if owner_contact_matches(row, owner)
+    ]
+    try:
+        planning_customers = get_customer_rows(spreadsheet)
+    except Exception:
+        planning_customers = []
+    planning_customer_by_key = {
+        normalize_key(customer.get("customer")): customer
+        for customer in planning_customers
+    }
+    unplanned_contacts = []
+    for row_index, row in owner_contacts:
+        if str(row.get("planned_activity_id") or "").strip():
+            continue
+        contact_date = parse_date_value(row.get("date_time"))
+        if contact_date and start_date <= contact_date <= end_date:
+            item = public_unplanned_contact(row, row_index)
+            customer = planning_customer_by_key.get(
+                normalize_key(row.get("customer"))
+            )
+            item.update({
+                "customer_row": customer.get("row") if customer else None,
+                "customer_number": (
+                    str(customer.get("customer_number") or "").strip()
+                    if customer else ""
+                ),
+                "latest_contact_date": contact_date.isoformat(),
+                "reason": str(row.get("result") or "").strip(),
+            })
+            unplanned_contacts.append(item)
+    unplanned_contacts.sort(
+        key=lambda item: item.get("date_time") or "",
+        reverse=True,
+    )
+
+    unscheduled_followups = []
+    try:
+        contact_rows_only = [row for _row_index, row in owner_contacts]
+        contact_features = build_contact_features(
+            contact_rows_only,
+            build_order_features(get_order_rows(spreadsheet)),
+        )
+        active_followup_customer_keys = set()
+        for _row_index, row in owner_activities_all:
+            if (
+                str(row.get("source") or "").strip().casefold() != "follow_up"
+                or str(row.get("status") or "").strip().casefold()
+                not in {"planned", "completed"}
+            ):
+                continue
+            active_followup_customer_keys.update({
+                normalize_key(row.get("customer_key")),
+                normalize_key(row.get("customer")),
+            })
+        active_followup_customer_keys.discard("")
+        for customer_key, feature in contact_features.items():
+            follow_up_date = feature.get("latest_follow_up_date")
+            if (
+                not follow_up_date
+                or feature.get("follow_up_resolved")
+                or not start_date <= follow_up_date <= end_date
+                or normalize_key(customer_key) in active_followup_customer_keys
+            ):
+                continue
+            source_index = None
+            source_row = None
+            for row_index, row in owner_contacts:
+                if (
+                    normalize_key(row.get("customer")) == normalize_key(customer_key)
+                    and parse_date_value(row.get("follow_up_date")) == follow_up_date
+                ):
+                    if source_index is None or row_index > source_index:
+                        source_index, source_row = row_index, row
+            if source_row is None:
+                continue
+            customer = planning_customer_by_key.get(
+                normalize_key(customer_key)
+            )
+            unscheduled_followups.append({
+                "customer": str(source_row.get("customer") or "").strip(),
+                "customer_key": normalize_key(customer_key),
+                "customer_row": customer.get("row") if customer else None,
+                "customer_number": (
+                    str(customer.get("customer_number") or "").strip()
+                    if customer else ""
+                ),
+                "follow_up_date": follow_up_date.isoformat(),
+                "source_contact_id": str(
+                    source_row.get("contact_id") or ""
+                ).strip(),
+                "source_contact_row": source_index,
+                "latest_contact_result": feature.get(
+                    "latest_contact_result", ""
+                ),
+                "contact_type": normalize_planning_contact_type(
+                    source_row.get("contact_channel")
+                ),
+                "note": str(
+                    feature.get("latest_contact_comment") or ""
+                ).strip(),
+            })
+    except Exception:
+        app.logger.warning(
+            "Could not build unscheduled legacy follow-ups",
+            exc_info=True,
+        )
+
+    unscheduled_followups_overdue, unscheduled_followups_upcoming = (
+        build_unscheduled_followup_groups(
+            indexed_contacts=owner_contacts,
+            activities=[row for _row_index, row in owner_activities_all],
+            customers=planning_customers,
+            selected_start=start_date,
+            selected_end=end_date,
+            today=stockholm_today(),
+        )
+    )
+    unscheduled_followups = (
+        unscheduled_followups_overdue + unscheduled_followups_upcoming
+    )
+
+    summaries = planning_day_summaries(
+        start_date,
+        end_date,
+        activities,
+        unplanned_contacts,
+    )
+    day_summaries = [
+        {
+            **item,
+            "active_count": item["activity_count"],
+            "completed_count": item["completed"],
+            "planned_count": item["planned"],
+        }
+        for item in summaries
+    ]
+    try:
+        available_users = [
+            {
+                **public_user(user),
+                "sales_person": str(user.get("name") or "").strip(),
+                "display_name": str(user.get("name") or "").strip(),
+            }
+            for user in get_user_rows(spreadsheet)
+            if is_yes(user.get("active")) and user_is_seller(user)
+        ]
+        available_users.sort(
+            key=lambda user: normalize_key(user.get("user_name"))
+        )
+        if not user_is_admin(current_user()):
+            available_users = [
+                user
+                for user in available_users
+                if normalize_key(user.get("user_name"))
+                == normalize_key(owner.get("user_name"))
+            ]
+    except Exception:
+        available_users = [{
+            **owner,
+            "sales_person": str(owner.get("name") or "").strip(),
+            "display_name": str(owner.get("name") or "").strip(),
+        }]
+    return jsonify({
+        "ok": True,
+        "owner": owner,
+        "start": start_date.isoformat(),
+        "end": end_date.isoformat(),
+        "activities": activities,
+        "summaries": summaries,
+        "day_summaries": day_summaries,
+        "days": {item["date"]: item for item in summaries},
+        "available_users": available_users,
+        "unplanned_contacts": unplanned_contacts,
+        "unscheduled_followups_overdue": unscheduled_followups_overdue,
+        "unscheduled_followups_upcoming": unscheduled_followups_upcoming,
+        "unscheduled_followups": sorted(
+            unscheduled_followups,
+            key=lambda item: (
+                item.get("follow_up_date") or "",
+                item.get("customer") or "",
+            ),
+        ),
+    })
+
+
+@app.route("/planning/activities/<activity_id>", methods=["PATCH"])
+def update_planning_activity(activity_id):
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return planning_error(
+            "invalid_request",
+            "Begäran är ogiltig.",
+            400,
+        )
+    client_request_id = normalize_client_request_id(
+        data.get("client_request_id")
+    )
+    if not client_request_id:
+        return planning_error(
+            "invalid_client_request_id",
+            "Ett giltigt request-ID krävs.",
+            400,
+            field="client_request_id",
+        )
+    try:
+        spreadsheet = get_spreadsheet_with_retry()
+    except Exception:
+        return planning_error(
+            "planning_store_unavailable",
+            "Planeringen kunde inte sparas. Försök igen.",
+            503,
+        )
+
+    mutable_fields = {
+        "contact_type", "scheduled_at", "note", "status", "customer_id"
+    }
+    requested_fields = mutable_fields.intersection(data)
+    if not requested_fields:
+        return planning_error(
+            "no_activity_changes",
+            "Inga ändringar skickades.",
+            400,
+        )
+
+    updated_customer = None
+    if "customer_id" in data:
+        try:
+            updated_customer = resolve_planning_customer(
+                spreadsheet,
+                {"customer_id": data.get("customer_id")},
+            )
+        except PlanningCustomerResolutionError as exc:
+            return planning_error(
+                exc.code, str(exc), exc.status, field="customer_id"
+            )
+        if not updated_customer:
+            return planning_error(
+                "customer_not_found",
+                "Butiken kunde inte hittas.",
+                404,
+                field="customer_id",
+            )
+        if customer_is_cancelled(updated_customer):
+            return planning_error(
+                "customer_cancelled",
+                "Avslutade kunder kan inte få nya planerade aktiviteter.",
+                409,
+            )
+
+    with _planning_write_lock:
+        sheet, headers, row_index, current = find_planned_activity(
+            spreadsheet,
+            activity_id,
+        )
+        if not row_index:
+            return planning_error(
+                "activity_not_found",
+                "Aktiviteten kunde inte hittas.",
+                404,
+            )
+        caller = current_user()
+        mutation_request_scope = planning_request_scope(
+            caller,
+            "update",
+            activity_id,
+            client_request_id,
+        )
+        if (
+            normalize_key(current.get("user_name"))
+            != normalize_key(caller.get("user_name"))
+            and not user_is_admin(caller)
+        ):
+            return planning_error(
+                "planning_owner_forbidden",
+                "Du får inte ändra en annan säljares aktivitet.",
+                403,
+            )
+        current_status = str(
+            current.get("status") or "planned"
+        ).strip().casefold()
+        current_revision = planning_revision(current)
+        pre_same_mutation_request = (
+            str(current.get("last_mutation_request_id") or "").strip()
+            in {mutation_request_scope, client_request_id}
+            or (
+                not str(current.get("last_mutation_request_id") or "").strip()
+                and str(current.get("client_request_id") or "").strip()
+                in {mutation_request_scope, client_request_id}
+            )
+        )
+        expected_revision = data.get("expected_revision")
+        if expected_revision not in (None, ""):
+            try:
+                expected_revision = int(expected_revision)
+            except (TypeError, ValueError):
+                return planning_error(
+                    "invalid_expected_revision",
+                    "Aktivitetens revision är ogiltig.",
+                    400,
+                    field="expected_revision",
+                )
+        else:
+            expected_revision = (
+                max(1, current_revision - 1)
+                if pre_same_mutation_request
+                and str(current.get("last_mutation_fingerprint") or "").strip()
+                else current_revision
+            )
+        mutation_changes = {}
+        if "contact_type" in data:
+            mutation_changes["contact_type"] = normalize_planning_contact_type(
+                data.get("contact_type")
+            )
+        if "scheduled_at" in data:
+            mutation_changes["scheduled_at"] = planning_datetime_text(
+                data.get("scheduled_at")
+            )
+        if "note" in data:
+            mutation_changes["note"] = str(data.get("note") or "").strip()
+        if "status" in data:
+            mutation_changes["status"] = str(
+                data.get("status") or ""
+            ).strip().casefold()
+        if "customer_id" in data and updated_customer is None:
+            mutation_changes["customer_id"] = str(
+                data.get("customer_id") or ""
+            ).strip()
+        mutation_fingerprint = planning_update_fingerprint(
+            actor=caller,
+            activity_id=activity_id,
+            expected_revision=expected_revision,
+            changes=mutation_changes,
+        )
+        same_mutation_request = pre_same_mutation_request
+        if same_mutation_request:
+            stored_fingerprint = str(
+                current.get("last_mutation_fingerprint") or ""
+            ).strip()
+            if stored_fingerprint and stored_fingerprint != mutation_fingerprint:
+                return planning_error(
+                    "idempotency_payload_mismatch",
+                    "Samma request-ID har redan använts med ett annat innehåll.",
+                    409,
+                    activity=public_planned_activity(current),
+                )
+            try:
+                mirror_synced = sync_planned_followup_mirror(
+                    spreadsheet,
+                    current,
+                )
+            except Exception:
+                app.logger.exception(
+                    "Could not repair follow-up mirror on update retry"
+                )
+                mirror_synced = False
+            if not mirror_synced:
+                return planning_error(
+                    "follow_up_mirror_failed",
+                    "Aktiviteten är uppdaterad men uppföljningsdatumet kunde inte synkas. Försök igen med samma request-ID.",
+                    503,
+                )
+            return jsonify({
+                "ok": True,
+                "duplicate": True,
+                "activity": public_planned_activity(current),
+            })
+
+        if "expected_revision" in data and expected_revision != current_revision:
+            return planning_error(
+                "revision_conflict",
+                "Aktiviteten har ändrats sedan den laddades. Ladda om planeringen och försök igen.",
+                409,
+                activity=public_planned_activity(current),
+            )
+        if "expected_revision" not in data and "expected_updated_at" not in data:
+            return planning_error(
+                "expected_updated_at_required",
+                "Aktivitetens versionsstämpel saknas. Ladda om planeringen och försök igen.",
+                400,
+                field="expected_updated_at",
+            )
+        expected_updated_at = str(
+            data.get("expected_updated_at") or ""
+        ).strip()
+        current_updated_at = str(
+            current.get("updated_at") or ""
+        ).strip()
+        if (
+            "expected_revision" not in data
+            and expected_updated_at != current_updated_at
+        ):
+            return planning_error(
+                "planning_changed",
+                "Aktiviteten har ändrats sedan den laddades. Ladda om planeringen och försök igen.",
+                409,
+                activity=public_planned_activity(current),
+            )
+        if current_status in {"completed", "cancelled"}:
+            return planning_error(
+                (
+                    "completed_activity_immutable"
+                    if current_status == "completed"
+                    else "cancelled_activity_immutable"
+                ),
+                (
+                    "En genomförd aktivitet kan inte ändras."
+                    if current_status == "completed"
+                    else "En inställd aktivitet kan inte ändras."
+                ),
+                409,
+            )
+
+        updates = {}
+        if "customer_id" in data:
+            updates.update({
+                "customer_id": str(
+                    updated_customer.get("customer_id") or ""
+                ).strip(),
+                "customer_key": (
+                    normalize_key(updated_customer.get("customer_number"))
+                    or normalize_key(updated_customer.get("customer"))
+                ),
+                "customer_row": updated_customer.get("row") or "",
+                "customer_number": str(
+                    updated_customer.get("customer_number") or ""
+                ).strip(),
+                "customer": str(
+                    updated_customer.get("customer") or ""
+                ).strip(),
+            })
+        if "contact_type" in data:
+            contact_type = normalize_planning_contact_type(
+                data.get("contact_type")
+            )
+            if contact_type not in PLANNING_CONTACT_TYPES:
+                return planning_error(
+                    "invalid_contact_type",
+                    "Välj Besök, Telefon eller Mejl.",
+                    400,
+                    field="contact_type",
+                )
+            updates["contact_type"] = contact_type
+            updates["duration_minutes"] = PLANNING_CONTACT_DURATIONS[
+                contact_type
+            ]
+        if "scheduled_at" in data:
+            scheduled_at = parse_planning_datetime(data.get("scheduled_at"))
+            if scheduled_at is None:
+                return planning_error(
+                    "invalid_scheduled_at",
+                    "Ange ett giltigt datum och klockslag.",
+                    400,
+                    field="scheduled_at",
+                )
+            updates["scheduled_at"] = scheduled_at.isoformat(timespec="minutes")
+            updates["time_is_estimated"] = "N"
+        if "note" in data:
+            note = str(data.get("note") or "").strip()
+            if len(note) > 300:
+                return planning_error(
+                    "note_too_long",
+                    "Anteckningen får vara högst 300 tecken.",
+                    400,
+                    field="note",
+                )
+            updates["note"] = note
+        if "status" in data:
+            status = str(data.get("status") or "").strip().casefold()
+            if status not in PLANNING_STATUSES:
+                return planning_error(
+                    "invalid_activity_status",
+                    "Aktiviteten har en ogiltig status.",
+                    400,
+                    field="status",
+                )
+            if status == "completed" and current_status != "completed":
+                return planning_error(
+                    "completion_requires_contact",
+                    "Logga kontakten för att markera aktiviteten som genomförd.",
+                    409,
+                )
+            updates["status"] = status
+
+        route_content_fields = {
+            "contact_type", "scheduled_at", "note", "customer_id"
+        }
+        if (
+            str(current.get("source") or "").strip().casefold() == "route"
+            and route_content_fields.intersection(data)
+        ):
+            updates.update({
+                "source": "manual",
+                "route_group_id": "",
+                "route_sequence": "",
+                "time_is_estimated": "N",
+            })
+        updates["last_mutation_request_id"] = mutation_request_scope
+        updates["last_mutation_fingerprint"] = mutation_fingerprint
+        updates["revision"] = current_revision + 1
+        updates["updated_at"] = next_planning_updated_at(
+            current.get("updated_at")
+        )
+        update_sheet_row(sheet, row_index, headers, updates)
+        updated = {**current, **updates}
+        try:
+            mirror_synced = sync_planned_followup_mirror(
+                spreadsheet,
+                updated,
+            )
+        except Exception:
+            app.logger.exception(
+                "Activity updated but follow-up mirror failed"
+            )
+            mirror_synced = False
+        if not mirror_synced:
+            return planning_error(
+                "follow_up_mirror_failed",
+                "Aktiviteten är uppdaterad men uppföljningsdatumet kunde inte synkas. Försök igen med samma request-ID.",
+                503,
+            )
+
+    return jsonify({
+        "ok": True,
+        "duplicate": False,
+        "activity": public_planned_activity(updated),
+    })
+
+
 def route_proposal_error(code, message, status):
     return jsonify({
         "ok": False,
@@ -3512,6 +5589,7 @@ def build_route_proposal_payload(
     requested_rows,
     user,
     route_date,
+    max_total_seconds=MAX_TOTAL_SECONDS,
 ):
     stops = []
     for stop in proposal.route.stops:
@@ -3523,6 +5601,7 @@ def build_route_proposal_payload(
             "longitude": candidate.coordinate.longitude,
             "sequence": stop.sequence,
             "priority_score": candidate.priority_score,
+            "required": bool(getattr(candidate, "required", False)),
             "leg_drive_minutes": seconds_to_minutes(stop.leg_drive_seconds),
             "cumulative_drive_minutes": seconds_to_minutes(
                 stop.cumulative_drive_seconds
@@ -3584,7 +5663,7 @@ def build_route_proposal_payload(
                 proposal.solution.calculation_duration_ms
             ),
             "calculation_duration_ms": proposal.calculation_duration_ms,
-            "max_total_minutes": MAX_TOTAL_SECONDS // 60,
+            "max_total_minutes": max_total_seconds // 60,
             "max_route_stops": MAX_ROUTE_STOPS,
             "service_minutes_per_stop": SERVICE_SECONDS_PER_STOP // 60,
             "includes_return_to_start": True,
@@ -3600,6 +5679,9 @@ def calculate_route_proposal_for_user(
     client_requested_rows,
     user,
     route_date,
+    required_rows=(),
+    max_total_seconds=MAX_TOTAL_SECONDS,
+    respect_requested_rows=False,
 ):
     try:
         customers = get_customer_rows(spreadsheet)
@@ -3624,18 +5706,27 @@ def calculate_route_proposal_for_user(
             503,
         )
 
-    requested_rows = client_requested_rows
+    required_rows = tuple(sorted(set(required_rows or ())))
+    requested_rows = tuple(sorted(set(client_requested_rows or ())))
     if user_is_seller(user):
         owner_key = normalize_key(user_route_display_name(user))
-        requested_rows = tuple(sorted(
+        owned_rows = {
             customer.get("row")
             for customer in customers
             if (
                 isinstance(customer.get("row"), int)
                 and normalize_key(customer.get("sales_person")) == owner_key
             )
+        }
+        requested_rows = tuple(sorted(
+            (
+                set(requested_rows).intersection(owned_rows)
+                if respect_requested_rows
+                else owned_rows
+            )
+            | set(required_rows)
         ))
-        if not requested_rows:
+        if not requested_rows and not required_rows:
             return None, route_proposal_error(
                 "no_eligible_candidates",
                 "Du har inga egna butiker att skapa ett ruttförslag för.",
@@ -3652,16 +5743,29 @@ def calculate_route_proposal_for_user(
         for customer in priority_customers
         if isinstance(customer.get("row"), int)
     }
+    requested_rows = tuple(sorted(set(requested_rows) | set(required_rows)))
+    required_set = set(required_rows)
     candidates = []
+    invalid_required = []
     for row in requested_rows:
         customer = customer_by_row.get(row)
         priority = priority_by_row.get(row)
-        if not customer or not priority or customer_is_cancelled(customer):
+        if not customer or customer_is_cancelled(customer):
+            if row in required_set:
+                invalid_required.append({
+                    "row": row,
+                    "reason": (
+                        "customer_cancelled"
+                        if customer and customer_is_cancelled(customer)
+                        else "customer_not_found"
+                    ),
+                })
             continue
         if (
             user_is_seller(user)
             and normalize_key(customer.get("sales_person"))
             != normalize_key(user_route_display_name(user))
+            and row not in required_set
         ):
             continue
         latitude = parse_coordinate_value(
@@ -3672,14 +5776,27 @@ def calculate_route_proposal_for_user(
             customer.get("longitude_google") or customer.get("longitude"),
             "longitude",
         )
-        score = priority.get("priority_score")
-        if latitude is None or longitude is None or isinstance(score, bool):
+        score = (priority or {}).get("priority_score", 0)
+        if latitude is None or longitude is None:
+            if row in required_set:
+                invalid_required.append({
+                    "row": row,
+                    "customer": str(customer.get("customer") or "").strip(),
+                    "reason": "missing_coordinates",
+                })
             continue
         try:
             score = int(score)
         except (TypeError, ValueError, OverflowError):
+            if row in required_set:
+                score = 0
+            else:
+                continue
+        if isinstance(score, bool):
+            score = 0 if row in required_set else None
+        if score is None:
             continue
-        if score <= 0:
+        if score <= 0 and row not in required_set:
             continue
         candidates.append(
             RouteCandidate(
@@ -3690,9 +5807,16 @@ def calculate_route_proposal_for_user(
                     longitude=longitude,
                 ),
                 priority_score=score,
+                required=row in required_set,
             )
         )
 
+    if invalid_required:
+        return None, route_proposal_error(
+            "required_stops_not_feasible",
+            "Ett eller flera obligatoriska besök kan inte ruttas.",
+            422,
+        )
     if not candidates:
         return None, route_proposal_error(
             "no_eligible_candidates",
@@ -3700,11 +5824,34 @@ def calculate_route_proposal_for_user(
             422,
         )
 
+    candidate_count_before_preselection = len(candidates)
+    matrix_candidate_limit = route_matrix_candidate_limit()
+    required_candidates = [
+        candidate for candidate in candidates if candidate.required
+    ]
+    optional_candidates = sorted(
+        (
+            candidate for candidate in candidates
+            if not candidate.required
+        ),
+        key=lambda candidate: (
+            -candidate.priority_score,
+            candidate.row,
+        ),
+    )
+    candidates = [
+        *required_candidates,
+        *optional_candidates[
+            :max(0, matrix_candidate_limit - len(required_candidates))
+        ],
+    ]
+
     try:
         proposal = calculate_route_proposal(
             start=start,
             candidates=candidates,
             provider=get_route_travel_time_provider(),
+            max_total_seconds=max_total_seconds,
         )
     except RouteProposalError as exc:
         if exc.http_status >= 500:
@@ -3726,14 +5873,1434 @@ def calculate_route_proposal_for_user(
             500,
         )
 
-    return build_route_proposal_payload(
+    payload = build_route_proposal_payload(
         proposal=proposal,
         start=start,
         candidates=candidates,
         requested_rows=requested_rows,
         user=user,
         route_date=route_date,
-    ), None
+        max_total_seconds=max_total_seconds,
+    )
+    payload.setdefault("meta", {}).update({
+        "candidate_count_before_preselection": (
+            candidate_count_before_preselection
+        ),
+        "candidate_count_after_preselection": len(candidates),
+        "matrix_candidate_limit": matrix_candidate_limit,
+        "matrix_pair_count": proposal.provider_pair_count,
+        "provider_cache_hits": proposal.provider_cache_hits,
+    })
+    app.logger.info(
+        "route_metrics candidates_before=%s candidates_after=%s "
+        "matrix_candidates=%s matrix_pairs=%s provider_requests=%s "
+        "cache_hits=%s calculation_ms=%s final_stops=%s",
+        candidate_count_before_preselection,
+        len(candidates),
+        proposal.matrix_candidate_count,
+        proposal.provider_pair_count,
+        proposal.provider_request_count,
+        proposal.provider_cache_hits,
+        proposal.calculation_duration_ms,
+        len(proposal.route.stops),
+    )
+    return payload, None
+
+
+def planning_rows_for_date(rows, owner, route_date):
+    result = []
+    for row_index, row in rows:
+        if not planning_owner_matches(row, owner):
+            continue
+        scheduled = parse_planning_datetime(row.get("scheduled_at"))
+        if scheduled and scheduled.date() == route_date:
+            result.append((row_index, row))
+    return result
+
+
+def planning_state_fingerprint(rows):
+    values = []
+    for _row_index, row in rows:
+        values.append({
+            "id": str(row.get("planned_activity_id") or "").strip(),
+            "customer_id": str(row.get("customer_id") or "").strip(),
+            "scheduled_at": planning_datetime_text(row.get("scheduled_at")),
+            "contact_type": normalize_planning_contact_type(
+                row.get("contact_type")
+            ),
+            "status": str(row.get("status") or "").strip().casefold(),
+            "source": str(row.get("source") or "").strip().casefold(),
+            "updated_at": str(row.get("updated_at") or "").strip(),
+            "revision": planning_revision(row),
+        })
+    canonical = json.dumps(
+        sorted(values, key=lambda item: item["id"]),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return stable_planning_uuid("planning-state", canonical)
+
+
+def planning_route_apply_fingerprint(preview):
+    fingerprint_stops = []
+    for stop in preview.get("stops") or []:
+        if not isinstance(stop, dict):
+            continue
+        fingerprint_stops.append({
+            "customer_id": str(stop.get("customer_id") or "").strip(),
+            "customer_row": stop.get("customer_row") or stop.get("row"),
+            "sequence": stop.get("sequence"),
+            "required": bool(stop.get("required")),
+            "required_activity_ids": sorted(
+                str(value or "").strip()
+                for value in (stop.get("required_activity_ids") or [])
+                if str(value or "").strip()
+            ),
+            "planned_activity_id": str(
+                stop.get("planned_activity_id") or ""
+            ).strip(),
+            "scheduled_at": planning_datetime_text(
+                stop.get("scheduled_at")
+            ),
+            "estimated_at": planning_datetime_text(
+                stop.get("estimated_at")
+            ),
+            "duration_minutes": stop.get("duration_minutes"),
+        })
+    fingerprint_stops.sort(
+        key=lambda stop: (
+            int(stop.get("sequence") or 0),
+            int(stop.get("customer_row") or 0),
+        )
+    )
+    canonical = json.dumps(
+        {
+            "route_date": str(preview.get("route_date") or "").strip(),
+            "route_start_at": planning_datetime_text(
+                preview.get("route_start_at")
+            ),
+            "start": dict(preview.get("start") or {}),
+            "return_drive_minutes": (
+                (preview.get("summary") or {}).get(
+                    "return_drive_minutes"
+                )
+            ),
+            "route_end_at": planning_datetime_text(
+                (preview.get("timeline") or {}).get("route_end_at")
+                or (preview.get("summary") or {}).get("route_end_at")
+            ),
+            "stops": fingerprint_stops,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return stable_planning_uuid("route-apply-preview", canonical)
+
+
+def planning_fixed_activity_intervals(fixed_non_route):
+    intervals = []
+    for activity in fixed_non_route:
+        start = parse_planning_datetime(activity.get("scheduled_at"))
+        if start is None:
+            return None, planning_error(
+                "invalid_fixed_activity_time",
+                "En fast telefon- eller mejlaktivitet saknar giltig tid.",
+                422,
+                planned_activity_id=activity.get(
+                    "planned_activity_id",
+                    "",
+                ),
+            )
+        try:
+            duration_minutes = max(
+                1,
+                int(math.ceil(float(
+                    activity.get("duration_minutes") or 10
+                ))),
+            )
+        except (TypeError, ValueError, OverflowError):
+            duration_minutes = 10
+        intervals.append({
+            "start": start,
+            "end": start + timedelta(minutes=duration_minutes),
+            "activity": activity,
+        })
+    intervals.sort(key=lambda interval: interval["start"])
+    for previous, current in zip(intervals, intervals[1:]):
+        if current["start"] < previous["end"]:
+            return None, planning_error(
+                "fixed_activity_conflict",
+                "Två fasta telefon- eller mejlaktiviteter överlappar varandra.",
+                422,
+                planned_activity_ids=[
+                    previous["activity"].get("planned_activity_id", ""),
+                    current["activity"].get("planned_activity_id", ""),
+                ],
+            )
+    return intervals, None
+
+
+def planning_next_unblocked_start(
+    earliest_start,
+    duration_minutes,
+    fixed_intervals,
+):
+    duration = timedelta(minutes=max(0, duration_minutes))
+    start = earliest_start
+    while True:
+        shifted = False
+        end = start + duration
+        for interval in fixed_intervals:
+            if interval["end"] <= start:
+                continue
+            if end <= interval["start"]:
+                break
+            if start < interval["end"] and interval["start"] < end:
+                start = interval["end"]
+                shifted = True
+                break
+        if not shifted:
+            return start
+
+
+def schedule_planning_route_timeline(
+    *,
+    stops,
+    fixed_non_route,
+    route_start_at,
+    return_drive_minutes,
+):
+    fixed_intervals, fixed_error = planning_fixed_activity_intervals(
+        fixed_non_route
+    )
+    if fixed_error is not None:
+        return None, None, fixed_error
+
+    scheduled_stops = []
+    timeline_segments = []
+    cursor = route_start_at
+    for raw_stop in stops:
+        stop = dict(raw_stop)
+        try:
+            drive_minutes = max(
+                0,
+                int(math.ceil(float(
+                    stop.get("leg_drive_minutes") or 0
+                ))),
+            )
+            service_minutes = max(
+                1,
+                int(math.ceil(float(
+                    stop.get("duration_minutes") or 20
+                ))),
+            )
+        except (TypeError, ValueError, OverflowError):
+            return None, None, planning_error(
+                "invalid_route_timeline",
+                "Rutten innehåller en ogiltig tidsberäkning.",
+                422,
+            )
+
+        departure = planning_next_unblocked_start(
+            cursor,
+            drive_minutes,
+            fixed_intervals,
+        )
+        arrival = departure + timedelta(minutes=drive_minutes)
+        if drive_minutes:
+            timeline_segments.append({
+                "kind": "drive",
+                "customer_row": stop.get("customer_row"),
+                "start": departure.isoformat(timespec="minutes"),
+                "end": arrival.isoformat(timespec="minutes"),
+            })
+
+        required = bool(stop.get("required"))
+        booked_at = (
+            parse_planning_datetime(stop.get("scheduled_at"))
+            if required else None
+        )
+        if required and booked_at is None:
+            return None, None, planning_error(
+                "required_stops_not_feasible",
+                "Ett obligatoriskt besök saknar giltig bokad tid.",
+                422,
+                planned_activity_id=stop.get(
+                    "planned_activity_id",
+                    "",
+                ),
+            )
+        earliest_service = arrival
+        if booked_at and booked_at > earliest_service:
+            earliest_service = booked_at
+        service_start = planning_next_unblocked_start(
+            earliest_service,
+            service_minutes,
+            fixed_intervals,
+        )
+        if booked_at:
+            delta_minutes = (
+                service_start - booked_at
+            ).total_seconds() / 60
+            if abs(delta_minutes) > PLANNING_ROUTE_CONFLICT_MINUTES:
+                return None, None, planning_error(
+                    "required_stops_not_feasible",
+                    "Ett obligatoriskt besök kan inte nås inom 15 minuter från bokad tid.",
+                    422,
+                    planned_activity_id=stop.get(
+                        "planned_activity_id",
+                        "",
+                    ),
+                    scheduled_at=booked_at.isoformat(
+                        timespec="minutes"
+                    ),
+                    estimated_at=service_start.isoformat(
+                        timespec="minutes"
+                    ),
+                    delta_minutes=round(delta_minutes),
+                )
+        service_end = service_start + timedelta(
+            minutes=service_minutes
+        )
+        timeline_segments.append({
+            "kind": "visit",
+            "customer_row": stop.get("customer_row"),
+            "planned_activity_id": stop.get(
+                "planned_activity_id",
+                "",
+            ),
+            "start": service_start.isoformat(timespec="minutes"),
+            "end": service_end.isoformat(timespec="minutes"),
+        })
+        stop.update({
+            "leg_departure_at": departure.isoformat(timespec="minutes"),
+            "arrival_at": arrival.isoformat(timespec="minutes"),
+            "estimated_at": service_start.isoformat(timespec="minutes"),
+            "service_end_at": service_end.isoformat(timespec="minutes"),
+            "scheduled_at": (
+                booked_at.isoformat(timespec="minutes")
+                if booked_at else service_start.isoformat(
+                    timespec="minutes"
+                )
+            ),
+            "time_is_estimated": not required,
+        })
+        scheduled_stops.append(stop)
+        cursor = service_end
+
+    try:
+        return_minutes = max(
+            0,
+            int(math.ceil(float(return_drive_minutes or 0))),
+        )
+    except (TypeError, ValueError, OverflowError):
+        return None, None, planning_error(
+            "invalid_route_timeline",
+            "Rutten saknar en giltig returtid.",
+            422,
+        )
+    return_departure = planning_next_unblocked_start(
+        cursor,
+        return_minutes,
+        fixed_intervals,
+    )
+    route_end = return_departure + timedelta(minutes=return_minutes)
+    if return_minutes:
+        timeline_segments.append({
+            "kind": "return_drive",
+            "start": return_departure.isoformat(timespec="minutes"),
+            "end": route_end.isoformat(timespec="minutes"),
+        })
+    elapsed_minutes = (
+        route_end - route_start_at
+    ).total_seconds() / 60
+    if elapsed_minutes >= (MAX_TOTAL_SECONDS / 60):
+        return None, None, planning_error(
+            "route_timeline_exceeds_capacity",
+            "Rutten, fasta aktiviteter och väntetider ryms inte inom sju timmar.",
+            422,
+            total_minutes=round(elapsed_minutes, 1),
+        )
+    return scheduled_stops, {
+        "route_end_at": route_end.isoformat(timespec="minutes"),
+        "return_departure_at": return_departure.isoformat(
+            timespec="minutes"
+        ),
+        "elapsed_minutes": seconds_to_minutes(
+            int(math.ceil(elapsed_minutes * 60))
+        ),
+        "segments": timeline_segments,
+    }, None
+
+
+def schedule_planning_route_with_anchors(
+    *,
+    stops,
+    fixed_non_route,
+    route_start_at,
+    start,
+):
+    """Place optional route stops around immutable visit/time anchors."""
+    fixed_intervals, fixed_error = planning_fixed_activity_intervals(
+        fixed_non_route
+    )
+    if fixed_error is not None:
+        return None, None, fixed_error
+    if len(stops) > MAX_ROUTE_STOPS:
+        return None, None, planning_error(
+            "required_schedule_not_feasible",
+            "Dagens fasta och valfria besök överskrider max 15 stopp.",
+            422,
+        )
+
+    points = [start] + [
+        Coordinate(
+            latitude=float(stop.get("latitude")),
+            longitude=float(stop.get("longitude")),
+        )
+        for stop in stops
+    ]
+    try:
+        matrix_result = get_route_travel_time_provider().get_matrix_seconds(
+            points,
+            points,
+            ephemeral_origin_indexes=frozenset({0}),
+        )
+    except RouteProposalError as exc:
+        return None, None, route_proposal_error(
+            exc.code, exc.public_message, exc.http_status
+        )
+    except Exception:
+        app.logger.exception("Could not build anchor route matrix")
+        return None, None, planning_error(
+            "route_matrix_unavailable",
+            "Körtiderna för dagens fasta schema kunde inte hämtas.",
+            503,
+        )
+
+    matrix = matrix_result.seconds
+    indexed = [
+        {**dict(stop), "_matrix_index": index}
+        for index, stop in enumerate(stops, start=1)
+    ]
+    anchors = sorted(
+        (stop for stop in indexed if stop.get("required")),
+        key=lambda stop: planning_datetime_text(stop.get("scheduled_at")),
+    )
+    optional = [stop for stop in indexed if not stop.get("required")]
+    scheduled = []
+    segments = [
+        {
+            "kind": "fixed_activity",
+            "planned_activity_id": interval["activity"].get(
+                "planned_activity_id", ""
+            ),
+            "contact_type": interval["activity"].get("contact_type", ""),
+            "start": interval["start"].isoformat(timespec="minutes"),
+            "end": interval["end"].isoformat(timespec="minutes"),
+        }
+        for interval in fixed_intervals
+    ]
+    cursor = route_start_at
+    current_index = 0
+
+    def drive_minutes(origin_index, destination_index):
+        try:
+            seconds = matrix[origin_index][destination_index]
+        except (IndexError, TypeError):
+            seconds = None
+        if seconds is None:
+            return None
+        return max(0, int(math.ceil(float(seconds) / 60)))
+
+    def simulate(stop, from_cursor, from_index):
+        minutes = drive_minutes(from_index, stop["_matrix_index"])
+        if minutes is None:
+            return None
+        departure = planning_next_unblocked_start(
+            from_cursor, minutes, fixed_intervals
+        )
+        arrival = departure + timedelta(minutes=minutes)
+        try:
+            service_minutes = max(
+                1, int(math.ceil(float(stop.get("duration_minutes") or 20)))
+            )
+        except (TypeError, ValueError, OverflowError):
+            service_minutes = 20
+        booked_at = (
+            parse_planning_datetime(stop.get("scheduled_at"))
+            if stop.get("required") else None
+        )
+        service_start = planning_next_unblocked_start(
+            max(arrival, booked_at) if booked_at else arrival,
+            service_minutes,
+            fixed_intervals,
+        )
+        service_end = service_start + timedelta(minutes=service_minutes)
+        return {
+            "departure": departure,
+            "arrival": arrival,
+            "service_start": service_start,
+            "service_end": service_end,
+            "drive_minutes": minutes,
+            "service_minutes": service_minutes,
+            "booked_at": booked_at,
+        }
+
+    def append_stop(stop, timing):
+        nonlocal cursor, current_index
+        public_stop = {
+            key: value
+            for key, value in stop.items()
+            if key != "_matrix_index"
+        }
+        public_stop.update({
+            "sequence": len(scheduled) + 1,
+            "leg_drive_minutes": timing["drive_minutes"],
+            "leg_departure_at": timing["departure"].isoformat(
+                timespec="minutes"
+            ),
+            "arrival_at": timing["arrival"].isoformat(timespec="minutes"),
+            "estimated_at": timing["service_start"].isoformat(
+                timespec="minutes"
+            ),
+            "service_end_at": timing["service_end"].isoformat(
+                timespec="minutes"
+            ),
+            "scheduled_at": (
+                timing["booked_at"].isoformat(timespec="minutes")
+                if timing["booked_at"]
+                else timing["service_start"].isoformat(timespec="minutes")
+            ),
+            "time_is_estimated": not bool(stop.get("required")),
+        })
+        if timing["drive_minutes"]:
+            segments.append({
+                "kind": "drive",
+                "customer_id": stop.get("customer_id", ""),
+                "customer_row": stop.get("customer_row"),
+                "start": timing["departure"].isoformat(timespec="minutes"),
+                "end": timing["arrival"].isoformat(timespec="minutes"),
+            })
+        segments.append({
+            "kind": "visit",
+            "customer_id": stop.get("customer_id", ""),
+            "customer_row": stop.get("customer_row"),
+            "planned_activity_id": stop.get("planned_activity_id", ""),
+            "required": bool(stop.get("required")),
+            "start": timing["service_start"].isoformat(timespec="minutes"),
+            "end": timing["service_end"].isoformat(timespec="minutes"),
+        })
+        scheduled.append(public_stop)
+        cursor = timing["service_end"]
+        current_index = stop["_matrix_index"]
+
+    remaining = list(optional)
+    for anchor in anchors:
+        anchor_booked = parse_planning_datetime(anchor.get("scheduled_at"))
+        if anchor_booked is None:
+            return None, None, planning_error(
+                "required_schedule_not_feasible",
+                "Ett fast besök saknar giltig bokad tid.",
+                422,
+                planned_activity_id=anchor.get("planned_activity_id", ""),
+            )
+        while remaining:
+            best = None
+            for candidate in remaining:
+                optional_timing = simulate(candidate, cursor, current_index)
+                if optional_timing is None:
+                    continue
+                anchor_timing = simulate(
+                    anchor,
+                    optional_timing["service_end"],
+                    candidate["_matrix_index"],
+                )
+                if (
+                    anchor_timing is None
+                    or anchor_timing["service_start"]
+                    > anchor_booked
+                    + timedelta(minutes=PLANNING_ROUTE_CONFLICT_MINUTES)
+                ):
+                    continue
+                extra_minutes = (
+                    optional_timing["drive_minutes"]
+                    + optional_timing["service_minutes"]
+                    + anchor_timing["drive_minutes"]
+                )
+                value_rate = float(candidate.get("priority_score") or 0) / max(
+                    1, extra_minutes
+                )
+                score = (value_rate, float(candidate.get("priority_score") or 0))
+                if best is None or score > best[0]:
+                    best = (score, candidate, optional_timing)
+            if best is None:
+                break
+            _score, candidate, timing = best
+            append_stop(candidate, timing)
+            remaining.remove(candidate)
+
+        anchor_timing = simulate(anchor, cursor, current_index)
+        if (
+            anchor_timing is None
+            or anchor_timing["service_start"]
+            > anchor_booked
+            + timedelta(minutes=PLANNING_ROUTE_CONFLICT_MINUTES)
+        ):
+            estimated = (
+                anchor_timing["service_start"].isoformat(timespec="minutes")
+                if anchor_timing else ""
+            )
+            return None, None, planning_error(
+                "required_schedule_not_feasible",
+                "Ett fast besök kan inte nås från föregående aktivitet i tid.",
+                422,
+                planned_activity_id=anchor.get("planned_activity_id", ""),
+                scheduled_at=anchor_booked.isoformat(timespec="minutes"),
+                estimated_at=estimated,
+            )
+        append_stop(anchor, anchor_timing)
+
+    route_limit = route_start_at + timedelta(seconds=MAX_TOTAL_SECONDS)
+    while remaining and len(scheduled) < MAX_ROUTE_STOPS:
+        best = None
+        for candidate in remaining:
+            timing = simulate(candidate, cursor, current_index)
+            if timing is None:
+                continue
+            return_minutes = drive_minutes(candidate["_matrix_index"], 0)
+            if return_minutes is None:
+                continue
+            return_departure = planning_next_unblocked_start(
+                timing["service_end"], return_minutes, fixed_intervals
+            )
+            route_end = return_departure + timedelta(minutes=return_minutes)
+            if route_end >= route_limit:
+                continue
+            extra = timing["drive_minutes"] + timing["service_minutes"] + return_minutes
+            value_rate = float(candidate.get("priority_score") or 0) / max(1, extra)
+            score = (value_rate, float(candidate.get("priority_score") or 0))
+            if best is None or score > best[0]:
+                best = (score, candidate, timing)
+        if best is None:
+            break
+        _score, candidate, timing = best
+        append_stop(candidate, timing)
+        remaining.remove(candidate)
+
+    return_minutes = drive_minutes(current_index, 0)
+    if return_minutes is None:
+        return None, None, planning_error(
+            "required_schedule_not_feasible",
+            "Returen till startpunkten saknar en körbar väg.",
+            422,
+        )
+    return_departure = planning_next_unblocked_start(
+        cursor, return_minutes, fixed_intervals
+    )
+    route_end = return_departure + timedelta(minutes=return_minutes)
+    if route_end >= route_limit:
+        return None, None, planning_error(
+            "required_schedule_not_feasible",
+            "Dagens fasta schema och retur ryms inte inom mindre än sju timmar.",
+            422,
+            scheduled_at=route_start_at.isoformat(timespec="minutes"),
+            estimated_at=route_end.isoformat(timespec="minutes"),
+        )
+    if return_minutes:
+        segments.append({
+            "kind": "return_drive",
+            "start": return_departure.isoformat(timespec="minutes"),
+            "end": route_end.isoformat(timespec="minutes"),
+        })
+    segments.sort(key=lambda segment: (segment.get("start", ""), segment["kind"]))
+    elapsed_minutes = int(math.ceil(
+        (route_end - route_start_at).total_seconds() / 60
+    ))
+    return scheduled, {
+        "route_end_at": route_end.isoformat(timespec="minutes"),
+        "return_departure_at": return_departure.isoformat(timespec="minutes"),
+        "return_drive_minutes": return_minutes,
+        "elapsed_minutes": elapsed_minutes,
+        "blocked_minutes": sum(
+            int((item["end"] - item["start"]).total_seconds() / 60)
+            for item in fixed_intervals
+        ),
+        "segments": segments,
+        "matrix_request_count": matrix_result.request_count,
+        "matrix_cache_hits": matrix_result.cache_hits,
+    }, None
+
+
+def planning_route_conflicts(stops, fixed_non_route):
+    conflicts = []
+    for stop in stops:
+        estimated = parse_planning_datetime(stop.get("estimated_at"))
+        scheduled = parse_planning_datetime(stop.get("scheduled_at"))
+        if stop.get("required") and estimated and scheduled:
+            delta_minutes = round((estimated - scheduled).total_seconds() / 60)
+            if abs(delta_minutes) > PLANNING_ROUTE_CONFLICT_MINUTES:
+                conflicts.append({
+                    "code": "scheduled_time_conflict",
+                    "planned_activity_id": stop.get("planned_activity_id", ""),
+                    "customer_row": stop.get("customer_row"),
+                    "customer": stop.get("customer", ""),
+                    "scheduled_at": scheduled.isoformat(timespec="minutes"),
+                    "estimated_at": estimated.isoformat(timespec="minutes"),
+                    "delta_minutes": delta_minutes,
+                    "message": (
+                        f"Tidskonflikt för {stop.get('customer')}: beräknad "
+                        f"ankomst {estimated.strftime('%H.%M')}, bokad tid "
+                        f"{scheduled.strftime('%H.%M')}."
+                    ),
+                })
+
+        if not estimated:
+            continue
+        route_end = estimated + timedelta(
+            minutes=int(stop.get("duration_minutes") or 20)
+        )
+        for activity in fixed_non_route:
+            fixed_start = parse_planning_datetime(activity.get("scheduled_at"))
+            if not fixed_start:
+                continue
+            fixed_end = fixed_start + timedelta(
+                minutes=int(activity.get("duration_minutes") or 10)
+            )
+            if estimated < fixed_end and fixed_start < route_end:
+                conflicts.append({
+                    "code": "activity_overlap",
+                    "planned_activity_id": activity.get(
+                        "planned_activity_id", ""
+                    ),
+                    "route_customer_row": stop.get("customer_row"),
+                    "customer": activity.get("customer", ""),
+                    "scheduled_at": fixed_start.isoformat(timespec="minutes"),
+                    "estimated_at": estimated.isoformat(timespec="minutes"),
+                    "message": (
+                        f"Rutten överlappar {activity.get('contact_type_label', '').lower()} "
+                        f"med {activity.get('customer')} kl. "
+                        f"{fixed_start.strftime('%H.%M')}."
+                    ),
+                })
+    return conflicts
+
+
+def build_planning_route_preview(
+    *,
+    spreadsheet,
+    owner,
+    route_date,
+    start,
+    candidate_rows,
+):
+    _sheet, _headers, all_rows = get_planned_activity_snapshot(spreadsheet)
+    customers = get_customer_rows(spreadsheet)
+    customer_by_row = {
+        customer.get("row"): customer
+        for customer in customers
+        if isinstance(customer.get("row"), int)
+    }
+    date_rows = planning_rows_for_date(all_rows, owner, route_date)
+    active_rows = [
+        (row_index, row)
+        for row_index, row in date_rows
+        if str(row.get("status") or "").strip().casefold() == "planned"
+    ]
+    fixed_visit_rows = [
+        (row_index, row)
+        for row_index, row in active_rows
+        if (
+            normalize_planning_contact_type(row.get("contact_type")) == "visit"
+            and str(row.get("source") or "").strip().casefold()
+            in {"manual", "follow_up"}
+            and not is_yes(row.get("time_is_estimated"))
+        )
+    ]
+    fixed_non_route = [
+        public_planned_activity(row)
+        for _row_index, row in active_rows
+        if normalize_planning_contact_type(row.get("contact_type"))
+        in {"phone", "email"}
+        and str(row.get("source") or "").strip().casefold()
+        in {"manual", "follow_up"}
+    ]
+    non_route_minutes = sum(
+        int(item.get("duration_minutes") or 0) for item in fixed_non_route
+    )
+    max_total_seconds = MAX_TOTAL_SECONDS - (non_route_minutes * 60)
+    if max_total_seconds <= SERVICE_SECONDS_PER_STOP:
+        return None, planning_error(
+            "day_capacity_exhausted",
+            "Telefon- och mejlaktiviteterna lämnar inte plats för en körbar rutt.",
+            422,
+        )
+
+    required_row_values = set()
+    invalid_required_activity_ids = []
+    for _row_index, row in fixed_visit_rows:
+        try:
+            customer_row = int(float(row.get("customer_row") or 0))
+        except (TypeError, ValueError, OverflowError):
+            customer_row = 0
+        if customer_row < 2:
+            invalid_required_activity_ids.append(
+                str(row.get("planned_activity_id") or "").strip()
+            )
+        else:
+            required_row_values.add(customer_row)
+    if invalid_required_activity_ids:
+        return None, planning_error(
+            "required_stops_not_feasible",
+            "Ett eller flera obligatoriska besök saknar en giltig butikskoppling.",
+            422,
+            planned_activity_ids=invalid_required_activity_ids,
+        )
+    required_rows = tuple(sorted(required_row_values))
+    required_activity_by_row = defaultdict(list)
+    for _row_index, row in fixed_visit_rows:
+        try:
+            row_number = int(float(row.get("customer_row") or 0))
+        except (TypeError, ValueError):
+            row_number = 0
+        if row_number:
+            required_activity_by_row[row_number].append(
+                public_planned_activity(row)
+            )
+    duplicate_required_rows = {
+        row_number: [
+            activity.get("planned_activity_id", "")
+            for activity in activities
+        ]
+        for row_number, activities in required_activity_by_row.items()
+        if len(activities) > 1
+    }
+    if duplicate_required_rows:
+        return None, planning_error(
+            "duplicate_required_customer",
+            "Samma butik har flera obligatoriska besök samma dag. Flytta eller ställ in ett av besöken innan rutten fylls.",
+            422,
+            duplicate_customers=duplicate_required_rows,
+        )
+
+    explicitly_requested_rows = set(candidate_rows or ())
+    if not candidate_rows:
+        owner_name = normalize_key(user_route_display_name(owner))
+        candidate_rows = tuple(
+            customer.get("row")
+            for customer in customers
+            if (
+                isinstance(customer.get("row"), int)
+                and normalize_key(customer.get("sales_person")) == owner_name
+            )
+        )
+    def activity_customer_identity(row):
+        return (
+            str(row.get("customer_id") or "").strip()
+            or normalize_key(row.get("customer"))
+        )
+
+    blocked_candidate_identities = set()
+    for _row_index, activity in all_rows:
+        if str(activity.get("status") or "planned").strip().casefold() != "planned":
+            continue
+        scheduled = parse_planning_datetime(activity.get("scheduled_at"))
+        if not scheduled:
+            continue
+        activity_type = normalize_planning_contact_type(
+            activity.get("contact_type")
+        )
+        source = str(activity.get("source") or "").strip().casefold()
+        if (
+            scheduled.date() == route_date
+            and source != "route"
+            and activity_type in {"phone", "email"}
+        ) or scheduled.date() > route_date:
+            blocked_candidate_identities.add(
+                activity_customer_identity(activity)
+            )
+        if (
+            scheduled.date() == route_date
+            and source != "route"
+            and activity_type == "visit"
+            and not planning_owner_matches(activity, owner)
+        ):
+            blocked_candidate_identities.add(
+                activity_customer_identity(activity)
+            )
+    try:
+        for contact in get_contact_rows(spreadsheet):
+            if parse_date_value(contact.get("date_time")) == route_date:
+                blocked_candidate_identities.add(
+                    str(contact.get("customer_id") or "").strip()
+                    or normalize_key(contact.get("customer"))
+                )
+    except Exception:
+        app.logger.warning(
+            "Could not apply completed-contact route exclusions",
+            exc_info=True,
+        )
+    blocked_candidate_identities.discard("")
+
+    candidate_warnings = []
+    filtered_candidate_rows = []
+    for row_number in candidate_rows:
+        customer = customer_by_row.get(row_number, {})
+        identity = (
+            str(customer.get("customer_id") or "").strip()
+            or normalize_key(customer.get("customer"))
+        )
+        blocked = identity in blocked_candidate_identities
+        if blocked and row_number not in required_rows:
+            if row_number in explicitly_requested_rows:
+                candidate_warnings.append({
+                    "code": "customer_already_has_planned_contact",
+                    "customer_id": str(
+                        customer.get("customer_id") or ""
+                    ).strip(),
+                    "customer_row": row_number,
+                    "message": "Kunden har redan en planerad kontakt.",
+                })
+            else:
+                continue
+        filtered_candidate_rows.append(row_number)
+    candidate_rows = tuple(sorted(
+        set(filtered_candidate_rows) | set(required_rows)
+    ))
+    route_payload, route_error = calculate_route_proposal_for_user(
+        spreadsheet=spreadsheet,
+        start=start,
+        client_requested_rows=candidate_rows,
+        user=owner,
+        route_date=route_date,
+        required_rows=required_rows,
+        max_total_seconds=max_total_seconds,
+        respect_requested_rows=True,
+    )
+    if route_error is not None:
+        return None, route_error
+
+    route_start_at = route_start_datetime(route_date)
+    stops = []
+    for stop in route_payload.get("stops", []):
+        row_number = int(stop.get("row") or 0)
+        customer = customer_by_row.get(row_number) or {}
+        customer_id = str(customer.get("customer_id") or "").strip()
+        if not customer_id:
+            return None, planning_error(
+                "customer_identity_conflict",
+                "En butik i ruttförslaget saknar customer_id. Uppdatera kundregistret och beräkna rutten igen.",
+                409,
+                customer_row=row_number,
+            )
+        required_activities = required_activity_by_row.get(row_number, [])
+        required_activity = required_activities[0] if required_activities else None
+        scheduled = (
+            parse_planning_datetime(required_activity.get("scheduled_at"))
+            if required_activity else None
+        )
+        stops.append({
+            **stop,
+            "customer_row": row_number,
+            "customer_id": customer_id,
+            "customer_number": str(
+                customer.get("customer_number") or ""
+            ).strip(),
+            "customer": str(customer.get("customer") or "").strip(),
+            "address": " ".join(filter(None, [
+                str(
+                    customer.get("address_google")
+                    or customer.get("address")
+                    or ""
+                ).strip(),
+                str(
+                    customer.get("address_number_google")
+                    or customer.get("address_number")
+                    or ""
+                ).strip(),
+            ])),
+            "city": str(
+                customer.get("city_google")
+                or customer.get("city")
+                or ""
+            ).strip(),
+            "contact_type": "visit",
+            "contact_type_label": PLANNING_CONTACT_TYPE_LABELS["visit"],
+            "duration_minutes": SERVICE_SECONDS_PER_STOP // 60,
+            "required": bool(required_activity),
+            "planned_activity_id": (
+                required_activity.get("planned_activity_id", "")
+                if required_activity else ""
+            ),
+            "required_activity_ids": [
+                item.get("planned_activity_id", "")
+                for item in required_activities
+            ],
+            "scheduled_at": (
+                scheduled.isoformat(timespec="minutes") if scheduled else ""
+            ),
+            "estimated_at": "",
+            "time_is_estimated": not bool(required_activity),
+        })
+
+    route_summary = dict(route_payload.get("summary") or {})
+    stops, route_timeline, timeline_error = schedule_planning_route_with_anchors(
+        stops=stops,
+        fixed_non_route=fixed_non_route,
+        route_start_at=route_start_at,
+        start=start,
+    )
+    if timeline_error is not None:
+        return None, timeline_error
+    conflicts = planning_route_conflicts(stops, fixed_non_route)
+    active_total_minutes = float(
+        route_timeline.get("elapsed_minutes") or 0
+    )
+    route_total_minutes = max(0, active_total_minutes - non_route_minutes)
+    if float(active_total_minutes) >= (MAX_TOTAL_SECONDS / 60):
+        return None, planning_error(
+            "day_capacity_exhausted",
+            "Rutten och dagens fasta aktiviteter måste rymmas inom mindre än sju timmar.",
+            422,
+            total_minutes=active_total_minutes,
+        )
+    route_summary.update({
+        "stop_count": len(stops),
+        "drive_minutes": sum(
+            max(0, int(stop.get("leg_drive_minutes") or 0))
+            for stop in stops
+        ),
+        "return_drive_minutes": route_timeline.get(
+            "return_drive_minutes", 0
+        ),
+        "service_minutes": sum(
+            max(0, int(stop.get("duration_minutes") or 0))
+            for stop in stops
+        ),
+        "route_minutes": route_total_minutes,
+        "non_route_minutes": non_route_minutes,
+        "blocked_minutes": route_timeline.get("blocked_minutes", 0),
+        "total_minutes": active_total_minutes,
+        "conflict_count": len(conflicts),
+        "route_end_at": route_timeline.get("route_end_at"),
+        "timeline_elapsed_minutes": route_timeline.get(
+            "elapsed_minutes"
+        ),
+    })
+    gps_notice = (
+        "Start och retur: din position nu"
+        if route_date == stockholm_today()
+        else "Rutten beräknas från din position nu"
+    )
+    preview = {
+        "ok": True,
+        "owner": owner,
+        "route_date": route_date.isoformat(),
+        "route_start_at": route_start_at.isoformat(timespec="minutes"),
+        "generated_at": planning_timestamp(),
+        "expires_at": (
+            stockholm_now()
+            + timedelta(seconds=PLANNING_PREVIEW_MAX_AGE_SECONDS)
+        ).isoformat(timespec="seconds"),
+        "start": {
+            "latitude": start.latitude,
+            "longitude": start.longitude,
+        },
+        "stops": stops,
+        "summary": route_summary,
+        "conflicts": conflicts,
+        "warnings": candidate_warnings,
+        "timeline": route_timeline,
+        "gps_notice": gps_notice,
+        "plan_fingerprint": planning_state_fingerprint(date_rows),
+        "route_payload": {
+            **route_payload,
+            "stops": stops,
+            "summary": route_summary,
+            "route_start_at": route_start_at.isoformat(timespec="minutes"),
+            "gps_notice": gps_notice,
+            "conflicts": conflicts,
+            "timeline": route_timeline,
+        },
+    }
+    token_payload = {
+        key: value
+        for key, value in preview.items()
+        if key not in {"ok", "owner"}
+    }
+    token_payload["user_name"] = owner.get("user_name")
+    preview["preview_token"] = planning_preview_serializer().dumps(
+        token_payload
+    )
+    return preview, None
+
+
+def saved_route_has_group(spreadsheet, route_group_id):
+    sheet = get_or_create_worksheet(
+        spreadsheet,
+        ROUTE_PROPOSALS_SHEET,
+        ROUTE_PROPOSAL_COLUMNS,
+        rows=500,
+    )
+    for row in worksheet_to_dicts(
+        sheet,
+        expected_columns=ROUTE_PROPOSAL_COLUMNS,
+    ):
+        try:
+            payload = json.loads(str(row.get("payload_json") or ""))
+        except (TypeError, ValueError):
+            continue
+        if str(payload.get("route_group_id") or "").strip() == route_group_id:
+            return True
+    return False
+
+
+def saved_route_request_conflicts(
+    spreadsheet,
+    route_request_key,
+    preview_fingerprint,
+):
+    sheet = get_or_create_worksheet(
+        spreadsheet,
+        ROUTE_PROPOSALS_SHEET,
+        ROUTE_PROPOSAL_COLUMNS,
+        rows=500,
+    )
+    for row in worksheet_to_dicts(
+        sheet,
+        expected_columns=ROUTE_PROPOSAL_COLUMNS,
+    ):
+        try:
+            payload = json.loads(str(row.get("payload_json") or ""))
+        except (TypeError, ValueError):
+            continue
+        if (
+            str(payload.get("route_request_key") or "").strip()
+            == route_request_key
+            and str(
+                payload.get("route_preview_fingerprint") or ""
+            ).strip() != preview_fingerprint
+        ):
+            return True
+    return False
+
+
+def apply_planning_route(
+    *,
+    spreadsheet,
+    owner,
+    preview,
+    client_request_id,
+):
+    route_date = parse_planning_date(preview.get("route_date"))
+    if route_date is None:
+        return None, planning_error(
+            "invalid_route_preview",
+            "Ruttförhandsgranskningen saknar giltigt datum.",
+            400,
+        )
+    route_request_key = stable_planning_uuid(
+        "route-request",
+        current_user().get("user_name"),
+        owner.get("user_name"),
+        route_date.isoformat(),
+        client_request_id,
+    )
+    preview_fingerprint = planning_route_apply_fingerprint(preview)
+    route_group_id = f"{route_request_key}:{preview_fingerprint}"
+    preview_stops = [
+        stop
+        for stop in (preview.get("stops") or [])
+        if isinstance(stop, dict)
+    ]
+    signed_customer_ids = [
+        str(stop.get("customer_id") or "").strip()
+        for stop in preview_stops
+    ]
+    if not preview_stops or any(not value for value in signed_customer_ids):
+        return None, planning_error(
+            "route_preview_expired_or_legacy",
+            "Ruttförhandsgranskningen använder äldre kundidentitet. Beräkna rutten igen.",
+            409,
+        )
+    current_customers = get_customer_rows(spreadsheet)
+    customers_by_id = defaultdict(list)
+    for customer in current_customers:
+        customer_id = str(customer.get("customer_id") or "").strip()
+        if customer_id:
+            customers_by_id[customer_id].append(customer)
+    resolved_customers_by_id = {}
+    for customer_id in set(signed_customer_ids):
+        matches = customers_by_id.get(customer_id, [])
+        if len(matches) != 1:
+            return None, planning_error(
+                "customer_identity_conflict",
+                "En butik i rutten kunde inte bindas entydigt via customer_id. Beräkna rutten igen.",
+                409,
+                customer_id=customer_id,
+            )
+        resolved_customers_by_id[customer_id] = matches[0]
+
+    with _planning_write_lock:
+        sheet, headers, all_rows = get_planned_activity_snapshot(spreadsheet)
+        date_rows = planning_rows_for_date(all_rows, owner, route_date)
+        conflicting_request_rows = [
+            row
+            for _row_index, row in all_rows
+            if (
+                planning_owner_matches(row, owner)
+                and str(row.get("route_group_id") or "").strip().startswith(
+                    f"{route_request_key}:"
+                )
+                and str(row.get("route_group_id") or "").strip()
+                != route_group_id
+            )
+        ]
+        if conflicting_request_rows or saved_route_request_conflicts(
+            spreadsheet,
+            route_request_key,
+            preview_fingerprint,
+        ):
+            return None, planning_error(
+                "client_request_id_conflict",
+                "Request-ID:t har redan använts för ett annat ruttförslag.",
+                409,
+                field="client_request_id",
+            )
+        existing_group_rows = [
+            (row_index, row)
+            for row_index, row in date_rows
+            if str(row.get("route_group_id") or "").strip() == route_group_id
+        ]
+        if (
+            not existing_group_rows
+            and str(preview.get("plan_fingerprint") or "").strip()
+            != planning_state_fingerprint(date_rows)
+        ):
+            return None, planning_error(
+                "planning_changed",
+                "Planeringen ändrades efter förhandsgranskningen. Beräkna rutten igen.",
+                409,
+            )
+
+        existing_by_id = {
+            str(row.get("planned_activity_id") or "").strip(): (row_index, row)
+            for row_index, row in all_rows
+            if str(row.get("planned_activity_id") or "").strip()
+        }
+        applied_rows = []
+        new_rows = []
+        row_changes = []
+        for stop in preview_stops:
+            if not isinstance(stop, dict):
+                continue
+            signed_customer_id = str(
+                stop.get("customer_id") or ""
+            ).strip()
+            if not signed_customer_id:
+                return None, planning_error(
+                    "route_preview_expired_or_legacy",
+                    "Ruttförhandsgranskningen använder äldre kundidentitet. Beräkna rutten igen.",
+                    409,
+                )
+            try:
+                customer_row = int(stop.get("customer_row") or stop.get("row"))
+                sequence = int(stop.get("sequence"))
+            except (TypeError, ValueError):
+                return None, planning_error(
+                    "invalid_route_preview",
+                    "Ruttförhandsgranskningen innehåller ett ogiltigt stopp.",
+                    400,
+                )
+            if not 1 <= sequence <= MAX_ROUTE_STOPS:
+                return None, planning_error(
+                    "invalid_route_preview",
+                    "Ruttförhandsgranskningen innehåller en ogiltig stoppordning.",
+                    400,
+                )
+
+            required_ids = [
+                str(value or "").strip()
+                for value in (stop.get("required_activity_ids") or [])
+                if str(value or "").strip()
+            ]
+            if stop.get("planned_activity_id") and not required_ids:
+                required_ids = [str(stop.get("planned_activity_id")).strip()]
+            if stop.get("required"):
+                if not required_ids:
+                    return None, planning_error(
+                        "required_activity_missing",
+                        "Ett obligatoriskt besök saknas i planeringen.",
+                        409,
+                    )
+                for activity_id in required_ids:
+                    existing = existing_by_id.get(activity_id)
+                    if not existing:
+                        return None, planning_error(
+                            "required_activity_missing",
+                            "Ett obligatoriskt besök ändrades. Beräkna rutten igen.",
+                            409,
+                        )
+                    row_index, row = existing
+                    if (
+                        not planning_owner_matches(row, owner)
+                        or str(row.get("status") or "").strip().casefold()
+                        != "planned"
+                        or normalize_planning_contact_type(
+                            row.get("contact_type")
+                        ) != "visit"
+                        or str(row.get("customer_id") or "").strip()
+                        != signed_customer_id
+                    ):
+                        return None, planning_error(
+                            "required_activity_changed",
+                            "Ett obligatoriskt besök ändrades. Beräkna rutten igen.",
+                            409,
+                        )
+                    updates = {}
+                    if (
+                        str(row.get("route_group_id") or "").strip()
+                        != route_group_id
+                    ):
+                        updates["route_group_id"] = route_group_id
+                    try:
+                        current_sequence = int(
+                            float(row.get("route_sequence") or 0)
+                        )
+                    except (TypeError, ValueError):
+                        current_sequence = 0
+                    if current_sequence != sequence:
+                        updates["route_sequence"] = sequence
+                    if updates:
+                        updates["updated_at"] = planning_timestamp()
+                        updates["revision"] = planning_revision(row) + 1
+                        row_changes.append((row_index, updates))
+                    applied_rows.append({**row, **updates})
+                continue
+
+            activity_id = stable_planning_uuid(
+                "route-activity",
+                route_group_id,
+                sequence,
+                stop.get("customer_id") or customer_row,
+            )
+            existing = existing_by_id.get(activity_id)
+            if existing:
+                applied_rows.append(existing[1])
+                continue
+            customer = resolved_customers_by_id[signed_customer_id]
+            if not customer or customer_is_cancelled(customer):
+                return None, planning_error(
+                    "route_customer_unavailable",
+                    "En butik i rutten är inte längre tillgänglig.",
+                    409,
+                    customer_row=customer_row,
+                )
+            activity = build_planned_activity_row(
+                activity_id=activity_id,
+                owner=owner,
+                customer=customer,
+                contact_type="visit",
+                scheduled_at=stop.get("estimated_at") or stop.get("scheduled_at"),
+                note="Automatiskt dagsförslag",
+                source="route",
+                route_group_id=route_group_id,
+                route_sequence=sequence,
+                client_request_id=client_request_id,
+                time_is_estimated=True,
+                create_fingerprint=planning_create_fingerprint(
+                    actor=current_user(),
+                    owner=owner,
+                    customer_id=customer.get("customer_id"),
+                    contact_type="visit",
+                    scheduled_at=(
+                        stop.get("estimated_at")
+                        or stop.get("scheduled_at")
+                    ),
+                    duration_minutes=PLANNING_CONTACT_DURATIONS["visit"],
+                    note="Automatiskt dagsförslag",
+                    source="route",
+                    source_contact_id="",
+                ),
+                revision=1,
+            )
+            new_rows.append(activity)
+            applied_rows.append(activity)
+        cancelled_count = 0
+        for row_index, row in date_rows:
+            if (
+                str(row.get("source") or "").strip().casefold() != "route"
+                or str(row.get("status") or "").strip().casefold() != "planned"
+                or str(row.get("route_group_id") or "").strip() == route_group_id
+            ):
+                continue
+            row_changes.append((row_index, {
+                "status": "cancelled",
+                "last_mutation_request_id": client_request_id,
+                "last_mutation_fingerprint": preview_fingerprint,
+                "revision": planning_revision(row) + 1,
+                "updated_at": planning_timestamp(),
+            }))
+            cancelled_count += 1
+
+        batch_update_sheet_changes(
+            sheet,
+            headers,
+            row_changes,
+            new_rows,
+        )
+
+        route_payload = dict(preview.get("route_payload") or {})
+        route_payload.update({
+            "ok": True,
+            "route_group_id": route_group_id,
+            "route_request_key": route_request_key,
+            "route_preview_fingerprint": preview_fingerprint,
+            "client_request_id": client_request_id,
+            "route_date": route_date.isoformat(),
+            "route_owner": user_route_display_name(owner),
+            "generated_at": preview.get("generated_at") or planning_timestamp(),
+            "stops": list(preview.get("stops") or []),
+            "summary": dict(preview.get("summary") or {}),
+            "conflicts": list(preview.get("conflicts") or []),
+            "route_start_at": preview.get("route_start_at"),
+            "gps_notice": preview.get("gps_notice"),
+        })
+        if not saved_route_has_group(spreadsheet, route_group_id):
+            save_route_proposal(
+                spreadsheet,
+                user_name=owner.get("user_name"),
+                user_display_name=user_route_display_name(owner),
+                route_date=route_date,
+                payload=route_payload,
+            )
+
+    unique_applied = {}
+    for row in applied_rows:
+        unique_applied[str(row.get("planned_activity_id") or "")] = row
+    activities = sorted(
+        (
+            public_planned_activity(row)
+            for row in unique_applied.values()
+            if row
+        ),
+        key=lambda item: (
+            item.get("route_sequence") or 999,
+            item.get("scheduled_at") or "",
+        ),
+    )
+    return {
+        "ok": True,
+        "duplicate": bool(existing_group_rows and not new_rows),
+        "route_group_id": route_group_id,
+        "route_date": route_date.isoformat(),
+        "activities": activities,
+        "activity_count": len(activities),
+        "imported_count": len(new_rows),
+        "cancelled_route_activity_count": cancelled_count,
+    }, None
 
 
 @app.route("/route-proposal", methods=["GET", "POST"])
@@ -3858,6 +7425,474 @@ def create_route_proposal():
             "Dagens ruttförslag kunde inte sparas. Försök igen.",
             503,
         )
+
+@app.route("/planning/route-import", methods=["POST"])
+def planning_route_import():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return planning_error(
+            "invalid_request",
+            "Begäran om att importera rutten är ogiltig.",
+            400,
+        )
+    client_request_id = normalize_client_request_id(
+        data.get("client_request_id")
+    )
+    if not client_request_id:
+        return planning_error(
+            "invalid_client_request_id",
+            "Ett giltigt request-ID krävs.",
+            400,
+            field="client_request_id",
+        )
+    route_date = stockholm_today()
+    try:
+        spreadsheet = get_spreadsheet_with_retry()
+    except Exception:
+        return planning_error(
+            "route_store_unavailable",
+            "Dagens rutt kunde inte laddas. Försök igen.",
+            503,
+        )
+    owner, owner_error = resolve_planning_owner(
+        spreadsheet,
+        data.get("user_name"),
+    )
+    if owner_error is not None:
+        return owner_error
+    try:
+        saved = get_saved_route_proposal(
+            spreadsheet,
+            owner.get("user_name"),
+            route_date,
+        )
+    except Exception:
+        app.logger.exception("Could not read daily route for planning import")
+        return planning_error(
+            "route_store_unavailable",
+            "Dagens rutt kunde inte laddas. Försök igen.",
+            503,
+        )
+    if not saved:
+        return planning_error(
+            "no_daily_route",
+            "Det finns inget sparat ruttförslag för idag.",
+            404,
+        )
+
+    _sheet, _headers, all_rows = get_planned_activity_snapshot(spreadsheet)
+    date_rows = planning_rows_for_date(all_rows, owner, route_date)
+    required_by_customer_row = defaultdict(list)
+    invalid_required_activity_ids = []
+    fixed_non_route = []
+    for _row_index, row in date_rows:
+        if str(row.get("status") or "").strip().casefold() != "planned":
+            continue
+        public_row = public_planned_activity(row)
+        if (
+            public_row.get("contact_type") == "visit"
+            and public_row.get("source") in {"manual", "follow_up"}
+            and not public_row.get("time_is_estimated")
+        ):
+            if public_row.get("customer_row"):
+                required_by_customer_row[public_row["customer_row"]].append(
+                    public_row
+                )
+            else:
+                invalid_required_activity_ids.append(
+                    public_row.get("planned_activity_id", "")
+                )
+        elif (
+            public_row.get("contact_type") in {"phone", "email"}
+            and public_row.get("source") in {"manual", "follow_up"}
+        ):
+            fixed_non_route.append(public_row)
+
+    if invalid_required_activity_ids:
+        return planning_error(
+            "required_stops_not_feasible",
+            "Ett eller flera obligatoriska besök saknar en giltig butikskoppling.",
+            422,
+            planned_activity_ids=invalid_required_activity_ids,
+        )
+    duplicate_required_rows = {
+        row_number: [
+            activity.get("planned_activity_id", "")
+            for activity in activities
+        ]
+        for row_number, activities in required_by_customer_row.items()
+        if len(activities) > 1
+    }
+    if duplicate_required_rows:
+        return planning_error(
+            "duplicate_required_customer",
+            "Samma butik har flera obligatoriska besök samma dag. Flytta eller ställ in ett av besöken innan rutten importeras.",
+            422,
+            duplicate_customers=duplicate_required_rows,
+        )
+
+    saved_stop_customer_rows = set()
+    for raw_stop in saved.get("stops") or []:
+        if not isinstance(raw_stop, dict):
+            continue
+        try:
+            saved_customer_row = int(
+                raw_stop.get("customer_row") or raw_stop.get("row")
+            )
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if saved_customer_row >= 2:
+            saved_stop_customer_rows.add(saved_customer_row)
+    missing_required_rows = sorted(
+        set(required_by_customer_row) - saved_stop_customer_rows
+    )
+    if missing_required_rows:
+        return planning_error(
+            "required_stops_missing_from_daily_route",
+            "Den sparade rutten saknar ett obligatoriskt besök. Använd Fyll dagen automatiskt för att beräkna en komplett plan.",
+            422,
+            customer_rows=missing_required_rows,
+        )
+
+    non_route_minutes = sum(
+        int(item.get("duration_minutes") or 0)
+        for item in fixed_non_route
+    )
+    try:
+        saved_route_minutes = float(
+            (saved.get("summary") or {}).get("total_minutes")
+        )
+    except (TypeError, ValueError, OverflowError):
+        saved_route_minutes = -1
+    if not math.isfinite(saved_route_minutes) or saved_route_minutes < 0:
+        return planning_error(
+            "invalid_daily_route",
+            "Dagens sparade rutt saknar en giltig tidsberäkning.",
+            422,
+        )
+    imported_total_minutes = saved_route_minutes + non_route_minutes
+    if imported_total_minutes >= (MAX_TOTAL_SECONDS / 60):
+        return planning_error(
+            "day_capacity_exhausted",
+            "Rutten och dagens telefon- och mejlaktiviteter ryms inte inom sju timmar.",
+            422,
+            route_minutes=saved_route_minutes,
+            non_route_minutes=non_route_minutes,
+            total_minutes=imported_total_minutes,
+        )
+
+    saved_start_at = parse_planning_datetime(
+        saved.get("route_start_at")
+    )
+    if saved_start_at and saved_start_at.date() == route_date:
+        start_at = saved_start_at
+    else:
+        saved_generated_at = parse_planning_instant(
+            saved.get("generated_at")
+        )
+        start_at = route_start_datetime(
+            route_date,
+            now=(
+                saved_generated_at
+                if saved_generated_at
+                and saved_generated_at.date() == route_date
+                else None
+            ),
+        )
+    stops = []
+    for raw_stop in saved.get("stops") or []:
+        try:
+            customer_row = int(
+                raw_stop.get("customer_row") or raw_stop.get("row")
+            )
+            sequence = int(raw_stop.get("sequence"))
+        except (TypeError, ValueError):
+            continue
+        required_activities = required_by_customer_row.get(customer_row, [])
+        scheduled = (
+            parse_planning_datetime(required_activities[0].get("scheduled_at"))
+            if required_activities else None
+        )
+        stops.append({
+            **raw_stop,
+            "row": customer_row,
+            "customer_row": customer_row,
+            "sequence": sequence,
+            "contact_type": "visit",
+            "contact_type_label": PLANNING_CONTACT_TYPE_LABELS["visit"],
+            "duration_minutes": SERVICE_SECONDS_PER_STOP // 60,
+            "required": bool(required_activities),
+            "planned_activity_id": (
+                required_activities[0].get("planned_activity_id", "")
+                if required_activities else ""
+            ),
+            "required_activity_ids": [
+                item.get("planned_activity_id", "")
+                for item in required_activities
+            ],
+            "scheduled_at": (
+                scheduled.isoformat(timespec="minutes") if scheduled else ""
+            ),
+            "estimated_at": "",
+            "time_is_estimated": not bool(required_activities),
+        })
+    if not stops:
+        return planning_error(
+            "no_daily_route_stops",
+            "Dagens rutt saknar stopp att spara i Planering.",
+            422,
+        )
+    summary = dict(saved.get("summary") or {})
+    stops, route_timeline, timeline_error = schedule_planning_route_timeline(
+        stops=stops,
+        fixed_non_route=fixed_non_route,
+        route_start_at=start_at,
+        return_drive_minutes=summary.get(
+            "return_drive_minutes",
+            0,
+        ),
+    )
+    if timeline_error is not None:
+        return timeline_error
+    conflicts = planning_route_conflicts(stops, fixed_non_route)
+    summary.update({
+        "route_minutes": saved_route_minutes,
+        "non_route_minutes": non_route_minutes,
+        "total_minutes": max(
+            imported_total_minutes,
+            float(route_timeline.get("elapsed_minutes") or 0),
+        ),
+        "conflict_count": len(conflicts),
+        "route_end_at": route_timeline.get("route_end_at"),
+        "timeline_elapsed_minutes": route_timeline.get(
+            "elapsed_minutes"
+        ),
+    })
+    preview = {
+        "route_date": route_date.isoformat(),
+        "route_start_at": start_at.isoformat(timespec="minutes"),
+        "generated_at": saved.get("generated_at") or planning_timestamp(),
+        "start": dict(saved.get("start") or {}),
+        "stops": stops,
+        "summary": summary,
+        "conflicts": conflicts,
+        "timeline": route_timeline,
+        "gps_notice": "Planen beräknades från din position vid skapandet",
+        "plan_fingerprint": planning_state_fingerprint(date_rows),
+        "route_payload": {
+            **saved,
+            "stops": stops,
+            "conflicts": conflicts,
+            "timeline": route_timeline,
+            "route_start_at": start_at.isoformat(timespec="minutes"),
+        },
+    }
+    try:
+        result, import_error = apply_planning_route(
+            spreadsheet=spreadsheet,
+            owner=owner,
+            preview=preview,
+            client_request_id=client_request_id,
+        )
+    except Exception:
+        app.logger.exception("Could not import daily route into planning")
+        return planning_error(
+            "route_import_failed",
+            "Dagens rutt kunde inte sparas i Planering. Försök igen.",
+            503,
+        )
+    if import_error is not None:
+        return import_error
+    result["imported"] = True
+    return jsonify(result)
+
+
+@app.route("/planning/route-apply", methods=["POST"])
+def planning_route_apply():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return planning_error(
+            "invalid_request",
+            "Begäran om att spara rutten är ogiltig.",
+            400,
+        )
+    client_request_id = normalize_client_request_id(
+        data.get("client_request_id")
+    )
+    if not client_request_id:
+        return planning_error(
+            "invalid_client_request_id",
+            "Ett giltigt request-ID krävs.",
+            400,
+            field="client_request_id",
+        )
+    token = str(data.get("preview_token") or "").strip()
+    if not token:
+        return planning_error(
+            "missing_preview_token",
+            "Ruttförhandsgranskningen saknas.",
+            400,
+            field="preview_token",
+        )
+    try:
+        preview = planning_preview_serializer().loads(
+            token,
+            max_age=PLANNING_PREVIEW_MAX_AGE_SECONDS,
+        )
+    except SignatureExpired:
+        return planning_error(
+            "route_preview_expired",
+            "Ruttförhandsgranskningen har gått ut. Beräkna rutten igen.",
+            409,
+        )
+    except BadSignature:
+        return planning_error(
+            "invalid_route_preview",
+            "Ruttförhandsgranskningen är ogiltig.",
+            400,
+        )
+    if not isinstance(preview, dict):
+        return planning_error(
+            "invalid_route_preview",
+            "Ruttförhandsgranskningen är ogiltig.",
+            400,
+        )
+    route_date = parse_planning_date(preview.get("route_date"))
+    if route_date is None or route_date < stockholm_today():
+        return planning_error(
+            "route_date_in_past",
+            "Tidigare dagar kan inte fyllas automatiskt.",
+            409,
+        )
+
+    try:
+        spreadsheet = get_spreadsheet_with_retry()
+    except Exception:
+        return planning_error(
+            "route_store_unavailable",
+            "Rutten kunde inte sparas. Försök igen.",
+            503,
+        )
+    owner, owner_error = resolve_planning_owner(
+        spreadsheet,
+        preview.get("user_name"),
+    )
+    if owner_error is not None:
+        return owner_error
+    requested_owner = str(data.get("user_name") or "").strip()
+    if (
+        requested_owner
+        and normalize_key(requested_owner)
+        != normalize_key(owner.get("user_name"))
+    ):
+        return planning_error(
+            "route_preview_owner_mismatch",
+            "Ruttförhandsgranskningen tillhör en annan säljare.",
+            409,
+        )
+    try:
+        result, apply_error = apply_planning_route(
+            spreadsheet=spreadsheet,
+            owner=owner,
+            preview=preview,
+            client_request_id=client_request_id,
+        )
+    except Exception:
+        app.logger.exception("Could not apply planning route")
+        return planning_error(
+            "route_apply_failed",
+            "Rutten kunde inte sparas. Försök igen med samma request-ID.",
+            503,
+        )
+    if apply_error is not None:
+        return apply_error
+    return jsonify(result)
+
+
+@app.route("/planning/route-preview", methods=["POST"])
+def planning_route_preview():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return planning_error(
+            "invalid_request",
+            "Begäran om dagsfyllning är ogiltig.",
+            400,
+        )
+    route_date = parse_planning_date(data.get("route_date"))
+    if route_date is None:
+        return planning_error(
+            "invalid_route_date",
+            "Ange ett giltigt datum för rutten.",
+            400,
+            field="route_date",
+        )
+    if route_date < stockholm_today():
+        return planning_error(
+            "route_date_in_past",
+            "Tidigare dagar kan inte fyllas automatiskt.",
+            409,
+            field="route_date",
+        )
+    start = parse_route_start(data)
+    if start is None:
+        return planning_error(
+            "invalid_start",
+            "Din position är ogiltig. Försök hämta positionen igen.",
+            400,
+            field="start",
+        )
+    candidate_rows = data.get("candidate_rows", [])
+    if candidate_rows is None:
+        candidate_rows = []
+    if (
+        not isinstance(candidate_rows, list)
+        or len(candidate_rows) > 2376
+        or any(
+            isinstance(row, bool) or not isinstance(row, int) or row < 2
+            for row in candidate_rows
+        )
+    ):
+        return planning_error(
+            "invalid_candidate_rows",
+            "Listan med butiker är ogiltig.",
+            400,
+            field="candidate_rows",
+        )
+
+    try:
+        spreadsheet = get_spreadsheet_with_retry()
+    except Exception:
+        app.logger.exception("Could not open planning route store")
+        return planning_error(
+            "route_store_unavailable",
+            "Ruttförslaget kunde inte laddas. Försök igen.",
+            503,
+        )
+    owner, owner_error = resolve_planning_owner(
+        spreadsheet,
+        data.get("user_name"),
+    )
+    if owner_error is not None:
+        return owner_error
+    try:
+        preview, preview_error = build_planning_route_preview(
+            spreadsheet=spreadsheet,
+            owner=owner,
+            route_date=route_date,
+            start=start,
+            candidate_rows=tuple(sorted(set(candidate_rows))),
+        )
+    except Exception:
+        app.logger.exception("Unexpected planning route preview failure")
+        return planning_error(
+            "route_preview_failed",
+            "Ruttförslaget kunde inte beräknas. Försök igen.",
+            500,
+        )
+    if preview_error is not None:
+        return preview_error
+    return jsonify(preview)
+
 
 @app.route("/followup-insights", methods=["GET"])
 def get_followup_insights():
@@ -4125,29 +8160,720 @@ def update_customer_contact(row):
 
 @app.route("/customers/<customer_name>/contacts", methods=["POST"])
 def add_contact(customer_name):
-    customer_name = unquote(customer_name)
-    data = request.get_json()
-    sheet = get_spreadsheet_with_retry().worksheet("sales_activities")
-    headers = ensure_contact_worksheet_schema(sheet)
-    freezer_values = {field: checkbox_to_sheet_value(data.get(field, "")) for field in FREEZER_COLUMNS}
-    if not any(freezer_values.values()):
-        return jsonify({"ok": False, "error": "freezer_selection_required"}), 400
+    customer_name = unquote(customer_name).strip()
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return planning_error(
+            "invalid_request",
+            "Kontaktuppgifterna är ogiltiga.",
+            400,
+        )
 
-    row_data = {
-        "date_time": data.get("date_time", stockholm_now().strftime("%Y-%m-%d %H:%M")),
-        "sales_person": data.get("sales_person", ""),
-        "customer": customer_name,
-        "contact_channel": data.get("contact_channel", ""),
-        "result": data.get("result", ""),
-        "comment": data.get("comment", ""),
-        "customer_contact_person": data.get("customer_contact_person", ""),
-        "follow_up_date": data.get("follow_up_date", ""),
-        **freezer_values,
+    contact_type = normalize_planning_contact_type(data.get("contact_channel"))
+    physical_contact = contact_type == "visit" or not str(
+        data.get("contact_channel") or ""
+    ).strip()
+    freezer_values = {
+        field: checkbox_to_sheet_value(data.get(field, ""))
+        for field in FREEZER_COLUMNS
     }
-    row = build_worksheet_row(headers, row_data, single_value_columns=FREEZER_COLUMNS)
-    sheet.append_row(row)
-    return jsonify({"ok": True})
+    if physical_contact and not any(freezer_values.values()):
+        return jsonify({"ok": False, "error": "freezer_selection_required"}), 400
+    if not str(data.get("comment") or "").strip():
+        return planning_error(
+            "comment_required",
+            "Kommentar är obligatorisk.",
+            400,
+            field="comment",
+        )
 
+    raw_follow_up = data.get("follow_up")
+    if isinstance(raw_follow_up, dict):
+        follow_up = dict(raw_follow_up)
+    else:
+        follow_up = {
+            "enabled": data.get("follow_up_enabled"),
+            "contact_type": data.get("follow_up_contact_type"),
+            "scheduled_at": data.get("follow_up_scheduled_at"),
+            "note": data.get("follow_up_note"),
+        }
+    follow_up_enabled = is_yes(follow_up.get("enabled")) or follow_up.get(
+        "enabled"
+    ) is True
+    follow_up_type = ""
+    follow_up_at = None
+    follow_up_note = ""
+    if follow_up_enabled:
+        follow_up_type = normalize_planning_contact_type(
+            follow_up.get("contact_type")
+        )
+        if follow_up_type not in PLANNING_CONTACT_TYPES:
+            return planning_error(
+                "invalid_follow_up_contact_type",
+                "Välj Besök, Telefon eller Mejl för uppföljningen.",
+                400,
+                field="follow_up.contact_type",
+            )
+        follow_up_at = parse_planning_datetime(follow_up.get("scheduled_at"))
+        if follow_up_at is None:
+            return planning_error(
+                "invalid_follow_up_scheduled_at",
+                "Ange datum och tid för uppföljningen.",
+                400,
+                field="follow_up.scheduled_at",
+            )
+        follow_up_note = str(follow_up.get("note") or "").strip()
+        if len(follow_up_note) > 300:
+            return planning_error(
+                "follow_up_note_too_long",
+                "Uppföljningsanteckningen får vara högst 300 tecken.",
+                400,
+                field="follow_up.note",
+            )
+
+    planned_activity_id = str(
+        data.get("planned_activity_id") or ""
+    ).strip()
+    client_request_id = normalize_client_request_id(
+        data.get("client_request_id")
+    )
+    if (follow_up_enabled or planned_activity_id) and not client_request_id:
+        return planning_error(
+            "invalid_client_request_id",
+            "Ett giltigt request-ID krävs för kalenderkopplade kontakter.",
+            400,
+            field="client_request_id",
+        )
+
+    try:
+        spreadsheet = get_spreadsheet_with_retry()
+    except Exception:
+        app.logger.exception("Could not open contact store")
+        return planning_error(
+            "contact_store_unavailable",
+            "Kontakten kunde inte sparas. Försök igen.",
+            503,
+        )
+    sheet = spreadsheet.worksheet("sales_activities")
+    headers = ensure_contact_worksheet_schema(sheet)
+    session_caller = current_user()
+    calendar_coupled = bool(follow_up_enabled or planned_activity_id)
+    caller = session_caller
+    if calendar_coupled:
+        try:
+            active_caller = find_active_user(
+                spreadsheet,
+                session_caller.get("user_name"),
+            )
+        except Exception:
+            app.logger.exception("Could not validate contact actor")
+            return planning_error(
+                "user_store_unavailable",
+                "Användaren kunde inte verifieras. Försök igen.",
+                503,
+            )
+        if not active_caller:
+            return planning_error(
+                "planning_access_forbidden",
+                "Ditt konto är inte aktivt för kalenderkopplade kontakter.",
+                403,
+            )
+        caller = public_user(active_caller)
+    owner = caller
+    planned_row_index = None
+    planned_headers = None
+    planned_row = {}
+    customer = None
+
+    if planned_activity_id:
+        (
+            _planned_sheet,
+            planned_headers,
+            planned_row_index,
+            planned_row,
+        ) = find_planned_activity(spreadsheet, planned_activity_id)
+        if not planned_row_index:
+            return planning_error(
+                "activity_not_found",
+                "Den planerade aktiviteten kunde inte hittas.",
+                404,
+            )
+        try:
+            activity_owner = find_active_user(
+                spreadsheet,
+                planned_row.get("user_name"),
+            )
+        except Exception:
+            app.logger.exception("Could not validate planned activity owner")
+            return planning_error(
+                "user_store_unavailable",
+                "Aktivitetens säljare kunde inte verifieras. Försök igen.",
+                503,
+            )
+        if not activity_owner or not user_is_seller(activity_owner):
+            return planning_error(
+                "activity_owner_not_sales_user",
+                "Aktiviteten saknar en aktiv säljare och kan inte loggas.",
+                422,
+            )
+        if (
+            normalize_key(activity_owner.get("user_name"))
+            != normalize_key(caller.get("user_name"))
+            and not user_is_admin(caller)
+        ):
+            return planning_error(
+                "planning_owner_forbidden",
+                "Du får inte logga en annan säljares aktivitet.",
+                403,
+            )
+        try:
+            planned_customer = resolve_planning_customer(
+                spreadsheet,
+                {
+                    "customer_id": planned_row.get("customer_id"),
+                    "customer": planned_row.get("customer"),
+                    "customer_row": planned_row.get("customer_row"),
+                    "customer_number": planned_row.get("customer_number"),
+                },
+            )
+        except PlanningCustomerResolutionError as exc:
+            return planning_error(exc.code, str(exc), exc.status)
+        valid_customer_names = {
+            normalize_key(planned_row.get("customer")),
+            normalize_key(
+                planned_customer.get("customer") if planned_customer else ""
+            ),
+        }
+        valid_customer_names.discard("")
+        if normalize_key(customer_name) not in valid_customer_names:
+            return planning_error(
+                "activity_customer_mismatch",
+                "Aktiviteten hör till en annan butik.",
+                409,
+            )
+        if str(planned_row.get("status") or "").strip().casefold() in {
+            "cancelled",
+            "skipped",
+        }:
+            return planning_error(
+                "activity_not_active",
+                "Aktiviteten är inte längre aktiv.",
+                409,
+            )
+        owner = public_user(activity_owner)
+        if not contact_type:
+            contact_type = normalize_planning_contact_type(
+                planned_row.get("contact_type")
+            )
+        if planned_customer:
+            customer = planned_customer
+        customer_name = str(
+            (planned_customer or {}).get("customer")
+            or planned_row.get("customer")
+            or customer_name
+        ).strip()
+    elif follow_up_enabled:
+        requested_owner_name = str(data.get("user_name") or "").strip()
+        if (
+            user_is_admin(caller)
+            and not user_is_seller(caller)
+            and not requested_owner_name
+        ):
+            return planning_error(
+                "planning_owner_required",
+                "Välj en aktiv säljare för den kalenderkopplade kontakten.",
+                422,
+                field="user_name",
+            )
+        requested_owner_name = (
+            requested_owner_name
+            or str(caller.get("user_name") or "").strip()
+        )
+        if (
+            normalize_key(requested_owner_name)
+            != normalize_key(caller.get("user_name"))
+            and not user_is_admin(caller)
+        ):
+            return planning_error(
+                "planning_owner_forbidden",
+                "Du får inte skapa en uppföljning åt en annan säljare.",
+                403,
+            )
+        try:
+            requested_owner = find_active_user(
+                spreadsheet,
+                requested_owner_name,
+            )
+        except Exception:
+            app.logger.exception("Could not validate follow-up owner")
+            return planning_error(
+                "user_store_unavailable",
+                "Den valda säljaren kunde inte verifieras. Försök igen.",
+                503,
+            )
+        if not requested_owner:
+            return planning_error(
+                "planning_owner_not_found",
+                "Den valda säljaren är inte aktiv.",
+                404,
+                field="user_name",
+            )
+        if not user_is_seller(requested_owner):
+            if normalize_key(requested_owner_name) == normalize_key(
+                caller.get("user_name")
+            ) and not user_is_admin(caller):
+                return planning_error(
+                    "planning_access_forbidden",
+                    "Ditt konto saknar behörighet att skapa uppföljningar.",
+                    403,
+                )
+            return planning_error(
+                "planning_owner_not_sales_user",
+                "Den valda användaren kan inte äga en uppföljning.",
+                422,
+                field="user_name",
+            )
+        owner = public_user(requested_owner)
+
+    if customer is None:
+        try:
+            customer = resolve_planning_customer(
+                spreadsheet,
+                {
+                    "customer_id": data.get("customer_id"),
+                    "customer": customer_name,
+                    "customer_row": planned_row.get("customer_row"),
+                    "customer_number": planned_row.get("customer_number"),
+                },
+            )
+        except PlanningCustomerResolutionError as exc:
+            return planning_error(exc.code, str(exc), exc.status)
+    if not customer:
+        return planning_error(
+            "customer_not_found",
+            "Butiken kunde inte hittas.",
+            404,
+        )
+
+    if follow_up_enabled:
+        if customer is None:
+            try:
+                customer = resolve_planning_customer(
+                    spreadsheet,
+                    {
+                        "customer_id": (
+                            data.get("customer_id")
+                            or planned_row.get("customer_id")
+                        ),
+                        "customer": customer_name,
+                        "customer_row": planned_row.get("customer_row"),
+                        "customer_number": planned_row.get("customer_number"),
+                    },
+                )
+            except PlanningCustomerResolutionError as exc:
+                return planning_error(exc.code, str(exc), exc.status)
+        if not customer:
+            return planning_error(
+                "customer_not_found",
+                "Butiken kunde inte hittas för uppföljningen.",
+                404,
+            )
+        if customer_is_cancelled(customer):
+            return planning_error(
+                "customer_cancelled",
+                "Avslutade kunder kan inte få en ny uppföljning.",
+                409,
+            )
+
+    contact_channel = (
+        planning_contact_label(contact_type)
+        if contact_type else str(data.get("contact_channel") or "").strip()
+    )
+    mirrored_follow_up_date = (
+        follow_up_at.date().isoformat()
+        if follow_up_enabled and follow_up_at
+        else str(data.get("follow_up_date") or "").strip()
+    )
+    if planned_activity_id:
+        contact_id = planned_contact_id_for_payload(
+            owner=owner,
+            planned_activity_id=planned_activity_id,
+            customer_name=customer_name,
+            customer_key=(
+                planned_row.get("customer_number")
+                or planned_row.get("customer_key")
+                or planned_row.get("customer_row")
+            ),
+            contact_channel=contact_channel,
+            data=data,
+            freezer_values=freezer_values,
+            follow_up_enabled=follow_up_enabled,
+            follow_up_type=follow_up_type,
+            follow_up_at=follow_up_at,
+            follow_up_note=follow_up_note,
+            mirrored_follow_up_date=mirrored_follow_up_date,
+        )
+    elif client_request_id:
+        contact_id = stable_planning_uuid(
+            "contact",
+            owner.get("user_name"),
+            client_request_id,
+        )
+    else:
+        contact_id = str(uuid.uuid4())
+    follow_up_activity_id = (
+        stable_planning_uuid(
+            "follow-up",
+            owner.get("user_name"),
+            contact_id,
+        )
+        if follow_up_enabled else ""
+    )
+
+    contact_saved = False
+    activity_completed = not bool(planned_activity_id)
+    follow_up_saved = not follow_up_enabled
+    duplicate_contact = False
+    follow_up_activity = None
+    partial_errors = []
+
+    with _planning_write_lock:
+        if planned_activity_id:
+            (
+                _live_planned_sheet,
+                planned_headers,
+                planned_row_index,
+                planned_row,
+            ) = find_planned_activity(spreadsheet, planned_activity_id)
+            if not planned_row_index:
+                return planning_error(
+                    "activity_not_found",
+                    "Den planerade aktiviteten kunde inte hittas.",
+                    404,
+                )
+            live_status = str(
+                planned_row.get("status") or "planned"
+            ).strip().casefold()
+            live_completed_id = str(
+                planned_row.get("completed_contact_id") or ""
+            ).strip()
+            if live_status in {"cancelled", "skipped"}:
+                return planning_error(
+                    "activity_not_active",
+                    "Aktiviteten är inte längre aktiv.",
+                    409,
+                )
+
+        _contact_headers, contact_rows = worksheet_snapshot(
+            sheet,
+            expected_columns=CONTACT_COLUMNS,
+        )
+        contacts_with_id = [
+            (row_index, row)
+            for row_index, row in contact_rows
+            if str(row.get("contact_id") or "").strip() == contact_id
+        ]
+        if len(contacts_with_id) > 1:
+            return planning_error(
+                "duplicate_contact_id",
+                "Kontaktloggen innehåller flera poster med samma kontakt-ID.",
+                409,
+            )
+        existing_contact_row = None
+        existing_contact = {}
+        if contacts_with_id:
+            existing_contact_row, existing_contact = contacts_with_id[0]
+
+        if planned_activity_id:
+            contacts_for_activity = [
+                (row_index, row)
+                for row_index, row in contact_rows
+                if str(
+                    row.get("planned_activity_id") or ""
+                ).strip() == planned_activity_id
+            ]
+            if len(contacts_for_activity) > 1:
+                return planning_error(
+                    "duplicate_planned_activity_contacts",
+                    "Aktiviteten har redan flera kontaktloggar och måste granskas innan den kan ändras.",
+                    409,
+                )
+            if contacts_for_activity:
+                planned_contact_row, planned_contact = (
+                    contacts_for_activity[0]
+                )
+                planned_contact_id = str(
+                    planned_contact.get("contact_id") or ""
+                ).strip()
+                if planned_contact_id != contact_id:
+                    return planning_error(
+                        "planned_activity_contact_conflict",
+                        "Aktiviteten har redan loggats med andra kontaktuppgifter.",
+                        409,
+                    )
+                existing_contact_row = planned_contact_row
+                existing_contact = planned_contact
+            elif existing_contact_row:
+                return planning_error(
+                    "client_request_id_conflict",
+                    "Kontakt-ID:t har redan använts för en annan aktivitet.",
+                    409,
+                    field="client_request_id",
+                )
+            if (
+                live_status == "completed"
+                and live_completed_id
+                and live_completed_id != contact_id
+            ):
+                return planning_error(
+                    "planned_activity_contact_conflict",
+                    "Aktiviteten har redan genomförts med andra kontaktuppgifter.",
+                    409,
+                )
+            if (
+                live_status == "completed"
+                and live_completed_id == contact_id
+                and not existing_contact_row
+            ):
+                return planning_error(
+                    "completed_contact_missing",
+                    "Aktivitetens genomförda kontakt saknas i kontaktloggen.",
+                    409,
+                )
+
+        if existing_contact_row:
+            existing_activity_id = str(
+                existing_contact.get("planned_activity_id") or ""
+            ).strip()
+            if (
+                existing_activity_id != planned_activity_id
+                or (
+                    not planned_activity_id
+                    and normalize_key(existing_contact.get("customer"))
+                    != normalize_key(customer_name)
+                )
+            ):
+                return planning_error(
+                    "client_request_id_conflict",
+                    "Request-ID:t har redan använts för en annan kontakt.",
+                    409,
+                    field="client_request_id",
+                )
+            contact_saved = True
+            duplicate_contact = True
+        else:
+            row_data = {
+                "date_time": data.get(
+                    "date_time",
+                    stockholm_now().strftime("%Y-%m-%d %H:%M"),
+                ),
+                "sales_person": user_route_display_name(owner),
+                "customer": customer_name,
+                "customer_id": str(
+                    (customer or {}).get("customer_id")
+                    or planned_row.get("customer_id")
+                    or ""
+                ).strip(),
+                "contact_channel": contact_channel,
+                "result": str(data.get("result") or "").strip(),
+                "comment": text_to_sheet_value(data.get("comment")),
+                "customer_contact_person": text_to_sheet_value(
+                    data.get("customer_contact_person")
+                ),
+                "follow_up_date": mirrored_follow_up_date,
+                "contact_id": contact_id,
+                "planned_activity_id": planned_activity_id,
+                **freezer_values,
+            }
+            try:
+                append_dict_row(
+                    sheet,
+                    CONTACT_COLUMNS,
+                    row_data,
+                    single_value_columns=FREEZER_COLUMNS,
+                )
+                contact_saved = True
+            except Exception:
+                app.logger.exception("Could not append sales activity")
+                return planning_error(
+                    "contact_store_unavailable",
+                    "Kontakten kunde inte sparas. Försök igen.",
+                    503,
+                )
+
+        if planned_activity_id:
+            try:
+                (
+                    planned_sheet,
+                    planned_headers,
+                    planned_row_index,
+                    planned_row,
+                ) = find_planned_activity(spreadsheet, planned_activity_id)
+                if not planned_row_index:
+                    raise RuntimeError("planned activity disappeared")
+                current_completed_id = str(
+                    planned_row.get("completed_contact_id") or ""
+                ).strip()
+                current_status = str(
+                    planned_row.get("status") or ""
+                ).strip().casefold()
+                if current_status == "completed" and current_completed_id not in {
+                    "",
+                    contact_id,
+                }:
+                    return planning_error(
+                        "activity_already_completed",
+                        "Aktiviteten har redan genomförts med en annan kontakt.",
+                        409,
+                    )
+                if not (
+                    current_status == "completed"
+                    and current_completed_id == contact_id
+                ):
+                    completion_updates = {
+                        "status": "completed",
+                        "completed_contact_id": contact_id,
+                        "last_mutation_request_id": planning_request_scope(
+                            caller,
+                            "complete",
+                            planned_activity_id,
+                            client_request_id,
+                        ),
+                        "last_mutation_fingerprint": canonical_payload_fingerprint({
+                            "operation": "planned_activity.complete.v1",
+                            "actor": normalize_key(caller.get("user_name")),
+                            "planned_activity_id": planned_activity_id,
+                            "contact_id": contact_id,
+                        }),
+                        "revision": planning_revision(planned_row) + 1,
+                        "updated_at": planning_timestamp(),
+                    }
+                    update_sheet_row(
+                        planned_sheet,
+                        planned_row_index,
+                        planned_headers,
+                        completion_updates,
+                    )
+                activity_completed = True
+                if (
+                    str(planned_row.get("source") or "").strip().casefold()
+                    == "follow_up"
+                ):
+                    sync_followup_date_to_source_contact(
+                        spreadsheet,
+                        planned_row.get("source_contact_id"),
+                        "",
+                    )
+            except Exception as exc:
+                app.logger.exception("Contact saved but activity completion failed")
+                partial_errors.append({
+                    "step": "complete_activity",
+                    "message": str(exc)[:200],
+                })
+
+        if follow_up_enabled and customer:
+            try:
+                follow_sheet, _follow_headers, follow_rows = (
+                    get_planned_activity_snapshot(spreadsheet)
+                )
+                existing_follow_up = next(
+                    (
+                        row
+                        for _row_index, row in follow_rows
+                        if str(
+                            row.get("planned_activity_id") or ""
+                        ).strip() == follow_up_activity_id
+                    ),
+                    None,
+                )
+                if existing_follow_up is not None:
+                    follow_up_activity = existing_follow_up
+                    follow_up_saved = True
+                else:
+                    follow_up_activity = build_planned_activity_row(
+                        activity_id=follow_up_activity_id,
+                        owner=owner,
+                        customer=customer,
+                        contact_type=follow_up_type,
+                        scheduled_at=follow_up_at,
+                        note=follow_up_note,
+                        source="follow_up",
+                        source_contact_id=contact_id,
+                        client_request_id=planning_request_scope(
+                            caller,
+                            "create_follow_up",
+                            owner.get("user_name"),
+                            client_request_id,
+                        ),
+                        create_fingerprint=planning_create_fingerprint(
+                            actor=caller,
+                            owner=owner,
+                            customer_id=customer.get("customer_id"),
+                            contact_type=follow_up_type,
+                            scheduled_at=follow_up_at,
+                            duration_minutes=PLANNING_CONTACT_DURATIONS[
+                                follow_up_type
+                            ],
+                            note=follow_up_note,
+                            source="follow_up",
+                            source_contact_id=contact_id,
+                        ),
+                        revision=1,
+                    )
+                    append_dict_row(
+                        follow_sheet,
+                        PLANNED_ACTIVITY_COLUMNS,
+                        follow_up_activity,
+                    )
+                    follow_up_saved = True
+            except Exception as exc:
+                app.logger.exception("Contact saved but follow-up append failed")
+                partial_errors.append({
+                    "step": "create_follow_up",
+                    "message": str(exc)[:200],
+                })
+
+    if partial_errors:
+        return jsonify({
+            "ok": False,
+            "status": "partial",
+            "error": "partial_save",
+            "code": "partial_save",
+            "message": (
+                "Kontakten sparades men hela kalenderuppdateringen kunde inte "
+                "slutföras. Försök igen."
+            ),
+            "contact_id": contact_id,
+            "contact_saved": contact_saved,
+            "planned_activity_id": planned_activity_id,
+            "activity_completed": activity_completed,
+            "follow_up": {
+                "enabled": follow_up_enabled,
+                "saved": follow_up_saved,
+                "planned_activity_id": follow_up_activity_id,
+            },
+            "partial_errors": partial_errors,
+        }), 207
+
+    response = {
+        "ok": True,
+        "status": "saved",
+        "duplicate": duplicate_contact,
+        "contact_id": contact_id,
+        "contact_saved": contact_saved,
+        "planned_activity_id": planned_activity_id,
+        "activity_completed": activity_completed,
+        "follow_up": {
+            "enabled": follow_up_enabled,
+            "saved": follow_up_saved,
+            "planned_activity_id": follow_up_activity_id,
+            "activity": (
+                public_planned_activity(follow_up_activity)
+                if follow_up_activity else None
+            ),
+        },
+    }
+    return jsonify(response)
 
 @app.route("/config")
 def config():

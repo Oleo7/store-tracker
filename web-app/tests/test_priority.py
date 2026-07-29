@@ -1535,7 +1535,16 @@ class PriorityTests(TestCase):
                 },
             ),
         ]
-        fake_spreadsheet = FakeSpreadsheet({"sales_activities": contacts})
+        fake_spreadsheet = FakeSpreadsheet({
+            "sales_activities": contacts,
+            "customers_enriched": [
+                list(app_module.CUSTOMER_COLUMNS),
+                _row(app_module.CUSTOMER_COLUMNS, {
+                    "customer": "Store A",
+                    "customer_id": "11111111-1111-4111-8111-111111111111",
+                }),
+            ],
+        })
 
         with patch.object(app_module, "get_spreadsheet_with_retry", return_value=fake_spreadsheet):
             client = app_module.app.test_client()
@@ -1565,7 +1574,16 @@ class PriorityTests(TestCase):
             headers,
             _row(app_module.CONTACT_COLUMNS, _contact("Store A", "2026-06-03 14:30", "Sofia", "Positiv")) + ["true"],
         ]
-        fake_spreadsheet = FakeSpreadsheet({"sales_activities": contacts})
+        fake_spreadsheet = FakeSpreadsheet({
+            "sales_activities": contacts,
+            "customers_enriched": [
+                list(app_module.CUSTOMER_COLUMNS),
+                _row(app_module.CUSTOMER_COLUMNS, {
+                    "customer": "Store A",
+                    "customer_id": "11111111-1111-4111-8111-111111111111",
+                }),
+            ],
+        })
 
         rows = app_module.get_contact_rows(fake_spreadsheet)
 
@@ -1577,7 +1595,16 @@ class PriorityTests(TestCase):
             headers,
             _row(app_module.CONTACT_COLUMNS, _contact("Existing Store", "2026-06-03 14:30", "Sofia", "Positiv")) + ["true"],
         ]
-        fake_spreadsheet = FakeSpreadsheet({"sales_activities": contacts})
+        fake_spreadsheet = FakeSpreadsheet({
+            "sales_activities": contacts,
+            "customers_enriched": [
+                list(app_module.CUSTOMER_COLUMNS),
+                _row(app_module.CUSTOMER_COLUMNS, {
+                    "customer": "Store A",
+                    "customer_id": "11111111-1111-4111-8111-111111111111",
+                }),
+            ],
+        })
 
         with patch.object(app_module, "get_spreadsheet_with_retry", return_value=fake_spreadsheet):
             client = app_module.app.test_client()
@@ -1603,7 +1630,16 @@ class PriorityTests(TestCase):
     def test_add_contact_creates_and_logs_none_column(self):
         headers_without_none = [column for column in app_module.CONTACT_COLUMNS if column != "none"]
         contacts = [headers_without_none]
-        fake_spreadsheet = FakeSpreadsheet({"sales_activities": contacts})
+        fake_spreadsheet = FakeSpreadsheet({
+            "sales_activities": contacts,
+            "customers_enriched": [
+                list(app_module.CUSTOMER_COLUMNS),
+                _row(app_module.CUSTOMER_COLUMNS, {
+                    "customer": "Store A",
+                    "customer_id": "11111111-1111-4111-8111-111111111111",
+                }),
+            ],
+        })
 
         with patch.object(app_module, "get_spreadsheet_with_retry", return_value=fake_spreadsheet):
             client = app_module.app.test_client()
@@ -1723,6 +1759,25 @@ class FakeWorksheet:
             while len(target_row) <= col_idx:
                 target_row.append("")
             target_row[col_idx] = value_row[0] if value_row else ""
+
+    def batch_update(self, data, value_input_option=None):
+        for item in data:
+            match = re.match(
+                r"([A-Z]+)(\d+):([A-Z]+)(\d+)$",
+                item.get("range", ""),
+            )
+            if not match:
+                raise ValueError(f"Unsupported range: {item.get('range')}")
+            start_col, start_row, _end_col, _end_row = match.groups()
+            first_column = _a1_column_to_index(start_col)
+            first_row = int(start_row)
+            for row_offset, value_row in enumerate(item.get("values", [])):
+                for column_offset, value in enumerate(value_row):
+                    self.update_cell(
+                        first_row + row_offset,
+                        first_column + column_offset,
+                        value,
+                    )
 
     def delete_columns(self, start_index, end_index=None):
         start_idx = start_index - 1

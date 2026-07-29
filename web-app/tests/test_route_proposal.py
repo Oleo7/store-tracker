@@ -18,6 +18,7 @@ import route_proposal as route_proposal_module
 from route_proposal import (
     Coordinate,
     GoogleRoutesTravelTimeProvider,
+    RequiredStopsNotFeasible,
     RouteCandidate,
     RouteVerificationError,
     TravelTimeResult,
@@ -34,7 +35,14 @@ from route_proposal import (
 START = Coordinate(57.7089, 11.9746)
 
 
-def candidate(row, score, latitude=None, longitude=None, name=None):
+def candidate(
+    row,
+    score,
+    latitude=None,
+    longitude=None,
+    name=None,
+    required=False,
+):
     return RouteCandidate(
         row=row,
         customer=name or f"Store {row}",
@@ -43,6 +51,7 @@ def candidate(row, score, latitude=None, longitude=None, name=None):
             longitude if longitude is not None else 11.9 + row / 1000,
         ),
         priority_score=score,
+        required=required,
     )
 
 
@@ -121,6 +130,63 @@ class SolverTests(TestCase):
             service_seconds_per_stop=1200,
         )
         self.assertEqual(solution.route_indices, (1,))
+
+    def test_required_zero_score_stop_wins_over_optional_high_score(self):
+        candidates = [
+            candidate(2, 0, required=True),
+            candidate(3, 100),
+        ]
+        matrix = complete_matrix(
+            [60, 60],
+            [
+                [0, 40000],
+                [40000, 0],
+            ],
+        )
+
+        solution = solve_route(
+            candidates,
+            matrix,
+            max_total_seconds=2000,
+            service_seconds_per_stop=1200,
+        )
+        route = verify_route(
+            candidates=candidates,
+            drive_seconds=matrix,
+            route_indices=solution.route_indices,
+            max_total_seconds=2000,
+            service_seconds_per_stop=1200,
+        )
+
+        self.assertEqual(solution.route_indices, (0,))
+        self.assertEqual(route.total_priority_score, 0)
+        self.assertTrue(route.stops[0].candidate.required)
+
+    def test_required_stop_over_strict_budget_has_stable_422_error(self):
+        candidates = [candidate(2, 0, required=True)]
+        with self.assertRaises(RequiredStopsNotFeasible) as raised:
+            solve_route(
+                candidates,
+                [[800], [0]],
+                max_total_seconds=2000,
+                service_seconds_per_stop=1200,
+            )
+
+        self.assertEqual(raised.exception.code, "required_stops_not_feasible")
+        self.assertEqual(raised.exception.http_status, 422)
+
+    def test_more_than_maximum_required_stops_has_stable_422_error(self):
+        candidates = [
+            candidate(index + 2, 0, required=True)
+            for index in range(16)
+        ]
+        matrix = [[0] * len(candidates) for _ in range(len(candidates) + 1)]
+
+        with self.assertRaises(RequiredStopsNotFeasible) as raised:
+            solve_route(candidates, matrix)
+
+        self.assertEqual(raised.exception.code, "required_stops_not_feasible")
+        self.assertEqual(raised.exception.http_status, 422)
 
     def test_lower_drive_time_breaks_equal_score_tie(self):
         candidates = [candidate(2, 50), candidate(3, 50)]
@@ -220,6 +286,38 @@ class SolverTests(TestCase):
         self.assertLessEqual(verified.total_seconds, 28800)
         self.assertEqual(len(first.route_indices), 15)
 
+    def test_beam_solver_keeps_required_stop(self):
+        candidates = [
+            *[
+                candidate(index + 2, 100 - index)
+                for index in range(15)
+            ],
+            candidate(100, 0, required=True),
+        ]
+        matrix = complete_matrix(
+            [60] * len(candidates),
+            [
+                [
+                    0 if left == right else 60
+                    for right in range(len(candidates))
+                ]
+                for left in range(len(candidates))
+            ],
+        )
+
+        solution = solve_route(
+            candidates,
+            matrix,
+            max_total_seconds=28800,
+            service_seconds_per_stop=1200,
+            exact_solver_limit=15,
+            beam_width=150,
+            beam_time_limit_seconds=1,
+        )
+
+        self.assertIn(15, solution.route_indices)
+        self.assertEqual(len(solution.route_indices), 15)
+
     def test_post_verifier_rejects_an_overlong_solver_result(self):
         candidates = [candidate(2, 100)]
         with self.assertRaises(RouteVerificationError):
@@ -244,6 +342,28 @@ class SolverTests(TestCase):
                 route_indices=[0],
             )
 
+    def test_post_verifier_rejects_route_missing_required_stop(self):
+        candidates = [
+            candidate(2, 0, required=True),
+            candidate(3, 100),
+        ]
+        matrix = complete_matrix(
+            [60, 60],
+            [
+                [0, 60],
+                [60, 0],
+            ],
+        )
+
+        with self.assertRaises(RequiredStopsNotFeasible) as raised:
+            verify_route(
+                candidates=candidates,
+                drive_seconds=matrix,
+                route_indices=[1],
+            )
+
+        self.assertEqual(raised.exception.code, "required_stops_not_feasible")
+
     def test_shortlist_is_bounded_and_deterministic(self):
         candidates = [candidate(index + 2, 100 - index) for index in range(40)]
         direct = {item.row: 60 + item.row for item in candidates}
@@ -264,6 +384,30 @@ class SolverTests(TestCase):
             [item.row for item in second],
         )
         self.assertIn(2, {item.row for item in first})
+
+    def test_shortlist_never_drops_required_stops(self):
+        candidates = [
+            candidate(
+                index + 2,
+                0 if index >= 14 else 100 - index,
+                required=index >= 14,
+            )
+            for index in range(20)
+        ]
+        required_rows = {
+            item.row for item in candidates if item.required
+        }
+        direct = {item.row: 60 for item in candidates}
+
+        shortlisted = shortlist_candidates(
+            start=START,
+            candidates=candidates,
+            direct_seconds=direct,
+            limit=5,
+        )
+
+        self.assertEqual(len(shortlisted), len(required_rows))
+        self.assertEqual({item.row for item in shortlisted}, required_rows)
 
     def test_large_shortlist_has_bounded_geographic_work(self):
         candidates = [
@@ -346,6 +490,29 @@ class SolverTests(TestCase):
         self.assertTrue(proposal.shortlisted)
         self.assertFalse(proposal.solution.optimality_proven)
         self.assertTrue(proposal.solution.solver_status.startswith("shortlisted_"))
+
+    def test_calculation_respects_lower_non_required_time_budget(self):
+        proposal = calculate_route_proposal(
+            start=START,
+            candidates=[candidate(2, 100), candidate(3, 90)],
+            provider=FormulaProvider(),
+            max_total_seconds=1380,
+            service_seconds_per_stop=600,
+        )
+
+        self.assertEqual(len(proposal.route.stops), 1)
+        self.assertLess(proposal.route.total_seconds, 1380)
+
+    def test_required_stop_without_direct_road_has_stable_422_error(self):
+        with self.assertRaises(RequiredStopsNotFeasible) as raised:
+            calculate_route_proposal(
+                start=START,
+                candidates=[candidate(2, 0, required=True)],
+                provider=SequenceProvider([[(None,)]]),
+            )
+
+        self.assertEqual(raised.exception.code, "required_stops_not_feasible")
+        self.assertEqual(raised.exception.http_status, 422)
 
 
 class ProviderTests(TestCase):
@@ -609,6 +776,51 @@ class RouteEndpointTests(TestCase):
         self.assertEqual(payload["route_owner"], "Route User")
         self.assertIn("route_date", payload)
         self.save_route_mock.assert_called_once()
+
+    def test_endpoint_caps_candidates_before_first_provider_call(self):
+        self.login()
+        self.customers[:] = [
+            {
+                "row": row,
+                "customer": f"Store {row}",
+                "cancelled_flag": "",
+                "sales_person": "Route User",
+                "latitude_google": str(57.0 + row / 1000),
+                "longitude_google": str(11.0 + row / 1000),
+            }
+            for row in range(2, 77)
+        ]
+        self.priorities[:] = [
+            {
+                "row": row,
+                "customer": f"Store {row}",
+                "priority_score": 1000 - row,
+            }
+            for row in range(2, 77)
+        ]
+
+        with patch.object(
+            app_module,
+            "route_matrix_candidate_limit",
+            return_value=20,
+        ):
+            response = self.client.post("/route-proposal", json={
+                "start": {"latitude": 57.7, "longitude": 11.9},
+                "candidate_rows": [2],
+            })
+
+        payload = response.get_json()
+        self.assertEqual(response.status_code, 200, payload)
+        self.assertEqual(
+            payload["meta"]["candidate_count_before_preselection"],
+            75,
+        )
+        self.assertEqual(
+            payload["meta"]["candidate_count_after_preselection"],
+            20,
+        )
+        self.assertEqual(payload["meta"]["matrix_candidate_limit"], 20)
+        self.assertEqual(self.provider.call_shapes[0], (1, 20))
 
     def test_phone_recommendation_does_not_exclude_high_score_route_candidate(self):
         self.login()
@@ -898,6 +1110,22 @@ class FormulaProvider:
             seconds.append(tuple(row))
         return TravelTimeResult(
             seconds=tuple(seconds),
+            pair_count=len(origins) * len(destinations),
+            request_count=1,
+            routing_preference="TRAFFIC_UNAWARE",
+        )
+
+
+class SequenceProvider:
+    def __init__(self, matrices):
+        self.matrices = list(matrices)
+
+    def get_matrix_seconds(
+        self, origins, destinations, *, ephemeral_origin_indexes=frozenset()
+    ):
+        matrix = self.matrices.pop(0)
+        return TravelTimeResult(
+            seconds=tuple(tuple(row) for row in matrix),
             pair_count=len(origins) * len(destinations),
             request_count=1,
             routing_preference="TRAFFIC_UNAWARE",

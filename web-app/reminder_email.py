@@ -14,14 +14,14 @@ from zoneinfo import ZoneInfo
 
 
 EMAIL_MESSAGES_COLUMNS = [
-    "email_id", "customer", "customer_number", "email_type", "sender_user_name", "sender_name",
+    "email_id", "customer", "customer_number", "customer_id", "email_type", "sender_user_name", "sender_name",
     "sender_email", "subject", "body_text", "body_html", "latest_order_reference",
     "latest_delivery_date", "product_sheet_url", "stockfiller_url", "is_test",
     "recipient_count", "status", "created_at", "sent_at",
 ]
 
 EMAIL_RECIPIENTS_COLUMNS = [
-    "email_id", "customer", "intended_email", "actual_email", "greeting_name",
+    "email_id", "customer", "customer_id", "intended_email", "actual_email", "greeting_name",
     "brevo_message_id", "send_status", "send_error", "sent_at", "delivered_at",
     "first_opened_at", "last_opened_at", "open_count",
     "product_sheet_first_clicked_at", "product_sheet_last_clicked_at", "product_sheet_click_count",

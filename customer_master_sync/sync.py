@@ -10,6 +10,7 @@ import os
 import re
 import sys
 import unicodedata
+import uuid
 from typing import Any, Iterable
 
 import gspread
@@ -32,6 +33,7 @@ ORDER_REQUIRED_COLUMNS = [
 CUSTOMER_REQUIRED_COLUMNS = [
     "customer",
     "cancelled_flag",
+    "customer_id",
     "customer_number",
     "email_last_order",
     "address_google",
@@ -50,6 +52,7 @@ REVIEW_COLUMNS = [
     "status",
     "identity_key",
     "master_customer",
+    "customer_id",
     "customer_number",
     "source_customer_identifier",
     "matched_row",
@@ -227,6 +230,7 @@ class OrderMaster:
 class EnrichedCustomer:
     row_number: int
     customer: str
+    customer_id: str
     customer_number: str
     email_last_order: str
     cancelled_flag: str
@@ -250,6 +254,7 @@ class CustomerDecision:
     order_reference: str
     matched_row: int | None = None
     existing_customer: str = ""
+    existing_customer_id: str = ""
     existing_customer_number: str = ""
     existing_email: str = ""
     existing_cancelled_flag: str = ""
@@ -531,6 +536,7 @@ def build_enriched_customers(customer_rows: list[dict[str, Any]]) -> list[Enrich
             EnrichedCustomer(
                 row_number=row_number,
                 customer=customer,
+                customer_id=clean(row.get("customer_id")),
                 customer_number=clean(row.get("customer_number")),
                 email_last_order=clean(row.get("email_last_order")),
                 cancelled_flag=clean(row.get("cancelled_flag")),
@@ -575,6 +581,7 @@ def _decision(
         order_reference=master.reference,
         matched_row=matched.row_number if matched else None,
         existing_customer=matched.customer if matched else "",
+        existing_customer_id=matched.customer_id if matched else "",
         existing_customer_number=matched.customer_number if matched else "",
         existing_email=matched.email_last_order if matched else "",
         existing_cancelled_flag=matched.cancelled_flag if matched else "",
@@ -829,10 +836,13 @@ def plan_customer_sync(
 ) -> list[CustomerDecision]:
     masters = build_order_masters(order_rows)
     customers = build_enriched_customers(customer_rows)
+    customer_ids: dict[str, list[EnrichedCustomer]] = defaultdict(list)
     numbers: dict[str, list[EnrichedCustomer]] = defaultdict(list)
     names: dict[str, list[EnrichedCustomer]] = defaultdict(list)
     addresses: dict[tuple[str, str, str], list[EnrichedCustomer]] = defaultdict(list)
     for customer in customers:
+        if customer.customer_id:
+            customer_ids[customer.customer_id].append(customer)
         if customer.number_key:
             numbers[customer.number_key].append(customer)
         names[customer.name_key].append(customer)
@@ -842,6 +852,22 @@ def plan_customer_sync(
     decisions = [
         _classify(master, customers, numbers, names, addresses)
         for master in masters
+    ]
+    conflicted_rows = {
+        customer.row_number
+        for matches in customer_ids.values()
+        if len(matches) > 1
+        for customer in matches
+    }
+    decisions = [
+        replace(
+            decision,
+            status="needs_review",
+            reason="customer_id exists on multiple customer rows",
+        )
+        if decision.matched_row in conflicted_rows
+        else decision
+        for decision in decisions
     ]
     return _block_collisions(decisions)
 
@@ -910,10 +936,17 @@ def _history_rename_targets(
         for decision in renames
     }
     targets = []
-    for sheet_name in ("sales_activities", "email_messages", "email_recipients"):
+    for sheet_name in (
+        "sales_activities",
+        "email_messages",
+        "email_recipients",
+        "planned_activities",
+    ):
         try:
             worksheet = spreadsheet.worksheet(sheet_name)
         except WorksheetNotFound as exc:
+            if sheet_name == "planned_activities":
+                continue
             raise ValueError(
                 f"{sheet_name} is required to preserve history during a customer rename"
             ) from exc
@@ -946,6 +979,61 @@ def _apply_history_renames(
     return verification
 
 
+def _apply_planning_snapshots(
+    spreadsheet,
+    decisions: list[CustomerDecision],
+) -> list[tuple[Any, int, str]]:
+    by_customer_id = {
+        decision.existing_customer_id: decision
+        for decision in decisions
+        if (
+            decision.existing_customer_id
+            and decision.status not in {"needs_review", "ignored_internal"}
+        )
+    }
+    if not by_customer_id:
+        return []
+    try:
+        worksheet = spreadsheet.worksheet("planned_activities")
+    except WorksheetNotFound:
+        return []
+    values = worksheet.get_all_values()
+    if not values:
+        return []
+    headers = [clean(header) for header in values[0]]
+    required = {"customer_id", "customer", "customer_number", "customer_key"}
+    if not required.issubset(headers):
+        raise ValueError(
+            "planned_activities is missing customer snapshot columns"
+        )
+    indexes = {column: headers.index(column) for column in required}
+    updates = []
+    verification = []
+    for row_number, row in enumerate(values[1:], start=2):
+        customer_id = clean(
+            row[indexes["customer_id"]]
+            if indexes["customer_id"] < len(row) else ""
+        )
+        decision = by_customer_id.get(customer_id)
+        if not decision:
+            continue
+        snapshot = {
+            "customer": decision.master_customer,
+            "customer_number": decision.customer_number,
+            "customer_key": (
+                number_key(decision.customer_number)
+                or name_key(decision.master_customer)
+            ),
+        }
+        for column, value in snapshot.items():
+            current = row[indexes[column]] if indexes[column] < len(row) else ""
+            if clean(current) != clean(value):
+                updates.append((row_number, indexes[column], value))
+        verification.append((worksheet, row_number, decision.master_customer))
+    _batch_cell_updates(worksheet, updates)
+    return verification
+
+
 def _verify_history(verification: list[tuple[Any, int, str]]) -> None:
     by_worksheet: dict[int, tuple[Any, dict[int, str]]] = {}
     for worksheet, row_number, value in verification:
@@ -973,6 +1061,7 @@ def _apply_customer_changes(
     decisions: list[CustomerDecision],
 ) -> None:
     customer_index = headers.index("customer")
+    customer_id_index = headers.index("customer_id")
     number_index = headers.index("customer_number")
     email_index = headers.index("email_last_order")
     updates = []
@@ -995,6 +1084,7 @@ def _apply_customer_changes(
             continue
         row = [""] * len(headers)
         row[customer_index] = decision.master_customer
+        row[customer_id_index] = str(uuid.uuid4())
         row[number_index] = decision.customer_number
         row[email_index] = decision.latest_email
         append_values.append(row)
@@ -1012,6 +1102,7 @@ def _verify_customer_changes(
     if actual_headers != headers:
         raise RuntimeError("customers_enriched headers changed during customer sync")
     customer_index = headers.index("customer")
+    customer_id_index = headers.index("customer_id")
     number_index = headers.index("customer_number")
     email_index = headers.index("email_last_order")
 
@@ -1048,6 +1139,14 @@ def _verify_customer_changes(
         actual_number = (
             actual_row[number_index] if number_index < len(actual_row) else ""
         )
+        actual_customer_id = (
+            actual_row[customer_id_index]
+            if customer_id_index < len(actual_row) else ""
+        )
+        if not clean(actual_customer_id):
+            raise RuntimeError(
+                f"customer_id verification failed for {decision.master_customer!r}"
+            )
         actual_email = (
             actual_row[email_index] if email_index < len(actual_row) else ""
         )
@@ -1093,6 +1192,7 @@ def _write_review_sheet(
     values = [REVIEW_COLUMNS]
     for decision in review:
         row = asdict(decision)
+        row["customer_id"] = decision.existing_customer_id
         row["last_seen_at"] = timestamp
         values.append([row.get(column, "") for column in REVIEW_COLUMNS])
     worksheet.clear()
@@ -1127,6 +1227,9 @@ def run_customer_sync(
 
     renames = [decision for decision in decisions if decision.changes_name]
     history_verification = _apply_history_renames(spreadsheet, renames)
+    history_verification.extend(
+        _apply_planning_snapshots(spreadsheet, decisions)
+    )
     _apply_customer_changes(
         customer_sheet,
         customer_headers,

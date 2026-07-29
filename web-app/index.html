@@ -1118,6 +1118,9 @@
       color: #777;
       font-size: 0.78rem;
     }
+    body.user-admin .insights-session-footer {
+      padding-right: 164px;
+    }
     .insights-session-footer button {
       border: 1px solid #e3d6dc;
       border-radius: 999px;
@@ -2747,6 +2750,777 @@
       .settings-order-row { grid-template-columns: minmax(0, 1fr) 72px 34px; }
       .settings-order-unit { display: none; }
     }
+
+    /* ── Sales planning ── */
+    .planning-body {
+      width: min(100%, 1080px);
+      margin: 0 auto;
+      padding: 12px 12px 48px;
+    }
+    #view-planning .back-btn,
+    #planning-new-btn {
+      min-width: 44px;
+      min-height: 44px;
+    }
+    .planning-controls,
+    .planning-agenda-card,
+    .planning-backlog-card {
+      border: 1px solid var(--pb-border);
+      border-radius: var(--pb-radius);
+      background: #fff;
+      box-shadow: var(--pb-shadow-soft);
+    }
+    .planning-controls {
+      position: sticky;
+      top: 68px;
+      z-index: 8;
+      padding: 12px;
+    }
+    .planning-toolbar-row,
+    .planning-week-nav,
+    .planning-agenda-heading,
+    .planning-backlog-heading,
+    .planning-dialog-actions,
+    .planning-activity-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .planning-toolbar-row {
+      justify-content: space-between;
+      flex-wrap: wrap;
+    }
+    .planning-week-nav {
+      min-width: 0;
+      flex: 1 1 250px;
+      justify-content: space-between;
+    }
+    .planning-icon-btn,
+    .planning-today-btn {
+      min-height: 44px;
+      border: 1px solid var(--pb-border);
+      border-radius: 10px;
+      background: var(--pb-surface-soft);
+      color: var(--pb-ink);
+      cursor: pointer;
+      font-weight: 800;
+    }
+    .planning-icon-btn {
+      width: 44px;
+      flex: 0 0 44px;
+      font-size: 1.05rem;
+    }
+    .planning-today-btn {
+      padding: 7px 11px;
+      font-size: 0.76rem;
+    }
+    .planning-week-label {
+      min-width: 0;
+      color: var(--pb-ink);
+      font-size: 0.92rem;
+      font-weight: 850;
+      text-align: center;
+    }
+    .planning-owner-wrap {
+      display: none;
+      flex: 1 1 220px;
+    }
+    .planning-owner-wrap.visible { display: block; }
+    .planning-owner-wrap .insights-select {
+      width: 100%;
+      min-height: 44px;
+      border-color: var(--pb-border);
+      background: #fff;
+    }
+    .planning-date-jump {
+      width: 44px;
+      min-height: 44px;
+      padding: 6px;
+      border: 1px solid var(--pb-border);
+      border-radius: 10px;
+      background: var(--pb-surface-soft);
+      color: var(--pb-ink);
+      cursor: pointer;
+      font-size: 0;
+    }
+    .planning-date-jump::-webkit-calendar-picker-indicator {
+      width: 20px;
+      height: 20px;
+      margin: 0;
+      cursor: pointer;
+    }
+    .planning-week-strip {
+      display: grid;
+      grid-template-columns: repeat(7, minmax(44px, 1fr));
+      gap: 5px;
+      margin-top: 11px;
+      overflow-x: auto;
+      overscroll-behavior-inline: contain;
+      scroll-snap-type: inline proximity;
+      scrollbar-width: thin;
+    }
+    .planning-day-btn {
+      min-width: 44px;
+      min-height: 62px;
+      padding: 6px 2px;
+      border: 1px solid transparent;
+      border-radius: 10px;
+      background: #fbf7fa;
+      color: var(--pb-muted);
+      cursor: pointer;
+      scroll-snap-align: start;
+      text-align: center;
+    }
+    .planning-day-btn:hover { border-color: var(--pb-border-strong); }
+    .planning-day-btn.selected {
+      border-color: var(--pb-pink-strong);
+      background: var(--pb-pink-soft);
+      color: #8c214c;
+      box-shadow: inset 0 0 0 1px rgba(216,61,121,0.08);
+    }
+    .planning-day-btn.today .planning-day-number {
+      text-decoration: underline;
+      text-decoration-thickness: 2px;
+      text-underline-offset: 3px;
+    }
+    .planning-day-name,
+    .planning-day-count {
+      display: block;
+      font-size: 0.62rem;
+      font-weight: 800;
+      line-height: 1.1;
+    }
+    .planning-day-name {
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .planning-day-number {
+      display: block;
+      margin: 3px 0 2px;
+      color: inherit;
+      font-size: 1rem;
+      font-weight: 900;
+      line-height: 1;
+    }
+    .planning-day-count { min-height: 0.7rem; color: var(--pb-soft-muted); }
+    .planning-day-btn.selected .planning-day-count { color: #8c214c; }
+    .planning-main-grid {
+      display: grid;
+      gap: 12px;
+      margin-top: 12px;
+    }
+    .planning-agenda-card,
+    .planning-backlog-card {
+      min-width: 0;
+      padding: 14px;
+    }
+    .planning-agenda-heading,
+    .planning-backlog-heading {
+      align-items: flex-start;
+      justify-content: space-between;
+      margin-bottom: 12px;
+    }
+    .planning-section-title {
+      color: var(--pb-ink);
+      font-size: 1rem;
+      font-weight: 900;
+      line-height: 1.2;
+    }
+    .planning-section-subtitle {
+      margin-top: 3px;
+      color: var(--pb-muted);
+      font-size: 0.76rem;
+      line-height: 1.4;
+    }
+    .planning-agenda-actions {
+      display: flex;
+      flex-shrink: 0;
+      gap: 7px;
+    }
+    .planning-compact-btn {
+      min-height: 44px;
+      padding: 7px 10px;
+      border: 1px solid var(--pb-border-strong);
+      border-radius: 10px;
+      background: #fff;
+      color: var(--pb-ink);
+      cursor: pointer;
+      font-size: 0.74rem;
+      font-weight: 850;
+      white-space: nowrap;
+    }
+    .planning-compact-btn.primary {
+      border-color: var(--pb-ink);
+      background: var(--pb-ink);
+      color: #fff;
+    }
+    .planning-compact-btn.danger {
+      border-color: #f1c6d1;
+      background: #fff6f8;
+      color: #9c284f;
+    }
+    .planning-state {
+      padding: 34px 12px;
+      color: var(--pb-muted);
+      font-size: 0.84rem;
+      line-height: 1.5;
+      text-align: center;
+    }
+    .planning-state strong {
+      display: block;
+      margin-bottom: 4px;
+      color: var(--pb-ink);
+      font-size: 0.94rem;
+    }
+    .planning-state .planning-compact-btn { margin-top: 12px; }
+    .planning-activity-list {
+      display: grid;
+      gap: 8px;
+    }
+    .planning-activity-card {
+      --planning-status: var(--pb-border-strong);
+      position: relative;
+      display: grid;
+      grid-template-columns: 54px minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 10px;
+      width: 100%;
+      min-height: 72px;
+      padding: 10px 10px 10px 13px;
+      border: 1px solid var(--pb-border);
+      border-radius: 11px;
+      background: #fff;
+      color: var(--pb-ink);
+      cursor: pointer;
+      text-align: left;
+    }
+    .planning-activity-card::before {
+      content: "";
+      position: absolute;
+      top: 9px;
+      bottom: 9px;
+      left: 0;
+      width: 4px;
+      border-radius: 0 999px 999px 0;
+      background: var(--planning-status);
+    }
+    .planning-activity-card.status-completed { --planning-status: var(--pb-green); background: #fbfffd; }
+    .planning-activity-card.status-overdue { --planning-status: #c33b55; background: #fff9fa; }
+    .planning-activity-card.status-skipped { --planning-status: var(--pb-mango); background: #fffcf7; }
+    .planning-activity-card.status-cancelled { --planning-status: #aaa1a8; opacity: 0.68; }
+    .planning-activity-time {
+      align-self: start;
+      padding-top: 2px;
+      color: var(--pb-ink);
+      font-size: 0.82rem;
+      font-weight: 900;
+      white-space: nowrap;
+    }
+    .planning-activity-main { min-width: 0; }
+    .planning-activity-type {
+      display: block;
+      color: var(--pb-muted);
+      font-size: 0.66rem;
+      font-weight: 850;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+    }
+    .planning-activity-customer {
+      display: block;
+      margin-top: 2px;
+      overflow: hidden;
+      color: var(--pb-ink);
+      font-size: 0.9rem;
+      font-weight: 850;
+      line-height: 1.25;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .planning-activity-note {
+      display: block;
+      margin-top: 3px;
+      overflow: hidden;
+      color: var(--pb-muted);
+      font-size: 0.72rem;
+      line-height: 1.25;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .planning-status-badge,
+    .planning-source-badge {
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      padding: 4px 7px;
+      font-size: 0.64rem;
+      font-weight: 850;
+      white-space: nowrap;
+    }
+    .planning-status-badge {
+      background: #f4eff3;
+      color: var(--pb-muted);
+    }
+    .planning-source-badge {
+      margin-right: 4px;
+      background: var(--pb-blue-soft);
+      color: var(--pb-blue);
+    }
+    .planning-route-origin-note {
+      margin-bottom: 10px;
+      padding: 9px 10px;
+      border-radius: 10px;
+      background: var(--pb-blue-soft);
+      color: var(--pb-blue);
+      font-size: 0.73rem;
+      font-weight: 700;
+      line-height: 1.4;
+    }
+    .planning-backlog-section + .planning-backlog-section {
+      margin-top: 16px;
+      padding-top: 14px;
+      border-top: 1px solid var(--pb-border);
+    }
+    .planning-backlog-title {
+      margin-bottom: 7px;
+      color: var(--pb-muted);
+      font-size: 0.72rem;
+      font-weight: 900;
+      letter-spacing: 0.055em;
+      text-transform: uppercase;
+    }
+    .planning-backlog-list {
+      display: grid;
+      gap: 7px;
+    }
+    .planning-backlog-item {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 8px;
+      padding: 9px 0;
+      border-bottom: 1px solid #f3edf1;
+    }
+    .planning-backlog-item:last-child { border-bottom: none; }
+    .planning-backlog-customer {
+      overflow: hidden;
+      color: var(--pb-ink);
+      font-size: 0.8rem;
+      font-weight: 850;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .planning-backlog-meta {
+      margin-top: 2px;
+      color: var(--pb-muted);
+      font-size: 0.7rem;
+      line-height: 1.35;
+    }
+    .planning-card-plan-btn {
+      position: relative;
+      z-index: 2;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 44px;
+      margin-top: 10px;
+      padding: 7px 10px;
+      border: 1px solid var(--pb-border-strong);
+      border-radius: 10px;
+      background: var(--pb-surface-soft);
+      color: var(--pb-ink);
+      cursor: pointer;
+      font-size: 0.72rem;
+      font-weight: 850;
+    }
+    .planning-modal-backdrop {
+      position: fixed;
+      inset: 0;
+      z-index: 120;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 18px;
+      background: rgba(37,28,37,0.5);
+      backdrop-filter: blur(3px);
+    }
+    .planning-modal-backdrop.open { display: flex; }
+    .planning-modal {
+      width: min(100%, 560px);
+      max-height: min(90vh, 760px);
+      max-height: min(90dvh, 760px);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      border: 1px solid var(--pb-border);
+      border-radius: 18px;
+      background: #fff;
+      box-shadow: 0 26px 70px rgba(37,28,37,0.28);
+    }
+    .planning-modal-header {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      padding: 17px 18px 13px;
+      border-bottom: 1px solid var(--pb-border);
+    }
+    .planning-modal-heading { min-width: 0; flex: 1; }
+    .planning-modal-heading h2 {
+      color: var(--pb-ink);
+      font-size: 1.05rem;
+      font-weight: 900;
+    }
+    .planning-modal-heading p {
+      margin-top: 3px;
+      color: var(--pb-muted);
+      font-size: 0.76rem;
+      line-height: 1.35;
+    }
+    .planning-modal-close {
+      width: 44px;
+      height: 44px;
+      flex: 0 0 44px;
+      border: 1px solid var(--pb-border);
+      border-radius: 10px;
+      background: #fff;
+      color: var(--pb-muted);
+      cursor: pointer;
+      font-size: 1rem;
+    }
+    .planning-modal-content {
+      min-height: 0;
+      padding: 16px 18px 18px;
+      overflow-y: auto;
+    }
+    .planning-dialog-form {
+      display: grid;
+      gap: 13px;
+    }
+    .planning-form-row {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+    .planning-field {
+      min-width: 0;
+    }
+    .planning-field label,
+    .planning-detail-label {
+      display: block;
+      margin-bottom: 5px;
+      color: var(--pb-muted);
+      font-size: 0.7rem;
+      font-weight: 850;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+    }
+    .planning-field input,
+    .planning-field select,
+    .planning-field textarea {
+      width: 100%;
+      min-height: 44px;
+      padding: 9px 11px;
+      border: 1.5px solid var(--pb-border);
+      border-radius: 10px;
+      background: #fff;
+      color: var(--pb-ink);
+      font-size: 16px;
+      outline: none;
+    }
+    .planning-field textarea {
+      min-height: 92px;
+      resize: vertical;
+    }
+    .planning-combobox {
+      position: relative;
+    }
+    .planning-combobox-list {
+      position: absolute;
+      z-index: 8;
+      top: calc(100% + 4px);
+      right: 0;
+      left: 0;
+      max-height: min(320px, 48vh);
+      overflow-y: auto;
+      border: 1.5px solid var(--pb-border);
+      border-radius: 10px;
+      background: #fff;
+      box-shadow: 0 12px 30px rgba(36, 25, 31, 0.16);
+    }
+    .planning-combobox-list[hidden] {
+      display: none;
+    }
+    .planning-combobox-option {
+      display: block;
+      width: 100%;
+      min-height: 52px;
+      padding: 8px 11px;
+      border: 0;
+      border-bottom: 1px solid var(--pb-border);
+      background: #fff;
+      color: var(--pb-ink);
+      text-align: left;
+    }
+    .planning-combobox-option:last-child {
+      border-bottom: 0;
+    }
+    .planning-combobox-option.active,
+    .planning-combobox-option:hover {
+      background: var(--pb-pink-soft);
+    }
+    .planning-combobox-option strong,
+    .planning-combobox-option span {
+      display: block;
+    }
+    .planning-combobox-option span {
+      margin-top: 2px;
+      color: var(--pb-muted);
+      font-size: 0.75rem;
+    }
+    .planning-field input:focus,
+    .planning-field select:focus,
+    .planning-field textarea:focus {
+      border-color: var(--pb-pink-strong);
+      box-shadow: 0 0 0 3px rgba(216,61,121,0.12);
+    }
+    .planning-type-choices {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 8px;
+      margin: 0;
+      padding: 0;
+      border: 0;
+    }
+    .planning-type-choices legend {
+      margin-bottom: 5px;
+      color: var(--pb-muted);
+      font-size: 0.7rem;
+      font-weight: 850;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+    }
+    .planning-type-choice {
+      position: relative;
+      display: block;
+      margin: 0;
+      cursor: pointer;
+    }
+    .planning-type-choice input {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      opacity: 0;
+      pointer-events: none;
+    }
+    .planning-type-choice span {
+      display: flex;
+      min-height: 52px;
+      align-items: center;
+      justify-content: center;
+      padding: 7px 6px;
+      border: 1.5px solid var(--pb-border);
+      border-radius: 10px;
+      background: #fff;
+      color: var(--pb-muted);
+      font-size: 0.76rem;
+      font-weight: 850;
+      line-height: 1.25;
+      text-align: center;
+    }
+    .planning-type-choice input:checked + span {
+      border-color: var(--pb-pink-strong);
+      background: var(--pb-pink-soft);
+      color: #8c214c;
+      box-shadow: inset 0 0 0 1px rgba(216,61,121,0.08);
+    }
+    .planning-type-choice input:focus-visible + span {
+      outline: 3px solid rgba(216,61,121,0.28);
+      outline-offset: 2px;
+    }
+    .planning-activity-card.unplanned {
+      cursor: default;
+    }
+    .planning-field-help,
+    .planning-note-count {
+      margin-top: 4px;
+      color: var(--pb-soft-muted);
+      font-size: 0.68rem;
+      line-height: 1.35;
+    }
+    .planning-note-count { text-align: right; }
+    .planning-dialog-error {
+      display: none;
+      padding: 10px 11px;
+      border: 1px solid #f1c6d1;
+      border-radius: 10px;
+      background: #fff5f7;
+      color: #9c284f;
+      font-size: 0.76rem;
+      line-height: 1.4;
+    }
+    .planning-dialog-error.visible { display: block; }
+    .planning-dialog-actions {
+      justify-content: flex-end;
+      flex-wrap: wrap;
+      margin-top: 3px;
+    }
+    .planning-dialog-actions .action-btn {
+      width: auto;
+      min-width: 116px;
+      margin: 0;
+      padding: 10px 13px;
+    }
+    .planning-detail-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }
+    .planning-detail-value {
+      color: var(--pb-ink);
+      font-size: 0.84rem;
+      font-weight: 750;
+      line-height: 1.4;
+      overflow-wrap: anywhere;
+    }
+    .planning-detail-note {
+      grid-column: 1 / -1;
+      padding: 11px;
+      border-radius: 10px;
+      background: #fbf7fa;
+      color: var(--pb-muted);
+      font-size: 0.8rem;
+      line-height: 1.5;
+      white-space: pre-wrap;
+    }
+    .planning-activity-actions {
+      align-items: stretch;
+      flex-wrap: wrap;
+      margin-top: 16px;
+      padding-top: 14px;
+      border-top: 1px solid var(--pb-border);
+    }
+    .planning-activity-actions .planning-compact-btn { flex: 1 1 130px; }
+    .planning-route-summary {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 8px;
+      margin-bottom: 13px;
+    }
+    .planning-route-metric {
+      min-width: 0;
+      padding: 9px;
+      border-radius: 10px;
+      background: #f8f5f7;
+    }
+    .planning-route-metric span {
+      display: block;
+      color: var(--pb-muted);
+      font-size: 0.65rem;
+      font-weight: 800;
+      text-transform: uppercase;
+    }
+    .planning-route-metric strong {
+      display: block;
+      margin-top: 3px;
+      color: var(--pb-ink);
+      font-size: 0.88rem;
+    }
+    .planning-route-stop-list,
+    .planning-conflict-list {
+      display: grid;
+      gap: 7px;
+      margin-top: 9px;
+    }
+    .planning-route-stop,
+    .planning-conflict {
+      padding: 9px 10px;
+      border-radius: 9px;
+      background: #f8f5f7;
+      color: var(--pb-ink);
+      font-size: 0.76rem;
+      line-height: 1.4;
+    }
+    .planning-conflict {
+      border: 1px solid #f1d3a8;
+      background: #fff9ef;
+      color: #79501b;
+    }
+    .planning-followup-toggle {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      min-height: 44px;
+      padding: 10px 12px;
+      border: 1px solid var(--pb-border);
+      border-radius: 10px;
+      background: #fff;
+      color: var(--pb-ink);
+      cursor: pointer;
+      font-size: 0.84rem;
+      font-weight: 800;
+    }
+    .planning-followup-toggle input {
+      width: 18px;
+      height: 18px;
+      accent-color: var(--pb-pink-strong);
+    }
+    .followup-fields {
+      display: none;
+      padding: 12px;
+      border: 1px solid var(--pb-border);
+      border-radius: var(--pb-radius);
+      background: #fffafd;
+    }
+    .followup-fields.visible { display: block; }
+
+    @media (min-width: 820px) {
+      .planning-main-grid {
+        grid-template-columns: minmax(0, 1.55fr) minmax(280px, 0.85fr);
+        align-items: start;
+      }
+      .planning-backlog-card {
+        position: sticky;
+        top: 214px;
+      }
+    }
+    @media (max-width: 620px) {
+      body.user-admin .insights-session-footer {
+        flex-wrap: wrap;
+        padding-right: 108px;
+      }
+      .planning-body { padding: 10px 10px 40px; }
+      .planning-controls { top: 68px; padding: 9px; }
+      .planning-week-strip { gap: 3px; }
+      .planning-day-btn { min-height: 58px; border-radius: 9px; }
+      .planning-day-name { font-size: 0.58rem; }
+      .planning-day-number { font-size: 0.92rem; }
+      .planning-agenda-card,
+      .planning-backlog-card { padding: 12px; }
+      .planning-agenda-heading { flex-direction: column; }
+      .planning-agenda-actions { width: 100%; }
+      .planning-agenda-actions .planning-compact-btn { flex: 1; }
+      .planning-modal-backdrop { align-items: stretch; padding: 0; }
+      .planning-modal { min-height: 100%; max-height: 100dvh; border-radius: 0; }
+      .planning-modal-content { padding: 15px 14px 20px; }
+      .planning-modal-header { padding: 14px; }
+      .planning-detail-grid,
+      .planning-form-row { grid-template-columns: 1fr; }
+      .planning-route-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .planning-dialog-actions {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+      .planning-dialog-actions .action-btn { width: 100%; min-width: 0; }
+    }
+    @media (max-width: 380px) {
+      .planning-day-count { font-size: 0.56rem; }
+      .planning-activity-card {
+        grid-template-columns: 46px minmax(0, 1fr);
+      }
+      .planning-activity-card > .planning-status-badge {
+        grid-column: 2;
+        justify-self: start;
+      }
+    }
   </style>
 </head>
 <body>
@@ -2790,6 +3564,7 @@
       <p id="subtitle">Laddar...</p>
     </div>
     <div class="header-actions">
+      <button class="route-mode-btn" id="planning-mode-btn">Planering</button>
       <button class="route-mode-btn" id="insights-mode-btn">Insikter</button>
       <button class="route-mode-btn" id="route-mode-btn">&#128205; Karta</button>
     </div>
@@ -2991,6 +3766,68 @@
   </div>
 </div>
 
+<!-- ═══════════════ SALES PLANNING VIEW ═══════════════ -->
+<div class="view" id="view-planning">
+  <div class="header">
+    <button class="back-btn" id="planning-back-btn" aria-label="Tillbaka till butiker">&#8592;</button>
+    <div class="header-text">
+      <h1>Planering</h1>
+      <p id="planning-subtitle">Veckans kundkontakter</p>
+    </div>
+    <div class="header-actions">
+      <button class="route-mode-btn" id="planning-new-btn" type="button">+ Aktivitet</button>
+    </div>
+  </div>
+
+  <main class="planning-body">
+    <section class="planning-controls" aria-label="Veckoval">
+      <div class="planning-toolbar-row">
+        <div class="planning-week-nav">
+          <button class="planning-icon-btn" id="planning-prev-week-btn" type="button" aria-label="Föregående vecka">&#8249;</button>
+          <div class="planning-week-label" id="planning-week-label">Vecka</div>
+          <button class="planning-icon-btn" id="planning-next-week-btn" type="button" aria-label="Nästa vecka">&#8250;</button>
+          <button class="planning-today-btn" id="planning-today-btn" type="button">Idag</button>
+          <input class="planning-date-jump" id="planning-date-jump" type="date" aria-label="Hoppa till datum" title="Hoppa till datum" />
+        </div>
+        <div class="planning-owner-wrap" id="planning-owner-wrap">
+          <select class="insights-select" id="planning-owner-select" aria-label="Välj säljare"></select>
+        </div>
+      </div>
+      <div class="planning-week-strip" id="planning-week-strip"></div>
+    </section>
+
+    <div class="planning-main-grid">
+      <section class="planning-agenda-card" aria-labelledby="planning-day-title">
+        <div class="planning-agenda-heading">
+          <div>
+            <h2 class="planning-section-title" id="planning-day-title">Dagens agenda</h2>
+            <p class="planning-section-subtitle" id="planning-day-summary"></p>
+          </div>
+          <div class="planning-agenda-actions">
+            <button class="planning-compact-btn" id="planning-add-day-btn" type="button">+ Aktivitet</button>
+            <button class="planning-compact-btn primary" id="planning-route-preview-btn" type="button">Fyll dagen automatiskt</button>
+          </div>
+        </div>
+        <div id="planning-agenda" aria-live="polite">
+          <div class="planning-state"><strong>Laddar planering…</strong></div>
+        </div>
+      </section>
+
+      <aside class="planning-backlog-card" aria-labelledby="planning-backlog-title">
+        <div class="planning-backlog-heading">
+          <div>
+            <h2 class="planning-section-title" id="planning-backlog-title">Att planera</h2>
+            <p class="planning-section-subtitle">Kontakter och uppföljningar utan tid.</p>
+          </div>
+        </div>
+        <div id="planning-backlog" aria-live="polite">
+          <div class="planning-state">Laddar…</div>
+        </div>
+      </aside>
+    </div>
+  </main>
+</div>
+
 <!-- ═══════════════ DETAIL VIEW ═══════════════ -->
 <div class="view" id="view-detail">
   <div class="header">
@@ -3006,7 +3843,8 @@
 
     <!-- Action buttons -->
     <div class="detail-action-bar">
-      <button class="action-btn" id="update-contact-btn">Logga besök</button>
+      <button class="action-btn" id="update-contact-btn">Logga kontakt</button>
+      <button class="action-btn secondary" id="d-plan-btn">Planera kontakt</button>
       <button class="action-btn secondary" id="d-call-btn">Ring</button>
       <button class="action-btn secondary" id="d-mail-btn">Email</button>
       <button class="action-btn secondary" id="d-reminder-btn">Mejlförslag</button>
@@ -3150,7 +3988,7 @@
   <div class="header">
     <button class="back-btn" id="form-back-btn" aria-label="Tillbaka till kund">&#8592;</button>
     <div class="header-text">
-      <h1>Logga besök</h1>
+      <h1>Logga kontakt</h1>
       <p id="form-header-customer"></p>
     </div>
   </div>
@@ -3159,27 +3997,27 @@
     <div>
 
       <input type="hidden" id="f-date" />
+      <input type="hidden" id="f-planned-activity-id" />
+      <input type="hidden" id="f-client-request-id" />
       <div class="form-field">
-        <label>Säljare</label>
+        <label for="f-seller">Säljare</label>
         <textarea id="f-seller" placeholder="Ditt namn" rows="1"></textarea>
       </div>
       <div class="form-field">
-        <label>Kontaktperson</label>
+        <label for="f-contactPerson">Kontaktperson</label>
         <textarea id="f-contactPerson" placeholder="Namn på kontaktperson" rows="1"></textarea>
       </div>
       <div class="form-field">
-        <label>Kanal</label>
+        <label for="f-channel">Kanal</label>
         <select id="f-channel">
           <option value="">Välj...</option>
           <option>Telefon</option>
-          <option>Email</option>
+          <option>Mejl</option>
           <option>Besök</option>
-          <option>Möte</option>
-          <option>Annat</option>
         </select>
       </div>
       <div class="form-field">
-        <label>Resultat</label>
+        <label for="f-result">Resultat</label>
         <select id="f-result">
           <option value="">Välj...</option>
           <option>Positiv</option>
@@ -3189,7 +4027,7 @@
           <option>Order lagd!</option>
         </select>
       </div>
-      <div class="detail-section" id="freezer-section" style="padding:12px 14px;margin-bottom:14px">
+      <div class="detail-section" id="freezer-section" style="display:none;padding:12px 14px;margin-bottom:14px">
         <div class="detail-section-title" style="margin-bottom:8px">I frysdisken</div>
         <div class="competitor-grid">
           <button class="competitor-toggle visit-competitor-toggle" data-competitor="Franui" type="button" aria-pressed="false">
@@ -3215,17 +4053,52 @@
         </div>
       </div>
       <div class="form-field">
-        <label>Kommentar</label>
-        <textarea id="f-comment" placeholder="Anteckningar från mötet..."></textarea>
+        <label for="f-comment">Kommentar</label>
+        <textarea id="f-comment" placeholder="Anteckningar från kontakten..."></textarea>
       </div>
       <div class="form-field">
-        <label>Nästa uppföljning</label>
-        <input type="date" id="f-nextFollowUp" />
+        <label class="planning-followup-toggle" for="f-followup-enabled">
+          <input type="checkbox" id="f-followup-enabled" />
+          Planera en uppföljning
+        </label>
+      </div>
+      <div class="followup-fields" id="followup-fields">
+        <div class="form-field" id="f-followup-owner-field" style="display:none">
+          <label for="f-followup-owner">Säljare för uppföljningen</label>
+          <select id="f-followup-owner">
+            <option value="">Välj aktiv säljare...</option>
+          </select>
+        </div>
+        <div class="planning-form-row">
+          <div class="form-field">
+            <label for="f-followup-type">Typ</label>
+            <select id="f-followup-type">
+              <option value="visit">Besök</option>
+              <option value="phone">Telefon</option>
+              <option value="email">Mejl</option>
+            </select>
+          </div>
+          <div class="form-field">
+            <label for="f-nextFollowUp">Datum</label>
+            <input type="date" id="f-nextFollowUp" />
+          </div>
+        </div>
+        <div class="planning-form-row">
+          <div class="form-field">
+            <label for="f-nextFollowUpTime">Tid</label>
+            <input type="time" id="f-nextFollowUpTime" />
+          </div>
+          <div class="form-field">
+            <label for="f-followup-note">Anteckning</label>
+            <input type="text" id="f-followup-note" maxlength="300" placeholder="Vad ska följas upp?" />
+          </div>
+        </div>
       </div>
 
     </div>
 
-    <button class="action-btn" id="form-save-btn">Logga besök</button>
+    <div class="planning-dialog-error" id="contact-save-error" role="alert"></div>
+    <button class="action-btn" id="form-save-btn">Logga kontakt</button>
     <button class="action-btn secondary" id="form-cancel-btn">Avbryt</button>
   </div>
 </div>
@@ -3295,6 +4168,20 @@
   </section>
 </div>
 
+<!-- ═══════════════ PLANNING DIALOG ═══════════════ -->
+<div class="planning-modal-backdrop" id="planning-modal-backdrop" aria-hidden="true">
+  <section class="planning-modal" id="planning-modal" role="dialog" aria-modal="true" aria-labelledby="planning-modal-title">
+    <div class="planning-modal-header">
+      <div class="planning-modal-heading">
+        <h2 id="planning-modal-title">Planering</h2>
+        <p id="planning-modal-subtitle"></p>
+      </div>
+      <button class="planning-modal-close" id="planning-modal-close" type="button" aria-label="Stäng">✕</button>
+    </div>
+    <div class="planning-modal-content" id="planning-modal-content"></div>
+  </section>
+</div>
+
 <!-- ═══════════════ FILTER MODAL ═══════════════ -->
 <div class="filter-backdrop" id="filter-backdrop"></div>
 <div class="filter-modal" id="filter-modal">
@@ -3320,12 +4207,30 @@
   const ROUTE_SERVICE_MINUTES_PER_STOP = 20;
   const MAP_ROUTE_DRAFT_KEY = "st_map_route_draft_v1";
   const MAP_ROUTE_DRAFT_TTL_MS = 12 * 60 * 60 * 1000;
+  const PLANNING_TIME_ZONE = "Europe/Stockholm";
+  const PLANNING_NOTE_MAX_LENGTH = 300;
+  const PLANNING_CONTACT_TYPES = Object.freeze({
+    visit: { label: "Besök", duration: 20, channel: "Besök" },
+    phone: { label: "Telefon", duration: 10, channel: "Telefon" },
+    email: { label: "Mejl", duration: 10, channel: "Mejl" },
+  });
+  const PLANNING_STATUS_LABELS = Object.freeze({
+    planned: "Planerad",
+    completed: "Genomförd",
+    skipped: "Överhoppad",
+    cancelled: "Avbokad",
+    overdue: "Försenad",
+  });
 
   let customers = [];
   let currentUser = null;
   let searchQuery = "";
   let currentCustomer = null;
   let detailReturnView = "list";
+  let formReturnView = "detail";
+  let activePlannedActivityId = "";
+  let contactClientRequestId = "";
+  let contactRetryPayload = null;
   let insights = {};
   let emailClickNoOrderActive = false;
   let insightsLoaded = false;
@@ -3348,6 +4253,23 @@
   let visibleListCount = LIST_BATCH_SIZE;
   let lastListSignature = "";
   let defaultResponsibleFilterApplied = false;
+  let planningWeekStart = "";
+  let planningSelectedDate = "";
+  let planningSelectedUserName = "";
+  let planningData = null;
+  let planningActiveUsersCache = [];
+  let planningLoading = false;
+  let planningLoadSerial = 0;
+  let planningEditorActivity = null;
+  let planningEditorCustomer = null;
+  let planningEditorSeed = null;
+  let planningEditorRequestId = "";
+  let planningModalReturnFocus = null;
+  let planningRoutePreview = null;
+  let planningRouteApplyRequestId = "";
+  let planningRouteImportRequestId = "";
+  let planningBacklogExpanded = { overdue: false, upcoming: false };
+  const planningStatusRequestIds = new Map();
   const visitCompetitorButtons = Array.from(document.querySelectorAll(".visit-competitor-toggle"))
     .filter(btn => FREEZER_FIELD_SET.has(btn.dataset.competitor));
   const customerCommentInput = document.getElementById("customer-comment-input");
@@ -3884,7 +4806,16 @@
   }
 
   function currentUserIsSeller() {
-    return normalizeRouteIdentity(currentUser?.role) === "säljare";
+    return new Set([
+      "säljare",
+      "saljare",
+      "account manager",
+      "accountmanager",
+    ]).has(normalizeRouteIdentity(currentUser?.role));
+  }
+
+  function currentUserCanPlan() {
+    return currentUserIsSeller() || userIsAdmin();
   }
 
   function getRouteProposalBaseCustomers() {
@@ -4013,6 +4944,7 @@
 
     if (routeProposal) {
       const summary = routeProposal.summary;
+      const mapSelectionChanged = routeMapSelectionDiffersFromProposal();
       const owner = esc(routeProposal.routeOwner || currentUser?.name || currentUser?.user_name || "");
       const routeDate = esc(formatRouteDate(routeProposal.routeDate));
       const savedCopy = routeProposal.cached
@@ -4049,15 +4981,21 @@
           </div>
         </div>
         <div class="route-proposal-map-hint">Total tid är under 7 timmar inklusive 20 minuters besök per butik och retur till start. Öppna kartan för att ta bort eller lägga tillbaka stopp.</div>
+        ${mapSelectionChanged ? `
+          <div class="planning-conflict" style="margin-bottom:10px">
+            Kartans stopp har ändrats. Beräkna ett nytt verifierat ruttförslag eller återställ stoppordningen innan rutten sparas i Planering.
+          </div>` : ""}
         <div class="route-proposal-actions">
           <button class="action-btn secondary" id="route-proposal-clear-btn" type="button">Rensa ruttförslag</button>
           <button class="action-btn" id="route-proposal-map-btn" type="button">Visa på karta</button>
+          <button class="action-btn" id="route-proposal-planning-btn" type="button" ${mapSelectionChanged ? "disabled" : ""}>Spara i Planering</button>
         </div>
       `;
       document.getElementById("route-proposal-clear-btn").addEventListener("click", () => {
         clearRouteProposal({ announce: true });
       });
       document.getElementById("route-proposal-map-btn").addEventListener("click", showMapView);
+      document.getElementById("route-proposal-planning-btn").addEventListener("click", importCurrentRouteToPlanning);
       return;
     }
 
@@ -4108,6 +5046,19 @@
     routeProposalMapSeededSignature = "";
     routeInMapStops = [];
     hasStoredRouteOutsideCurrentMap = false;
+  }
+
+  function routeMapSelectionDiffersFromProposal() {
+    if (
+      !routeProposal ||
+      routeProposalMapSeededSignature !== routeProposal.signature
+    ) {
+      return false;
+    }
+    const proposalRows = (routeProposal.rows || []).map(Number);
+    const selectedRows = routeInMapStops.map(stop => Number(stop.row));
+    return proposalRows.length !== selectedRows.length ||
+      proposalRows.some((row, index) => row !== selectedRows[index]);
   }
 
   function invalidateRouteProposalIfNeeded(currentSignature) {
@@ -4557,6 +5508,7 @@
           ${getNextActionHtml(c)}
           ${getPotentialHtml(c)}
           ${getCardDatesHtml(c)}
+          ${isCancelledCustomer(c) || !currentUserCanPlan() ? "" : `<button class="planning-card-plan-btn" type="button" data-plan-row="${c.row}">Planera kontakt</button>`}
         </div>`;
     }).join("") + (remainingCount > 0
       ? `<button class="load-more-btn" id="load-more-btn">Visa fler (${remainingCount} kvar)</button>`
@@ -4569,10 +5521,18 @@
       };
       card.addEventListener("click", openCard);
       card.addEventListener("keydown", e => {
+        if (e.target !== card) return;
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault();
           openCard();
         }
+      });
+    });
+    list.querySelectorAll(".planning-card-plan-btn").forEach(button => {
+      button.addEventListener("click", async event => {
+        event.stopPropagation();
+        const customer = customers.find(item => Number(item.row) === Number(button.dataset.planRow));
+        if (customer) await openPlanningEditorForCustomer(customer);
       });
     });
 
@@ -5088,7 +6048,10 @@
       reminderDirty = false;
       closeReminderModal(true);
       showToast(result.status === "partial" ? "Mejlet skickades till vissa mottagare" : (result.is_test ? "Testmejl skickat" : `${result.email_type_label || "Mejlförslag"} skickat`));
-      if (!result.is_test) await refreshStats(currentCustomer);
+      if (!result.is_test) {
+        planningData = null;
+        await refreshStats(currentCustomer);
+      }
     } catch (error) {
       showToast(reminderErrorMessage(error?.error));
     } finally {
@@ -5400,6 +6363,8 @@
     const c = customers.find(c => c.row === row);
     if (!c) return;
     currentCustomer = c;
+    document.getElementById("d-plan-btn").style.display =
+      currentUserCanPlan() && !isCancelledCustomer(c) ? "" : "none";
 
     document.getElementById("detail-loader").classList.add("show");
 
@@ -5592,61 +6557,222 @@
     if (saved) setCustomerComment(nextValue);
   });
 
-  document.getElementById("back-btn").addEventListener("click", () => showView(detailReturnView));
+  document.getElementById("back-btn").addEventListener("click", () => {
+    showView(detailReturnView);
+    if (detailReturnView === "planning") loadPlanningWeek();
+  });
 
   // ── Open contact form ──
-  document.getElementById("update-contact-btn").addEventListener("click", () => {
-    document.getElementById("form-header-customer").textContent = currentCustomer.customer;
+  function contactChannelNeedsFreezer(channel) {
+    return String(channel || "").trim().toLowerCase() === "besök";
+  }
+
+  function updateContactChannelFields() {
+    const channel = document.getElementById("f-channel").value;
+    const needsFreezer = contactChannelNeedsFreezer(channel);
+    document.getElementById("freezer-section").style.display = needsFreezer ? "block" : "none";
+    if (!needsFreezer) {
+      syncVisitCompetitorButtons({});
+      setFreezerSectionInvalid(false);
+    }
+  }
+
+  async function ensurePlanningActiveUsers() {
+    const knownUsers = (planningData?.available_users || [])
+      .map(normalizePlanningUser)
+      .filter(user => user.user_name);
+    if (knownUsers.length) planningActiveUsersCache = knownUsers;
+    if (planningActiveUsersCache.length) return planningActiveUsersCache;
+    const today = planningTodayKey();
+    const params = new URLSearchParams({ start: today, end: today });
+    const payload = await planningFetchJson(`/planning/activities?${params.toString()}`);
+    const source = payload?.data && typeof payload.data === "object" ? payload.data : payload;
+    planningActiveUsersCache = (source.available_users || [])
+      .map(normalizePlanningUser)
+      .filter(user => user.user_name);
+    return planningActiveUsersCache;
+  }
+
+  function renderContactFollowupOwner() {
+    const field = document.getElementById("f-followup-owner-field");
+    const select = document.getElementById("f-followup-owner");
+    const visible = userIsAdmin() &&
+      document.getElementById("f-followup-enabled").checked;
+    field.style.display = visible ? "block" : "none";
+    if (!visible) {
+      select.value = "";
+      return;
+    }
+    const previous = select.value;
+    const users = planningActiveUsersCache;
+    select.innerHTML = `
+      <option value="">Välj aktiv säljare...</option>
+      ${users.map(user =>
+        `<option value="${escAttr(user.user_name)}">${esc(user.name || user.user_name)}</option>`
+      ).join("")}`;
+    const responsibleKey = normalizeRouteIdentity(currentCustomer?.sales_person);
+    const responsible = users.find(user =>
+      normalizeRouteIdentity(user.name) === responsibleKey
+    );
+    select.value = users.some(user => user.user_name === previous)
+      ? previous
+      : (responsible?.user_name || "");
+  }
+
+  async function updateFollowupFields() {
+    const enabled = document.getElementById("f-followup-enabled").checked;
+    document.getElementById("followup-fields").classList.toggle("visible", enabled);
+    if (enabled && !document.getElementById("f-nextFollowUp").value) {
+      document.getElementById("f-nextFollowUp").value = planningAddDays(planningTodayKey(), 7);
+      document.getElementById("f-nextFollowUpTime").value = "09:00";
+    }
+    renderContactFollowupOwner();
+    if (enabled && userIsAdmin()) {
+      try {
+        await ensurePlanningActiveUsers();
+        renderContactFollowupOwner();
+      } catch {
+        showContactSaveError(
+          "Aktiva säljare kunde inte laddas. Försök igen innan uppföljningen sparas."
+        );
+      }
+    }
+  }
+
+  function setContactFormRetryMode(enabled) {
+    document.querySelectorAll(
+      "#view-form input, #view-form textarea, #view-form select, #view-form .visit-competitor-toggle"
+    ).forEach(control => {
+      control.disabled = Boolean(enabled);
+    });
+  }
+
+  function showContactSaveError(message = "") {
+    const target = document.getElementById("contact-save-error");
+    target.textContent = message;
+    target.classList.toggle("visible", Boolean(message));
+  }
+
+  function openContactFormForCustomer(customer, { activity = null, returnView = "detail" } = {}) {
+    if (!customer) return;
+    currentCustomer = customer;
+    formReturnView = returnView;
+    activePlannedActivityId = activity ? planningActivityId(activity) : "";
+    contactClientRequestId = planningClientRequestId("contact-log");
+    contactRetryPayload = null;
+    document.getElementById("form-header-customer").textContent = customer.customer;
     const now = new Date();
     const pad = n => String(n).padStart(2, "0");
     const datetime = `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}`;
     document.getElementById("f-date").value = datetime;
-    document.getElementById("f-seller").value = getPrefilledSellerName();
+    document.getElementById("f-planned-activity-id").value = activePlannedActivityId;
+    document.getElementById("f-client-request-id").value = contactClientRequestId;
+    document.getElementById("f-seller").value =
+      String(activity?.sales_person || "").trim() || getPrefilledSellerName();
     document.getElementById("f-contactPerson").value = "";
-    document.getElementById("f-channel").value = "";
+    document.getElementById("f-channel").value =
+      PLANNING_CONTACT_TYPES[activity?.contact_type]?.channel || "";
     document.getElementById("f-result").value = "";
     document.getElementById("f-comment").value = "";
+    document.getElementById("f-followup-enabled").checked = false;
+    document.getElementById("f-followup-owner").value = "";
+    document.getElementById("f-followup-type").value = "visit";
     document.getElementById("f-nextFollowUp").value = "";
+    document.getElementById("f-nextFollowUpTime").value = "";
+    document.getElementById("f-followup-note").value = "";
     syncVisitCompetitorButtons({});
     setFreezerSectionInvalid(false);
+    setContactFormRetryMode(false);
+    showContactSaveError("");
+    updateContactChannelFields();
+    updateFollowupFields();
     showView("form");
+  }
+
+  document.getElementById("update-contact-btn").addEventListener("click", () => {
+    openContactFormForCustomer(currentCustomer, { returnView: "detail" });
   });
 
-  // ── Back (form → detail) ──
-  document.getElementById("form-back-btn").addEventListener("click", () => showView("detail"));
-  document.getElementById("form-cancel-btn").addEventListener("click", () => showView("detail"));
+  document.getElementById("f-channel").addEventListener("change", updateContactChannelFields);
+  document.getElementById("f-followup-enabled").addEventListener("change", updateFollowupFields);
+
+  // ── Back (form → origin) ──
+  document.getElementById("form-back-btn").addEventListener("click", () => showView(formReturnView));
+  document.getElementById("form-cancel-btn").addEventListener("click", () => showView(formReturnView));
 
   // ── Save contact ──
   document.getElementById("form-save-btn").addEventListener("click", async () => {
     const btn = document.getElementById("form-save-btn");
-    const payload = {
+    const channel = document.getElementById("f-channel").value;
+    const followupEnabled = document.getElementById("f-followup-enabled").checked;
+    const followupDate = document.getElementById("f-nextFollowUp").value;
+    const followupTime = document.getElementById("f-nextFollowUpTime").value;
+    const followupType = document.getElementById("f-followup-type").value;
+    const followupNote = document.getElementById("f-followup-note").value.trim();
+    const followupScheduledAt = followupEnabled
+      ? planningStockholmIso(followupDate, followupTime)
+      : "";
+    const draftPayload = {
+      customer_id:        String(currentCustomer?.customer_id || "").trim(),
       date_time:          document.getElementById("f-date").value,
       sales_person:       document.getElementById("f-seller").value,
       customer_contact_person: document.getElementById("f-contactPerson").value,
-      contact_channel:    document.getElementById("f-channel").value,
+      contact_channel:    channel,
       result:             document.getElementById("f-result").value,
       comment:            document.getElementById("f-comment").value,
-      follow_up_date:     document.getElementById("f-nextFollowUp").value,
+      follow_up_date:     followupEnabled ? followupDate : "",
+      follow_up: followupEnabled ? {
+        enabled: true,
+        contact_type: followupType,
+        scheduled_at: followupScheduledAt,
+        note: followupNote,
+      } : { enabled: false },
+      planned_activity_id: activePlannedActivityId || undefined,
+      client_request_id: contactClientRequestId || document.getElementById("f-client-request-id").value,
+      user_name: followupEnabled && userIsAdmin()
+        ? document.getElementById("f-followup-owner").value
+        : undefined,
       ...getVisitFreezerPayload(),
     };
+    const payload = contactRetryPayload || JSON.parse(JSON.stringify(draftPayload));
+    const retryingPartialSave = Boolean(contactRetryPayload);
 
     const hasFreezerSelection = FREEZER_FIELDS.some(field => payload[field] === "1");
-    if (!hasFreezerSelection) {
+    if (!retryingPartialSave && contactChannelNeedsFreezer(channel) && !hasFreezerSelection) {
       showToast("Välj något under I frysdisken.");
       setFreezerSectionInvalid(true);
       visitCompetitorButtons[0]?.focus();
       return;
     }
 
-    if (!payload.comment.trim()) {
+    if (!retryingPartialSave && !payload.comment.trim()) {
       showToast("Kommentar är obligatorisk.");
       document.getElementById("f-comment").focus();
+      return;
+    }
+
+    if (!retryingPartialSave && followupEnabled && (!PLANNING_CONTACT_TYPES[followupType] || !followupScheduledAt)) {
+      showToast("Välj typ, datum och tid för uppföljningen.");
+      document.getElementById("f-nextFollowUp").focus();
+      return;
+    }
+
+    if (!retryingPartialSave && followupEnabled && userIsAdmin() && !payload.user_name) {
+      showToast("Välj en aktiv säljare för uppföljningen.");
+      document.getElementById("f-followup-owner").focus();
+      return;
+    }
+
+    if (!retryingPartialSave && followupNote.length > PLANNING_NOTE_MAX_LENGTH) {
+      showToast(`Uppföljningsanteckningen får vara högst ${PLANNING_NOTE_MAX_LENGTH} tecken.`);
+      document.getElementById("f-followup-note").focus();
       return;
     }
 
     btn.disabled = true;
     btn.textContent = "Sparar...";
     setVisitCompetitorButtonsDisabled(true);
+    showContactSaveError("");
 
     try {
       const res = await fetch(`${API}/customers/${encodeURIComponent(currentCustomer.customer)}/contacts`, {
@@ -5654,22 +6780,52 @@
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-      if (res.ok) {
-        showToast("Besök sparat!");
-        showView("detail");
+      const result = await res.json().catch(() => ({}));
+      const partial = res.status === 207 || result?.status === "partial";
+      if (res.ok && !partial) {
+        showToast(result.duplicate ? "Kontakten var redan sparad" : "Kontakt sparad!");
+        contactClientRequestId = "";
+        contactRetryPayload = null;
+        activePlannedActivityId = "";
+        setContactFormRetryMode(false);
         contactLogLoaded = false;
-        refreshStats(currentCustomer);
+        planningData = null;
+        if (formReturnView === "planning") {
+          showView("planning");
+          await loadPlanningWeek();
+        } else {
+          showView("detail");
+          refreshStats(currentCustomer);
+        }
         loadInsights();
         if (followupInsights) loadFollowupInsights(document.getElementById("insights-responsible").value);
+      } else if (partial) {
+        contactRetryPayload = payload;
+        setContactFormRetryMode(true);
+        const message = result.message ||
+          "Kontakten sparades, men uppföljningen saknas. Försök igen för att slutföra samma sparning.";
+        showContactSaveError(message);
+        showToast("Kontakten sparades delvis – slutför uppföljningen");
       } else {
-        showToast("Kunde inte spara. Försök igen.");
+        if (res.status >= 500) {
+          contactRetryPayload = payload;
+          setContactFormRetryMode(true);
+        }
+        const message = result.message || "Kunde inte spara. Försök igen.";
+        showContactSaveError(message);
+        showToast(message);
       }
     } catch {
+      contactRetryPayload = payload;
+      setContactFormRetryMode(true);
+      showContactSaveError(
+        "Anslutningen bröts under sparningen. Försök igen med samma uppgifter för att undvika en dubblett."
+      );
       showToast("Nätverksfel. Försök igen.");
     } finally {
       btn.disabled = false;
-      btn.textContent = "Logga besök";
-      setVisitCompetitorButtonsDisabled(false);
+      btn.textContent = contactRetryPayload ? "Försök slutföra sparningen" : "Logga kontakt";
+      if (!contactRetryPayload) setVisitCompetitorButtonsDisabled(false);
     }
   });
 
@@ -5700,6 +6856,1366 @@
   function escAttr(s) {
     return esc(s).replace(/"/g, "&quot;");
   }
+
+  // ══════════════════════════════════════
+  // SALES PLANNING
+  // ══════════════════════════════════════
+
+  function planningClientRequestId(prefix = "planning") {
+    const suffix = globalThis.crypto?.randomUUID
+      ? globalThis.crypto.randomUUID()
+      : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+    return `${prefix}-${suffix}`;
+  }
+
+  function planningDateFromKey(value) {
+    const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(value || ""));
+    if (!match) return null;
+    return new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]), 12));
+  }
+
+  function planningDateKey(value) {
+    if (!(value instanceof Date) || Number.isNaN(value.getTime())) return "";
+    return [
+      value.getUTCFullYear(),
+      String(value.getUTCMonth() + 1).padStart(2, "0"),
+      String(value.getUTCDate()).padStart(2, "0"),
+    ].join("-");
+  }
+
+  function planningAddDays(dateKey, days) {
+    const date = planningDateFromKey(dateKey);
+    if (!date) return "";
+    date.setUTCDate(date.getUTCDate() + Number(days || 0));
+    return planningDateKey(date);
+  }
+
+  function planningStartOfWeek(dateKey) {
+    const date = planningDateFromKey(dateKey);
+    if (!date) return "";
+    const day = date.getUTCDay() || 7;
+    date.setUTCDate(date.getUTCDate() - day + 1);
+    return planningDateKey(date);
+  }
+
+  function planningWeekDates(start = planningWeekStart) {
+    return Array.from({ length: 7 }, (_, index) => planningAddDays(start, index));
+  }
+
+  function planningTodayKey() {
+    return getStockholmRouteDate();
+  }
+
+  function planningDateKeyFromIso(value) {
+    const text = String(value || "").trim();
+    if (!text) return "";
+    const parsed = new Date(text);
+    if (!Number.isNaN(parsed.getTime())) {
+      return new Intl.DateTimeFormat("sv-SE", {
+        timeZone: PLANNING_TIME_ZONE,
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+      }).format(parsed);
+    }
+    const match = /^(\d{4}-\d{2}-\d{2})/.exec(text);
+    return match ? match[1] : "";
+  }
+
+  function planningTimeFromIso(value) {
+    const text = String(value || "").trim();
+    if (!text) return "";
+    const parsed = new Date(text);
+    if (!Number.isNaN(parsed.getTime())) {
+      return new Intl.DateTimeFormat("sv-SE", {
+        timeZone: PLANNING_TIME_ZONE,
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false,
+      }).format(parsed);
+    }
+    return text.slice(11, 16);
+  }
+
+  function planningStockholmOffset(dateKey, timeValue) {
+    const probe = new Date(`${dateKey}T${timeValue || "12:00"}:00Z`);
+    if (Number.isNaN(probe.getTime())) return "+01:00";
+    const part = new Intl.DateTimeFormat("en-US", {
+      timeZone: PLANNING_TIME_ZONE,
+      timeZoneName: "longOffset",
+    }).formatToParts(probe).find(item => item.type === "timeZoneName")?.value || "GMT+01:00";
+    const match = /GMT([+-])(\d{1,2})(?::?(\d{2}))?/.exec(part);
+    if (!match) return "+01:00";
+    return `${match[1]}${String(Number(match[2])).padStart(2, "0")}:${match[3] || "00"}`;
+  }
+
+  function planningStockholmIso(dateKey, timeValue) {
+    if (!planningDateFromKey(dateKey) || !/^\d{2}:\d{2}$/.test(String(timeValue || ""))) return "";
+    return `${dateKey}T${timeValue}:00${planningStockholmOffset(dateKey, timeValue)}`;
+  }
+
+  function planningFormatDate(dateKey, options = {}) {
+    const date = planningDateFromKey(dateKey);
+    if (!date) return dateKey || "—";
+    return new Intl.DateTimeFormat("sv-SE", {
+      timeZone: "UTC",
+      weekday: options.weekday === false ? undefined : (options.short ? "short" : "long"),
+      day: "numeric",
+      month: options.month || "long",
+      year: options.year ? "numeric" : undefined,
+    }).format(date);
+  }
+
+  function planningWeekNumber(dateKey) {
+    const date = planningDateFromKey(dateKey);
+    if (!date) return "";
+    const target = new Date(date.valueOf());
+    const day = target.getUTCDay() || 7;
+    target.setUTCDate(target.getUTCDate() + 4 - day);
+    const yearStart = new Date(Date.UTC(target.getUTCFullYear(), 0, 1, 12));
+    return Math.ceil((((target - yearStart) / 86400000) + 1) / 7);
+  }
+
+  function planningTruthy(value) {
+    return value === true || ["1", "y", "yes", "ja", "true", "on"].includes(String(value || "").trim().toLowerCase());
+  }
+
+  function planningActivityId(activity) {
+    return String(activity?.planned_activity_id ?? activity?.activity_id ?? activity?.id ?? "").trim();
+  }
+
+  function normalizePlanningActivity(activity) {
+    const source = activity && typeof activity === "object" ? activity : {};
+    return {
+      ...source,
+      planned_activity_id: planningActivityId(source),
+      customer_id: String(source.customer_id || "").trim(),
+      customer_row: Number(source.customer_row ?? source.row) || null,
+      customer: String(source.customer ?? source.customer_name ?? "").trim(),
+      contact_type: PLANNING_CONTACT_TYPES[source.contact_type] ? source.contact_type : "visit",
+      scheduled_at: String(source.scheduled_at ?? source.start_at ?? source.estimated_at ?? "").trim(),
+      note: String(source.note ?? source.comment ?? "").trim(),
+      status: ["planned", "completed", "skipped", "cancelled"].includes(source.status)
+        ? source.status
+        : "planned",
+      source: ["manual", "follow_up", "route"].includes(source.source) ? source.source : "manual",
+      time_is_estimated: planningTruthy(source.time_is_estimated ?? source.is_estimated ?? source.approximate_time),
+    };
+  }
+
+  function planningEffectiveStatus(activity) {
+    if (activity.status !== "planned") return activity.status;
+    const scheduled = new Date(activity.scheduled_at);
+    return !Number.isNaN(scheduled.getTime()) && scheduled.getTime() < Date.now()
+      ? "overdue"
+      : "planned";
+  }
+
+  function planningSourceLabel(source) {
+    return { manual: "Manuell", follow_up: "Uppföljning", route: "Rutt", unplanned: "Oplanerad" }[source] || "";
+  }
+
+  function planningCustomerForItem(item) {
+    const customerId = String(item?.customer_id || "").trim();
+    if (customerId) {
+      const byId = customers.filter(customer =>
+        String(customer.customer_id || "").trim() === customerId
+      );
+      return byId.length === 1 ? byId[0] : null;
+    }
+    const customerNumber = customerInsightKey(item?.customer_number);
+    if (customerNumber) {
+      const byNumber = customers.filter(customer =>
+        customerInsightKey(customer.customer_number) === customerNumber
+      );
+      return byNumber.length === 1 ? byNumber[0] : null;
+    }
+    const customerName = customerInsightKey(item?.customer ?? item?.customer_name);
+    const address = customerInsightKey(item?.address ?? item?.address_google);
+    const city = customerInsightKey(item?.city ?? item?.city_google);
+    if (!customerName || (!address && !city)) return null;
+    const byVerifiedSnapshot = customers.filter(customer => {
+      if (customerInsightKey(customer.customer) !== customerName) return false;
+      const customerAddress = customerInsightKey([
+        customer.address_google ?? customer.address,
+        customer.address_number_google ?? customer.address_number,
+      ].filter(Boolean).join(" "));
+      const customerCity = customerInsightKey(customer.city_google ?? customer.city);
+      return (!address || customerAddress === address) &&
+        (!city || customerCity === city);
+    });
+    return byVerifiedSnapshot.length === 1 ? byVerifiedSnapshot[0] : null;
+  }
+
+  function planningSelectedOwner() {
+    if (!userIsAdmin()) return "";
+    return planningSelectedUserName;
+  }
+
+  function planningOwnerQuery(params) {
+    const owner = planningSelectedOwner();
+    if (owner) params.set("user_name", owner);
+    return params;
+  }
+
+  async function planningFetchJson(path, options = {}) {
+    const response = await fetch(`${API}${path}`, options);
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || payload?.ok === false) {
+      const error = new Error(
+        payload?.message || payload?.detail || payload?.error_description ||
+        (typeof payload?.error === "string" ? payload.error : "") ||
+        `HTTP ${response.status}`
+      );
+      error.code = String(payload?.code || payload?.error || "");
+      error.status = response.status;
+      error.payload = payload;
+      throw error;
+    }
+    return payload;
+  }
+
+  function openPlanningView({ date = "" } = {}) {
+    const targetDate = planningDateFromKey(date) ? date : (planningSelectedDate || planningTodayKey());
+    planningSelectedDate = targetDate;
+    planningWeekStart = planningStartOfWeek(targetDate);
+    if (!userIsAdmin()) {
+      planningSelectedUserName = String(currentUser?.user_name || "").trim();
+    }
+    showView("planning");
+    renderPlanningWeekStrip();
+    return loadPlanningWeek();
+  }
+
+  async function openPlanningEditorForCustomer(customer) {
+    if (!customer) return;
+    if (userIsAdmin()) {
+      if (!planningData?.available_users?.length) {
+        await openPlanningView();
+      }
+      const responsibleKey = normalizeRouteIdentity(customer.sales_person);
+      const responsible = (planningData?.available_users || [])
+        .map(normalizePlanningUser)
+        .find(user => normalizeRouteIdentity(user.name) === responsibleKey);
+      if (!responsible) {
+        showView("planning");
+        showToast("Välj en aktiv säljare i Planering innan kontakten bokas.");
+        return;
+      }
+      if (planningSelectedUserName !== responsible.user_name) {
+        planningSelectedUserName = responsible.user_name;
+        await loadPlanningWeek();
+      }
+    }
+    openPlanningEditor({
+      customer,
+      date: planningSelectedDate || planningTodayKey(),
+    });
+  }
+
+  async function loadPlanningWeek() {
+    if (!planningWeekStart) {
+      planningSelectedDate = planningTodayKey();
+      planningWeekStart = planningStartOfWeek(planningSelectedDate);
+    }
+    const requestSerial = ++planningLoadSerial;
+    planningLoading = true;
+    document.getElementById("planning-agenda").innerHTML =
+      '<div class="planning-state"><strong>Laddar planering…</strong>Hämtar aktiviteter för veckan.</div>';
+    document.getElementById("planning-backlog").innerHTML =
+      '<div class="planning-state">Laddar att planera…</div>';
+    renderPlanningWeekStrip();
+    try {
+      const params = planningOwnerQuery(new URLSearchParams({
+        start: planningWeekStart,
+        end: planningAddDays(planningWeekStart, 6),
+      }));
+      const payload = await planningFetchJson(`/planning/activities?${params.toString()}`);
+      if (requestSerial !== planningLoadSerial) return;
+      const source = payload?.data && typeof payload.data === "object" ? payload.data : payload;
+      const responseOwner = normalizePlanningUser(source.owner || {});
+      if (userIsAdmin() && responseOwner.user_name) {
+        planningSelectedUserName = responseOwner.user_name;
+      }
+      planningData = {
+        ...source,
+        activities: (source.activities || source.items || []).map(normalizePlanningActivity),
+        unplanned_contacts: source.unplanned_contacts || source.unplanned || [],
+        unscheduled_followups: source.unscheduled_followups || source.unscheduled_follow_ups || [],
+        unscheduled_followups_overdue: source.unscheduled_followups_overdue || [],
+        unscheduled_followups_upcoming: source.unscheduled_followups_upcoming || [],
+        day_summaries: source.day_summaries || source.days || [],
+        available_users: source.available_users || source.users || [],
+      };
+      planningActiveUsersCache = planningData.available_users
+        .map(normalizePlanningUser)
+        .filter(user => user.user_name);
+      renderPlanning();
+    } catch (error) {
+      if (requestSerial !== planningLoadSerial) return;
+      planningData = null;
+      renderPlanningLoadError(error);
+    } finally {
+      if (requestSerial === planningLoadSerial) planningLoading = false;
+    }
+  }
+
+  function renderPlanningLoadError(error) {
+    const message = error?.status === 403
+      ? "Du har inte behörighet att visa den här säljarens planering."
+      : "Planeringen kunde inte laddas. Kontrollera anslutningen och försök igen.";
+    document.getElementById("planning-agenda").innerHTML = `
+      <div class="planning-state">
+        <strong>Kunde inte ladda planeringen</strong>
+        ${esc(message)}
+        <br><button class="planning-compact-btn" id="planning-retry-btn" type="button">Försök igen</button>
+      </div>`;
+    document.getElementById("planning-backlog").innerHTML =
+      '<div class="planning-state">Att planera är inte tillgängligt just nu.</div>';
+    document.getElementById("planning-retry-btn")?.addEventListener("click", loadPlanningWeek);
+    document.getElementById("planning-day-summary").textContent = "Data saknas";
+    renderPlanningOwnerSelect();
+  }
+
+  function renderPlanning() {
+    renderPlanningOwnerSelect();
+    renderPlanningWeekStrip();
+    renderPlanningAgenda();
+    renderPlanningBacklogHardened();
+  }
+
+  function normalizePlanningUser(user) {
+    if (typeof user === "string") return { user_name: user, name: user };
+    return {
+      user_name: String(user?.user_name ?? user?.username ?? user?.value ?? "").trim(),
+      name: String(user?.name ?? user?.sales_person ?? user?.label ?? user?.user_name ?? "").trim(),
+    };
+  }
+
+  function renderPlanningOwnerSelect() {
+    const wrap = document.getElementById("planning-owner-wrap");
+    const select = document.getElementById("planning-owner-select");
+    const isAdmin = userIsAdmin();
+    wrap.classList.toggle("visible", isAdmin);
+    if (!isAdmin) return;
+    const available = (planningData?.available_users || []).map(normalizePlanningUser).filter(user => user.user_name);
+    select.innerHTML = available.map(user =>
+      `<option value="${escAttr(user.user_name)}">${esc(user.name || user.user_name)}</option>`
+    ).join("");
+    if (!available.some(user => user.user_name === planningSelectedUserName)) {
+      planningSelectedUserName = available[0]?.user_name || "";
+    }
+    select.disabled = available.length === 0;
+    select.value = planningSelectedUserName;
+  }
+
+  function planningDaySummary(dateKey) {
+    const summaries = planningData?.day_summaries;
+    if (Array.isArray(summaries)) {
+      return summaries.find(summary => String(summary?.date ?? summary?.day ?? "").slice(0, 10) === dateKey) || {};
+    }
+    return summaries?.[dateKey] || {};
+  }
+
+  function planningActivitiesForDate(dateKey) {
+    return (planningData?.activities || [])
+      .filter(activity => planningDateKeyFromIso(activity.scheduled_at) === dateKey)
+      .sort((left, right) =>
+        String(left.scheduled_at).localeCompare(String(right.scheduled_at)) ||
+        left.customer.localeCompare(right.customer, "sv")
+      );
+  }
+
+  function planningUnplannedForDate(dateKey) {
+    return (planningData?.unplanned_contacts || [])
+      .filter(contact => String(contact?.date_time || contact?.latest_contact_date || "").slice(0, 10) === dateKey)
+      .map(contact => ({
+        ...contact,
+        planned_activity_id: "",
+        customer_row: Number(contact.customer_row) || null,
+        customer: String(contact.customer || "").trim(),
+        contact_type: PLANNING_CONTACT_TYPES[contact.contact_type] ? contact.contact_type : "phone",
+        scheduled_at: String(contact.date_time || contact.latest_contact_date || "").trim(),
+        note: String(contact.comment || contact.result || "").trim(),
+        status: "completed",
+        source: "unplanned",
+        time_is_estimated: false,
+        unplanned: true,
+      }))
+      .sort((left, right) =>
+        String(left.scheduled_at).localeCompare(String(right.scheduled_at)) ||
+        left.customer.localeCompare(right.customer, "sv")
+      );
+  }
+
+  function planningAgendaItemsForDate(dateKey) {
+    return [
+      ...planningActivitiesForDate(dateKey),
+      ...planningUnplannedForDate(dateKey),
+    ].sort((left, right) =>
+      String(left.scheduled_at).localeCompare(String(right.scheduled_at)) ||
+      left.customer.localeCompare(right.customer, "sv")
+    );
+  }
+
+  function renderPlanningWeekStrip() {
+    if (!planningWeekStart) return;
+    const weekDates = planningWeekDates();
+    const first = weekDates[0];
+    const last = weekDates[6];
+    const firstLabel = planningFormatDate(first, { weekday: false, short: true, month: "short" });
+    const lastLabel = planningFormatDate(last, { weekday: false, short: true, month: "short", year: first.slice(0, 4) !== last.slice(0, 4) });
+    document.getElementById("planning-week-label").textContent =
+      `Vecka ${planningWeekNumber(first)} · ${firstLabel}–${lastLabel}`;
+    document.getElementById("planning-date-jump").value = planningSelectedDate;
+    document.getElementById("planning-week-strip").innerHTML = weekDates.map(dateKey => {
+      const summary = planningDaySummary(dateKey);
+      const activeCount = Number(summary.activity_count ?? summary.display_count) ||
+        planningAgendaItemsForDate(dateKey).filter(activity => activity.status !== "cancelled").length;
+      const date = planningDateFromKey(dateKey);
+      const dayName = new Intl.DateTimeFormat("sv-SE", { weekday: "short", timeZone: "UTC" })
+        .format(date).replace(".", "");
+      return `
+        <button class="planning-day-btn${dateKey === planningSelectedDate ? " selected" : ""}${dateKey === planningTodayKey() ? " today" : ""}"
+          type="button" data-planning-date="${dateKey}" aria-pressed="${dateKey === planningSelectedDate}">
+          <span class="planning-day-name">${esc(dayName)}</span>
+          <span class="planning-day-number">${date.getUTCDate()}</span>
+          <span class="planning-day-count">${activeCount ? `${activeCount} st` : ""}</span>
+        </button>`;
+    }).join("");
+    document.getElementById("planning-week-strip").querySelectorAll("[data-planning-date]").forEach(button => {
+      button.addEventListener("click", () => {
+        planningSelectedDate = button.dataset.planningDate;
+        renderPlanningWeekStrip();
+        renderPlanningAgenda();
+      });
+    });
+  }
+
+  function planningStatusSummary(activities) {
+    const counts = { planned: 0, overdue: 0, completed: 0, skipped: 0, cancelled: 0, unplanned: 0 };
+    activities.forEach(activity => {
+      if (activity.unplanned) {
+        counts.unplanned += 1;
+        return;
+      }
+      const status = planningEffectiveStatus(activity);
+      counts[status] = (counts[status] || 0) + 1;
+    });
+    const parts = [];
+    if (counts.planned) parts.push(`${counts.planned} planerade`);
+    if (counts.overdue) parts.push(`${counts.overdue} försenade`);
+    if (counts.completed) parts.push(`${counts.completed} genomförda`);
+    if (counts.unplanned) parts.push(`${counts.unplanned} oplanerade`);
+    if (counts.skipped) parts.push(`${counts.skipped} överhoppade`);
+    if (!parts.length && counts.cancelled) parts.push(`${counts.cancelled} avbokade`);
+    return parts.join(" · ");
+  }
+
+  function renderPlanningActivityCard(activity) {
+    const status = planningEffectiveStatus(activity);
+    const type = PLANNING_CONTACT_TYPES[activity.contact_type];
+    const time = planningTimeFromIso(activity.scheduled_at) || "—";
+    const timeLabel = activity.time_is_estimated ? `ca ${time}` : time;
+    const sourceBadge = activity.source !== "manual"
+      ? `<span class="planning-source-badge">${esc(planningSourceLabel(activity.source))}</span>`
+      : "";
+    if (activity.unplanned) {
+      return `
+        <div class="planning-activity-card status-completed unplanned"
+          aria-label="${escAttr(`${timeLabel}, oplanerad ${type.label.toLowerCase()}, ${activity.customer}, genomförd`)}">
+          <span class="planning-activity-time">${esc(timeLabel)}</span>
+          <span class="planning-activity-main">
+            <span class="planning-activity-type">${sourceBadge}${esc(type.label)} · ${type.duration} min</span>
+            <span class="planning-activity-customer">${esc(activity.customer || "Okänd kund")}</span>
+            ${activity.note ? `<span class="planning-activity-note">${esc(activity.note)}</span>` : ""}
+          </span>
+          <span class="planning-status-badge">Genomförd</span>
+        </div>`;
+    }
+    return `
+      <button class="planning-activity-card status-${status}" type="button"
+        data-planning-activity-id="${escAttr(planningActivityId(activity))}"
+        aria-label="${escAttr(`${timeLabel}, ${type.label}, ${activity.customer}, ${PLANNING_STATUS_LABELS[status]}`)}">
+        <span class="planning-activity-time">${esc(timeLabel)}</span>
+        <span class="planning-activity-main">
+          <span class="planning-activity-type">${sourceBadge}${esc(type.label)} · ${type.duration} min</span>
+          <span class="planning-activity-customer">${esc(activity.customer || "Okänd kund")}</span>
+          ${activity.note ? `<span class="planning-activity-note">${esc(activity.note)}</span>` : ""}
+        </span>
+        <span class="planning-status-badge">${esc(PLANNING_STATUS_LABELS[status])}</span>
+      </button>`;
+  }
+
+  function renderPlanningAgenda() {
+    const activities = planningAgendaItemsForDate(planningSelectedDate);
+    const dateLabel = planningFormatDate(planningSelectedDate, { year: true });
+    document.getElementById("planning-day-title").textContent =
+      dateLabel ? dateLabel.charAt(0).toUpperCase() + dateLabel.slice(1) : "Dagens agenda";
+    const summary = planningStatusSummary(activities);
+    document.getElementById("planning-day-summary").textContent = summary || "Ingen aktivitet ännu";
+    const owner = planningSelectedOwner();
+    const selectedOwner = (planningData?.available_users || [])
+      .map(normalizePlanningUser)
+      .find(user => user.user_name === owner);
+    document.getElementById("planning-subtitle").textContent =
+      owner && userIsAdmin()
+        ? `Veckans kundkontakter · ${selectedOwner?.name || owner}`
+        : "Veckans kundkontakter";
+    const hasRoute = activities.some(activity => activity.source === "route");
+    const routeNote = hasRoute
+      ? '<div class="planning-route-origin-note">Planen beräknades från din position vid skapandet.</div>'
+      : "";
+    const agenda = document.getElementById("planning-agenda");
+    if (!activities.length) {
+      agenda.innerHTML = `
+        ${routeNote}
+        <div class="planning-state">
+          <strong>Inget planerat den här dagen</strong>
+          Lägg till en aktivitet eller fyll dagen automatiskt.
+          <br><button class="planning-compact-btn" id="planning-empty-add-btn" type="button">+ Aktivitet</button>
+        </div>`;
+      document.getElementById("planning-empty-add-btn")?.addEventListener("click", () =>
+        openPlanningEditor({ date: planningSelectedDate })
+      );
+      return;
+    }
+    agenda.innerHTML = `${routeNote}<div class="planning-activity-list">${activities.map(renderPlanningActivityCard).join("")}</div>`;
+    agenda.querySelectorAll("[data-planning-activity-id]").forEach(button => {
+      button.addEventListener("click", () => openPlanningActivityDetail(button.dataset.planningActivityId));
+    });
+  }
+
+  function planningBacklogMeta(item, kind) {
+    if (["followup", "overdue", "upcoming"].includes(kind)) {
+      const date = String(item?.follow_up_date ?? item?.date ?? "").slice(0, 10);
+      return [date ? `Uppföljning ${date}` : "Uppföljning saknar tid", item?.note ?? item?.comment]
+        .filter(Boolean).join(" · ");
+    }
+    return String(item?.reason ?? item?.latest_contact_date ?? item?.message ?? "Kontakt saknar planerad tid");
+  }
+
+  function renderPlanningBacklogRows(rows, kind) {
+    const visibleRows = planningBacklogExpanded[kind] ? rows : rows.slice(0, 20);
+    if (!rows.length) return '<div class="planning-state" style="padding:14px 4px">Inga just nu.</div>';
+    return `<div class="planning-backlog-list">${visibleRows.map((item, index) => {
+      const customer = planningCustomerForItem(item);
+      const customerName = customer?.customer || item?.customer || item?.customer_name || "Okänd kund";
+      return `
+        <div class="planning-backlog-item">
+          <div>
+            <div class="planning-backlog-customer">${esc(customerName)}</div>
+            <div class="planning-backlog-meta">${esc(planningBacklogMeta(item, kind))}</div>
+          </div>
+          <button class="planning-compact-btn" type="button" data-planning-backlog-kind="${kind}" data-planning-backlog-index="${index}">Planera</button>
+        </div>`;
+    }).join("")}</div>
+      ${rows.length > 20 ? `<button class="planning-compact-btn" type="button" data-planning-backlog-expand="${kind}">${planningBacklogExpanded[kind] ? "Visa färre" : `Visa alla (${rows.length})`}</button>` : ""}`;
+  }
+
+  function renderPlanningBacklog() {
+    const followups = planningData?.unscheduled_followups || [];
+    document.getElementById("planning-backlog").innerHTML = `
+      <section class="planning-backlog-section">
+        <h3 class="planning-backlog-title">Uppföljningar utan bokad tid · ${followups.length}</h3>
+        ${renderPlanningBacklogRows(followups, "followup")}
+      </section>`;
+    document.getElementById("planning-backlog").querySelectorAll("[data-planning-backlog-index]").forEach(button => {
+      button.addEventListener("click", () => {
+        const item = followups[Number(button.dataset.planningBacklogIndex)];
+        const date = String(item?.follow_up_date || "").slice(0, 10);
+        openPlanningEditor({
+          customer: planningCustomerForItem(item),
+          date: planningDateFromKey(date) ? date : planningSelectedDate,
+          seed: item,
+        });
+      });
+    });
+  }
+
+  function renderPlanningBacklogHardened() {
+    const overdue = planningData?.unscheduled_followups_overdue || [];
+    const upcoming = planningData?.unscheduled_followups_upcoming || [];
+    const target = document.getElementById("planning-backlog");
+    target.innerHTML = `
+      <section class="planning-backlog-section">
+        <h3 class="planning-backlog-title">Försenade uppföljningar · ${overdue.length}</h3>
+        ${renderPlanningBacklogRows(overdue, "overdue")}
+      </section>
+      <section class="planning-backlog-section">
+        <h3 class="planning-backlog-title">Kommande uppföljningar · ${upcoming.length}</h3>
+        ${renderPlanningBacklogRows(upcoming, "upcoming")}
+      </section>`;
+    target.querySelectorAll("[data-planning-backlog-index]").forEach(button => {
+      button.addEventListener("click", () => {
+        const rows = button.dataset.planningBacklogKind === "overdue"
+          ? overdue : upcoming;
+        const item = rows[Number(button.dataset.planningBacklogIndex)];
+        const date = String(item?.follow_up_date || "").slice(0, 10);
+        const customer = planningCustomerForItem(item);
+        if (!customer) {
+          showToast("Kunden kunde inte bindas säkert. Ladda om eller kontakta administratör.");
+          return;
+        }
+        openPlanningEditor({
+          customer,
+          date: planningDateFromKey(date) ? date : planningSelectedDate,
+          seed: item,
+        });
+      });
+    });
+    target.querySelectorAll("[data-planning-backlog-expand]").forEach(button => {
+      button.addEventListener("click", () => {
+        const kind = button.dataset.planningBacklogExpand;
+        planningBacklogExpanded[kind] = !planningBacklogExpanded[kind];
+        renderPlanningBacklogHardened();
+      });
+    });
+  }
+
+  const planningModalBackdrop = document.getElementById("planning-modal-backdrop");
+  const planningModalContent = document.getElementById("planning-modal-content");
+
+  function planningModalFocusableElements() {
+    return Array.from(document.getElementById("planning-modal").querySelectorAll(
+      "button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [href], [tabindex]:not([tabindex='-1'])"
+    )).filter(element => element.getClientRects().length > 0);
+  }
+
+  function openPlanningModal(title, subtitle, content) {
+    if (!planningModalBackdrop.classList.contains("open")) {
+      planningModalReturnFocus = document.activeElement;
+    }
+    document.getElementById("planning-modal-title").textContent = title;
+    document.getElementById("planning-modal-subtitle").textContent = subtitle || "";
+    planningModalContent.innerHTML = content;
+    planningModalBackdrop.classList.add("open");
+    planningModalBackdrop.setAttribute("aria-hidden", "false");
+    document.body.style.overflow = "hidden";
+    setTimeout(() => {
+      let contentFocus = planningModalContent.querySelector(
+        "input:not([disabled]), select:not([disabled]), textarea:not([disabled]), button:not([disabled])"
+      );
+      if (contentFocus?.matches("input[type='radio']:not(:checked)")) {
+        contentFocus = planningModalContent.querySelector(
+          `input[type="radio"][name="${contentFocus.name}"]:checked`
+        ) || contentFocus;
+      }
+      (contentFocus || document.getElementById("planning-modal-close"))?.focus();
+    }, 0);
+  }
+
+  function closePlanningModal() {
+    planningModalBackdrop.classList.remove("open");
+    planningModalBackdrop.setAttribute("aria-hidden", "true");
+    document.body.style.overflow = "";
+    planningModalContent.innerHTML = "";
+    planningEditorActivity = null;
+    planningEditorCustomer = null;
+    planningEditorSeed = null;
+    const returnFocus = planningModalReturnFocus;
+    planningModalReturnFocus = null;
+    if (returnFocus?.isConnected) setTimeout(() => returnFocus.focus(), 0);
+  }
+
+  function planningSelectableCustomers() {
+    let ownerKey = "";
+    if (userIsAdmin()) {
+      const users = (planningData?.available_users || []).map(normalizePlanningUser);
+      const selected = users.find(user => user.user_name === planningSelectedUserName);
+      if (selected?.name) {
+        ownerKey = normalizeRouteIdentity(selected.name);
+      }
+    } else if (currentUserIsSeller()) {
+      ownerKey = normalizeRouteIdentity(
+        currentUser?.name || currentUser?.user_name
+      );
+    }
+    return customers
+      .filter(customer => !isCancelledCustomer(customer))
+      .slice()
+      .sort((left, right) => {
+        const leftOwned = normalizeRouteIdentity(left.sales_person) === ownerKey;
+        const rightOwned = normalizeRouteIdentity(right.sales_person) === ownerKey;
+        if (leftOwned !== rightOwned) return leftOwned ? -1 : 1;
+        return String(left.customer).localeCompare(
+          String(right.customer), "sv"
+        );
+      });
+  }
+
+  function planningDefaultTime(dateKey) {
+    if (dateKey !== planningTodayKey()) return "09:00";
+    const now = new Date();
+    const stockholmTime = new Intl.DateTimeFormat("sv-SE", {
+      timeZone: PLANNING_TIME_ZONE,
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    }).format(now);
+    const [hour, minute] = stockholmTime.split(":").map(Number);
+    const roundedMinutes = Math.min(23 * 60 + 30, Math.ceil((hour * 60 + minute + 15) / 30) * 30);
+    return `${String(Math.floor(roundedMinutes / 60)).padStart(2, "0")}:${String(roundedMinutes % 60).padStart(2, "0")}`;
+  }
+
+  function planningSearchKey(value) {
+    return String(value || "")
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/\u00a0/g, " ")
+      .toLocaleLowerCase("sv-SE")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function planningCustomerSecondary(customer) {
+    const city = customer.city || customer.city_google || "";
+    const address = [
+      customer.address || customer.address_google || "",
+      customer.address_number || customer.address_number_google || "",
+    ].filter(Boolean).join(" ");
+    const number = customer.customer_number || "Inget kundnummer ännu";
+    return [city, address, number].filter(Boolean).join(" · ");
+  }
+
+  function setupPlanningCustomerCombobox(selectable) {
+    const input = document.getElementById("planning-editor-customer-search");
+    const list = document.getElementById("planning-editor-customer-list");
+    const fallback = document.getElementById("planning-editor-customer");
+    if (!input || !list) return;
+    let activeIndex = -1;
+    let results = [];
+    const close = () => {
+      list.hidden = true;
+      input.setAttribute("aria-expanded", "false");
+      input.removeAttribute("aria-activedescendant");
+      activeIndex = -1;
+    };
+    const choose = customer => {
+      planningEditorCustomer = customer;
+      input.value = customer.customer || "";
+      input.dataset.customerId = String(customer.customer_id || "");
+      if (fallback) fallback.value = String(customer.row || "");
+      close();
+    };
+    const render = () => {
+      const query = planningSearchKey(input.value);
+      if (query.length < 1) {
+        close();
+        return;
+      }
+      results = selectable.filter(customer => planningSearchKey([
+        customer.customer,
+        customer.city,
+        customer.city_google,
+        customer.address,
+        customer.address_google,
+        customer.address_number_google,
+        customer.customer_number,
+      ].filter(Boolean).join(" ")).includes(query)).slice(0, 20);
+      activeIndex = results.length ? 0 : -1;
+      list.innerHTML = results.length
+        ? results.map((customer, index) => `
+          <button class="planning-combobox-option${index === activeIndex ? " active" : ""}"
+            id="planning-customer-option-${index}"
+            type="button"
+            role="option"
+            aria-selected="${index === activeIndex}"
+            data-planning-customer-option="${index}">
+            <strong>${esc(customer.customer || "Okänd kund")}</strong>
+            <span>${esc(planningCustomerSecondary(customer))}</span>
+          </button>`).join("")
+        : '<div class="planning-state" style="padding:12px">Ingen kund matchar sökningen.</div>';
+      list.hidden = false;
+      input.setAttribute("aria-expanded", "true");
+      if (activeIndex >= 0) {
+        input.setAttribute("aria-activedescendant", `planning-customer-option-${activeIndex}`);
+      }
+      list.querySelectorAll("[data-planning-customer-option]").forEach(button => {
+        button.addEventListener("mousedown", event => event.preventDefault());
+        button.addEventListener("click", () =>
+          choose(results[Number(button.dataset.planningCustomerOption)])
+        );
+      });
+    };
+    input.addEventListener("input", () => {
+      if (planningEditorCustomer?.customer !== input.value) {
+        planningEditorCustomer = null;
+        input.dataset.customerId = "";
+        if (fallback) fallback.value = "";
+      }
+      render();
+    });
+    input.addEventListener("focus", render);
+    input.addEventListener("blur", () => setTimeout(close, 120));
+    input.addEventListener("keydown", event => {
+      if (event.key === "Escape") {
+        close();
+        return;
+      }
+      if (!results.length || list.hidden) return;
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        const delta = event.key === "ArrowDown" ? 1 : -1;
+        activeIndex = (activeIndex + delta + results.length) % results.length;
+        list.querySelectorAll("[data-planning-customer-option]").forEach((button, index) => {
+          const active = index === activeIndex;
+          button.classList.toggle("active", active);
+          button.setAttribute("aria-selected", String(active));
+          if (active) button.scrollIntoView({ block: "nearest" });
+        });
+        input.setAttribute("aria-activedescendant", `planning-customer-option-${activeIndex}`);
+      } else if (event.key === "Enter" && activeIndex >= 0) {
+        event.preventDefault();
+        choose(results[activeIndex]);
+      }
+    });
+  }
+
+  function openPlanningEditor({ activity = null, customer = null, date = "", seed = null } = {}) {
+    planningEditorActivity = activity ? normalizePlanningActivity(activity) : null;
+    planningEditorCustomer = customer || (activity ? planningCustomerForItem(activity) : null);
+    planningEditorSeed = seed && typeof seed === "object" ? { ...seed } : null;
+    planningEditorRequestId = planningClientRequestId(activity ? "planning-edit" : "planning-create");
+    const scheduledDate = activity ? planningDateKeyFromIso(activity.scheduled_at) : "";
+    const selectedDate = scheduledDate || (planningDateFromKey(date) ? date : planningSelectedDate || planningTodayKey());
+    const selectedTime = activity ? planningTimeFromIso(activity.scheduled_at) : planningDefaultTime(selectedDate);
+    const selectedType = activity?.contact_type || seed?.contact_type || "visit";
+    const note = String(activity?.note ?? seed?.note ?? seed?.comment ?? "").slice(0, PLANNING_NOTE_MAX_LENGTH);
+    const selectable = planningSelectableCustomers()
+      .filter(item => !isCancelledCustomer(item))
+      .slice();
+    if (planningEditorCustomer && !selectable.some(item => Number(item.row) === Number(planningEditorCustomer.row))) {
+      selectable.unshift(planningEditorCustomer);
+    }
+    const customerOptions = selectable.map(item =>
+      `<option value="${escAttr(item.row)}" ${Number(item.row) === Number(planningEditorCustomer?.row) ? "selected" : ""}>${esc(item.customer)}${item.city ? ` · ${esc(item.city)}` : ""}</option>`
+    ).join("");
+    const editing = Boolean(planningEditorActivity);
+    openPlanningModal(
+      editing ? "Redigera aktivitet" : "Planera aktivitet",
+      editing ? "Flytta eller uppdatera den planerade kontakten." : "Lägg in en kundkontakt i säljarens agenda.",
+      `<form class="planning-dialog-form" id="planning-editor-form">
+        <div class="planning-field">
+          <label for="planning-editor-customer">Kund</label>
+          <div class="planning-combobox">
+            <input id="planning-editor-customer-search"
+              type="text"
+              role="combobox"
+              aria-autocomplete="list"
+              aria-controls="planning-editor-customer-list"
+              aria-expanded="false"
+              autocomplete="off"
+              placeholder="Sök namn, ort, adress eller kundnummer"
+              value="${escAttr(planningEditorCustomer?.customer || "")}" />
+            <div class="planning-combobox-list" id="planning-editor-customer-list" role="listbox" hidden></div>
+          </div>
+          <select id="planning-editor-customer" hidden aria-hidden="true" tabindex="-1">
+            <option value="">Välj kund…</option>
+            ${customerOptions}
+          </select>
+        </div>
+        ${editing && planningEditorActivity.source === "route" ? `
+          <div class="planning-route-origin-note">När du sparar blir aktiviteten manuellt planerad och behålls vid nästa automatiska ruttberäkning.</div>
+        ` : ""}
+        <fieldset class="planning-type-choices">
+          <legend>Kontakttyp</legend>
+          ${Object.entries(PLANNING_CONTACT_TYPES).map(([value, config]) =>
+            `<label class="planning-type-choice">
+              <input type="radio" name="planning-editor-type" value="${value}" ${value === selectedType ? "checked" : ""} />
+              <span>${esc(config.label)} · ${config.duration} min</span>
+            </label>`
+          ).join("")}
+        </fieldset>
+        <div class="planning-form-row">
+          <div class="planning-field">
+            <label for="planning-editor-date">Datum</label>
+            <input id="planning-editor-date" type="date" value="${escAttr(selectedDate)}" required />
+          </div>
+          <div class="planning-field">
+            <label for="planning-editor-time">Tid</label>
+            <input id="planning-editor-time" type="time" value="${escAttr(selectedTime)}" required />
+          </div>
+        </div>
+        <div class="planning-field-help" id="planning-editor-duration">Beräknad längd: ${PLANNING_CONTACT_TYPES[selectedType]?.duration || 20} minuter</div>
+        <div class="planning-field">
+          <label for="planning-editor-note">Anteckning</label>
+          <textarea id="planning-editor-note" maxlength="${PLANNING_NOTE_MAX_LENGTH}" placeholder="Vad behöver göras?">${esc(note)}</textarea>
+          <div class="planning-note-count" id="planning-editor-note-count">${note.length}/${PLANNING_NOTE_MAX_LENGTH}</div>
+        </div>
+        <div class="planning-dialog-error" id="planning-editor-error" role="alert"></div>
+        <div class="planning-dialog-actions">
+          <button class="action-btn secondary" id="planning-editor-cancel" type="button">Avbryt</button>
+          <button class="action-btn" id="planning-editor-save" type="submit">${editing ? "Spara ändringar" : "Planera aktivitet"}</button>
+        </div>
+      </form>`
+    );
+    document.getElementById("planning-editor-cancel").addEventListener("click", closePlanningModal);
+    setupPlanningCustomerCombobox(selectable);
+    document.getElementById("planning-editor-form").addEventListener("input", () => {
+      planningEditorRequestId = planningClientRequestId(
+        editing ? "planning-edit" : "planning-create"
+      );
+    });
+    document.querySelectorAll("input[name='planning-editor-type']").forEach(input => {
+      input.addEventListener("change", event => {
+        document.getElementById("planning-editor-duration").textContent =
+          `Beräknad längd: ${PLANNING_CONTACT_TYPES[event.target.value]?.duration || 10} minuter`;
+      });
+    });
+    document.getElementById("planning-editor-note").addEventListener("input", event => {
+      document.getElementById("planning-editor-note-count").textContent =
+        `${event.target.value.length}/${PLANNING_NOTE_MAX_LENGTH}`;
+    });
+    document.getElementById("planning-editor-form").addEventListener("submit", savePlanningEditor);
+  }
+
+  function showPlanningEditorError(message) {
+    const target = document.getElementById("planning-editor-error");
+    if (!target) return;
+    target.textContent = message;
+    target.classList.add("visible");
+  }
+
+  async function savePlanningEditor(event) {
+    event.preventDefault();
+    const button = document.getElementById("planning-editor-save");
+    const customer = planningEditorCustomer;
+    const row = Number(customer?.row);
+    const contactType = document.querySelector("input[name='planning-editor-type']:checked")?.value || "";
+    const dateKey = document.getElementById("planning-editor-date").value;
+    const timeValue = document.getElementById("planning-editor-time").value;
+    const note = document.getElementById("planning-editor-note").value.trim();
+    const scheduledAt = planningStockholmIso(dateKey, timeValue);
+    if (!customer || !Number.isFinite(row)) {
+      showPlanningEditorError("Välj en kund.");
+      return;
+    }
+    if (!planningEditorActivity && userIsAdmin() && !planningSelectedOwner()) {
+      showPlanningEditorError("Välj en aktiv säljare innan aktiviteten planeras.");
+      return;
+    }
+    if (!PLANNING_CONTACT_TYPES[contactType] || !scheduledAt) {
+      showPlanningEditorError("Välj kontakttyp, datum och tid.");
+      return;
+    }
+    if (note.length > PLANNING_NOTE_MAX_LENGTH) {
+      showPlanningEditorError(`Anteckningen får vara högst ${PLANNING_NOTE_MAX_LENGTH} tecken.`);
+      return;
+    }
+    const editing = Boolean(planningEditorActivity);
+    const payload = {
+      contact_type: contactType,
+      scheduled_at: scheduledAt,
+      note,
+      client_request_id: planningEditorRequestId,
+    };
+    if (editing) {
+      payload.expected_revision = Number(planningEditorActivity.revision || 1);
+      payload.expected_updated_at = planningEditorActivity.updated_at;
+    }
+    if (customer.customer_id) payload.customer_id = customer.customer_id;
+    if (!editing) {
+      payload.customer_row = row;
+      payload.customer = customer.customer;
+      if (customer.customer_number) payload.customer_number = customer.customer_number;
+      const owner = planningSelectedOwner();
+      if (owner) payload.user_name = owner;
+      if (planningEditorSeed?.source_contact_id) {
+        payload.source = "follow_up";
+        payload.source_contact_id = planningEditorSeed.source_contact_id;
+      }
+    }
+    button.disabled = true;
+    const originalLabel = button.textContent;
+    button.textContent = "Sparar…";
+    try {
+      const path = editing
+        ? `/planning/activities/${encodeURIComponent(planningActivityId(planningEditorActivity))}`
+        : "/planning/activities";
+      await planningFetchJson(path, {
+        method: editing ? "PATCH" : "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      closePlanningModal();
+      planningSelectedDate = dateKey;
+      planningWeekStart = planningStartOfWeek(dateKey);
+      showToast(editing ? "Aktiviteten uppdaterades" : "Aktiviteten planerades");
+      await loadPlanningWeek();
+    } catch (error) {
+      showPlanningEditorError(error.message || "Aktiviteten kunde inte sparas.");
+    } finally {
+      if (document.body.contains(button)) {
+        button.disabled = false;
+        button.textContent = originalLabel;
+      }
+    }
+  }
+
+  function getPlanningActivity(activityId) {
+    return (planningData?.activities || []).find(activity =>
+      planningActivityId(activity) === String(activityId || "")
+    ) || null;
+  }
+
+  function openPlanningActivityDetail(activityId) {
+    const activity = getPlanningActivity(activityId);
+    if (!activity) {
+      showToast("Aktiviteten kunde inte hittas");
+      return;
+    }
+    const boundCustomer = planningCustomerForItem(activity);
+    const status = planningEffectiveStatus(activity);
+    const statusLabel = PLANNING_STATUS_LABELS[status];
+    const type = PLANNING_CONTACT_TYPES[activity.contact_type];
+    const dateKey = planningDateKeyFromIso(activity.scheduled_at);
+    const time = planningTimeFromIso(activity.scheduled_at);
+    const timeLabel = activity.time_is_estimated ? `ca ${time}` : time;
+    const terminal = activity.status === "completed" || activity.status === "cancelled";
+    const plannedActions = !terminal && activity.status === "planned" ? `
+      <button class="planning-compact-btn primary" type="button" data-planning-detail-action="log">Logga kontakt</button>
+      <button class="planning-compact-btn" type="button" data-planning-detail-action="edit">Redigera / flytta</button>
+      <button class="planning-compact-btn" type="button" data-planning-detail-action="skip">Hoppa över</button>
+      <button class="planning-compact-btn danger" type="button" data-planning-detail-action="cancel">Avboka</button>
+    ` : "";
+    const skippedActions = activity.status === "skipped" ? `
+      <button class="planning-compact-btn primary" type="button" data-planning-detail-action="restore">Återställ</button>
+      <button class="planning-compact-btn" type="button" data-planning-detail-action="edit">Flytta aktiviteten</button>
+    ` : "";
+    openPlanningModal(
+      activity.customer || "Planerad aktivitet",
+      `${type.label} · ${statusLabel}`,
+      `<div class="planning-detail-grid">
+        <div>
+          <span class="planning-detail-label">Datum</span>
+          <div class="planning-detail-value">${esc(planningFormatDate(dateKey, { year: true }))}</div>
+        </div>
+        <div>
+          <span class="planning-detail-label">Tid</span>
+          <div class="planning-detail-value">${esc(timeLabel || "—")}</div>
+        </div>
+        <div>
+          <span class="planning-detail-label">Typ</span>
+          <div class="planning-detail-value">${esc(type.label)} · ${Number(activity.duration_minutes || type.duration)} min</div>
+        </div>
+        <div>
+          <span class="planning-detail-label">Status</span>
+          <div class="planning-detail-value">${esc(statusLabel)}</div>
+        </div>
+        <div>
+          <span class="planning-detail-label">Källa</span>
+          <div class="planning-detail-value">${esc(planningSourceLabel(activity.source) || "Manuell")}</div>
+        </div>
+        <div>
+          <span class="planning-detail-label">Säljare</span>
+          <div class="planning-detail-value">${esc(activity.sales_person || activity.user_name || "—")}</div>
+        </div>
+        ${activity.note ? `<div class="planning-detail-note">${esc(activity.note)}</div>` : ""}
+        ${activity.source === "route" ? '<div class="planning-route-origin-note" style="grid-column:1/-1;margin:0">Planen beräknades från din position vid skapandet.</div>' : ""}
+      </div>
+      <div class="planning-activity-actions">
+        ${plannedActions}${skippedActions}
+        ${boundCustomer?.row ? '<button class="planning-compact-btn" type="button" data-planning-detail-action="customer">Öppna kund</button>' : ""}
+      </div>`
+    );
+    planningModalContent.querySelectorAll("[data-planning-detail-action]").forEach(button => {
+      button.addEventListener("click", () => handlePlanningDetailAction(button.dataset.planningDetailAction, activity));
+    });
+  }
+
+  function handlePlanningDetailAction(action, activity) {
+    if (action === "edit") {
+      const customer = planningCustomerForItem(activity);
+      if (!customer) {
+        showToast("Kunden kunde inte bindas säkert. Ladda om eller kontakta administratör.");
+        return;
+      }
+      openPlanningEditor({ activity, customer });
+      return;
+    }
+    if (action === "log") {
+      const customer = planningCustomerForItem(activity);
+      if (!customer) {
+        showToast("Kunden kunde inte bindas säkert. Ladda om eller kontakta administratör.");
+        return;
+      }
+      closePlanningModal();
+      openContactFormForCustomer(customer, { activity, returnView: "planning" });
+      return;
+    }
+    if (action === "customer") {
+      const customer = planningCustomerForItem(activity);
+      if (!customer?.row) {
+        showToast("Kunden kunde inte bindas säkert. Ladda om eller kontakta administratör.");
+        return;
+      }
+      closePlanningModal();
+      detailReturnView = "planning";
+      openDetail(Number(customer.row));
+      return;
+    }
+    if (action === "skip") updatePlanningActivityStatus(activity, "skipped");
+    if (action === "restore") updatePlanningActivityStatus(activity, "planned");
+    if (action === "cancel") {
+      if (window.confirm("Avboka den planerade aktiviteten?")) {
+        updatePlanningActivityStatus(activity, "cancelled");
+      }
+    }
+  }
+
+  async function updatePlanningActivityStatus(activity, status) {
+    const buttons = Array.from(planningModalContent.querySelectorAll("button"));
+    const requestKey = `${planningActivityId(activity)}:${status}`;
+    const requestId = planningStatusRequestIds.get(requestKey) ||
+      planningClientRequestId(`planning-${status}`);
+    planningStatusRequestIds.set(requestKey, requestId);
+    buttons.forEach(button => button.disabled = true);
+    try {
+      await planningFetchJson(`/planning/activities/${encodeURIComponent(planningActivityId(activity))}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          status,
+          client_request_id: requestId,
+          expected_revision: Number(activity.revision || 1),
+          expected_updated_at: activity.updated_at,
+        }),
+      });
+      planningStatusRequestIds.delete(requestKey);
+      closePlanningModal();
+      showToast(status === "planned" ? "Aktiviteten återställdes" : status === "skipped" ? "Aktiviteten hoppades över" : "Aktiviteten avbokades");
+      await loadPlanningWeek();
+    } catch (error) {
+      buttons.forEach(button => button.disabled = false);
+      const alert = document.createElement("div");
+      alert.className = "planning-dialog-error visible";
+      alert.setAttribute("role", "alert");
+      alert.textContent = error.message || "Statusen kunde inte uppdateras.";
+      planningModalContent.prepend(alert);
+    }
+  }
+
+  function planningRouteGpsCopy(routeDate) {
+    return routeDate === planningTodayKey()
+      ? "Start och retur: din position nu"
+      : "Rutten beräknas från din position nu";
+  }
+
+  async function openPlanningRoutePreview() {
+    const button = document.getElementById("planning-route-preview-btn");
+    if (planningSelectedDate < planningTodayKey()) {
+      showToast("En passerad dag kan inte fyllas automatiskt");
+      return;
+    }
+    button.disabled = true;
+    const oldText = button.textContent;
+    button.textContent = "Beräknar…";
+    try {
+      const position = await getCurrentPositionForRoute();
+      const payload = {
+        route_date: planningSelectedDate,
+        start: {
+          latitude: position.latitude,
+          longitude: position.longitude,
+          accuracy: position.accuracy,
+        },
+      };
+      const owner = planningSelectedOwner();
+      if (owner) payload.user_name = owner;
+      planningRoutePreview = await planningFetchJson("/planning/route-preview", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      planningRouteApplyRequestId = planningClientRequestId("planning-route-apply");
+      renderPlanningRoutePreview(planningRoutePreview);
+    } catch (error) {
+      showToast(getRouteProposalFailureMessage(error) || error.message || "Ruttförslaget kunde inte skapas");
+    } finally {
+      button.disabled = false;
+      button.textContent = oldText;
+    }
+  }
+
+  function renderPlanningRoutePreview(preview) {
+    const source = preview?.data && typeof preview.data === "object" ? preview.data : preview;
+    const stops = source?.stops || source?.activities || [];
+    const conflicts = source?.conflicts || [];
+    const warnings = source?.warnings || [];
+    const summary = source?.summary || {};
+    const token = String(source?.preview_token ?? source?.token ?? "").trim();
+    planningRoutePreview = { ...source, preview_token: token };
+    const stopCount = Number(summary.stop_count ?? summary.activity_count ?? stops.length) || 0;
+    const totalMinutes = Number(summary.total_minutes ?? summary.duration_minutes ?? 0);
+    const driveMinutes = Number(summary.drive_minutes ?? summary.travel_minutes ?? 0);
+    const gpsCopy = planningRouteGpsCopy(planningSelectedDate);
+    const gpsNotice = String(source.gps_notice || "").trim();
+    const extraGpsNotice = gpsNotice && gpsNotice !== gpsCopy
+      ? ` · ${esc(gpsNotice)}`
+      : "";
+    openPlanningModal(
+      "Fyll dagen automatiskt",
+      planningFormatDate(planningSelectedDate, { year: true }),
+      `<div class="planning-route-origin-note">${esc(gpsCopy)}${extraGpsNotice}</div>
+      <div class="planning-route-summary">
+        <div class="planning-route-metric"><span>Stopp</span><strong>${stopCount}</strong></div>
+        <div class="planning-route-metric"><span>Körtid</span><strong>${esc(formatRouteMinutes(driveMinutes))}</strong></div>
+        <div class="planning-route-metric"><span>Total tid</span><strong>${esc(formatRouteMinutes(totalMinutes))}</strong></div>
+      </div>
+      <span class="planning-detail-label">Föreslagen ordning</span>
+      <div class="planning-route-stop-list">
+        ${stops.length ? stops.map((stop, index) => {
+          const scheduled = stop.scheduled_at || stop.estimated_at || "";
+          const stopTime = planningTimeFromIso(scheduled);
+          const stopTimeLabel = stopTime ? `${stop.required ? "" : "ca "}${esc(stopTime)}` : "";
+          return `<div class="planning-route-stop"><strong>${Number(stop.sequence || index + 1)}. ${esc(stop.customer || stop.customer_name || "Kund")}</strong>${stopTimeLabel ? ` · ${stopTimeLabel}` : ""}</div>`;
+        }).join("") : '<div class="planning-state" style="padding:14px 4px">Inga genomförbara stopp hittades.</div>'}
+      </div>
+      ${warnings.length ? `
+        <span class="planning-detail-label" style="margin-top:14px">Observera</span>
+        <div class="planning-conflict-list">${warnings.map(warning =>
+          `<div class="planning-route-origin-note">${esc(warning.message || "Kunden har redan en planerad kontakt.")}</div>`
+        ).join("")}</div>` : ""}
+      ${conflicts.length ? `
+        <span class="planning-detail-label" style="margin-top:14px">Konflikter</span>
+        <div class="planning-conflict-list">${conflicts.map(conflict =>
+          `<div class="planning-conflict">${esc(conflict.message || conflict.description || conflict.code || "Tidskonflikt")}</div>`
+        ).join("")}</div>` : ""}
+      <div class="planning-dialog-error" id="planning-route-apply-error" role="alert"></div>
+      <div class="planning-dialog-actions" style="margin-top:16px">
+        <button class="action-btn secondary" id="planning-route-cancel-btn" type="button">Avbryt</button>
+        <button class="action-btn" id="planning-route-apply-btn" type="button" ${!token || !stops.length ? "disabled" : ""}>Spara i Planering</button>
+      </div>`
+    );
+    document.getElementById("planning-route-cancel-btn").addEventListener("click", closePlanningModal);
+    document.getElementById("planning-route-apply-btn").addEventListener("click", applyPlanningRoutePreview);
+  }
+
+  async function applyPlanningRoutePreview() {
+    const button = document.getElementById("planning-route-apply-btn");
+    const errorTarget = document.getElementById("planning-route-apply-error");
+    button.disabled = true;
+    const oldText = button.textContent;
+    button.textContent = "Sparar…";
+    try {
+      await planningFetchJson("/planning/route-apply", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          preview_token: planningRoutePreview?.preview_token,
+          client_request_id: planningRouteApplyRequestId,
+        }),
+      });
+      closePlanningModal();
+      showToast("Dagen fylldes med ruttens aktiviteter");
+      await loadPlanningWeek();
+    } catch (error) {
+      errorTarget.textContent = error.message || "Rutten kunde inte sparas i planeringen.";
+      errorTarget.classList.add("visible");
+      button.disabled = false;
+      button.textContent = oldText;
+    }
+  }
+
+  async function importCurrentRouteToPlanning() {
+    const button = document.getElementById("route-proposal-planning-btn");
+    if (!button || button.disabled) return;
+    if (routeMapSelectionDiffersFromProposal()) {
+      showToast("Kartans ändringar måste verifieras i ett nytt ruttförslag först.");
+      renderRouteProposalPanel();
+      return;
+    }
+    if (!planningRouteImportRequestId) planningRouteImportRequestId = planningClientRequestId("planning-route-import");
+    button.disabled = true;
+    const oldText = button.textContent;
+    button.textContent = "Sparar…";
+    try {
+      const result = await planningFetchJson("/planning/route-import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ client_request_id: planningRouteImportRequestId }),
+      });
+      planningRouteImportRequestId = "";
+      planningData = null;
+      const count = Number(result.imported_count ?? result.activity_count ?? result.activities?.length ?? 0);
+      showToast(count ? `${count} ruttstopp sparades i Planering` : "Rutten sparades i Planering");
+      if (document.getElementById("view-planning").classList.contains("active")) await loadPlanningWeek();
+    } catch (error) {
+      showToast(error.message || "Rutten kunde inte sparas i Planering");
+    } finally {
+      if (document.body.contains(button)) {
+        button.disabled = false;
+        button.textContent = oldText;
+      }
+    }
+  }
+
+  document.getElementById("planning-mode-btn").addEventListener("click", () => openPlanningView());
+  document.getElementById("planning-back-btn").addEventListener("click", () => showView("list"));
+  document.getElementById("planning-new-btn").addEventListener("click", () =>
+    openPlanningEditor({ date: planningSelectedDate || planningTodayKey() })
+  );
+  document.getElementById("planning-add-day-btn").addEventListener("click", () =>
+    openPlanningEditor({ date: planningSelectedDate || planningTodayKey() })
+  );
+  document.getElementById("planning-route-preview-btn").addEventListener("click", openPlanningRoutePreview);
+  document.getElementById("planning-prev-week-btn").addEventListener("click", () => {
+    planningSelectedDate = planningAddDays(planningSelectedDate || planningTodayKey(), -7);
+    planningWeekStart = planningStartOfWeek(planningSelectedDate);
+    loadPlanningWeek();
+  });
+  document.getElementById("planning-next-week-btn").addEventListener("click", () => {
+    planningSelectedDate = planningAddDays(planningSelectedDate || planningTodayKey(), 7);
+    planningWeekStart = planningStartOfWeek(planningSelectedDate);
+    loadPlanningWeek();
+  });
+  document.getElementById("planning-today-btn").addEventListener("click", () => {
+    planningSelectedDate = planningTodayKey();
+    planningWeekStart = planningStartOfWeek(planningSelectedDate);
+    loadPlanningWeek();
+  });
+  document.getElementById("planning-date-jump").addEventListener("change", event => {
+    if (!planningDateFromKey(event.target.value)) return;
+    planningSelectedDate = event.target.value;
+    planningWeekStart = planningStartOfWeek(planningSelectedDate);
+    loadPlanningWeek();
+  });
+  document.getElementById("planning-owner-select").addEventListener("change", event => {
+    planningSelectedUserName = event.target.value;
+    loadPlanningWeek();
+  });
+  document.getElementById("planning-modal-close").addEventListener("click", closePlanningModal);
+  planningModalBackdrop.addEventListener("click", event => {
+    if (event.target === planningModalBackdrop) closePlanningModal();
+  });
+  document.addEventListener("keydown", event => {
+    if (!planningModalBackdrop.classList.contains("open")) return;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closePlanningModal();
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const focusable = planningModalFocusableElements();
+    if (!focusable.length) {
+      event.preventDefault();
+      document.getElementById("planning-modal-close")?.focus();
+      return;
+    }
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  });
+  document.getElementById("d-plan-btn").addEventListener("click", async () => {
+    if (currentCustomer) await openPlanningEditorForCustomer(currentCustomer);
+  });
 
   // ══════════════════════════════════════
   // CONTACT LOG
@@ -6336,6 +8852,7 @@
 
   document.getElementById("map-back-btn").addEventListener("click", () => {
     showView("list");
+    renderRouteProposalPanel();
   });
 
   document.getElementById("map-gmaps-btn").addEventListener("click", openInGoogleMaps);
@@ -6710,13 +9227,25 @@
   }
 
   function setSessionUser(user) {
+    const previousUserName = String(currentUser?.user_name || "");
     currentUser = user || null;
+    if (previousUserName !== String(currentUser?.user_name || "")) {
+      planningSelectedUserName = "";
+      planningData = null;
+      planningActiveUsersCache = [];
+    }
     const control = document.getElementById("session-control");
     const displayName = currentUser?.name || currentUser?.user_name || "";
+    document.body.classList.toggle(
+      "user-admin",
+      Boolean(currentUser) && userIsAdmin()
+    );
     document.getElementById("session-user-name").textContent = displayName;
     document.getElementById("insights-session-user-name").textContent =
       displayName ? `Inloggad som ${displayName}` : "";
     control.classList.toggle("visible", Boolean(currentUser) && userIsAdmin());
+    document.getElementById("planning-mode-btn").style.display =
+      currentUserCanPlan() ? "" : "none";
   }
 
   async function checkLogin() {

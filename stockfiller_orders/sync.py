@@ -54,6 +54,7 @@ ORDER_COLUMNS = [
     "Order Discount (Amount)",
     "Order Discount (%)",
     "Batch",
+    "customer_id",
 ]
 
 CUSTOMER_EMAIL_COLUMN = "email_last_order"
@@ -281,6 +282,7 @@ def sync_orders(
     # newly fetched rows. This makes a delayed customer-number assignment
     # converge without requiring a full historical backfill.
     apply_crm_customer_numbers(final_rows, load_crm_customer_numbers(spreadsheet))
+    apply_crm_customer_ids(final_rows, load_crm_customer_ids(spreadsheet))
 
     customer_sync_result = None
     if not dry_run:
@@ -292,6 +294,11 @@ def sync_orders(
                 mode=mode,
                 order_rows=final_rows,
             )
+            apply_crm_customer_ids(
+                final_rows,
+                load_crm_customer_ids(spreadsheet),
+            )
+            write_rows(order_sheet, merged_headers, final_rows)
             sync_latest_order_emails(spreadsheet, final_rows)
         if update_state:
             state = read_sync_state(spreadsheet)
@@ -520,6 +527,57 @@ def apply_crm_customer_numbers(order_rows: list[dict[str, str]], customer_number
         crm_customer_number = customer_numbers_by_name.get(normalize_key(row.get("Customer")))
         if crm_customer_number:
             row["Customer number"] = crm_customer_number
+
+
+def load_crm_customer_ids(spreadsheet) -> dict[tuple[str, str], str]:
+    try:
+        values = spreadsheet.worksheet("customers_enriched").get_all_values()
+    except WorksheetNotFound:
+        return {}
+    if not values:
+        return {}
+    headers = [text(header) for header in values[0]]
+    required = {"customer", "customer_number", "customer_id"}
+    if not required.issubset(headers):
+        return {}
+    indexes = {column: headers.index(column) for column in required}
+    identities: dict[tuple[str, str], set[str]] = {}
+    for row in values[1:]:
+        customer_id = text(
+            row[indexes["customer_id"]]
+            if indexes["customer_id"] < len(row) else ""
+        )
+        if not customer_id:
+            continue
+        name = normalize_key(
+            row[indexes["customer"]]
+            if indexes["customer"] < len(row) else ""
+        )
+        number = normalize_key(
+            row[indexes["customer_number"]]
+            if indexes["customer_number"] < len(row) else ""
+        )
+        for identity in ((name, ""), ("", number)):
+            if any(identity):
+                identities.setdefault(identity, set()).add(customer_id)
+    return {
+        identity: next(iter(customer_ids))
+        for identity, customer_ids in identities.items()
+        if len(customer_ids) == 1
+    }
+
+
+def apply_crm_customer_ids(
+    order_rows: list[dict[str, str]],
+    customer_ids_by_identity: dict[tuple[str, str], str],
+) -> None:
+    for row in order_rows:
+        customer_id = customer_ids_by_identity.get(
+            ("", normalize_key(row.get("Customer number")))
+        ) or customer_ids_by_identity.get(
+            (normalize_key(row.get("Customer")), "")
+        )
+        row["customer_id"] = customer_id or ""
 
 
 def latest_order_emails_by_customer(order_rows: Iterable[dict[str, Any]]) -> dict[str, str]:

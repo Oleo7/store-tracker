@@ -1,0 +1,30 @@
+services:
+  - type: web
+    name: polarbar-store-tracker
+    runtime: python
+    rootDir: web-app
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn --workers 1 --threads 4 --timeout 120 --bind 0.0.0.0:$PORT app:app
+    healthCheckPath: /health
+    numInstances: 1
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: WEB_CONCURRENCY
+        value: "1"
+      - key: APP_INSTANCE_COUNT
+        value: "1"
+      - key: PRODUCTION_SHEET_KEY
+        sync: false
+      - key: GOOGLE_CREDENTIALS
+        sync: false
+      - key: GOOGLE_ROUTES_API_KEY
+        sync: false
+      - key: FLASK_SECRET_KEY
+        generateValue: true
+      - key: ROUTE_MATRIX_CANDIDATE_LIMIT
+        value: "60"
+      - key: ROUTE_MATRIX_TIMEOUT_SECONDS
+        value: "15"
+      - key: ROUTE_MATRIX_CACHE_TTL_SECONDS
+        value: "600"

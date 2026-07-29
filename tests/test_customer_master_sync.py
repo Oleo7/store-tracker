@@ -29,6 +29,7 @@ CUSTOMER_HEADERS = [
     "customer",
     "cancelled_flag",
     "sales_person",
+    "customer_id",
     "customer_number",
     "email_last_order",
     "city_google",
@@ -78,6 +79,10 @@ def customer(
         "customer": name,
         "cancelled_flag": "",
         "sales_person": sales_person,
+        "customer_id": (
+            "11111111-1111-4111-8111-"
+            f"{abs(hash(name)) % 10**12:012d}"
+        ),
         "customer_number": customer_number,
         "email_last_order": email,
         "city_google": city,
