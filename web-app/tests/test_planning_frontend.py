@@ -84,15 +84,18 @@ class PlanningFrontendContractTests(TestCase):
         self.assertIn('aria-label="Besök"', self.html)
         self.assertIn("function planningCalendarLayout(activities, startMinutes)", self.html)
         self.assertIn('class="planning-calendar-hour"', self.html)
-        self.assertIn('class="planning-calendar-event-time"', self.html)
+        self.assertNotIn('class="planning-calendar-event-time"', self.html)
+        self.assertIn("const PLANNING_CALENDAR_PX_PER_MINUTE = 1.5", self.html)
+        self.assertIn("contact-phone", self.html)
+        self.assertIn("contact-email", self.html)
         card = re.search(
             r"function renderPlanningCalendarActivity\(item\) \{(.*?)\n  \}",
             self.html,
             flags=re.DOTALL,
         )
         self.assertIsNotNone(card)
-        self.assertIn("planning-activity-type", card.group(1))
         self.assertIn("planning-activity-customer", card.group(1))
+        self.assertNotIn("planning-activity-type", card.group(1))
         self.assertNotIn("planning-activity-note", card.group(1))
         self.assertNotIn("planning-activity-time", card.group(1))
 

@@ -2990,14 +2990,12 @@
       min-height: 480px;
       margin: 0 -3px;
     }
-    .planning-calendar-hours,
-    .planning-calendar-time-markers {
+    .planning-calendar-hours {
       position: absolute;
       inset: 0;
       pointer-events: none;
     }
-    .planning-calendar-hour,
-    .planning-calendar-event-time {
+    .planning-calendar-hour {
       position: absolute;
       left: 0;
       width: 100%;
@@ -3006,8 +3004,7 @@
       font-weight: 750;
       line-height: 1;
     }
-    .planning-calendar-hour span,
-    .planning-calendar-event-time span {
+    .planning-calendar-hour span {
       display: block;
       width: 38px;
       padding-right: 5px;
@@ -3022,7 +3019,6 @@
       left: 42px;
       border-top: 1px solid #eee7ec;
     }
-    .planning-calendar-event-time { color: #8f858d; }
     .planning-calendar-columns {
       position: absolute;
       inset: 0 0 0 42px;
@@ -3040,9 +3036,9 @@
       position: absolute;
       z-index: 1;
       display: block;
-      min-height: 34px;
+      min-height: 15px;
       overflow: hidden;
-      padding: 5px 6px 5px 8px;
+      padding: 1px 4px 1px 6px;
       border: 1px solid var(--pb-border);
       border-left: 3px solid var(--planning-status);
       border-radius: 7px;
@@ -3055,23 +3051,15 @@
     .planning-activity-card.status-overdue { --planning-status: #c33b55; background: #fff9fa; }
     .planning-activity-card.status-skipped { --planning-status: var(--pb-mango); background: #fffcf7; }
     .planning-activity-card.status-cancelled { --planning-status: #aaa1a8; opacity: 0.68; }
-    .planning-activity-type {
-      display: block;
-      color: var(--pb-muted);
-      font-size: 0.58rem;
-      font-weight: 850;
-      letter-spacing: 0.035em;
-      line-height: 1.1;
-      text-transform: uppercase;
-    }
+    .planning-activity-card.contact-phone { --planning-status: #7597bd; background: #fbfdff; }
+    .planning-activity-card.contact-email { --planning-status: #c98aa8; background: #fffafd; }
     .planning-activity-customer {
       display: block;
-      margin-top: 2px;
       overflow: hidden;
       color: var(--pb-ink);
-      font-size: 0.71rem;
+      font-size: 0.62rem;
       font-weight: 850;
-      line-height: 1.12;
+      line-height: 1.25;
       text-overflow: ellipsis;
       white-space: nowrap;
     }
@@ -4218,6 +4206,7 @@
   const MAP_ROUTE_DRAFT_TTL_MS = 12 * 60 * 60 * 1000;
   const PLANNING_TIME_ZONE = "Europe/Stockholm";
   const PLANNING_NOTE_MAX_LENGTH = 300;
+  const PLANNING_CALENDAR_PX_PER_MINUTE = 1.5;
   const PLANNING_CONTACT_TYPES = Object.freeze({
     visit: { label: "Besök", duration: 20, channel: "Besök" },
     phone: { label: "Telefon", duration: 10, channel: "Telefon" },
@@ -7341,7 +7330,7 @@
       byColumn[activity.contact_type === "visit" ? "visit" : "remote"].push({
         activity,
         start,
-        end: start + Math.max(duration, 43),
+        end: start + Math.max(duration, 10),
         lane: 0,
       });
     });
@@ -7357,8 +7346,8 @@
       const laneCount = Math.max(1, laneEnds.length);
       items.forEach(item => {
         item.laneCount = laneCount;
-        item.top = (item.start - startMinutes) * 0.8;
-        item.height = Math.max(34, (item.end - item.start) * 0.8);
+        item.top = (item.start - startMinutes) * PLANNING_CALENDAR_PX_PER_MINUTE;
+        item.height = Math.max(15, (item.end - item.start) * PLANNING_CALENDAR_PX_PER_MINUTE - 1);
       });
     });
     return byColumn;
@@ -7372,14 +7361,12 @@
     const gap = 3;
     const width = 100 / item.laneCount;
     const style = `top:${item.top}px;height:${item.height}px;left:calc(${item.lane * width}% + ${gap}px);width:calc(${width}% - ${gap * 2}px)`;
-    const content = `
-      <span class="planning-activity-type">${esc(type.label)}</span>
-      <span class="planning-activity-customer">${esc(activity.customer || "Okänd kund")}</span>`;
+    const content = `<span class="planning-activity-customer">${esc(activity.customer || "Okänd kund")}</span>`;
     const aria = `${time}, ${type.label}, ${activity.customer}, ${PLANNING_STATUS_LABELS[status]}`;
     if (activity.unplanned) {
-      return `<div class="planning-activity-card status-completed unplanned" style="${style}" aria-label="${escAttr(aria)}">${content}</div>`;
+      return `<div class="planning-activity-card contact-${activity.contact_type} status-completed unplanned" style="${style}" aria-label="${escAttr(aria)}">${content}</div>`;
     }
-    return `<button class="planning-activity-card status-${status}" type="button" style="${style}"
+    return `<button class="planning-activity-card contact-${activity.contact_type} status-${status}" type="button" style="${style}"
       data-planning-activity-id="${escAttr(planningActivityId(activity))}" aria-label="${escAttr(aria)}">${content}</button>`;
   }
 
@@ -7419,27 +7406,21 @@
     const activityMinutes = activities.map(planningActivityMinutes);
     const startHour = Math.max(0, Math.min(8, Math.floor(Math.min(...activityMinutes) / 60)));
     const latestEnd = Math.max(...activities.map(activity =>
-      planningActivityMinutes(activity) + Math.max(
-        Number(PLANNING_CONTACT_TYPES[activity.contact_type]?.duration || 10), 43
-      )
+      planningActivityMinutes(activity) + Number(PLANNING_CONTACT_TYPES[activity.contact_type]?.duration || 10)
     ));
     const endHour = Math.min(24, Math.max(18, Math.ceil(latestEnd / 60)));
     const startMinutes = startHour * 60;
-    const calendarHeight = (endHour - startHour) * 48;
+    const pixelsPerHour = 60 * PLANNING_CALENDAR_PX_PER_MINUTE;
+    const calendarHeight = (endHour - startHour) * pixelsPerHour;
     const layout = planningCalendarLayout(activities, startMinutes);
     const hourLines = Array.from({ length: endHour - startHour + 1 }, (_, index) => {
       const hour = startHour + index;
-      return `<div class="planning-calendar-hour" style="top:${index * 48}px"><span>${String(hour).padStart(2, "0")}:00</span></div>`;
+      return `<div class="planning-calendar-hour" style="top:${index * pixelsPerHour}px"><span>${String(hour).padStart(2, "0")}:00</span></div>`;
     }).join("");
-    const eventMarkers = [...new Set(activityMinutes)]
-      .filter(minutes => minutes % 60 !== 0)
-      .map(minutes => `<div class="planning-calendar-event-time" style="top:${(minutes - startMinutes) * 0.8}px"><span>${String(Math.floor(minutes / 60)).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}</span></div>`)
-      .join("");
     agenda.innerHTML = `${routeNote}
       <div class="planning-calendar-header" aria-hidden="true"><span></span><span>Telefon/Email</span><span>Besök</span></div>
       <div class="planning-calendar" style="height:${calendarHeight}px">
         <div class="planning-calendar-hours">${hourLines}</div>
-        <div class="planning-calendar-time-markers">${eventMarkers}</div>
         <div class="planning-calendar-columns">
           <div class="planning-calendar-column" aria-label="Telefon och email">${layout.remote.map(renderPlanningCalendarActivity).join("")}</div>
           <div class="planning-calendar-column" aria-label="Besök">${layout.visit.map(renderPlanningCalendarActivity).join("")}</div>
