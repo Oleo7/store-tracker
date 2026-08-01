@@ -985,6 +985,18 @@ class FrontendRouteProposalFlowTests(TestCase):
     def setUpClass(cls):
         cls.html = (WEB_APP_DIR / "index.html").read_text(encoding="utf-8")
 
+    def test_legacy_endpoints_remain_while_frontend_entry_is_removed(self):
+        list_view = self.html.split('<div class="view active" id="view-list">', 1)[1].split(
+            "FOLLOW-UP INSIGHTS VIEW", 1
+        )[0]
+        self.assertNotIn('id="chip-route-proposal"', list_view)
+        self.assertNotIn('id="route-proposal-panel"', list_view)
+        source = (WEB_APP_DIR / "app.py").read_text(encoding="utf-8")
+        self.assertIn('@app.route("/route-proposal", methods=["GET", "POST"])', source)
+        self.assertIn('@app.route("/planning/route-import", methods=["POST"])', source)
+        self.assertIn('ROUTE_PROPOSALS_SHEET = "route_proposals"', source)
+        self.assertIn("LEGACY/ROLLBACK COMPATIBILITY", source)
+
     def test_route_proposal_seeds_the_editable_map_route(self):
         self.assertIn("function seedRouteProposalMapSelection()", self.html)
         self.assertIn(

@@ -3663,7 +3663,6 @@
       <input type="search" id="search-input" placeholder="Sök butik eller stad..." />
     </div>
     <div class="chip-row">
-      <button class="chip" id="chip-route-proposal" aria-pressed="false">&#129517; Föreslå rutt</button>
       <button class="chip" id="chip-responsible">Ansvarig</button>
       <button class="chip" id="chip-region">Region</button>
       <button class="chip" id="chip-city">Stad</button>
@@ -3679,8 +3678,6 @@
       <button class="chip chip-clear" id="clear-filters-btn">✕ Rensa filter</button>
     </div>
   </div>
-
-  <div class="route-proposal-panel" id="route-proposal-panel" aria-live="polite"></div>
 
   <div class="list-body" id="customer-list">
     <div class="state-msg">Laddar...</div>
@@ -5008,6 +5005,8 @@
     });
   }
 
+  // LEGACY ROLLBACK SUPPORT: these proposal helpers have no visible list-view
+  // entry point. Calendar "Fyll dagen automatiskt" is the active route flow.
   function updateRouteProposalChip() {
     const chip = document.getElementById("chip-route-proposal");
     if (!chip) return;
@@ -5527,15 +5526,6 @@
     }
   }
 
-  document.getElementById("chip-route-proposal").addEventListener("click", () => {
-    if (routeProposalLoading) return;
-    if (routeProposal) {
-      document.getElementById("route-proposal-panel").scrollIntoView({ behavior: "smooth", block: "start" });
-      return;
-    }
-    proposeRoute();
-  });
-
   // ── Render list ──
   function renderList() {
     const list = document.getElementById("customer-list");
@@ -5546,22 +5536,11 @@
     }
 
     const baseFilteredCustomers = getBaseFilteredCustomers();
-    const routeCandidates = getRouteProposalCandidates(baseFilteredCustomers);
-    const currentRouteSignature = getRouteProposalSignature(routeCandidates);
-    invalidateRouteProposalIfNeeded(currentRouteSignature);
-
-    const filtered = routeProposal
-      ? getRouteProposalCustomers(customers, routeProposal)
-      : baseFilteredCustomers;
-
-    renderRouteProposalPanel();
+    const filtered = baseFilteredCustomers;
     const activeViews = [];
     if (filterState.emailProposal.size) activeViews.push("Mejl-förslag");
     if (emailClickNoOrderActive) activeViews.push("Klickat – ingen order");
-    if (routeProposal) {
-      document.getElementById("subtitle").textContent =
-        `Ruttförslag för ${routeProposal.routeOwner}: ${filtered.length} butiker · ${formatRouteScore(routeProposal.summary.total_priority_score)} prioritetspoäng`;
-    } else if (activeViews.length) {
+    if (activeViews.length) {
       document.getElementById("subtitle").textContent = `${activeViews.join(" + ")}: ${filtered.length} matchande butiker`;
     } else {
       document.getElementById("subtitle").textContent = `${filtered.length} av ${customers.length} butiker`;
@@ -5576,9 +5555,8 @@
       return;
     }
 
-    const showAll = Boolean(routeProposal);
-    const visibleCustomers = showAll ? filtered : filtered.slice(0, visibleListCount);
-    const remainingCount = showAll ? 0 : Math.max(0, filtered.length - visibleCustomers.length);
+    const visibleCustomers = filtered.slice(0, visibleListCount);
+    const remainingCount = Math.max(0, filtered.length - visibleCustomers.length);
     list.innerHTML = insightsErrorHtml + visibleCustomers.map(c => {
       const routeStop = getRouteProposalStop(c);
       const routeSummary = routeStop ? `

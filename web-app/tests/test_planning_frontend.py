@@ -192,6 +192,19 @@ class PlanningFrontendContractTests(TestCase):
         self.assertIn('mapReturnView = "planning"', self.html)
         self.assertIn("showPlanningDayMap", self.html)
 
+    def test_list_view_hides_legacy_route_proposal_flow(self):
+        list_view = re.search(
+            r'<div class="view active" id="view-list">(.*?)<!-- .*?FOLLOW-UP INSIGHTS VIEW',
+            self.html,
+            flags=re.DOTALL,
+        )
+        self.assertIsNotNone(list_view)
+        self.assertNotIn('id="chip-route-proposal"', list_view.group(1))
+        self.assertNotIn('id="route-proposal-panel"', list_view.group(1))
+        self.assertIn('id="route-mode-btn"', list_view.group(1))
+        self.assertIn("Fyll dagen automatiskt", self.html)
+        self.assertIn("LEGACY ROLLBACK SUPPORT", self.html)
+
     def test_planning_error_preserves_admin_owner_and_backend_message(self):
         self.assertIn(
             "error?.details || error?.payload || {}",

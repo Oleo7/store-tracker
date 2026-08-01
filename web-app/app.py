@@ -341,6 +341,8 @@ EMAIL_RECIPIENTS_SHEET = "email_recipients"
 EMAIL_EVENTS_SHEET = "email_events"
 USERS_SHEET = "users"
 SETTINGS_SHEET = "settings"
+# LEGACY/ROLLBACK COMPATIBILITY: the list-view proposal flow is retired.
+# Keep this storage and its endpoints until a separate removal migration.
 ROUTE_PROPOSALS_SHEET = "route_proposals"
 ROUTE_PROPOSAL_COLUMNS = [
     "route_date",
@@ -7366,6 +7368,7 @@ def apply_planning_route(
     }, None
 
 
+# LEGACY/ROLLBACK COMPATIBILITY: no longer called by the active frontend.
 @app.route("/route-proposal", methods=["GET", "POST"])
 def create_route_proposal():
     user = current_user()
@@ -7489,6 +7492,7 @@ def create_route_proposal():
             503,
         )
 
+# LEGACY/ROLLBACK COMPATIBILITY: retained for older clients and rollback.
 @app.route("/planning/route-import", methods=["POST"])
 def planning_route_import():
     data = request.get_json(silent=True)
