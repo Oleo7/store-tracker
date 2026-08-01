@@ -70,22 +70,34 @@ class PlanningFrontendContractTests(TestCase):
             self.html,
         )
 
-    def test_global_followup_queue_has_overdue_upcoming_and_show_all(self):
-        self.assertIn("unscheduled_followups_overdue", self.html)
-        self.assertIn("unscheduled_followups_upcoming", self.html)
-        self.assertIn("Försenade uppföljningar", self.html)
-        self.assertIn("Kommande uppföljningar", self.html)
-        self.assertIn("Visa alla (${rows.length})", self.html)
+    def test_planning_candidate_list_is_ranked_and_loaded_ten_at_a_time(self):
+        self.assertIn("Butiker att planera in", self.html)
+        self.assertNotIn("Gamla uppföljningar att planera in", self.html)
+        self.assertNotIn("Kommande uppföljningar", self.html)
+        self.assertIn("const PLANNING_CANDIDATE_BATCH_SIZE = 10", self.html)
+        self.assertIn(".sort(prioritySort)", self.html)
+        self.assertIn("latest_contact_comment", self.html)
+        self.assertIn("Visa fler (${candidates.length - visible.length} kvar)", self.html)
 
-    def test_planning_backlog_title_and_priority_sort(self):
-        self.assertIn("Gamla uppföljningar att planera in", self.html)
-        self.assertNotIn("Kontakter och uppföljningar utan tid.", self.html)
-        self.assertIn("function planningBacklogPriorityScore(item)", self.html)
-        self.assertIn("function planningSortBacklog(rows)", self.html)
-        self.assertIn(
-            "planningBacklogPriorityScore(right) - planningBacklogPriorityScore(left)",
+    def test_planning_calendar_has_two_compact_time_lanes(self):
+        self.assertIn("Telefon/Email", self.html)
+        self.assertIn('aria-label="Besök"', self.html)
+        self.assertIn("function planningCalendarLayout(activities, startMinutes)", self.html)
+        self.assertIn('class="planning-calendar-hour"', self.html)
+        self.assertIn('class="planning-calendar-event-time"', self.html)
+        card = re.search(
+            r"function renderPlanningCalendarActivity\(item\) \{(.*?)\n  \}",
             self.html,
+            flags=re.DOTALL,
         )
+        self.assertIsNotNone(card)
+        self.assertIn("planning-activity-type", card.group(1))
+        self.assertIn("planning-activity-customer", card.group(1))
+        self.assertNotIn("planning-activity-note", card.group(1))
+        self.assertNotIn("planning-activity-time", card.group(1))
+
+    def test_planning_week_omits_legacy_followup_payload(self):
+        self.assertIn('include_followups: "0"', self.html)
 
     def test_planning_header_map_uses_ordered_day_visits(self):
         self.assertNotIn('id="planning-new-btn"', self.html)
@@ -137,8 +149,7 @@ class PlanningFrontendContractTests(TestCase):
     def test_unplanned_contacts_render_in_the_historical_agenda(self):
         self.assertIn("function planningUnplannedForDate", self.html)
         self.assertIn("function planningAgendaItemsForDate", self.html)
-        self.assertIn("Uppföljningar utan bokad tid", self.html)
-        self.assertNotIn("Oplanerade kontakter · ${unplanned.length}", self.html)
+        self.assertIn("planningAgendaItemsForDate(planningSelectedDate)", self.html)
 
     def test_contact_types_are_three_touch_sized_radio_chips(self):
         self.assertIn('name="planning-editor-type"', self.html)

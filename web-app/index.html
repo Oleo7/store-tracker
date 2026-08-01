@@ -2973,56 +2973,95 @@
       font-size: 0.94rem;
     }
     .planning-state .planning-compact-btn { margin-top: 12px; }
-    .planning-activity-list {
+    .planning-calendar-header {
       display: grid;
-      gap: 8px;
+      grid-template-columns: 42px repeat(2, minmax(0, 1fr));
+      gap: 6px;
+      margin-bottom: 5px;
+      color: var(--pb-muted);
+      font-size: 0.68rem;
+      font-weight: 900;
+      letter-spacing: 0.045em;
+      text-align: center;
+      text-transform: uppercase;
+    }
+    .planning-calendar {
+      position: relative;
+      min-height: 480px;
+      margin: 0 -3px;
+    }
+    .planning-calendar-hours,
+    .planning-calendar-time-markers {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+    }
+    .planning-calendar-hour,
+    .planning-calendar-event-time {
+      position: absolute;
+      left: 0;
+      width: 100%;
+      color: var(--pb-soft-muted);
+      font-size: 0.62rem;
+      font-weight: 750;
+      line-height: 1;
+    }
+    .planning-calendar-hour span,
+    .planning-calendar-event-time span {
+      display: block;
+      width: 38px;
+      padding-right: 5px;
+      text-align: right;
+      transform: translateY(-50%);
+    }
+    .planning-calendar-hour::after {
+      content: "";
+      position: absolute;
+      top: 0;
+      right: 0;
+      left: 42px;
+      border-top: 1px solid #eee7ec;
+    }
+    .planning-calendar-event-time { color: #8f858d; }
+    .planning-calendar-columns {
+      position: absolute;
+      inset: 0 0 0 42px;
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 6px;
+    }
+    .planning-calendar-column {
+      position: relative;
+      min-width: 0;
+      border-left: 1px solid #f4eef2;
     }
     .planning-activity-card {
       --planning-status: var(--pb-border-strong);
-      position: relative;
-      display: grid;
-      grid-template-columns: 54px minmax(0, 1fr) auto;
-      align-items: center;
-      gap: 10px;
-      width: 100%;
-      min-height: 72px;
-      padding: 10px 10px 10px 13px;
+      position: absolute;
+      z-index: 1;
+      display: block;
+      min-height: 34px;
+      overflow: hidden;
+      padding: 5px 6px 5px 8px;
       border: 1px solid var(--pb-border);
-      border-radius: 11px;
+      border-left: 3px solid var(--planning-status);
+      border-radius: 7px;
       background: #fff;
       color: var(--pb-ink);
       cursor: pointer;
       text-align: left;
     }
-    .planning-activity-card::before {
-      content: "";
-      position: absolute;
-      top: 9px;
-      bottom: 9px;
-      left: 0;
-      width: 4px;
-      border-radius: 0 999px 999px 0;
-      background: var(--planning-status);
-    }
     .planning-activity-card.status-completed { --planning-status: var(--pb-green); background: #fbfffd; }
     .planning-activity-card.status-overdue { --planning-status: #c33b55; background: #fff9fa; }
     .planning-activity-card.status-skipped { --planning-status: var(--pb-mango); background: #fffcf7; }
     .planning-activity-card.status-cancelled { --planning-status: #aaa1a8; opacity: 0.68; }
-    .planning-activity-time {
-      align-self: start;
-      padding-top: 2px;
-      color: var(--pb-ink);
-      font-size: 0.82rem;
-      font-weight: 900;
-      white-space: nowrap;
-    }
-    .planning-activity-main { min-width: 0; }
     .planning-activity-type {
       display: block;
       color: var(--pb-muted);
-      font-size: 0.66rem;
+      font-size: 0.58rem;
       font-weight: 850;
-      letter-spacing: 0.05em;
+      letter-spacing: 0.035em;
+      line-height: 1.1;
       text-transform: uppercase;
     }
     .planning-activity-customer {
@@ -3030,40 +3069,11 @@
       margin-top: 2px;
       overflow: hidden;
       color: var(--pb-ink);
-      font-size: 0.9rem;
+      font-size: 0.71rem;
       font-weight: 850;
-      line-height: 1.25;
+      line-height: 1.12;
       text-overflow: ellipsis;
       white-space: nowrap;
-    }
-    .planning-activity-note {
-      display: block;
-      margin-top: 3px;
-      overflow: hidden;
-      color: var(--pb-muted);
-      font-size: 0.72rem;
-      line-height: 1.25;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-    .planning-status-badge,
-    .planning-source-badge {
-      display: inline-flex;
-      align-items: center;
-      border-radius: 999px;
-      padding: 4px 7px;
-      font-size: 0.64rem;
-      font-weight: 850;
-      white-space: nowrap;
-    }
-    .planning-status-badge {
-      background: #f4eff3;
-      color: var(--pb-muted);
-    }
-    .planning-source-badge {
-      margin-right: 4px;
-      background: var(--pb-blue-soft);
-      color: var(--pb-blue);
     }
     .planning-route-origin-note {
       margin-bottom: 10px;
@@ -3816,7 +3826,7 @@
       <aside class="planning-backlog-card" aria-labelledby="planning-backlog-title">
         <div class="planning-backlog-heading">
           <div>
-            <h2 class="planning-section-title" id="planning-backlog-title">Gamla uppföljningar att planera in</h2>
+            <h2 class="planning-section-title" id="planning-backlog-title">Butiker att planera in</h2>
           </div>
         </div>
         <div id="planning-backlog" aria-live="polite">
@@ -4267,7 +4277,9 @@
   let planningRoutePreview = null;
   let planningRouteApplyRequestId = "";
   let planningRouteImportRequestId = "";
-  let planningBacklogExpanded = { overdue: false, upcoming: false };
+  let planningCandidateVisibleCount = 10;
+  let planningCandidateOwnerKey = "";
+  const PLANNING_CANDIDATE_BATCH_SIZE = 10;
   const planningStatusRequestIds = new Map();
   const visitCompetitorButtons = Array.from(document.querySelectorAll(".visit-competitor-toggle"))
     .filter(btn => FREEZER_FIELD_SET.has(btn.dataset.competitor));
@@ -7128,6 +7140,7 @@
       const params = planningOwnerQuery(new URLSearchParams({
         start: planningWeekStart,
         end: planningAddDays(planningWeekStart, 6),
+        include_followups: "0",
       }));
       const payload = await planningFetchJson(`/planning/activities?${params.toString()}`);
       if (requestSerial !== planningLoadSerial) return;
@@ -7179,7 +7192,7 @@
     renderPlanningOwnerSelect();
     renderPlanningWeekStrip();
     renderPlanningAgenda();
-    renderPlanningBacklogHardened();
+    renderPlanningCandidates();
   }
 
   function normalizePlanningUser(user) {
@@ -7314,39 +7327,60 @@
     return parts.join(" · ");
   }
 
-  function renderPlanningActivityCard(activity) {
+  function planningActivityMinutes(activity) {
+    const match = /^(\d{1,2}):(\d{2})$/.exec(planningTimeFromIso(activity?.scheduled_at));
+    if (!match) return 8 * 60;
+    return Math.max(0, Math.min(1439, Number(match[1]) * 60 + Number(match[2])));
+  }
+
+  function planningCalendarLayout(activities, startMinutes) {
+    const byColumn = { remote: [], visit: [] };
+    activities.forEach(activity => {
+      const start = planningActivityMinutes(activity);
+      const duration = Number(PLANNING_CONTACT_TYPES[activity.contact_type]?.duration || 10);
+      byColumn[activity.contact_type === "visit" ? "visit" : "remote"].push({
+        activity,
+        start,
+        end: start + Math.max(duration, 43),
+        lane: 0,
+      });
+    });
+    Object.values(byColumn).forEach(items => {
+      items.sort((left, right) => left.start - right.start || left.end - right.end);
+      const laneEnds = [];
+      items.forEach(item => {
+        let lane = laneEnds.findIndex(end => end <= item.start);
+        if (lane < 0) lane = laneEnds.length;
+        laneEnds[lane] = item.end;
+        item.lane = lane;
+      });
+      const laneCount = Math.max(1, laneEnds.length);
+      items.forEach(item => {
+        item.laneCount = laneCount;
+        item.top = (item.start - startMinutes) * 0.8;
+        item.height = Math.max(34, (item.end - item.start) * 0.8);
+      });
+    });
+    return byColumn;
+  }
+
+  function renderPlanningCalendarActivity(item) {
+    const activity = item.activity;
     const status = planningEffectiveStatus(activity);
     const type = PLANNING_CONTACT_TYPES[activity.contact_type];
     const time = planningTimeFromIso(activity.scheduled_at) || "—";
-    const timeLabel = activity.time_is_estimated ? `ca ${time}` : time;
-    const sourceBadge = activity.source !== "manual"
-      ? `<span class="planning-source-badge">${esc(planningSourceLabel(activity.source))}</span>`
-      : "";
+    const gap = 3;
+    const width = 100 / item.laneCount;
+    const style = `top:${item.top}px;height:${item.height}px;left:calc(${item.lane * width}% + ${gap}px);width:calc(${width}% - ${gap * 2}px)`;
+    const content = `
+      <span class="planning-activity-type">${esc(type.label)}</span>
+      <span class="planning-activity-customer">${esc(activity.customer || "Okänd kund")}</span>`;
+    const aria = `${time}, ${type.label}, ${activity.customer}, ${PLANNING_STATUS_LABELS[status]}`;
     if (activity.unplanned) {
-      return `
-        <div class="planning-activity-card status-completed unplanned"
-          aria-label="${escAttr(`${timeLabel}, oplanerad ${type.label.toLowerCase()}, ${activity.customer}, genomförd`)}">
-          <span class="planning-activity-time">${esc(timeLabel)}</span>
-          <span class="planning-activity-main">
-            <span class="planning-activity-type">${sourceBadge}${esc(type.label)} · ${type.duration} min</span>
-            <span class="planning-activity-customer">${esc(activity.customer || "Okänd kund")}</span>
-            ${activity.note ? `<span class="planning-activity-note">${esc(activity.note)}</span>` : ""}
-          </span>
-          <span class="planning-status-badge">Genomförd</span>
-        </div>`;
+      return `<div class="planning-activity-card status-completed unplanned" style="${style}" aria-label="${escAttr(aria)}">${content}</div>`;
     }
-    return `
-      <button class="planning-activity-card status-${status}" type="button"
-        data-planning-activity-id="${escAttr(planningActivityId(activity))}"
-        aria-label="${escAttr(`${timeLabel}, ${type.label}, ${activity.customer}, ${PLANNING_STATUS_LABELS[status]}`)}">
-        <span class="planning-activity-time">${esc(timeLabel)}</span>
-        <span class="planning-activity-main">
-          <span class="planning-activity-type">${sourceBadge}${esc(type.label)} · ${type.duration} min</span>
-          <span class="planning-activity-customer">${esc(activity.customer || "Okänd kund")}</span>
-          ${activity.note ? `<span class="planning-activity-note">${esc(activity.note)}</span>` : ""}
-        </span>
-        <span class="planning-status-badge">${esc(PLANNING_STATUS_LABELS[status])}</span>
-      </button>`;
+    return `<button class="planning-activity-card status-${status}" type="button" style="${style}"
+      data-planning-activity-id="${escAttr(planningActivityId(activity))}" aria-label="${escAttr(aria)}">${content}</button>`;
   }
 
   function renderPlanningAgenda() {
@@ -7382,112 +7416,89 @@
       );
       return;
     }
-    agenda.innerHTML = `${routeNote}<div class="planning-activity-list">${activities.map(renderPlanningActivityCard).join("")}</div>`;
+    const activityMinutes = activities.map(planningActivityMinutes);
+    const startHour = Math.max(0, Math.min(8, Math.floor(Math.min(...activityMinutes) / 60)));
+    const latestEnd = Math.max(...activities.map(activity =>
+      planningActivityMinutes(activity) + Math.max(
+        Number(PLANNING_CONTACT_TYPES[activity.contact_type]?.duration || 10), 43
+      )
+    ));
+    const endHour = Math.min(24, Math.max(18, Math.ceil(latestEnd / 60)));
+    const startMinutes = startHour * 60;
+    const calendarHeight = (endHour - startHour) * 48;
+    const layout = planningCalendarLayout(activities, startMinutes);
+    const hourLines = Array.from({ length: endHour - startHour + 1 }, (_, index) => {
+      const hour = startHour + index;
+      return `<div class="planning-calendar-hour" style="top:${index * 48}px"><span>${String(hour).padStart(2, "0")}:00</span></div>`;
+    }).join("");
+    const eventMarkers = [...new Set(activityMinutes)]
+      .filter(minutes => minutes % 60 !== 0)
+      .map(minutes => `<div class="planning-calendar-event-time" style="top:${(minutes - startMinutes) * 0.8}px"><span>${String(Math.floor(minutes / 60)).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}</span></div>`)
+      .join("");
+    agenda.innerHTML = `${routeNote}
+      <div class="planning-calendar-header" aria-hidden="true"><span></span><span>Telefon/Email</span><span>Besök</span></div>
+      <div class="planning-calendar" style="height:${calendarHeight}px">
+        <div class="planning-calendar-hours">${hourLines}</div>
+        <div class="planning-calendar-time-markers">${eventMarkers}</div>
+        <div class="planning-calendar-columns">
+          <div class="planning-calendar-column" aria-label="Telefon och email">${layout.remote.map(renderPlanningCalendarActivity).join("")}</div>
+          <div class="planning-calendar-column" aria-label="Besök">${layout.visit.map(renderPlanningCalendarActivity).join("")}</div>
+        </div>
+      </div>`;
     agenda.querySelectorAll("[data-planning-activity-id]").forEach(button => {
       button.addEventListener("click", () => openPlanningActivityDetail(button.dataset.planningActivityId));
     });
   }
 
-  function planningBacklogMeta(item, kind) {
-    if (["followup", "overdue", "upcoming"].includes(kind)) {
-      const date = String(item?.follow_up_date ?? item?.date ?? "").slice(0, 10);
-      return [date ? `Uppföljning ${date}` : "Uppföljning saknar tid", item?.note ?? item?.comment]
-        .filter(Boolean).join(" · ");
+  function planningOwnerIdentityKeys() {
+    const owner = normalizePlanningUser(planningData?.owner || currentUser || {});
+    const selected = (planningData?.available_users || [])
+      .map(normalizePlanningUser)
+      .find(user => user.user_name === (planningSelectedOwner() || owner.user_name));
+    return new Set([owner.name, owner.user_name, selected?.name, selected?.user_name]
+      .map(normalizeRouteIdentity).filter(Boolean));
+  }
+
+  function planningCandidateCustomers() {
+    const ownerKeys = planningOwnerIdentityKeys();
+    return customers
+      .filter(customer => ownerKeys.has(normalizeRouteIdentity(customer.sales_person)))
+      .sort(prioritySort);
+  }
+
+  function renderPlanningCandidates() {
+    const ownerKey = [...planningOwnerIdentityKeys()].sort().join("|");
+    if (ownerKey !== planningCandidateOwnerKey) {
+      planningCandidateOwnerKey = ownerKey;
+      planningCandidateVisibleCount = PLANNING_CANDIDATE_BATCH_SIZE;
     }
-    return String(item?.reason ?? item?.latest_contact_date ?? item?.message ?? "Kontakt saknar planerad tid");
-  }
-
-  function planningBacklogPriorityScore(item) {
-    const customer = planningCustomerForItem(item);
-    const insight = customer ? getCustomerInsight(customer) : {};
-    if (hasPriorityScore(insight)) return Number(insight.priority_score);
-    const fallback = Number(item?.priority_score);
-    return Number.isFinite(fallback) ? fallback : Number.NEGATIVE_INFINITY;
-  }
-
-  function planningSortBacklog(rows) {
-    return [...(rows || [])].sort((left, right) =>
-      planningBacklogPriorityScore(right) - planningBacklogPriorityScore(left) ||
-      String(left?.follow_up_date || "").localeCompare(String(right?.follow_up_date || "")) ||
-      String(left?.customer || "").localeCompare(String(right?.customer || ""), "sv")
-    );
-  }
-
-  function renderPlanningBacklogRows(rows, kind) {
-    const visibleRows = planningBacklogExpanded[kind] ? rows : rows.slice(0, 20);
-    if (!rows.length) return '<div class="planning-state" style="padding:14px 4px">Inga just nu.</div>';
-    return `<div class="planning-backlog-list">${visibleRows.map((item, index) => {
-      const customer = planningCustomerForItem(item);
-      const customerName = customer?.customer || item?.customer || item?.customer_name || "Okänd kund";
-      return `
-        <div class="planning-backlog-item">
-          <div>
-            <div class="planning-backlog-customer">${esc(customerName)}</div>
-            <div class="planning-backlog-meta">${esc(planningBacklogMeta(item, kind))}</div>
-          </div>
-          <button class="planning-compact-btn" type="button" data-planning-backlog-kind="${kind}" data-planning-backlog-index="${index}">Planera</button>
-        </div>`;
-    }).join("")}</div>
-      ${rows.length > 20 ? `<button class="planning-compact-btn" type="button" data-planning-backlog-expand="${kind}">${planningBacklogExpanded[kind] ? "Visa färre" : `Visa alla (${rows.length})`}</button>` : ""}`;
-  }
-
-  function renderPlanningBacklog() {
-    const followups = planningData?.unscheduled_followups || [];
-    document.getElementById("planning-backlog").innerHTML = `
-      <section class="planning-backlog-section">
-        <h3 class="planning-backlog-title">Uppföljningar utan bokad tid · ${followups.length}</h3>
-        ${renderPlanningBacklogRows(followups, "followup")}
-      </section>`;
-    document.getElementById("planning-backlog").querySelectorAll("[data-planning-backlog-index]").forEach(button => {
-      button.addEventListener("click", () => {
-        const item = followups[Number(button.dataset.planningBacklogIndex)];
-        const date = String(item?.follow_up_date || "").slice(0, 10);
-        openPlanningEditor({
-          customer: planningCustomerForItem(item),
-          date: planningDateFromKey(date) ? date : planningSelectedDate,
-          seed: item,
-        });
-      });
-    });
-  }
-
-  function renderPlanningBacklogHardened() {
-    const overdue = planningSortBacklog(planningData?.unscheduled_followups_overdue);
-    const upcoming = planningSortBacklog(planningData?.unscheduled_followups_upcoming);
+    const candidates = planningCandidateCustomers();
+    const visible = candidates.slice(0, planningCandidateVisibleCount);
     const target = document.getElementById("planning-backlog");
-    target.innerHTML = `
-      <section class="planning-backlog-section">
-        <h3 class="planning-backlog-title">Försenade uppföljningar · ${overdue.length}</h3>
-        ${renderPlanningBacklogRows(overdue, "overdue")}
-      </section>
-      <section class="planning-backlog-section">
-        <h3 class="planning-backlog-title">Kommande uppföljningar · ${upcoming.length}</h3>
-        ${renderPlanningBacklogRows(upcoming, "upcoming")}
-      </section>`;
-    target.querySelectorAll("[data-planning-backlog-index]").forEach(button => {
-      button.addEventListener("click", () => {
-        const rows = button.dataset.planningBacklogKind === "overdue"
-          ? overdue : upcoming;
-        const item = rows[Number(button.dataset.planningBacklogIndex)];
-        const date = String(item?.follow_up_date || "").slice(0, 10);
-        const customer = planningCustomerForItem(item);
-        if (!customer) {
-          showToast("Kunden kunde inte bindas säkert. Ladda om eller kontakta administratör.");
-          return;
-        }
-        openPlanningEditor({
-          customer,
-          date: planningDateFromKey(date) ? date : planningSelectedDate,
-          seed: item,
-        });
-      });
+    if (!candidates.length) {
+      target.innerHTML = '<div class="planning-state" style="padding:14px 4px">Inga egna butiker hittades.</div>';
+      return;
+    }
+    target.innerHTML = `<div class="planning-backlog-list">${visible.map((customer, index) => {
+      const comment = String(getCustomerInsight(customer).latest_contact_comment || "Ingen tidigare kommentar.").trim();
+      return `<div class="planning-backlog-item">
+        <div>
+          <div class="planning-backlog-customer">${esc(customer.customer || "Okänd kund")}</div>
+          <div class="planning-backlog-meta">${esc(comment)}</div>
+        </div>
+        <button class="planning-compact-btn" type="button" data-planning-candidate-index="${index}">Planera</button>
+      </div>`;
+    }).join("")}</div>
+      ${visible.length < candidates.length ? `<button class="planning-compact-btn" id="planning-load-more-btn" type="button">Visa fler (${candidates.length - visible.length} kvar)</button>` : ""}`;
+    target.querySelectorAll("[data-planning-candidate-index]").forEach(button => {
+      button.addEventListener("click", () => openPlanningEditor({
+        customer: visible[Number(button.dataset.planningCandidateIndex)],
+        date: planningSelectedDate,
+      }));
     });
-    target.querySelectorAll("[data-planning-backlog-expand]").forEach(button => {
-      button.addEventListener("click", () => {
-        const kind = button.dataset.planningBacklogExpand;
-        planningBacklogExpanded[kind] = !planningBacklogExpanded[kind];
-        renderPlanningBacklogHardened();
-      });
+    document.getElementById("planning-load-more-btn")?.addEventListener("click", () => {
+      planningCandidateVisibleCount += PLANNING_CANDIDATE_BATCH_SIZE;
+      renderPlanningCandidates();
     });
   }
 
@@ -8199,6 +8210,7 @@
   });
   document.getElementById("planning-owner-select").addEventListener("change", event => {
     planningSelectedUserName = event.target.value;
+    planningCandidateVisibleCount = PLANNING_CANDIDATE_BATCH_SIZE;
     loadPlanningWeek();
   });
   document.getElementById("planning-modal-close").addEventListener("click", closePlanningModal);

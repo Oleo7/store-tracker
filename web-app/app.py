@@ -4735,6 +4735,7 @@ def get_customer_insights():
             "days_since_delivery": priority.get("days_since_delivery"),
             "latest_contact_date": priority.get("latest_contact_date", ""),
             "latest_contact_result": priority.get("latest_contact_result", ""),
+            "latest_contact_comment": priority.get("latest_contact_comment", ""),
             "latest_contact_class": priority.get("latest_contact_class", ""),
             "latest_contact_channel": priority.get("latest_contact_channel", ""),
             "latest_follow_up_date": priority.get("latest_follow_up_date", ""),
@@ -5113,12 +5114,18 @@ def planning_activities():
         reverse=True,
     )
 
+    include_followups = str(
+        request.args.get("include_followups", "1")
+    ).strip().casefold() not in {"0", "false", "no"}
     unscheduled_followups = []
     try:
         contact_rows_only = [row for _row_index, row in owner_contacts]
-        contact_features = build_contact_features(
-            contact_rows_only,
-            build_order_features(get_order_rows(spreadsheet)),
+        contact_features = (
+            build_contact_features(
+                contact_rows_only,
+                build_order_features(get_order_rows(spreadsheet)),
+            )
+            if include_followups else {}
         )
         active_followup_customer_keys = set()
         for _row_index, row in owner_activities_all:
@@ -5193,7 +5200,7 @@ def planning_activities():
             selected_start=start_date,
             selected_end=end_date,
             today=stockholm_today(),
-        )
+        ) if include_followups else ([], [])
     )
     unscheduled_followups = (
         unscheduled_followups_overdue + unscheduled_followups_upcoming

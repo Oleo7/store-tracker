@@ -499,6 +499,7 @@ def build_priority_customers(
                 "overdue_days": overdue_days,
                 "latest_contact_date": _iso_date(latest_contact_date),
                 "latest_contact_result": contact_feature.get("latest_contact_result", ""),
+                "latest_contact_comment": contact_feature.get("latest_contact_comment", ""),
                 "latest_contact_class": latest_contact_class or "",
                 "latest_contact_channel": contact_feature.get("latest_contact_channel", ""),
                 "latest_contact_sales_person": contact_feature.get("latest_contact_sales_person", ""),

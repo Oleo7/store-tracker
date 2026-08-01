@@ -1223,6 +1223,7 @@ class PriorityTests(TestCase):
         self.assertIn("expected_cycle_days", data["customer a"])
         self.assertIn("expected_next_order_date", data["customer a"])
         self.assertIn("latest_contact_class", data["customer a"])
+        self.assertIn("latest_contact_comment", data["customer a"])
         self.assertIn("latest_follow_up_date", data["customer a"])
         self.assertIn("follow_up_due", data["customer a"])
         self.assertIn(
