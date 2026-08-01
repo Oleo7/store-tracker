@@ -105,7 +105,9 @@ class PlanningFrontendContractTests(TestCase):
     def test_drag_drop_uses_pointer_events_handle_and_half_hour_snapping(self):
         self.assertIn('addEventListener("pointerdown", planningDragPointerDown)', self.html)
         self.assertIn('document.addEventListener("pointermove", planningDragPointerMove', self.html)
-        self.assertIn('event.pointerType !== "mouse" && !handle', self.html)
+        self.assertIn('handle ? "handle" : "longpress"', self.html)
+        self.assertIn("}, 340)", self.html)
+        self.assertNotIn('event.pointerType !== "mouse" && !handle', self.html)
         self.assertRegex(
             self.html,
             r"(?s)@media \(pointer: coarse\).*?\.planning-drag-handle\s*\{.*?width:\s*44px;.*?height:\s*44px;",
@@ -114,6 +116,15 @@ class PlanningFrontendContractTests(TestCase):
         self.assertIn("planning-drop-indicator", self.html)
         self.assertIn("planning-drag-ghost", self.html)
         self.assertIn("planningStartDragAutoScroll", self.html)
+
+    def test_mobile_whole_card_long_press_preserves_scroll_and_prevents_selection(self):
+        self.assertIn("-webkit-touch-callout: none", self.html)
+        self.assertIn("-webkit-user-select: none", self.html)
+        self.assertIn("window.getSelection()?.removeAllRanges()", self.html)
+        self.assertIn('state.activationMode = "scroll"', self.html)
+        self.assertIn("window.scrollBy(0, state.lastClientY - event.clientY)", self.html)
+        self.assertIn("state.active || state.scrolled", self.html)
+        self.assertIn('button.addEventListener("contextmenu"', self.html)
 
     def test_drag_drop_allows_only_owned_planned_or_skipped_activities(self):
         can_drag = re.search(

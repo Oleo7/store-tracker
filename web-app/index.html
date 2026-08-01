@@ -3590,6 +3590,12 @@
         height: 44px;
       }
       .planning-activity-shell.is-draggable .planning-activity-card {
+        -webkit-touch-callout: none;
+        -webkit-user-select: none;
+        touch-action: none;
+        user-select: none;
+      }
+      .planning-activity-shell.is-draggable .planning-activity-card {
         padding-right: 24px;
       }
     }
@@ -7538,6 +7544,9 @@
         openPlanningActivityDetail(activityId);
       });
       button.addEventListener("pointerdown", planningDragPointerDown);
+      button.addEventListener("contextmenu", event => {
+        if (button.closest(".planning-activity-shell.is-draggable")) event.preventDefault();
+      });
     });
     agenda.querySelectorAll("[data-planning-drag-handle]").forEach(handle => {
       handle.addEventListener("pointerdown", planningDragPointerDown);
@@ -7572,14 +7581,13 @@
     if (planningDragState || event.isPrimary === false) return;
     if (event.pointerType === "mouse" && event.button !== 0) return;
     const handle = event.target.closest("[data-planning-drag-handle]");
-    if (event.pointerType !== "mouse" && !handle) return;
     const shell = event.target.closest("[data-planning-shell-id]");
     const activityId = String(shell?.dataset.planningShellId || "");
     const activity = getPlanningActivity(activityId);
     const calendar = shell?.closest(".planning-calendar");
     const column = shell?.closest(".planning-calendar-column");
     if (!shell || !calendar || !column || !planningCanDragActivity(activity) || planningDragSavingIds.has(activityId)) return;
-    if (handle || event.pointerType !== "mouse") event.preventDefault();
+    if (handle) event.preventDefault();
     planningDragState = {
       pointerId: event.pointerId,
       sourceElement: event.currentTarget,
@@ -7592,8 +7600,12 @@
       originY: event.clientY,
       clientX: event.clientX,
       clientY: event.clientY,
+      lastClientY: event.clientY,
       originalMinutes: planningActivityMinutes(activity),
       targetMinutes: planningActivityMinutes(activity),
+      activationMode: event.pointerType === "mouse" ? "desktop" : handle ? "handle" : "longpress",
+      longPressTimer: 0,
+      scrolled: false,
       active: false,
       ghost: null,
       indicator: null,
@@ -7603,12 +7615,20 @@
     document.addEventListener("pointerup", planningDragPointerUp);
     document.addEventListener("pointercancel", planningDragPointerCancel);
     document.addEventListener("keydown", planningDragKeyDown);
+    if (planningDragState.activationMode === "longpress") {
+      planningDragState.longPressTimer = window.setTimeout(() => {
+        if (!planningDragState || planningDragState.pointerId !== event.pointerId) return;
+        planningActivateDrag();
+        planningScheduleDragVisualUpdate();
+      }, 340);
+    }
   }
 
   function planningActivateDrag() {
     const state = planningDragState;
     if (!state || state.active) return;
     state.active = true;
+    try { window.getSelection()?.removeAllRanges(); } catch {}
     state.shell.classList.add("is-dragging");
     document.body.classList.add("planning-drag-active");
     const ghost = document.createElement("div");
@@ -7631,6 +7651,21 @@
     if (!state || event.pointerId !== state.pointerId) return;
     state.clientX = event.clientX;
     state.clientY = event.clientY;
+    if (!state.active && state.activationMode === "longpress") {
+      if (Math.hypot(event.clientX - state.originX, event.clientY - state.originY) > 8) {
+        if (state.longPressTimer) clearTimeout(state.longPressTimer);
+        state.longPressTimer = 0;
+        state.activationMode = "scroll";
+        state.scrolled = true;
+      }
+      return;
+    }
+    if (!state.active && state.activationMode === "scroll") {
+      event.preventDefault();
+      window.scrollBy(0, state.lastClientY - event.clientY);
+      state.lastClientY = event.clientY;
+      return;
+    }
     if (!state.active && Math.hypot(event.clientX - state.originX, event.clientY - state.originY) < 6) return;
     if (!state.active) planningActivateDrag();
     event.preventDefault();
@@ -7690,6 +7725,7 @@
     if (!state) return null;
     if (planningDragFrame) cancelAnimationFrame(planningDragFrame);
     if (planningDragAutoScrollFrame) cancelAnimationFrame(planningDragAutoScrollFrame);
+    if (state.longPressTimer) clearTimeout(state.longPressTimer);
     planningDragFrame = 0;
     planningDragAutoScrollFrame = 0;
     document.removeEventListener("pointermove", planningDragPointerMove);
@@ -7701,7 +7737,7 @@
     state.ghost?.remove();
     state.indicator?.remove();
     document.body.classList.remove("planning-drag-active");
-    if (suppressClick && state.active) {
+    if (suppressClick && (state.active || state.scrolled)) {
       planningDragSuppressedClicks.set(state.activityId, Date.now() + 500);
     }
     planningDragState = null;
@@ -7731,7 +7767,7 @@
       event.preventDefault();
       planningUpdateDragVisual();
     }
-    const finished = planningClearDragState({ suppressClick: state.active });
+    const finished = planningClearDragState({ suppressClick: state.active || state.scrolled });
     if (finished?.active && finished.targetMinutes !== finished.originalMinutes) {
       planningCommitDraggedActivity(finished.activity, finished.targetMinutes);
     }
