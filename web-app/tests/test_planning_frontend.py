@@ -102,6 +102,72 @@ class PlanningFrontendContractTests(TestCase):
     def test_planning_week_omits_legacy_followup_payload(self):
         self.assertIn('include_followups: "0"', self.html)
 
+    def test_drag_drop_uses_pointer_events_handle_and_half_hour_snapping(self):
+        self.assertIn('addEventListener("pointerdown", planningDragPointerDown)', self.html)
+        self.assertIn('document.addEventListener("pointermove", planningDragPointerMove', self.html)
+        self.assertIn('event.pointerType !== "mouse" && !handle', self.html)
+        self.assertRegex(
+            self.html,
+            r"(?s)@media \(pointer: coarse\).*?\.planning-drag-handle\s*\{.*?width:\s*44px;.*?height:\s*44px;",
+        )
+        self.assertIn("Math.round(rawMinutes / 30) * 30", self.html)
+        self.assertIn("planning-drop-indicator", self.html)
+        self.assertIn("planning-drag-ghost", self.html)
+        self.assertIn("planningStartDragAutoScroll", self.html)
+
+    def test_drag_drop_allows_only_owned_planned_or_skipped_activities(self):
+        can_drag = re.search(
+            r"function planningCanDragActivity\(activity\) \{(.*?)\n  \}",
+            self.html,
+            flags=re.DOTALL,
+        )
+        self.assertIsNotNone(can_drag)
+        self.assertIn('["planned", "skipped"]', can_drag.group(1))
+        self.assertIn("activity.unplanned", can_drag.group(1))
+        self.assertIn("activityOwner === loadedOwner", can_drag.group(1))
+
+    def test_drag_patch_is_minimal_idempotent_and_conflict_safe(self):
+        commit = re.search(
+            r"async function planningCommitDraggedActivity\(activity, targetMinutes\) \{(.*?)\n  \}",
+            self.html,
+            flags=re.DOTALL,
+        )
+        self.assertIsNotNone(commit)
+        body = commit.group(1)
+        for field in (
+            "scheduled_at",
+            "client_request_id",
+            "expected_revision",
+            "expected_updated_at",
+        ):
+            self.assertIn(field, body)
+        self.assertNotIn("customer_id", body)
+        self.assertNotIn("contact_type:", body)
+        self.assertIn("retry?.requestBody || JSON.stringify(payload)", body)
+        self.assertIn('method: "PATCH"', body)
+        self.assertIn('["revision_conflict", "planning_changed"]', body)
+        self.assertIn("await loadPlanningWeek()", body)
+        self.assertIn('activity.source === "route" ? "manual"', body)
+
+    def test_drag_cleanup_covers_escape_reload_and_view_switch(self):
+        self.assertIn('event.key === "Escape"', self.html)
+        self.assertIn('if (name !== "planning") planningCancelDrag()', self.html)
+        load_week = re.search(
+            r"async function loadPlanningWeek\(\) \{(.*?)\n  \}",
+            self.html,
+            flags=re.DOTALL,
+        )
+        self.assertIsNotNone(load_week)
+        self.assertIn("planningCancelDrag()", load_week.group(1))
+        self.assertIn('document.removeEventListener("pointermove", planningDragPointerMove)', self.html)
+        pointer_move = re.search(
+            r"function planningDragPointerMove\(event\) \{(.*?)\n  \}",
+            self.html,
+            flags=re.DOTALL,
+        )
+        self.assertIsNotNone(pointer_move)
+        self.assertNotIn("planningFetchJson", pointer_move.group(1))
+
     def test_planning_header_map_uses_ordered_day_visits(self):
         self.assertNotIn('id="planning-new-btn"', self.html)
         self.assertIn('id="planning-day-map-btn"', self.html)

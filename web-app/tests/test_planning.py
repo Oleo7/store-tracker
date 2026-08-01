@@ -1154,6 +1154,37 @@ class PlanningActivityApiTests(PlanningApiTestCase):
         self.assertEqual(updated["revision"], 2)
         self.assertEqual(sheet.batch_update_count - calls_before, 1)
 
+    def test_drag_style_patch_changes_only_time_and_converts_route_to_manual(self):
+        activity = self.append_planning_row(
+            planned_activity_id="route-drag",
+            source="route",
+            route_group_id="route-group",
+            route_sequence=2,
+            contact_type="email",
+            note="Behåll anteckningen",
+            time_is_estimated=True,
+        )
+
+        response = self.client.patch(
+            "/planning/activities/route-drag",
+            json={
+                "scheduled_at": "2026-07-29T14:30:00+02:00",
+                "client_request_id": "route-drag-request",
+                "expected_revision": 1,
+                "expected_updated_at": activity["updated_at"],
+            },
+        )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        updated = response.get_json()["activity"]
+        self.assertEqual(updated["scheduled_at"], "2026-07-29T14:30+02:00")
+        self.assertEqual(updated["customer_id"], activity["customer_id"])
+        self.assertEqual(updated["contact_type"], "email")
+        self.assertEqual(updated["note"], "Behåll anteckningen")
+        self.assertEqual(updated["source"], "manual")
+        self.assertEqual(updated["route_group_id"], "")
+        self.assertIsNone(updated["route_sequence"])
+
     def test_route_status_change_keeps_route_source(self):
         self.append_planning_row(
             planned_activity_id="route-skip",
