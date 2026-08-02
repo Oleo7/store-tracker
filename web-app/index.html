@@ -4321,6 +4321,11 @@
   let insightsLoaded = false;
   let insightsLoadFailed = false;
   let insightsRevision = 0;
+  let insightsRequestSerial = 0;
+  let customersLoadSerial = 0;
+  let customersLoadPromise = null;
+  let searchDebounceTimer = null;
+  const sharedJsonRequests = new Map();
   let routeProposal = null;
   let routeProposalMapSeededSignature = "";
   let routeProposalLoading = false;
@@ -4369,40 +4374,141 @@
   const customerCommentCount = document.getElementById("customer-comment-count");
 
   // ── Load customers ──
-  async function loadCustomers() {
-    try {
-      const res = await fetch(`${API}/customers`);
-      customers = await res.json();
-      buildDropdowns();
-      applyDefaultResponsibleFilter();
-      await loadInsights({ render: false });
-      renderList();
-    } catch {
-      document.getElementById("customer-list").innerHTML =
-        '<div class="state-msg">Kunde inte ansluta till servern.</div>';
-    } finally {
-      const loader = document.getElementById("app-loader");
-      loader.classList.add("hidden");
-      setTimeout(() => loader.remove(), 350);
-    }
+  function fetchJsonShared(path) {
+    const existing = sharedJsonRequests.get(path);
+    if (existing) return existing;
+
+    const requestPromise = fetch(path)
+      .then(async response => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .finally(() => {
+        if (sharedJsonRequests.get(path) === requestPromise) {
+          sharedJsonRequests.delete(path);
+        }
+      });
+    sharedJsonRequests.set(path, requestPromise);
+    return requestPromise;
+  }
+
+  function hideAppLoader() {
+    const loader = document.getElementById("app-loader");
+    if (!loader) return;
+    loader.classList.add("hidden");
+    setTimeout(() => loader.remove(), 350);
+  }
+
+  function recordFrontendMilestone(name, startMark, loadSerial) {
+    if (!window.performance?.mark || !window.performance?.measure) return;
+    const endMark = `store-tracker:${name}:${loadSerial}`;
+    performance.mark(endMark);
+    performance.measure(
+      `store-tracker:${name}`,
+      startMark,
+      endMark,
+    );
+  }
+
+  function loadCustomers() {
+    if (customersLoadPromise) return customersLoadPromise;
+
+    const loadSerial = ++customersLoadSerial;
+    const performanceStartMark = `store-tracker:customer-load-start:${loadSerial}`;
+    window.performance?.mark?.(performanceStartMark);
+    const customersRequest = fetchJsonShared(`${API}/customers`);
+    const insightsRequest = fetchJsonShared(`${API}/customer-insights`);
+    // Keep the parallel request handled if the customer request fails first.
+    insightsRequest.catch(() => {});
+
+    const loadPromise = (async () => {
+      let customerListReady = false;
+      try {
+        const loadedCustomers = await customersRequest;
+        if (loadSerial !== customersLoadSerial) return;
+        customers = loadedCustomers;
+        buildDropdowns();
+        applyDefaultResponsibleFilter();
+        renderList();
+        hideAppLoader();
+        recordFrontendMilestone(
+          "time-to-visible-customer-list",
+          performanceStartMark,
+          loadSerial,
+        );
+        customerListReady = true;
+      } catch {
+        if (loadSerial !== customersLoadSerial) return;
+        document.getElementById("customer-list").innerHTML =
+          '<div class="state-msg">Kunde inte ansluta till servern.</div>';
+      } finally {
+        if (loadSerial === customersLoadSerial) hideAppLoader();
+      }
+
+      if (!customerListReady || loadSerial !== customersLoadSerial) return;
+      await loadInsights({
+        requestPromise: insightsRequest,
+        parentLoadSerial: loadSerial,
+        announceSort: true,
+        performanceStartMark,
+      });
+    })();
+
+    customersLoadPromise = loadPromise.finally(() => {
+      if (loadSerial === customersLoadSerial) customersLoadPromise = null;
+    });
+    return customersLoadPromise;
   }
 
   // ── Multi-select filter state ──
   const filterState = { segment: new Set(), responsible: new Set(), city: new Set(), region: new Set(), priority: new Set(), risk: new Set(), delivery: new Set(), latestContact: new Set(), emailProposal: new Set() };
 
-  async function loadInsights({ render = true } = {}) {
+  async function loadInsights({
+    render = true,
+    requestPromise = null,
+    parentLoadSerial = null,
+    announceSort = false,
+    performanceStartMark = null,
+  } = {}) {
+    const requestSerial = ++insightsRequestSerial;
     try {
-      const res = await fetch(`${API}/customer-insights`);
-      if (!res.ok) throw new Error();
-      insights = await res.json();
+      const loadedInsights = await (
+        requestPromise || fetchJsonShared(`${API}/customer-insights`)
+      );
+      if (
+        requestSerial !== insightsRequestSerial
+        || (parentLoadSerial !== null && parentLoadSerial !== customersLoadSerial)
+      ) return false;
+      insights = loadedInsights;
       insightsLoaded = true;
       insightsLoadFailed = false;
       insightsRevision += 1;
       buildInsightDropdowns();
       updateEmailClickNoOrderChip();
       updateChip("emailProposal");
-      if (render) renderList();
+      if (render) {
+        const scrollX = window.scrollX;
+        const scrollY = window.scrollY;
+        if (announceSort) {
+          showToast("Prioriteringen är klar – uppdaterar sortering");
+        }
+        renderList();
+        window.scrollTo(scrollX, scrollY);
+        requestAnimationFrame(() => window.scrollTo(scrollX, scrollY));
+        if (performanceStartMark && parentLoadSerial !== null) {
+          recordFrontendMilestone(
+            "time-to-ready-insights",
+            performanceStartMark,
+            parentLoadSerial,
+          );
+        }
+      }
+      return true;
     } catch {
+      if (
+        requestSerial !== insightsRequestSerial
+        || (parentLoadSerial !== null && parentLoadSerial !== customersLoadSerial)
+      ) return false;
       insights = {};
       insightsLoaded = false;
       insightsLoadFailed = true;
@@ -4413,6 +4519,7 @@
       updateChip("emailProposal");
       showToast("Kunde inte ladda kundprioritering");
       if (render) renderList();
+      return false;
     }
   }
 
@@ -5621,8 +5728,12 @@
 
   // ── Search & dropdowns ──
   document.getElementById("search-input").addEventListener("input", e => {
-    searchQuery = e.target.value;
-    renderList();
+    const nextQuery = e.target.value;
+    clearTimeout(searchDebounceTimer);
+    searchDebounceTimer = setTimeout(() => {
+      searchQuery = nextQuery;
+      renderList();
+    }, 140);
   });
 
   let allContacts = [];
