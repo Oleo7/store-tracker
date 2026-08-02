@@ -8,6 +8,7 @@ from email.utils import parseaddr
 from hashlib import sha256
 from html import escape
 import json
+import os
 import re
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
@@ -56,6 +57,7 @@ EMAIL_PROPOSAL_CTA_LABELS = {
 }
 
 STOCKFILLER_CTA_LABEL = "Beställ i Stockfiller"
+EMAIL_LOGO_FILENAME = "polarbear-logo-black-email.png"
 
 EMAIL_PROPOSAL_TEMPLATE_FIELDS = (
     "subject",
@@ -160,6 +162,29 @@ def safe_http_url(value):
     except ValueError:
         return ""
     return text if parsed.scheme in {"http", "https"} and parsed.netloc else ""
+
+
+def email_logo_url(environ=None):
+    """Build an absolute HTTPS logo URL without ever emitting a relative asset path."""
+    environment = os.environ if environ is None else environ
+    asset_base = _safe_https_base_url(environment.get("EMAIL_ASSET_BASE_URL"))
+    if asset_base:
+        return f"{asset_base.rstrip('/')}/{EMAIL_LOGO_FILENAME}"
+    for value in (environment.get("PUBLIC_BASE_URL"), environment.get("RENDER_EXTERNAL_URL")):
+        public_base = _safe_https_base_url(value)
+        if public_base:
+            return f"{public_base.rstrip('/')}/images/{EMAIL_LOGO_FILENAME}"
+    return ""
+
+
+def _safe_https_base_url(value):
+    candidate = safe_http_url(value)
+    if not candidate:
+        return ""
+    parsed = urlparse(candidate)
+    if parsed.scheme != "https" or parsed.query or parsed.fragment:
+        return ""
+    return candidate.rstrip("/")
 
 
 def _parse_date(value):
@@ -592,6 +617,106 @@ def _html_paragraphs(value):
     return "".join(rendered)
 
 
+def _html_order_table(order_rows):
+    rows = []
+    for row in order_rows or []:
+        product = str(row.get("product", "")).strip()
+        if not product:
+            continue
+        quantity = str(row.get("quantity", "")).strip()
+        unit = str(row.get("unit", "DFP")).strip() or "DFP"
+        amount = " ".join(part for part in (quantity, unit) if part)
+        suffix = " (ny för er)" if is_yes(row.get("new_for_customer")) else ""
+        rows.append((amount, f"{product}{suffix}"))
+    if not rows:
+        return ""
+
+    body_rows = []
+    for index, (amount, product) in enumerate(rows):
+        border = "border-top:1px solid #F3D2CB;" if index else ""
+        body_rows.append(
+            '<tr>'
+            f'<td width="104" valign="top" style="{border}width:104px;padding:10px 12px 10px 0;'
+            'font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.45;'
+            f'font-weight:700;color:#1C1C1C;">{escape(amount)}</td>'
+            f'<td valign="top" style="{border}padding:10px 0;font-family:Arial,Helvetica,sans-serif;'
+            f'font-size:14px;line-height:1.45;color:#1C1C1C;">{escape(product)}</td>'
+            '</tr>'
+        )
+
+    return (
+        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" '
+        'bgcolor="#FFF2EF" style="width:100%;margin:0 0 20px;background:#FFF2EF;'
+        'border:1px solid #F3D2CB;border-radius:12px;border-collapse:separate;border-spacing:0;">'
+        '<tr><td style="padding:16px 18px;">'
+        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" '
+        'style="width:100%;border-collapse:collapse;">'
+        '<tr>'
+        '<th width="104" align="left" scope="col" style="width:104px;padding:0 12px 8px 0;'
+        'font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.45;'
+        'font-weight:700;color:#1C1C1C;">Antal</th>'
+        '<th align="left" scope="col" style="padding:0 0 8px;font-family:Arial,Helvetica,sans-serif;'
+        'font-size:14px;line-height:1.45;font-weight:700;color:#1C1C1C;">Produkt</th>'
+        '</tr>'
+        f'{"".join(body_rows)}'
+        '</table></td></tr></table>'
+    )
+
+
+def _html_cta_buttons(*, stockfiller_url, product_sheet_url,
+                      stockfiller_label, product_sheet_label):
+    definitions = []
+    if stockfiller_url:
+        definitions.append({
+            "url": stockfiller_url,
+            "label": stockfiller_label or STOCKFILLER_CTA_LABEL,
+            "background": "#1C1C1C",
+            "border": "#1C1C1C",
+            "color": "#FFFFFF",
+        })
+    if product_sheet_url:
+        definitions.append({
+            "url": product_sheet_url,
+            "label": product_sheet_label or "Se sortiment och priser",
+            "background": "#FFF2EF",
+            "border": "#F3D2CB",
+            "color": "#1C1C1C",
+        })
+    if not definitions:
+        return ""
+
+    width = "100%" if len(definitions) == 1 else "50%"
+    cells = []
+    for index, button in enumerate(definitions):
+        is_last = index == len(definitions) - 1
+        cell_class = "cta-cell cta-cell-last" if is_last else "cta-cell"
+        if len(definitions) == 1:
+            padding = "0"
+        elif index == 0:
+            padding = "0 5px 0 0"
+        else:
+            padding = "0 0 0 5px"
+        cells.append(
+            f'<td class="{cell_class}" width="{width}" valign="top" style="width:{width};padding:{padding};">'
+            '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" '
+            'style="width:100%;border-collapse:separate;border-spacing:0;">'
+            '<tr>'
+            f'<td height="46" align="center" valign="middle" bgcolor="{button["background"]}" '
+            f'style="height:46px;background:{button["background"]};border:1px solid {button["border"]};'
+            'border-radius:9px;mso-padding-alt:0;">'
+            f'<a class="cta-link" href="{escape(button["url"], quote=True)}" '
+            'style="display:block;padding:12px 16px;font-family:Arial,Helvetica,sans-serif;'
+            f'font-size:15px;line-height:20px;font-weight:700;color:{button["color"]};'
+            f'text-decoration:none;border-radius:9px;">{escape(str(button["label"]))}</a>'
+            '</td></tr></table></td>'
+        )
+    return (
+        '<table role="presentation" class="cta-table" width="100%" cellpadding="0" cellspacing="0" '
+        'border="0" style="width:100%;margin:22px 0 14px;border-collapse:collapse;">'
+        f'<tr>{"".join(cells)}</tr></table>'
+    )
+
+
 def _plain_text_markup(value):
     return re.sub(r"\*\*(.+?)\*\*", r"\1", str(value or ""))
 
@@ -618,27 +743,13 @@ def render_reminder_email(*, greeting_name, subject, intro_text, closing_text, o
     product_sheet_url = safe_http_url(product_sheet_url)
     stockfiller_url = safe_http_url(stockfiller_url)
     order_lines = _plain_order_lines(order_rows)
-
-    order_html = ""
-    if order_lines:
-        items = "".join(f'<li style="margin:0 0 8px">{escape(line[2:])}</li>' for line in order_lines)
-        order_html = f'<ul style="margin:0 0 20px;padding-left:22px">{items}</ul>'
-
-    buttons = []
-    button_style = (
-        "display:inline-block;background:#1a1a2e;color:#ffffff;text-decoration:none;"
-        "font-weight:700;padding:12px 16px;border-radius:10px;margin:0 8px 10px 0"
+    order_html = _html_order_table(order_rows)
+    buttons_html = _html_cta_buttons(
+        stockfiller_url=stockfiller_url,
+        product_sheet_url=product_sheet_url,
+        stockfiller_label=stockfiller_label,
+        product_sheet_label=product_sheet_label,
     )
-    if stockfiller_url:
-        buttons.append(
-            f'<a href="{escape(stockfiller_url, quote=True)}" style="{button_style}">'
-            f"{escape(str(stockfiller_label or STOCKFILLER_CTA_LABEL))}</a>"
-        )
-    if product_sheet_url:
-        buttons.append(
-            f'<a href="{escape(product_sheet_url, quote=True)}" style="{button_style}">'
-            f"{escape(str(product_sheet_label or 'Se sortiment och priser'))}</a>"
-        )
 
     sender_name = str(sender.get("name", "")).strip()
     sender_role = str(sender.get("role", "")).strip()
@@ -646,17 +757,54 @@ def render_reminder_email(*, greeting_name, subject, intro_text, closing_text, o
     signature_parts = [escape(value) for value in (sender_name, sender_role) if value]
     if sender_phone:
         signature_parts.append(f"📞 {escape(sender_phone)}")
-    signature_parts.append('<a href="https://www.xn--polarbr-bxa.se/" style="color:#1a1a2e">🌐 polarbär.se</a>')
+    signature_parts.append(
+        '<a href="https://www.xn--polarbr-bxa.se/" '
+        'style="color:#1C1C1C;text-decoration:underline;">🌐 polarbär.se</a>'
+    )
+
+    logo_url = email_logo_url()
+    logo_html = ""
+    if logo_url:
+        logo_html = (
+            '<tr><td align="center" style="padding:26px 28px;">'
+            f'<img src="{escape(logo_url, quote=True)}" width="145" alt="Polarbär" '
+            'style="display:block;width:145px;max-width:100%;height:auto;border:0;outline:none;'
+            'text-decoration:none;color:#1C1C1C;font-family:Arial,Helvetica,sans-serif;" />'
+            '</td></tr>'
+        )
 
     html_body = (
-        '<!doctype html><html><body style="margin:0;background:#f6f6f6">'
-        '<div style="max-width:640px;margin:0 auto;background:#ffffff;padding:28px;'
-        'font-family:Arial,sans-serif;color:#1a1a2e;font-size:16px">'
+        '<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">'
+        '<meta name="x-apple-disable-message-reformatting">'
+        '<style type="text/css">'
+        '@media only screen and (max-width:620px){'
+        '.email-shell{padding-left:0!important;padding-right:0!important;}'
+        '.email-card{width:100%!important;max-width:100%!important;}'
+        '.email-content{padding-left:24px!important;padding-right:24px!important;}'
+        '.cta-cell{display:block!important;width:100%!important;padding:0 0 10px!important;}'
+        '.cta-cell-last{padding-bottom:0!important;}'
+        '.cta-link{display:block!important;width:100%!important;box-sizing:border-box!important;}'
+        '}'
+        '</style></head>'
+        '<body bgcolor="#F6F6F6" style="margin:0;padding:0;background:#F6F6F6;'
+        'font-family:Arial,Helvetica,sans-serif;color:#1C1C1C;">'
+        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" '
+        'bgcolor="#F6F6F6" style="width:100%;background:#F6F6F6;border-collapse:collapse;'
+        'mso-table-lspace:0pt;mso-table-rspace:0pt;">'
+        '<tr><td class="email-shell" align="center" style="padding:0 12px;">'
+        '<table role="presentation" class="email-card" width="600" cellpadding="0" cellspacing="0" '
+        'border="0" bgcolor="#FFFDFC" style="width:100%;max-width:600px;background:#FFFDFC;'
+        'border-collapse:collapse;mso-table-lspace:0pt;mso-table-rspace:0pt;">'
+        '<tr><td height="8" bgcolor="#FFB2A3" style="height:8px;line-height:8px;font-size:0;'
+        'background:#FFB2A3;">&nbsp;</td></tr>'
+        f'{logo_html}'
+        '<tr><td class="email-content" style="padding:0 28px 28px;font-family:Arial,Helvetica,sans-serif;'
+        'font-size:16px;line-height:1.55;color:#1C1C1C;">'
         f'{_html_paragraphs(personalized_intro)}{order_html}{_html_paragraphs(closing_text)}'
-        f'<div style="margin:22px 0 14px">{"".join(buttons)}</div>'
-        '<p style="margin:18px 0 8px">Vänliga hälsningar,</p>'
-        f'<p style="margin:0;line-height:1.5">{"<br>".join(signature_parts)}</p>'
-        '</div></body></html>'
+        f'{buttons_html}'
+        '<p style="margin:18px 0 8px;line-height:1.55;">Vänliga hälsningar,</p>'
+        f'<p style="margin:0;line-height:1.5;">{"<br>".join(signature_parts)}</p>'
+        '</td></tr></table></td></tr></table></body></html>'
     )
 
     text_parts = [_plain_text_markup(personalized_intro)]

@@ -23,11 +23,14 @@ from reminder_email import (  # noqa: E402
     build_default_copy,
     build_latest_order_context,
     canonicalize_proposal_order_rows,
+    classify_clicked_url,
     classify_customer_relationship,
     brevo_event_time,
+    email_logo_url,
     first_name,
     recipient_greeting_name,
     normalize_brevo_event,
+    render_email_proposal,
     render_reminder_email,
     round_store_count_to_ten,
     split_email_values,
@@ -297,6 +300,164 @@ class ReminderEmailHelperTests(unittest.TestCase):
         )
         self.assertIn("Hej,", without_name["text"])
         self.assertNotIn("Hej!", without_name["text"])
+
+    def test_email_logo_url_accepts_only_absolute_https_bases(self):
+        self.assertEqual(
+            email_logo_url({"EMAIL_ASSET_BASE_URL": "https://cdn.example.com/email/"}),
+            "https://cdn.example.com/email/polarbear-logo-black-email.png",
+        )
+        self.assertEqual(
+            email_logo_url({"PUBLIC_BASE_URL": "https://crm.example.com/"}),
+            "https://crm.example.com/images/polarbear-logo-black-email.png",
+        )
+        self.assertEqual(
+            email_logo_url({"RENDER_EXTERNAL_URL": "https://polarbar-preview.onrender.com"}),
+            "https://polarbar-preview.onrender.com/images/polarbear-logo-black-email.png",
+        )
+        self.assertEqual(email_logo_url({"PUBLIC_BASE_URL": "http://crm.example.com"}), "")
+        self.assertEqual(email_logo_url({"EMAIL_ASSET_BASE_URL": "/images"}), "")
+        self.assertEqual(
+            email_logo_url({
+                "PUBLIC_BASE_URL": "http://crm.example.com",
+                "RENDER_EXTERNAL_URL": "https://polarbar-preview.onrender.com",
+            }),
+            "https://polarbar-preview.onrender.com/images/polarbear-logo-black-email.png",
+        )
+        self.assertEqual(
+            email_logo_url({"EMAIL_ASSET_BASE_URL": "https://cdn.example.com/email?bad=1"}),
+            "",
+        )
+
+    def test_shared_email_template_renders_all_types_and_requested_variants(self):
+        senders = {
+            "reminder": {"name": "Olle", "role": "Account Manager", "phone": "070-1"},
+            "reactivation": {"name": "Maja", "role": "Säljare", "phone": "070-2"},
+            "new_customer": {"name": "Noah", "role": "Kundansvarig", "phone": "070-3"},
+        }
+        link_variants = {
+            "both": (
+                "https://drive.example.com/product?source=email&version=1",
+                "https://stockfiller.example.com/order?source=email&version=1",
+            ),
+            "stockfiller_only": (
+                "",
+                "https://stockfiller.example.com/order?source=email&version=1",
+            ),
+            "product_only": (
+                "https://drive.example.com/product?source=email&version=1",
+                "",
+            ),
+        }
+        order_rows = [{
+            "product": "Mango & Hallon <test>",
+            "quantity": "4",
+            "unit": "DFP",
+            "new_for_customer": "Y",
+        }]
+
+        with patch.dict(
+            "os.environ",
+            {"EMAIL_ASSET_BASE_URL": "https://assets.example.com/email"},
+            clear=False,
+        ):
+            for proposal_type in ("reminder", "reactivation", "new_customer"):
+                copy = build_email_proposal_copy(
+                    proposal_type,
+                    "Testbutiken",
+                    latest_delivery_date="2026-05-01",
+                    unique_store_count=125,
+                    today=date(2026, 8, 2),
+                )
+                for include_orders in (True, False):
+                    greeting_name = "Anna Andersson" if include_orders else ""
+                    for link_variant, (product_url, stockfiller_url) in link_variants.items():
+                        with self.subTest(
+                            proposal_type=proposal_type,
+                            include_orders=include_orders,
+                            link_variant=link_variant,
+                        ):
+                            rendered = render_email_proposal(
+                                greeting_name=greeting_name,
+                                subject=copy["subject"],
+                                intro_text=copy["intro_text"],
+                                closing_text=copy["closing_text"],
+                                order_rows=order_rows if include_orders else [],
+                                product_sheet_url=product_url,
+                                stockfiller_url=stockfiller_url,
+                                sender=senders[proposal_type],
+                                product_sheet_label=copy["product_sheet_label"],
+                                stockfiller_label=copy["stockfiller_label"],
+                            )
+                            html = rendered["html"]
+                            text = rendered["text"]
+
+                            self.assertIn('bgcolor="#F6F6F6"', html)
+                            self.assertIn('bgcolor="#FFFDFC"', html)
+                            self.assertIn('max-width:600px', html)
+                            self.assertIn('height="8" bgcolor="#FFB2A3"', html)
+                            self.assertIn(
+                                'src="https://assets.example.com/email/'
+                                'polarbear-logo-black-email.png" width="145" alt="Polarbär"',
+                                html,
+                            )
+                            self.assertEqual(html.count("<img "), 1)
+                            self.assertNotIn("Stockfiller_Logotyp", html)
+                            self.assertNotIn("<ul", html)
+                            self.assertNotIn("display:flex", html)
+                            self.assertNotIn("display:grid", html)
+                            self.assertNotIn("background-image", html)
+                            self.assertIn("@media only screen and (max-width:620px)", html)
+                            self.assertIn(".cta-cell{display:block!important;width:100%!important", html)
+                            self.assertIn("<strong>", html)
+                            self.assertNotIn("**", text)
+                            self.assertIn(senders[proposal_type]["name"], text)
+
+                            if include_orders:
+                                self.assertIn(">Antal</th>", html)
+                                self.assertIn(">Produkt</th>", html)
+                                self.assertIn(">4 DFP</td>", html)
+                                self.assertIn("Mango &amp; Hallon &lt;test&gt; (ny för er)", html)
+                                self.assertIn("• 4 DFP Mango & Hallon <test> (ny för er)", text)
+                                self.assertIn("Hej Anna,", text)
+                            else:
+                                self.assertNotIn(">Antal</th>", html)
+                                self.assertNotIn("• 4 DFP", text)
+                                self.assertTrue(text.startswith("Hej,"))
+
+                            if stockfiller_url:
+                                escaped_stockfiller_url = stockfiller_url.replace("&", "&amp;")
+                                self.assertIn(f'href="{escaped_stockfiller_url}"', html)
+                                self.assertIn(f"{copy['stockfiller_label']}: {stockfiller_url}", text)
+                            else:
+                                self.assertNotIn(copy["stockfiller_label"], html)
+                                self.assertNotIn("stockfiller.example.com", text)
+
+                            if product_url:
+                                escaped_product_url = product_url.replace("&", "&amp;")
+                                self.assertIn(f'href="{escaped_product_url}"', html)
+                                self.assertIn(f"{copy['product_sheet_label']}: {product_url}", text)
+                            else:
+                                self.assertNotIn(copy["product_sheet_label"], html)
+                                self.assertNotIn("drive.example.com", text)
+
+                            if product_url and stockfiller_url:
+                                self.assertLess(
+                                    html.index(copy["stockfiller_label"]),
+                                    html.index(copy["product_sheet_label"]),
+                                )
+                                self.assertEqual(html.count('class="cta-cell'), 2)
+                            else:
+                                self.assertEqual(html.count('class="cta-cell'), 1)
+
+        product_url, stockfiller_url = link_variants["both"]
+        self.assertEqual(
+            classify_clicked_url(product_url, product_url, stockfiller_url),
+            "product_sheet_clicked",
+        )
+        self.assertEqual(
+            classify_clicked_url(stockfiller_url, product_url, stockfiller_url),
+            "stockfiller_clicked",
+        )
 
     def test_reminder_filter_requires_due_customer_without_recent_contact_or_email(self):
         customer = {
@@ -629,7 +790,8 @@ class TimelineAndWebhookTests(unittest.TestCase):
         app_module._brevo_reconcile_lock = __import__("threading").Lock()
         with patch.object(app_module, "get_spreadsheet_with_retry", return_value=spreadsheet), \
              patch.object(app_module, "ensure_email_worksheets", return_value=sheets), \
-             patch.object(app_module, "fetch_brevo_events", return_value=events):
+             patch.object(app_module, "fetch_brevo_events", return_value=events), \
+             patch.object(app_module, "stockholm_today", return_value=date(2026, 7, 20)):
             result = app_module.reconcile_recent_brevo_events(days=30)
 
         self.assertEqual(result["inserted_events"], 3)
@@ -1485,6 +1647,15 @@ class ReminderSendRouteTests(unittest.TestCase):
             self.spreadsheet.worksheet("email_recipients"), expected_columns=EMAIL_RECIPIENTS_COLUMNS
         )
         self.assertEqual({row["brevo_message_id"] for row in recipient_rows}, {"msg-a", "msg-b"})
+        message_rows = app_module.worksheet_to_dicts(
+            self.spreadsheet.worksheet("email_messages"), expected_columns=EMAIL_MESSAGES_COLUMNS
+        )
+        self.assertEqual(len(message_rows), 1)
+        self.assertIn("<!doctype html>", message_rows[0]["body_html"])
+        self.assertIn("Hej Anna,", message_rows[0]["body_html"])
+        self.assertIn("Beställ i Stockfiller", message_rows[0]["body_text"])
+        self.assertEqual(send.call_args_list[0].kwargs["html_body"], message_rows[0]["body_html"])
+        self.assertEqual(send.call_args_list[0].kwargs["text_body"], message_rows[0]["body_text"])
         self.assertEqual(len(self.spreadsheet.worksheet("sales_activities").values), 1)
         timeline = app_module.build_customer_timeline(
             "Butiken", app_module.get_order_rows(self.spreadsheet), [], {
