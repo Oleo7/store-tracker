@@ -1100,8 +1100,16 @@ class FrontendRouteProposalFlowTests(TestCase):
         self.assertNotIn("priority-customer-list", self.html)
         self.assertNotIn("renderPriorityCustomers", self.html)
 
-    def test_initial_list_waits_for_insights_and_has_error_fallback(self):
-        self.assertIn("await loadInsights({ render: false });", self.html)
+    def test_initial_list_renders_before_insights_and_has_error_fallback(self):
+        start = self.html.index("function loadCustomers()")
+        end = self.html.index("// ── Multi-select filter state", start)
+        load_source = self.html[start:end]
+        self.assertLess(
+            load_source.index("renderList();"),
+            load_source.index("await loadInsights({"),
+        )
+        self.assertIn("fetchJsonShared(`${API}/customers`)", load_source)
+        self.assertIn("fetchJsonShared(`${API}/customer-insights`)", load_source)
         self.assertIn("applyDefaultResponsibleFilter();", self.html)
         self.assertIn("Kundprioriteringen kunde inte laddas.", self.html)
         self.assertIn("priority-neutral", self.html)

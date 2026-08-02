@@ -1,5 +1,16 @@
-from flask import Flask, Response, jsonify, send_file, request, send_from_directory, session, g
+from flask import (
+    Flask,
+    Response,
+    g,
+    has_request_context,
+    jsonify,
+    request,
+    send_file,
+    send_from_directory,
+    session,
+)
 from flask_cors import CORS
+from contextlib import contextmanager
 import gspread
 from gspread.exceptions import WorksheetNotFound
 from google.oauth2.service_account import Credentials
@@ -271,6 +282,110 @@ app.config.update(
     ),
 )
 CORS(app, supports_credentials=True)
+
+
+PERFORMANCE_ENDPOINTS = {
+    "/session",
+    "/customers",
+    "/customer-insights",
+    "/followup-insights",
+    "/planning/activities",
+    "/customers/<customer_name>/stats",
+}
+PERFORMANCE_SHEETS = {
+    "customers_enriched",
+    "sales_activities",
+    "order_rows",
+    "email_messages",
+    "email_recipients",
+    "email_events",
+    "planned_activities",
+    "users",
+}
+
+
+def performance_logging_enabled(environ=None):
+    environment = os.environ if environ is None else environ
+    return str(environment.get("PERFORMANCE_LOGGING_ENABLED") or "").strip().casefold() in {
+        "1", "true", "yes", "y", "on",
+    }
+
+
+def _performance_endpoint():
+    rule = str(request.url_rule) if request.url_rule is not None else request.path
+    return rule if rule in PERFORMANCE_ENDPOINTS else ""
+
+
+def _performance_sheet_step(sheet):
+    title = str(getattr(sheet, "title", "") or "").strip()
+    safe_title = title if title in PERFORMANCE_SHEETS else "other"
+    return f"sheets.read.{safe_title}"
+
+
+def record_performance_step(step, started_at, row_count=None):
+    if not performance_logging_enabled() or not has_request_context():
+        return
+    if not getattr(g, "performance_request_id", ""):
+        return
+    g.performance_steps.append({
+        "step": str(step),
+        "duration_ms": round((time.perf_counter() - started_at) * 1000, 1),
+        "row_count": row_count,
+    })
+
+
+@contextmanager
+def performance_step(step):
+    started_at = time.perf_counter()
+    measurement = {"row_count": None}
+    try:
+        yield measurement
+    finally:
+        record_performance_step(step, started_at, measurement["row_count"])
+
+
+@app.before_request
+def start_performance_measurement():
+    if not performance_logging_enabled() or not _performance_endpoint():
+        return None
+    g.performance_request_id = uuid.uuid4().hex
+    g.performance_started_at = time.perf_counter()
+    g.performance_steps = []
+    return None
+
+
+@app.after_request
+def finalize_response(response):
+    if request.endpoint == "images":
+        response.headers["Cache-Control"] = "public, max-age=3600"
+    elif request.endpoint == "index":
+        response.headers["Cache-Control"] = "no-cache"
+    elif request.endpoint == "get_session" or response.is_json:
+        response.headers["Cache-Control"] = "no-store"
+
+    request_id = getattr(g, "performance_request_id", "")
+    if not request_id:
+        return response
+
+    endpoint = _performance_endpoint()
+    total_ms = round(
+        (time.perf_counter() - g.performance_started_at) * 1000,
+        1,
+    )
+    response_size = response.calculate_content_length()
+    common = {
+        "event": "performance",
+        "request_id": request_id,
+        "endpoint": endpoint,
+        "status_code": response.status_code,
+        "total_ms": total_ms,
+        "response_size_bytes": response_size,
+    }
+    entries = [{**common, "step": "total", "duration_ms": total_ms, "row_count": None}]
+    entries.extend({**common, **step} for step in g.performance_steps)
+    for entry in entries:
+        app.logger.info(json.dumps(entry, separators=(",", ":"), sort_keys=True))
+    return response
 
 
 @app.route("/health", methods=["GET"])
@@ -568,10 +683,11 @@ def get_spreadsheet(force_reconnect=False):
 
 def get_spreadsheet_with_retry():
     """Return spreadsheet, reconnecting once on stale-connection errors."""
-    try:
-        return get_spreadsheet()
-    except RequestsConnectionError:
-        return get_spreadsheet(force_reconnect=True)
+    with performance_step("sheets.open"):
+        try:
+            return get_spreadsheet()
+        except RequestsConnectionError:
+            return get_spreadsheet(force_reconnect=True)
 
 
 def get_route_travel_time_provider():
@@ -632,7 +748,9 @@ def route_matrix_candidate_limit(environ=None):
 
 
 def worksheet_to_dicts(worksheet, expected_columns=None, required_columns=None):
-    rows = worksheet.get_all_values()
+    with performance_step(_performance_sheet_step(worksheet)) as measurement:
+        rows = worksheet.get_all_values()
+        measurement["row_count"] = max(0, len(rows) - 1)
     if not rows:
         return []
 
@@ -782,21 +900,29 @@ def save_route_proposal(
     )
 
 
-def ensure_email_worksheets(spreadsheet):
+def ensure_email_worksheets(spreadsheet, *, include_events=True):
     global _email_sheets_cache
     spreadsheet_identity = id(spreadsheet)
     with _email_sheets_cache_lock:
         if _email_sheets_cache and _email_sheets_cache[0] == spreadsheet_identity:
-            return _email_sheets_cache[1]
+            sheets = _email_sheets_cache[1]
+        else:
+            contact_sheet = spreadsheet.worksheet("sales_activities")
+            ensure_contact_worksheet_schema(contact_sheet)
+            sheets = {
+                EMAIL_MESSAGES_SHEET: get_or_create_worksheet(
+                    spreadsheet, EMAIL_MESSAGES_SHEET, EMAIL_MESSAGES_COLUMNS
+                ),
+                EMAIL_RECIPIENTS_SHEET: get_or_create_worksheet(
+                    spreadsheet, EMAIL_RECIPIENTS_SHEET, EMAIL_RECIPIENTS_COLUMNS
+                ),
+            }
+            _email_sheets_cache = (spreadsheet_identity, sheets)
 
-        contact_sheet = spreadsheet.worksheet("sales_activities")
-        ensure_contact_worksheet_schema(contact_sheet)
-        sheets = {
-            EMAIL_MESSAGES_SHEET: get_or_create_worksheet(spreadsheet, EMAIL_MESSAGES_SHEET, EMAIL_MESSAGES_COLUMNS),
-            EMAIL_RECIPIENTS_SHEET: get_or_create_worksheet(spreadsheet, EMAIL_RECIPIENTS_SHEET, EMAIL_RECIPIENTS_COLUMNS),
-            EMAIL_EVENTS_SHEET: get_or_create_worksheet(spreadsheet, EMAIL_EVENTS_SHEET, EMAIL_EVENTS_COLUMNS),
-        }
-        _email_sheets_cache = (spreadsheet_identity, sheets)
+        if include_events and EMAIL_EVENTS_SHEET not in sheets:
+            sheets[EMAIL_EVENTS_SHEET] = get_or_create_worksheet(
+                spreadsheet, EMAIL_EVENTS_SHEET, EMAIL_EVENTS_COLUMNS
+            )
         return sheets
 
 
@@ -956,13 +1082,25 @@ def save_email_proposal_template_config(spreadsheet, proposal_type, config):
                 row_by_key[key] = len(sheet.get_all_values())
 
 
-def get_email_rows(spreadsheet):
-    sheets = ensure_email_worksheets(spreadsheet)
-    return (
-        worksheet_to_dicts(sheets[EMAIL_MESSAGES_SHEET], expected_columns=EMAIL_MESSAGES_COLUMNS),
-        worksheet_to_dicts(sheets[EMAIL_RECIPIENTS_SHEET], expected_columns=EMAIL_RECIPIENTS_COLUMNS),
-        worksheet_to_dicts(sheets[EMAIL_EVENTS_SHEET], expected_columns=EMAIL_EVENTS_COLUMNS),
+def get_email_rows(spreadsheet, *, include_events=True):
+    sheets = ensure_email_worksheets(
+        spreadsheet, include_events=include_events
     )
+    message_rows = worksheet_to_dicts(
+        sheets[EMAIL_MESSAGES_SHEET], expected_columns=EMAIL_MESSAGES_COLUMNS
+    )
+    recipient_rows = worksheet_to_dicts(
+        sheets[EMAIL_RECIPIENTS_SHEET], expected_columns=EMAIL_RECIPIENTS_COLUMNS
+    )
+    event_rows = (
+        worksheet_to_dicts(
+            sheets[EMAIL_EVENTS_SHEET],
+            expected_columns=EMAIL_EVENTS_COLUMNS,
+        )
+        if include_events
+        else []
+    )
+    return message_rows, recipient_rows, event_rows
 
 
 def append_dict_row(sheet, columns, values, value_input_option="RAW", single_value_columns=None):
@@ -1041,7 +1179,9 @@ def update_sheet_row(sheet, row_index, headers, updates):
 
 
 def worksheet_snapshot(sheet, expected_columns=None):
-    values = sheet.get_all_values()
+    with performance_step(_performance_sheet_step(sheet)) as measurement:
+        values = sheet.get_all_values()
+        measurement["row_count"] = max(0, len(values) - 1)
     if not values:
         return list(expected_columns or []), []
     headers = [str(header).strip() for header in values[0]]
@@ -1136,7 +1276,10 @@ def get_contact_rows(spreadsheet):
 
 
 def get_customer_rows(spreadsheet):
-    customer_values = spreadsheet.worksheet("customers_enriched").get_all_values()
+    sheet = spreadsheet.worksheet("customers_enriched")
+    with performance_step(_performance_sheet_step(sheet)) as measurement:
+        customer_values = sheet.get_all_values()
+        measurement["row_count"] = max(0, len(customer_values) - 1)
     customer_headers = customer_values[0] if customer_values else []
     customers = []
     for i, row in enumerate(customer_values[1:], start=2):
@@ -2991,7 +3134,9 @@ def build_email_proposal_draft(spreadsheet, row_number, draft_id=None, created_a
         return None
     order_rows = get_order_rows(spreadsheet)
     contact_rows = get_contact_rows(spreadsheet)
-    message_rows, recipient_rows, _ = get_email_rows(spreadsheet)
+    message_rows, recipient_rows, _ = get_email_rows(
+        spreadsheet, include_events=False
+    )
     latest_order = build_latest_order_context(order_rows, customer.get("customer"))
     relationship = classify_customer_relationship(
         order_rows,
@@ -3870,7 +4015,9 @@ def brevo_reconcile(secret):
 def get_customers():
     spreadsheet = get_spreadsheet_with_retry()
     sheet = spreadsheet.worksheet("customers_enriched")
-    all_rows = sheet.get_all_values()
+    with performance_step(_performance_sheet_step(sheet)) as measurement:
+        all_rows = sheet.get_all_values()
+        measurement["row_count"] = max(0, len(all_rows) - 1)
     headers = all_rows[0]
 
     # Build latest contact/follow_up_date per customer from sales_activities
@@ -4625,12 +4772,15 @@ def get_customer_insights():
     customers = get_customer_rows(spreadsheet)
 
     contact_rows = get_contact_rows(spreadsheet)
-    message_rows, recipient_rows, _ = get_email_rows(spreadsheet)
+    message_rows, recipient_rows, _ = get_email_rows(
+        spreadsheet, include_events=False
+    )
     latest_live_proposals = latest_live_email_proposals_by_customer(message_rows)
     blocked_recipients = blocked_recipient_reasons(recipient_rows)
 
     # Latest order date and order count per customer
     order_rows = get_order_rows(spreadsheet)
+    calculation_started = time.perf_counter()
     latest_order = {}
     latest_delivery = {}
     order_references = defaultdict(set)
@@ -4652,6 +4802,7 @@ def get_customer_insights():
         if ref:
             order_references[name].add(ref)
 
+    priority_started = time.perf_counter()
     priority_customers, email_engagement_by_customer = build_current_priority_snapshot(
         customers=customers,
         order_rows=order_rows,
@@ -4659,6 +4810,11 @@ def get_customer_insights():
         message_rows=message_rows,
         recipient_rows=recipient_rows,
         today=today,
+    )
+    record_performance_step(
+        "calculation.priority",
+        priority_started,
+        len(priority_customers),
     )
     priority_by_name = {
         normalize_key(customer["customer"]): customer
@@ -4768,6 +4924,11 @@ def get_customer_insights():
             "reminder_email_latest_sent_at": email_proposal["latest_sent_at"],
         }
 
+    record_performance_step(
+        "calculation.customer_insights",
+        calculation_started,
+        len(insights),
+    )
     return jsonify(insights)
 
 
@@ -5017,6 +5178,7 @@ def planning_activities():
             "activity": public_planned_activity(row_data),
         }), 201
 
+    calculation_started = time.perf_counter()
     start_date = parse_planning_date(request.args.get("start"))
     end_date = parse_planning_date(request.args.get("end"))
     if start_date is None:
@@ -5249,7 +5411,7 @@ def planning_activities():
             "sales_person": str(owner.get("name") or "").strip(),
             "display_name": str(owner.get("name") or "").strip(),
         }]
-    return jsonify({
+    payload = {
         "ok": True,
         "owner": owner,
         "start": start_date.isoformat(),
@@ -5269,7 +5431,13 @@ def planning_activities():
                 item.get("customer") or "",
             ),
         ),
-    })
+    }
+    record_performance_step(
+        "calculation.planning",
+        calculation_started,
+        len(activities),
+    )
+    return jsonify(payload)
 
 
 @app.route("/planning/activities/<activity_id>", methods=["PATCH"])
@@ -5755,7 +5923,9 @@ def calculate_route_proposal_for_user(
         customers = get_customer_rows(spreadsheet)
         contact_rows = get_contact_rows(spreadsheet)
         order_rows = get_order_rows(spreadsheet)
-        message_rows, recipient_rows, _ = get_email_rows(spreadsheet)
+        message_rows, recipient_rows, _ = get_email_rows(
+            spreadsheet, include_events=False
+        )
         priority_customers, _ = build_current_priority_snapshot(
             customers=customers,
             order_rows=order_rows,
@@ -7978,7 +8148,10 @@ def get_followup_insights():
 
     contact_rows = get_contact_rows(spreadsheet)
     order_rows = get_order_rows(spreadsheet)
-    message_rows, recipient_rows, _ = get_email_rows(spreadsheet)
+    message_rows, recipient_rows, _ = get_email_rows(
+        spreadsheet, include_events=False
+    )
+    calculation_started = time.perf_counter()
     dfp_top_weeks_2026 = build_dfp_top_weeks(order_rows, year=2026, limit=5)
 
     responsible_options = sorted({
@@ -8114,7 +8287,7 @@ def get_followup_insights():
         today=today,
     )
 
-    return jsonify({
+    payload = {
         "generated_at": stockholm_now().isoformat(timespec="minutes"),
         "selected_responsible": selected_responsible,
         "responsible_options": responsible_options,
@@ -8137,7 +8310,13 @@ def get_followup_insights():
             ],
         },
         "email_performance": email_performance,
-    })
+    }
+    record_performance_step(
+        "calculation.followup_insights",
+        calculation_started,
+        len(customers_by_name),
+    )
+    return jsonify(payload)
 
 
 @app.route("/customers/<int:row>/contact", methods=["PATCH"])
