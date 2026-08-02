@@ -939,7 +939,7 @@ def public_user(user):
         key: str(user.get(key, "")).strip()
         for key in ("user_name", "name", "role", "email", "phone")
     }
-    profile["admin"] = is_yes(user.get("admin"))
+    profile["admin"] = admin_flag_is_enabled(user.get("admin"))
     return profile
 
 
@@ -1329,8 +1329,14 @@ def user_is_seller(user):
     }
 
 
+def admin_flag_is_enabled(value):
+    """Return True only for the explicitly configured users.admin value Y."""
+    return str(value or "").strip().casefold() == "y"
+
+
 def user_is_admin(user):
-    return is_yes((user or {}).get("admin"))
+    value = (user or {}).get("admin")
+    return value is True or admin_flag_is_enabled(value)
 
 
 def user_route_display_name(user):
@@ -1356,6 +1362,195 @@ def customer_owned_by_user(customer, user):
         normalize_key((customer or {}).get("sales_person"))
         in user_route_identity_keys(user)
     )
+
+
+def customer_access_allowed(customer, user):
+    return bool(customer) and (
+        user_is_admin(user) or customer_owned_by_user(customer, user)
+    )
+
+
+class CustomerResolutionError(ValueError):
+    def __init__(self, code, message, status=409):
+        super().__init__(message)
+        self.code = code
+        self.status = status
+
+
+def resolve_customer(
+    customers,
+    *,
+    customer_id="",
+    customer_number="",
+    customer_name="",
+    row=None,
+):
+    """Resolve one canonical customer without allowing weaker identifiers to bypass stronger ones."""
+    requested_id = str(customer_id or "").strip()
+    if requested_id:
+        matches = [
+            customer for customer in customers
+            if str(customer.get("customer_id") or "").strip() == requested_id
+        ]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            raise CustomerResolutionError(
+                "customer_identity_conflict",
+                "Kund-ID:t finns på flera kundrader och måste rättas.",
+            )
+        return None
+
+    requested_number = normalize_key(customer_number)
+    if requested_number:
+        matches = [
+            customer for customer in customers
+            if normalize_key(customer.get("customer_number")) == requested_number
+        ]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            raise CustomerResolutionError(
+                "ambiguous_customer",
+                "Kundnumret matchar flera butiker.",
+            )
+        return None
+
+    requested_name = normalize_key(customer_name)
+    if requested_name:
+        matches = [
+            customer for customer in customers
+            if normalize_key(customer.get("customer")) == requested_name
+        ]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            raise CustomerResolutionError(
+                "ambiguous_customer",
+                "Kundnamnet matchar flera butiker.",
+            )
+        return None
+
+    if row not in (None, ""):
+        try:
+            requested_row = int(row)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        matches = [
+            customer for customer in customers
+            if customer.get("row") == requested_row
+        ]
+        return matches[0] if len(matches) == 1 else None
+    return None
+
+
+def resolve_customer_from_data(customers, data):
+    data = data or {}
+    return resolve_customer(
+        customers,
+        customer_id=data.get("customer_id"),
+        customer_number=data.get("customer_number"),
+        customer_name=data.get("customer") or data.get("customer_name"),
+        row=data.get("customer_row") or data.get("row"),
+    )
+
+
+def resolve_accessible_customer(customers, user, **identifiers):
+    try:
+        customer = resolve_customer(customers, **identifiers)
+    except CustomerResolutionError:
+        return None
+    return customer if customer_access_allowed(customer, user) else None
+
+
+def filter_accessible_customers(customers, user):
+    if user_is_admin(user):
+        return list(customers)
+    return [
+        customer for customer in customers
+        if customer_owned_by_user(customer, user)
+    ]
+
+
+def related_row_customer(row, customers, *, name_key="customer", number_key="customer_number"):
+    try:
+        return resolve_customer(
+            customers,
+            customer_id=row.get("customer_id"),
+            customer_number=row.get(number_key),
+            customer_name=row.get(name_key),
+            row=row.get("customer_row") or row.get("row"),
+        )
+    except CustomerResolutionError:
+        return None
+
+
+def related_rows_for_customer(
+    rows,
+    customers,
+    customer,
+    *,
+    name_key="customer",
+    number_key="customer_number",
+):
+    return [
+        row for row in rows
+        if related_row_customer(
+            row,
+            customers,
+            name_key=name_key,
+            number_key=number_key,
+        ) is customer
+    ]
+
+
+def accessible_contact_rows(contact_rows, customers, user):
+    if user_is_admin(user):
+        return list(contact_rows)
+    result = []
+    for contact in contact_rows:
+        customer = related_row_customer(contact, customers)
+        if not customer_access_allowed(customer, user):
+            continue
+        result.append({
+            **contact,
+            "customer": str(customer.get("customer") or "").strip(),
+            "customer_id": str(customer.get("customer_id") or "").strip(),
+        })
+    return result
+
+
+def accessible_related_rows(
+    rows,
+    customers,
+    user,
+    *,
+    name_key="customer",
+    number_key="customer_number",
+):
+    if user_is_admin(user):
+        return list(rows)
+    result = []
+    for row in rows:
+        customer = related_row_customer(
+            row,
+            customers,
+            name_key=name_key,
+            number_key=number_key,
+        )
+        if not customer_access_allowed(customer, user):
+            continue
+        normalized_row = dict(row)
+        normalized_row[name_key] = str(customer.get("customer") or "").strip()
+        if number_key:
+            normalized_row[number_key] = str(
+                customer.get("customer_number") or ""
+            ).strip()
+        normalized_row["customer_id"] = str(
+            customer.get("customer_id") or ""
+        ).strip()
+        result.append(normalized_row)
+    return result
 
 
 def planning_error(code, message, status=400, *, field=None, **extra):
@@ -1717,100 +1912,16 @@ def find_planned_activity(spreadsheet, activity_id):
     return sheet, headers, None, {}
 
 
-class PlanningCustomerResolutionError(ValueError):
-    def __init__(self, code, message, status=409):
-        super().__init__(message)
-        self.code = code
-        self.status = status
-
-
 def resolve_planning_customer(spreadsheet, data):
-    """Resolve a customer by durable identity, treating row as a verified cache only."""
-    customers = get_customer_rows(spreadsheet)
-    requested_id = str(data.get("customer_id") or "").strip()
-    if requested_id:
-        matches = [
-            customer for customer in customers
-            if str(customer.get("customer_id") or "").strip() == requested_id
-        ]
-        if len(matches) == 1:
-            return matches[0]
-        if len(matches) > 1:
-            raise PlanningCustomerResolutionError(
-                "customer_identity_conflict",
-                "Kund-ID:t finns på flera kundrader och måste rättas innan något kan sparas.",
-            )
-        raise PlanningCustomerResolutionError(
+    """Compatibility wrapper around the shared canonical customer resolver."""
+    customer = resolve_customer_from_data(get_customer_rows(spreadsheet), data)
+    if customer is None and str((data or {}).get("customer_id") or "").strip():
+        raise CustomerResolutionError(
             "customer_id_not_found",
             "Butikens kund-ID kunde inte hittas. Ladda om kundlistan och försök igen.",
             404,
         )
-
-    customer_number = normalize_key(data.get("customer_number"))
-    if customer_number:
-        matches = [
-            customer for customer in customers
-            if normalize_key(customer.get("customer_number")) == customer_number
-        ]
-        if len(matches) == 1:
-            return matches[0]
-        if len(matches) > 1:
-            raise PlanningCustomerResolutionError(
-                "ambiguous_customer",
-                "Kundnumret matchar flera butiker. Ingen aktivitet har sparats.",
-            )
-
-    customer_name = normalize_key(data.get("customer"))
-    if customer_name:
-        matches = [
-            customer for customer in customers
-            if normalize_key(customer.get("customer")) == customer_name
-        ]
-        address = normalize_key(
-            data.get("address")
-            or data.get("address_google")
-        )
-        city = normalize_key(
-            data.get("city")
-            or data.get("city_google")
-        )
-        if address or city:
-            matches = [
-                customer for customer in matches
-                if (
-                    (
-                        not address
-                        or normalize_key(" ".join(filter(None, [
-                            str(
-                                customer.get("address_google")
-                                or customer.get("address")
-                                or ""
-                            ).strip(),
-                            str(
-                                customer.get("address_number_google")
-                                or customer.get("address_number")
-                                or ""
-                            ).strip(),
-                        ]))) == address
-                    )
-                    and (
-                        not city
-                        or normalize_key(
-                            customer.get("city_google")
-                            or customer.get("city")
-                        ) == city
-                    )
-                )
-            ]
-        if len(matches) == 1:
-            return matches[0]
-        if len(matches) > 1:
-            raise PlanningCustomerResolutionError(
-                "ambiguous_customer",
-                "Kundnamnet matchar flera butiker. Välj butiken med adress eller kundnummer.",
-            )
-
-    return None
+    return customer
 
 
 def customer_identity_matches(
@@ -3128,8 +3239,16 @@ def build_reminder_email_status(customer, priority, latest_live_reminders, block
     return status
 
 
-def build_email_proposal_draft(spreadsheet, row_number, draft_id=None, created_at=None):
-    customer = get_customer_by_row(spreadsheet, row_number)
+def build_email_proposal_draft(
+    spreadsheet,
+    row_number,
+    draft_id=None,
+    created_at=None,
+    *,
+    customer=None,
+    customers=None,
+):
+    customer = customer or get_customer_by_row(spreadsheet, row_number)
     if not customer:
         return None
     order_rows = get_order_rows(spreadsheet)
@@ -3137,6 +3256,29 @@ def build_email_proposal_draft(spreadsheet, row_number, draft_id=None, created_a
     message_rows, recipient_rows, _ = get_email_rows(
         spreadsheet, include_events=False
     )
+    if customers is not None:
+        order_rows = related_rows_for_customer(
+            order_rows,
+            customers,
+            customer,
+            name_key="Customer",
+            number_key="Customer number",
+        )
+        contact_rows = related_rows_for_customer(
+            contact_rows, customers, customer
+        )
+        message_rows = related_rows_for_customer(
+            message_rows, customers, customer
+        )
+        visible_email_ids = {
+            str(message.get("email_id") or "").strip()
+            for message in message_rows
+        }
+        recipient_rows = [
+            recipient for recipient in recipient_rows
+            if str(recipient.get("email_id") or "").strip()
+            in visible_email_ids
+        ]
     latest_order = build_latest_order_context(order_rows, customer.get("customer"))
     relationship = classify_customer_relationship(
         order_rows,
@@ -3449,7 +3591,18 @@ def update_email_proposal_settings(proposal_type):
 @app.route("/customers/<int:row>/reminder-email-draft", methods=["GET"])
 def get_email_proposal_draft(row):
     spreadsheet = get_spreadsheet_with_retry()
-    draft = build_email_proposal_draft(spreadsheet, row)
+    customers = get_customer_rows(spreadsheet)
+    customer = resolve_accessible_customer(
+        customers, current_user(), row=row
+    )
+    if customer is None:
+        return jsonify({"ok": False, "error": "customer_not_found"}), 404
+    draft = build_email_proposal_draft(
+        spreadsheet,
+        row,
+        customer=customer,
+        customers=customers,
+    )
     if not draft:
         return jsonify({"ok": False, "error": "customer_not_found"}), 404
     if draft["customer"]["cancelled"]:
@@ -3488,6 +3641,12 @@ def send_email_proposal(row):
 
     try:
         spreadsheet = get_spreadsheet_with_retry()
+        customers = get_customer_rows(spreadsheet)
+        customer = resolve_accessible_customer(
+            customers, current_user(), row=row
+        )
+        if customer is None:
+            return jsonify({"ok": False, "error": "customer_not_found"}), 404
         sheets = ensure_email_worksheets(spreadsheet)
         existing_row, _, existing = find_sheet_row(sheets[EMAIL_MESSAGES_SHEET], "email_id", draft_id)
         if existing_row:
@@ -3503,6 +3662,8 @@ def send_email_proposal(row):
             row,
             draft_id=draft_id,
             created_at=draft_created_at or now_text(),
+            customer=customer,
+            customers=customers,
         )
         if not current_draft:
             return jsonify({"ok": False, "error": "customer_not_found"}), 404
@@ -4020,16 +4181,6 @@ def get_customers():
         measurement["row_count"] = max(0, len(all_rows) - 1)
     headers = all_rows[0]
 
-    # Build latest contact/follow_up_date per customer from sales_activities
-    contact_rows = get_contact_rows(spreadsheet)
-    latest_contact = {}
-    latest_contact_followup = build_latest_contact_followups(contact_rows)
-    for c in contact_rows:
-        name = c["customer"].strip().lower()
-        dt = parse_date_value(c["date_time"])
-        if dt and (name not in latest_contact or dt > latest_contact[name]):
-            latest_contact[name] = dt
-
     customers = []
     for i, row in enumerate(all_rows[1:], start=2):
         padded = row + [""] * (len(headers) - len(row))
@@ -4046,17 +4197,42 @@ def get_customers():
         customer["region_google"] = d.get("region_google", "").strip()
         customer["address"] = f"{addr} {num}".strip()
         customer["city"] = customer["city_google"] or d.get("city", "")
-        customer_key = customer["customer"].strip().lower()
-        customer["latest_contact_date"] = format_date_value(latest_contact.get(customer_key))
-        customer["follow_up_date"] = format_date_value(latest_contact_followup.get(normalize_key(customer_key)))
         customers.append({"row": i, **customer})
-    return jsonify(customers)
+
+    user = current_user()
+    contact_rows = accessible_contact_rows(
+        get_contact_rows(spreadsheet), customers, user
+    )
+    latest_contact = {}
+    latest_contact_followup = build_latest_contact_followups(contact_rows)
+    for contact in contact_rows:
+        name = normalize_key(contact.get("customer"))
+        contact_date = parse_date_value(contact.get("date_time"))
+        if contact_date and (
+            name not in latest_contact or contact_date > latest_contact[name]
+        ):
+            latest_contact[name] = contact_date
+
+    visible_customers = filter_accessible_customers(customers, user)
+    for customer in visible_customers:
+        customer_key = normalize_key(customer.get("customer"))
+        customer["latest_contact_date"] = format_date_value(
+            latest_contact.get(customer_key)
+        )
+        customer["follow_up_date"] = format_date_value(
+            latest_contact_followup.get(customer_key)
+        )
+    return jsonify(visible_customers)
 
 
 @app.route("/contact-log", methods=["GET"])
 def get_contact_log():
     spreadsheet = get_spreadsheet_with_retry()
-    contact_rows = get_contact_rows(spreadsheet)
+    contact_rows = accessible_contact_rows(
+        get_contact_rows(spreadsheet),
+        get_customer_rows(spreadsheet),
+        current_user(),
+    )
     filters = get_contact_log_filter_values(request.args)
     return jsonify(build_contact_log_payload(contact_rows, filters))
 
@@ -4064,7 +4240,11 @@ def get_contact_log():
 @app.route("/contact-log/export", methods=["GET"])
 def export_contact_log():
     spreadsheet = get_spreadsheet_with_retry()
-    contact_rows = get_contact_rows(spreadsheet)
+    contact_rows = accessible_contact_rows(
+        get_contact_rows(spreadsheet),
+        get_customer_rows(spreadsheet),
+        current_user(),
+    )
     filters = get_contact_log_filter_values(request.args)
     payload = build_contact_log_payload(contact_rows, filters)
     workbook = build_xlsx(payload["columns"], payload["rows"])
@@ -4507,6 +4687,9 @@ def build_customer_timeline(
     contact_rows,
     sheets,
     customer_number="",
+    *,
+    customer_record=None,
+    customers=None,
 ):
     """Build the customer-specific, user-facing activity stream.
 
@@ -4530,6 +4713,21 @@ def build_customer_timeline(
     recipient_rows = worksheet_to_dicts(
         sheets[EMAIL_RECIPIENTS_SHEET], expected_columns=EMAIL_RECIPIENTS_COLUMNS
     )
+    if customer_record is not None and customers is not None:
+        message_rows = related_rows_for_customer(
+            message_rows,
+            customers,
+            customer_record,
+        )
+        visible_email_ids = {
+            str(message.get("email_id") or "").strip()
+            for message in message_rows
+        }
+        recipient_rows = [
+            recipient for recipient in recipient_rows
+            if str(recipient.get("email_id") or "").strip()
+            in visible_email_ids
+        ]
     live_records = [
         record for record in build_live_email_records(message_rows, recipient_rows)
         if customer_identity_matches(
@@ -4665,17 +4863,26 @@ def build_customer_timeline(
 @app.route("/customers/<customer_name>/stats", methods=["GET"])
 def get_customer_stats(customer_name):
     customer_name = unquote(customer_name).strip()
-    customer_key = normalize_key(customer_name)
     spreadsheet = get_spreadsheet_with_retry()
-    customer_number = ""
-    for customer in get_customer_rows(spreadsheet):
-        if normalize_key(customer.get("customer")) == customer_key:
-            customer_name = customer.get("customer", customer_name)
-            customer_number = customer.get("customer_number", "")
-            break
+    customers = get_customer_rows(spreadsheet)
+    customer = resolve_accessible_customer(
+        customers,
+        current_user(),
+        customer_name=customer_name,
+    )
+    if customer is None:
+        return jsonify({"ok": False, "error": "customer_not_found"}), 404
+    customer_name = customer.get("customer", customer_name)
+    customer_number = customer.get("customer_number", "")
 
     # Orders
-    order_rows = get_order_rows(spreadsheet)
+    order_rows = related_rows_for_customer(
+        get_order_rows(spreadsheet),
+        customers,
+        customer,
+        name_key="Customer",
+        number_key="Customer number",
+    )
     total_sales = 0.0
     latest_order_date = None
     currency = ""
@@ -4704,7 +4911,11 @@ def get_customer_stats(customer_name):
             unique_references.add(o["Reference"].strip())
 
     # Contacts
-    contact_rows = get_contact_rows(spreadsheet)
+    contact_rows = related_rows_for_customer(
+        get_contact_rows(spreadsheet),
+        customers,
+        customer,
+    )
     contacts = []
     for c in contact_rows:
         if normalize_key(c.get("customer")) != normalize_key(customer_name):
@@ -4726,6 +4937,8 @@ def get_customer_stats(customer_name):
         contact_rows,
         sheets,
         customer_number=customer_number,
+        customer_record=customer,
+        customers=customers,
     )
 
     return jsonify({
@@ -4769,17 +4982,40 @@ def build_current_priority_snapshot(
 def get_customer_insights():
     spreadsheet = get_spreadsheet_with_retry()
     today = stockholm_today()
-    customers = get_customer_rows(spreadsheet)
+    user = current_user()
+    all_customers = get_customer_rows(spreadsheet)
+    customers = filter_accessible_customers(all_customers, user)
 
-    contact_rows = get_contact_rows(spreadsheet)
+    contact_rows = accessible_contact_rows(
+        get_contact_rows(spreadsheet), all_customers, user
+    )
     message_rows, recipient_rows, _ = get_email_rows(
         spreadsheet, include_events=False
     )
+    message_rows = accessible_related_rows(
+        message_rows, all_customers, user
+    )
+    if not user_is_admin(user):
+        visible_email_ids = {
+            str(message.get("email_id") or "").strip()
+            for message in message_rows
+        }
+        recipient_rows = [
+            recipient for recipient in recipient_rows
+            if str(recipient.get("email_id") or "").strip()
+            in visible_email_ids
+        ]
     latest_live_proposals = latest_live_email_proposals_by_customer(message_rows)
     blocked_recipients = blocked_recipient_reasons(recipient_rows)
 
     # Latest order date and order count per customer
-    order_rows = get_order_rows(spreadsheet)
+    order_rows = accessible_related_rows(
+        get_order_rows(spreadsheet),
+        all_customers,
+        user,
+        name_key="Customer",
+        number_key="Customer number",
+    )
     calculation_started = time.perf_counter()
     latest_order = {}
     latest_delivery = {}
@@ -5011,7 +5247,7 @@ def planning_activities():
             )
         try:
             customer = resolve_planning_customer(spreadsheet, data)
-        except PlanningCustomerResolutionError as exc:
+        except CustomerResolutionError as exc:
             return planning_error(
                 exc.code, str(exc), exc.status, field="customer_id"
             )
@@ -5021,6 +5257,13 @@ def planning_activities():
                 "Butiken kunde inte hittas.",
                 404,
                 field="customer_row",
+            )
+        if not customer_access_allowed(customer, current_user()):
+            return planning_error(
+                "customer_not_found",
+                "Butiken kunde inte hittas.",
+                404,
+                field="customer_id",
             )
         if customer_is_cancelled(customer):
             return planning_error(
@@ -5212,6 +5455,7 @@ def planning_activities():
             contact_sheet,
             expected_columns=CONTACT_COLUMNS,
         )
+        planning_customers = get_customer_rows(spreadsheet)
     except Exception:
         app.logger.exception("Could not read planning worksheets")
         return planning_error(
@@ -5224,7 +5468,13 @@ def planning_activities():
     owner_activities_all = [
         (row_index, row)
         for row_index, row in activity_rows
-        if planning_owner_matches(row, owner)
+        if (
+            planning_owner_matches(row, owner)
+            and customer_access_allowed(
+                related_row_customer(row, planning_customers),
+                current_user(),
+            )
+        )
     ]
     activities = []
     for _row_index, row in owner_activities_all:
@@ -5243,12 +5493,14 @@ def planning_activities():
     owner_contacts = [
         (row_index, row)
         for row_index, row in indexed_contacts
-        if owner_contact_matches(row, owner)
+        if (
+            owner_contact_matches(row, owner)
+            and customer_access_allowed(
+                related_row_customer(row, planning_customers),
+                current_user(),
+            )
+        )
     ]
-    try:
-        planning_customers = get_customer_rows(spreadsheet)
-    except Exception:
-        planning_customers = []
     planning_customer_by_key = {
         normalize_key(customer.get("customer")): customer
         for customer in planning_customers
@@ -5486,11 +5738,18 @@ def update_planning_activity(activity_id):
                 spreadsheet,
                 {"customer_id": data.get("customer_id")},
             )
-        except PlanningCustomerResolutionError as exc:
+        except CustomerResolutionError as exc:
             return planning_error(
                 exc.code, str(exc), exc.status, field="customer_id"
             )
         if not updated_customer:
+            return planning_error(
+                "customer_not_found",
+                "Butiken kunde inte hittas.",
+                404,
+                field="customer_id",
+            )
+        if not customer_access_allowed(updated_customer, current_user()):
             return planning_error(
                 "customer_not_found",
                 "Butiken kunde inte hittas.",
@@ -5516,6 +5775,24 @@ def update_planning_activity(activity_id):
                 404,
             )
         caller = current_user()
+        try:
+            current_customer = resolve_planning_customer(
+                spreadsheet,
+                {
+                    "customer_id": current.get("customer_id"),
+                    "customer_number": current.get("customer_number"),
+                    "customer": current.get("customer"),
+                    "customer_row": current.get("customer_row"),
+                },
+            )
+        except CustomerResolutionError:
+            current_customer = None
+        if not customer_access_allowed(current_customer, caller):
+            return planning_error(
+                "activity_not_found",
+                "Aktiviteten kunde inte hittas.",
+                404,
+            )
         mutation_request_scope = planning_request_scope(
             caller,
             "update",
@@ -5946,7 +6223,7 @@ def calculate_route_proposal_for_user(
 
     required_rows = tuple(sorted(set(required_rows or ())))
     requested_rows = tuple(sorted(set(client_requested_rows or ())))
-    if user_is_seller(user):
+    if not user_is_admin(user):
         owned_rows = {
             customer.get("row")
             for customer in customers
@@ -5955,6 +6232,12 @@ def calculate_route_proposal_for_user(
                 and customer_owned_by_user(customer, user)
             )
         }
+        if set(required_rows) - owned_rows:
+            return None, route_proposal_error(
+                "customer_not_found",
+                "Ett eller flera obligatoriska stopp kunde inte hittas.",
+                404,
+            )
         requested_rows = tuple(sorted(
             (
                 set(requested_rows).intersection(owned_rows)
@@ -5998,11 +6281,7 @@ def calculate_route_proposal_for_user(
                     ),
                 })
             continue
-        if (
-            user_is_seller(user)
-            and not customer_owned_by_user(customer, user)
-            and row not in required_set
-        ):
+        if not user_is_admin(user) and not customer_owned_by_user(customer, user):
             continue
         latitude = parse_coordinate_value(
             customer.get("latitude_google") or customer.get("latitude"),
@@ -6839,7 +7118,15 @@ def build_planning_route_preview(
         for customer in customers
         if isinstance(customer.get("row"), int)
     }
-    date_rows = planning_rows_for_date(all_rows, owner, route_date)
+    date_rows = [
+        (row_index, row)
+        for row_index, row in planning_rows_for_date(
+            all_rows, owner, route_date
+        )
+        if customer_access_allowed(
+            related_row_customer(row, customers), current_user()
+        )
+    ]
     active_rows = [
         (row_index, row)
         for row_index, row in date_rows
@@ -7008,7 +7295,7 @@ def build_planning_route_preview(
         spreadsheet=spreadsheet,
         start=start,
         client_requested_rows=candidate_rows,
-        user=owner,
+        user=current_user(),
         route_date=route_date,
         required_rows=required_rows,
         max_total_seconds=max_total_seconds,
@@ -7276,6 +7563,12 @@ def apply_planning_route(
                 409,
                 customer_id=customer_id,
             )
+        if not customer_access_allowed(matches[0], current_user()):
+            return None, planning_error(
+                "customer_not_found",
+                "En butik i rutten kunde inte hittas.",
+                404,
+            )
         resolved_customers_by_id[customer_id] = matches[0]
 
     with _planning_write_lock:
@@ -7538,6 +7831,19 @@ def apply_planning_route(
     }, None
 
 
+def route_payload_accessible(payload, customers, user):
+    stops = [
+        stop for stop in (payload or {}).get("stops", [])
+        if isinstance(stop, dict)
+    ]
+    return bool(stops) and all(
+        customer_access_allowed(
+            related_row_customer(stop, customers), user
+        )
+        for stop in stops
+    )
+
+
 # LEGACY/ROLLBACK COMPATIBILITY: no longer called by the active frontend.
 @app.route("/route-proposal", methods=["GET", "POST"])
 def create_route_proposal():
@@ -7570,7 +7876,9 @@ def create_route_proposal():
                 "Dagens ruttförslag kunde inte laddas. Försök igen.",
                 503,
             )
-        if saved:
+        if saved and route_payload_accessible(
+            saved, get_customer_rows(spreadsheet), user
+        ):
             return jsonify(saved)
         return route_proposal_error(
             "no_daily_route",
@@ -7634,7 +7942,9 @@ def create_route_proposal():
                 user_name,
                 route_date,
             )
-            if saved:
+            if saved and route_payload_accessible(
+                saved, get_customer_rows(spreadsheet), user
+            ):
                 return jsonify(saved)
 
             payload, error_response = calculate_route_proposal_for_user(
@@ -7716,9 +8026,26 @@ def planning_route_import():
             "Det finns inget sparat ruttförslag för idag.",
             404,
         )
+    route_customers = get_customer_rows(spreadsheet)
+    if not route_payload_accessible(
+        saved, route_customers, current_user()
+    ):
+        return planning_error(
+            "no_daily_route",
+            "Det finns inget sparat ruttförslag för idag.",
+            404,
+        )
 
     _sheet, _headers, all_rows = get_planned_activity_snapshot(spreadsheet)
-    date_rows = planning_rows_for_date(all_rows, owner, route_date)
+    date_rows = [
+        (row_index, row)
+        for row_index, row in planning_rows_for_date(
+            all_rows, owner, route_date
+        )
+        if customer_access_allowed(
+            related_row_customer(row, route_customers), current_user()
+        )
+    ]
     required_by_customer_row = defaultdict(list)
     invalid_required_activity_ids = []
     fixed_non_route = []
@@ -8322,7 +8649,13 @@ def get_followup_insights():
 @app.route("/customers/<int:row>/contact", methods=["PATCH"])
 def update_customer_contact(row):
     data = request.get_json() or {}
-    sheet = get_spreadsheet_with_retry().worksheet("customers_enriched")
+    spreadsheet = get_spreadsheet_with_retry()
+    customer = resolve_accessible_customer(
+        get_customer_rows(spreadsheet), current_user(), row=row
+    )
+    if customer is None:
+        return jsonify({"ok": False, "error": "customer_not_found"}), 404
+    sheet = spreadsheet.worksheet("customers_enriched")
     headers = sheet.row_values(1)
     if "name" in data:
         headers = ensure_customer_name_column(sheet, headers)
@@ -8500,6 +8833,20 @@ def add_contact(customer_name):
             "Kontakten kunde inte sparas. Försök igen.",
             503,
         )
+    customers = get_customer_rows(spreadsheet)
+    requested_customer = resolve_accessible_customer(
+        customers,
+        current_user(),
+        customer_id=data.get("customer_id"),
+        customer_name=customer_name,
+    )
+    if (
+        requested_customer is None
+        or normalize_key(requested_customer.get("customer"))
+        != normalize_key(customer_name)
+    ):
+        return jsonify({"ok": False, "error": "customer_not_found"}), 404
+    customer_name = str(requested_customer.get("customer") or "").strip()
     sheet = spreadsheet.worksheet("sales_activities")
     headers = ensure_contact_worksheet_schema(sheet)
     session_caller = current_user()
@@ -8529,7 +8876,7 @@ def add_contact(customer_name):
     planned_row_index = None
     planned_headers = None
     planned_row = {}
-    customer = None
+    customer = requested_customer
 
     if planned_activity_id:
         (
@@ -8582,7 +8929,7 @@ def add_contact(customer_name):
                     "customer_number": planned_row.get("customer_number"),
                 },
             )
-        except PlanningCustomerResolutionError as exc:
+        except CustomerResolutionError as exc:
             return planning_error(exc.code, str(exc), exc.status)
         valid_customer_names = {
             normalize_key(planned_row.get("customer")),
@@ -8692,9 +9039,15 @@ def add_contact(customer_name):
                     "customer_number": planned_row.get("customer_number"),
                 },
             )
-        except PlanningCustomerResolutionError as exc:
+        except CustomerResolutionError as exc:
             return planning_error(exc.code, str(exc), exc.status)
     if not customer:
+        return planning_error(
+            "customer_not_found",
+            "Butiken kunde inte hittas.",
+            404,
+        )
+    if not customer_access_allowed(customer, session_caller):
         return planning_error(
             "customer_not_found",
             "Butiken kunde inte hittas.",
@@ -8716,7 +9069,7 @@ def add_contact(customer_name):
                         "customer_number": planned_row.get("customer_number"),
                     },
                 )
-            except PlanningCustomerResolutionError as exc:
+            except CustomerResolutionError as exc:
                 return planning_error(exc.code, str(exc), exc.status)
         if not customer:
             return planning_error(

@@ -736,12 +736,13 @@ class RouteEndpointTests(TestCase):
         for patcher in reversed(self.patchers):
             patcher.stop()
 
-    def login(self, *, role="Säljare", name="Route User"):
+    def login(self, *, role="Säljare", name="Route User", admin=False):
         with self.client.session_transaction() as flask_session:
             flask_session["user"] = {
                 "user_name": "route-user",
                 "name": name,
                 "role": role,
+                "admin": admin,
             }
 
     def test_authentication_is_required(self):
@@ -837,7 +838,7 @@ class RouteEndpointTests(TestCase):
         self.assertEqual(payload["stops"][0]["priority_score"], 88)
 
     def test_only_requested_rows_can_be_selected(self):
-        self.login(role="Administratör")
+        self.login(role="Administratör", admin=True)
         response = self.client.post("/route-proposal", json={
             "start": {"latitude": 57.7089, "longitude": 11.9746},
             "candidate_rows": [3],
@@ -1110,7 +1111,8 @@ class FrontendRouteProposalFlowTests(TestCase):
         )
         self.assertIn("fetchJsonShared(`${API}/customers`)", load_source)
         self.assertIn("fetchJsonShared(`${API}/customer-insights`)", load_source)
-        self.assertIn("applyDefaultResponsibleFilter();", self.html)
+        self.assertNotIn("applyDefaultResponsibleFilter();", self.html)
+        self.assertNotIn('id="chip-responsible"', self.html)
         self.assertIn("Kundprioriteringen kunde inte laddas.", self.html)
         self.assertIn("priority-neutral", self.html)
 

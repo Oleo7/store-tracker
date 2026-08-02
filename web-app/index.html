@@ -3663,7 +3663,6 @@
       <input type="search" id="search-input" placeholder="Sök butik eller stad..." />
     </div>
     <div class="chip-row">
-      <button class="chip" id="chip-responsible">Ansvarig</button>
       <button class="chip" id="chip-region">Region</button>
       <button class="chip" id="chip-city">Stad</button>
       <button class="chip" id="chip-segment">Segment</button>
@@ -4342,7 +4341,6 @@
   let contactLogColumnFilters = { customer: "", comment: "" };
   let visibleListCount = LIST_BATCH_SIZE;
   let lastListSignature = "";
-  let defaultResponsibleFilterApplied = false;
   let planningWeekStart = "";
   let planningSelectedDate = "";
   let planningSelectedUserName = "";
@@ -4428,7 +4426,6 @@
         if (loadSerial !== customersLoadSerial) return;
         customers = loadedCustomers;
         buildDropdowns();
-        applyDefaultResponsibleFilter();
         renderList();
         hideAppLoader();
         recordFrontendMilestone(
@@ -4461,7 +4458,7 @@
   }
 
   // ── Multi-select filter state ──
-  const filterState = { segment: new Set(), responsible: new Set(), city: new Set(), region: new Set(), priority: new Set(), risk: new Set(), delivery: new Set(), latestContact: new Set(), emailProposal: new Set() };
+  const filterState = { segment: new Set(), city: new Set(), region: new Set(), priority: new Set(), risk: new Set(), delivery: new Set(), latestContact: new Set(), emailProposal: new Set() };
 
   async function loadInsights({
     render = true,
@@ -4527,7 +4524,6 @@
   let _sheetKey = null;
   const _sheetLabels = {
     segment:     "Segment",
-    responsible: "Ansvarig",
     city:        "Stad",
     region:      "Region",
     priority:    "Prio",
@@ -4538,7 +4534,6 @@
   };
   const _chipIds = {
     segment:     "chip-segment",
-    responsible: "chip-responsible",
     city:        "chip-city",
     region:      "chip-region",
     priority:    "chip-priority",
@@ -4547,12 +4542,11 @@
     latestContact: "chip-latest-contact",
     emailProposal: "chip-email-proposal",
   };
-  const _sheetValues = { segment: [], responsible: [], city: [], region: [], priority: ["Hög prio", "Medel prio", "Låg prio"], risk: [], delivery: [], latestContact: ["<1 månad", "1-2 månader", ">3 månader", "Saknar kontakt"], emailProposal: ["Påminnelse", "Återaktivering", "Nykund"] };
+  const _sheetValues = { segment: [], city: [], region: [], priority: ["Hög prio", "Medel prio", "Låg prio"], risk: [], delivery: [], latestContact: ["<1 månad", "1-2 månader", ">3 månader", "Saknar kontakt"], emailProposal: ["Påminnelse", "Återaktivering", "Nykund"] };
 
   // ── Filter modal ──
   const _customerFieldMap = {
     segment:     "customer_segment",
-    responsible: "sales_person",
     city:        "city",
     region:      "region_google",
   };
@@ -4646,36 +4640,15 @@
   function buildDropdowns() {
     const unique = (key) => [...new Set(customers.map(c => c[key]).filter(Boolean))].sort();
     _sheetValues.segment     = unique("customer_segment");
-    _sheetValues.responsible = unique("sales_person");
     _sheetValues.city        = unique("city");
     _sheetValues.region      = unique("region_google");
     _sheetValues.priority    = ["Hög prio", "Medel prio", "Låg prio"];
     _sheetValues.latestContact = ["<1 månad", "1-2 månader", ">3 månader", "Saknar kontakt"];
     updateChip("segment");
-    updateChip("responsible");
     updateChip("city");
     updateChip("region");
     updateChip("priority");
     updateChip("latestContact");
-  }
-
-  function applyDefaultResponsibleFilter() {
-    if (defaultResponsibleFilterApplied) return;
-    defaultResponsibleFilterApplied = true;
-    if (!currentUserIsSeller()) return;
-
-    const userIdentities = new Set(
-      [currentUser?.name, currentUser?.user_name]
-        .map(normalizeRouteIdentity)
-        .filter(Boolean)
-    );
-    const responsible = _sheetValues.responsible.find(name =>
-      userIdentities.has(normalizeRouteIdentity(name))
-    );
-    if (!responsible) return;
-
-    filterState.responsible.add(responsible);
-    updateChip("responsible");
   }
 
   function getLatestContactBucket(dateText) {
@@ -4934,7 +4907,6 @@
 
     if (q) filtered = filtered.filter(c => c.customer.toLowerCase().includes(q) || c.city.toLowerCase().includes(q));
     if (filterState.segment.size)     filtered = filtered.filter(c => filterState.segment.has(c.customer_segment));
-    if (filterState.responsible.size) filtered = filtered.filter(c => filterState.responsible.has(c.sales_person));
     if (filterState.city.size)        filtered = filtered.filter(c => filterState.city.has(c.city));
     if (filterState.region.size)      filtered = filtered.filter(c => filterState.region.has(c.region_google));
     if (filterState.priority.size) filtered = filtered.filter(c => {
@@ -9778,8 +9750,7 @@
   const loginScreen = document.getElementById("login-screen");
 
   function userIsAdmin() {
-    const value = currentUser?.admin;
-    return value === true || ["y", "yes", "ja", "1", "true", "on"].includes(String(value || "").trim().toLowerCase());
+    return currentUser?.admin === true;
   }
 
   function setSessionUser(user) {

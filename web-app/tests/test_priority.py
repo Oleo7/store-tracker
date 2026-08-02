@@ -37,6 +37,7 @@ class PriorityTests(TestCase):
                 "user_name": "priority-test",
                 "name": "Priority Test",
                 "role": "Säljare",
+                "admin": True,
             },
         )
         current_user_patcher.start()
