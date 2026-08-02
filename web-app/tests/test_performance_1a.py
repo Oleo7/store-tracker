@@ -45,20 +45,46 @@ class Performance1ATests(TestCase):
         self.assertIn("Kunde inte ladda kundprioritering", self.html)
         self.assertIn("requestAnimationFrame(() => window.scrollTo", self.html)
 
-    def test_customer_insights_does_not_request_email_events(self):
-        spreadsheet = object()
-        with (
-            patch.object(app_module, "get_spreadsheet_with_retry", return_value=spreadsheet),
-            patch.object(app_module, "get_customer_rows", return_value=[]),
-            patch.object(app_module, "get_contact_rows", return_value=[]),
-            patch.object(app_module, "get_order_rows", return_value=[]),
-            patch.object(app_module, "get_email_rows", return_value=([], [], [])) as email_rows,
-        ):
-            response = app_module.app.test_client().get("/customer-insights")
+    def test_get_email_rows_without_events_never_accesses_event_worksheet(self):
+        accessed_worksheets = []
 
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.get_json(), {})
-        email_rows.assert_called_once_with(spreadsheet, include_events=False)
+        class Worksheet:
+            def __init__(self, title, headers):
+                self.title = title
+                self.headers = list(headers)
+
+            def row_values(self, row):
+                self.assert_header_row(row)
+                return self.headers
+
+            def get_all_values(self):
+                return [self.headers]
+
+            def assert_header_row(self, row):
+                if row != 1:
+                    raise AssertionError("Only the header row should be requested")
+
+        class Spreadsheet:
+            def worksheet(self, title):
+                accessed_worksheets.append(title)
+                if title == app_module.EMAIL_EVENTS_SHEET:
+                    raise AssertionError("email_events must not be accessed")
+                headers = {
+                    app_module.EMAIL_MESSAGES_SHEET: app_module.EMAIL_MESSAGES_COLUMNS,
+                    app_module.EMAIL_RECIPIENTS_SHEET: app_module.EMAIL_RECIPIENTS_COLUMNS,
+                    "sales_activities": app_module.CONTACT_COLUMNS,
+                }[title]
+                return Worksheet(title, headers)
+
+        app_module._email_sheets_cache = None
+        self.addCleanup(setattr, app_module, "_email_sheets_cache", None)
+        with patch.object(app_module, "ensure_contact_worksheet_schema"):
+            rows = app_module.get_email_rows(
+                Spreadsheet(), include_events=False
+            )
+
+        self.assertEqual(rows, ([], [], []))
+        self.assertNotIn(app_module.EMAIL_EVENTS_SHEET, accessed_worksheets)
 
 
 if __name__ == "__main__":

@@ -900,21 +900,29 @@ def save_route_proposal(
     )
 
 
-def ensure_email_worksheets(spreadsheet):
+def ensure_email_worksheets(spreadsheet, *, include_events=True):
     global _email_sheets_cache
     spreadsheet_identity = id(spreadsheet)
     with _email_sheets_cache_lock:
         if _email_sheets_cache and _email_sheets_cache[0] == spreadsheet_identity:
-            return _email_sheets_cache[1]
+            sheets = _email_sheets_cache[1]
+        else:
+            contact_sheet = spreadsheet.worksheet("sales_activities")
+            ensure_contact_worksheet_schema(contact_sheet)
+            sheets = {
+                EMAIL_MESSAGES_SHEET: get_or_create_worksheet(
+                    spreadsheet, EMAIL_MESSAGES_SHEET, EMAIL_MESSAGES_COLUMNS
+                ),
+                EMAIL_RECIPIENTS_SHEET: get_or_create_worksheet(
+                    spreadsheet, EMAIL_RECIPIENTS_SHEET, EMAIL_RECIPIENTS_COLUMNS
+                ),
+            }
+            _email_sheets_cache = (spreadsheet_identity, sheets)
 
-        contact_sheet = spreadsheet.worksheet("sales_activities")
-        ensure_contact_worksheet_schema(contact_sheet)
-        sheets = {
-            EMAIL_MESSAGES_SHEET: get_or_create_worksheet(spreadsheet, EMAIL_MESSAGES_SHEET, EMAIL_MESSAGES_COLUMNS),
-            EMAIL_RECIPIENTS_SHEET: get_or_create_worksheet(spreadsheet, EMAIL_RECIPIENTS_SHEET, EMAIL_RECIPIENTS_COLUMNS),
-            EMAIL_EVENTS_SHEET: get_or_create_worksheet(spreadsheet, EMAIL_EVENTS_SHEET, EMAIL_EVENTS_COLUMNS),
-        }
-        _email_sheets_cache = (spreadsheet_identity, sheets)
+        if include_events and EMAIL_EVENTS_SHEET not in sheets:
+            sheets[EMAIL_EVENTS_SHEET] = get_or_create_worksheet(
+                spreadsheet, EMAIL_EVENTS_SHEET, EMAIL_EVENTS_COLUMNS
+            )
         return sheets
 
 
@@ -1075,7 +1083,9 @@ def save_email_proposal_template_config(spreadsheet, proposal_type, config):
 
 
 def get_email_rows(spreadsheet, *, include_events=True):
-    sheets = ensure_email_worksheets(spreadsheet)
+    sheets = ensure_email_worksheets(
+        spreadsheet, include_events=include_events
+    )
     message_rows = worksheet_to_dicts(
         sheets[EMAIL_MESSAGES_SHEET], expected_columns=EMAIL_MESSAGES_COLUMNS
     )
