@@ -1377,6 +1377,103 @@ class CustomerResolutionError(ValueError):
         self.status = status
 
 
+class CustomerLookup:
+    """Request-local indexes over one already loaded canonical customer list."""
+
+    def __init__(self, customers):
+        self.by_id = {}
+        self.by_number = {}
+        self.by_name = {}
+        self.by_row = {}
+        self.ambiguous_ids = set()
+        self.ambiguous_numbers = set()
+        self.ambiguous_names = set()
+        self.ambiguous_rows = set()
+        for customer in customers:
+            self._add(
+                self.by_id,
+                self.ambiguous_ids,
+                str(customer.get("customer_id") or "").strip(),
+                customer,
+            )
+            self._add(
+                self.by_number,
+                self.ambiguous_numbers,
+                normalize_key(customer.get("customer_number")),
+                customer,
+            )
+            self._add(
+                self.by_name,
+                self.ambiguous_names,
+                normalize_key(customer.get("customer")),
+                customer,
+            )
+            self._add(
+                self.by_row,
+                self.ambiguous_rows,
+                customer.get("row"),
+                customer,
+                allow_empty=True,
+            )
+
+    @staticmethod
+    def _add(mapping, ambiguous, key, customer, *, allow_empty=False):
+        if (not allow_empty and not key) or (allow_empty and key is None):
+            return
+        if key in ambiguous:
+            return
+        if key in mapping:
+            mapping.pop(key, None)
+            ambiguous.add(key)
+            return
+        mapping[key] = customer
+
+    def resolve(
+        self,
+        *,
+        customer_id="",
+        customer_number="",
+        customer_name="",
+        row=None,
+    ):
+        requested_id = str(customer_id or "").strip()
+        if requested_id:
+            if requested_id in self.ambiguous_ids:
+                raise CustomerResolutionError(
+                    "customer_identity_conflict",
+                    "Kund-ID:t finns på flera kundrader och måste rättas.",
+                )
+            return self.by_id.get(requested_id)
+
+        requested_number = normalize_key(customer_number)
+        if requested_number:
+            if requested_number in self.ambiguous_numbers:
+                raise CustomerResolutionError(
+                    "ambiguous_customer",
+                    "Kundnumret matchar flera butiker.",
+                )
+            return self.by_number.get(requested_number)
+
+        requested_name = normalize_key(customer_name)
+        if requested_name:
+            if requested_name in self.ambiguous_names:
+                raise CustomerResolutionError(
+                    "ambiguous_customer",
+                    "Kundnamnet matchar flera butiker.",
+                )
+            return self.by_name.get(requested_name)
+
+        if row not in (None, ""):
+            try:
+                requested_row = int(row)
+            except (TypeError, ValueError, OverflowError):
+                return None
+            if requested_row in self.ambiguous_rows:
+                return None
+            return self.by_row.get(requested_row)
+        return None
+
+
 def resolve_customer(
     customers,
     *,
@@ -1384,67 +1481,19 @@ def resolve_customer(
     customer_number="",
     customer_name="",
     row=None,
+    customer_lookup=None,
 ):
     """Resolve one canonical customer without allowing weaker identifiers to bypass stronger ones."""
-    requested_id = str(customer_id or "").strip()
-    if requested_id:
-        matches = [
-            customer for customer in customers
-            if str(customer.get("customer_id") or "").strip() == requested_id
-        ]
-        if len(matches) == 1:
-            return matches[0]
-        if len(matches) > 1:
-            raise CustomerResolutionError(
-                "customer_identity_conflict",
-                "Kund-ID:t finns på flera kundrader och måste rättas.",
-            )
-        return None
-
-    requested_number = normalize_key(customer_number)
-    if requested_number:
-        matches = [
-            customer for customer in customers
-            if normalize_key(customer.get("customer_number")) == requested_number
-        ]
-        if len(matches) == 1:
-            return matches[0]
-        if len(matches) > 1:
-            raise CustomerResolutionError(
-                "ambiguous_customer",
-                "Kundnumret matchar flera butiker.",
-            )
-        return None
-
-    requested_name = normalize_key(customer_name)
-    if requested_name:
-        matches = [
-            customer for customer in customers
-            if normalize_key(customer.get("customer")) == requested_name
-        ]
-        if len(matches) == 1:
-            return matches[0]
-        if len(matches) > 1:
-            raise CustomerResolutionError(
-                "ambiguous_customer",
-                "Kundnamnet matchar flera butiker.",
-            )
-        return None
-
-    if row not in (None, ""):
-        try:
-            requested_row = int(row)
-        except (TypeError, ValueError, OverflowError):
-            return None
-        matches = [
-            customer for customer in customers
-            if customer.get("row") == requested_row
-        ]
-        return matches[0] if len(matches) == 1 else None
-    return None
+    lookup = customer_lookup or CustomerLookup(customers)
+    return lookup.resolve(
+        customer_id=customer_id,
+        customer_number=customer_number,
+        customer_name=customer_name,
+        row=row,
+    )
 
 
-def resolve_customer_from_data(customers, data):
+def resolve_customer_from_data(customers, data, *, customer_lookup=None):
     data = data or {}
     return resolve_customer(
         customers,
@@ -1452,12 +1501,23 @@ def resolve_customer_from_data(customers, data):
         customer_number=data.get("customer_number"),
         customer_name=data.get("customer") or data.get("customer_name"),
         row=data.get("customer_row") or data.get("row"),
+        customer_lookup=customer_lookup,
     )
 
 
-def resolve_accessible_customer(customers, user, **identifiers):
+def resolve_accessible_customer(
+    customers,
+    user,
+    *,
+    customer_lookup=None,
+    **identifiers,
+):
     try:
-        customer = resolve_customer(customers, **identifiers)
+        customer = resolve_customer(
+            customers,
+            customer_lookup=customer_lookup,
+            **identifiers,
+        )
     except CustomerResolutionError:
         return None
     return customer if customer_access_allowed(customer, user) else None
@@ -1472,7 +1532,14 @@ def filter_accessible_customers(customers, user):
     ]
 
 
-def related_row_customer(row, customers, *, name_key="customer", number_key="customer_number"):
+def related_row_customer(
+    row,
+    customers,
+    *,
+    name_key="customer",
+    number_key="customer_number",
+    customer_lookup=None,
+):
     try:
         return resolve_customer(
             customers,
@@ -1480,6 +1547,7 @@ def related_row_customer(row, customers, *, name_key="customer", number_key="cus
             customer_number=row.get(number_key),
             customer_name=row.get(name_key),
             row=row.get("customer_row") or row.get("row"),
+            customer_lookup=customer_lookup,
         )
     except CustomerResolutionError:
         return None
@@ -1492,7 +1560,9 @@ def related_rows_for_customer(
     *,
     name_key="customer",
     number_key="customer_number",
+    customer_lookup=None,
 ):
+    lookup = customer_lookup or CustomerLookup(customers)
     return [
         row for row in rows
         if related_row_customer(
@@ -1500,16 +1570,28 @@ def related_rows_for_customer(
             customers,
             name_key=name_key,
             number_key=number_key,
+            customer_lookup=lookup,
         ) is customer
     ]
 
 
-def accessible_contact_rows(contact_rows, customers, user):
+def accessible_contact_rows(
+    contact_rows,
+    customers,
+    user,
+    *,
+    customer_lookup=None,
+):
     if user_is_admin(user):
         return list(contact_rows)
+    lookup = customer_lookup or CustomerLookup(customers)
     result = []
     for contact in contact_rows:
-        customer = related_row_customer(contact, customers)
+        customer = related_row_customer(
+            contact,
+            customers,
+            customer_lookup=lookup,
+        )
         if not customer_access_allowed(customer, user):
             continue
         result.append({
@@ -1527,9 +1609,11 @@ def accessible_related_rows(
     *,
     name_key="customer",
     number_key="customer_number",
+    customer_lookup=None,
 ):
     if user_is_admin(user):
         return list(rows)
+    lookup = customer_lookup or CustomerLookup(customers)
     result = []
     for row in rows:
         customer = related_row_customer(
@@ -1537,6 +1621,7 @@ def accessible_related_rows(
             customers,
             name_key=name_key,
             number_key=number_key,
+            customer_lookup=lookup,
         )
         if not customer_access_allowed(customer, user):
             continue
@@ -3257,18 +3342,26 @@ def build_email_proposal_draft(
         spreadsheet, include_events=False
     )
     if customers is not None:
+        customer_lookup = CustomerLookup(customers)
         order_rows = related_rows_for_customer(
             order_rows,
             customers,
             customer,
             name_key="Customer",
             number_key="Customer number",
+            customer_lookup=customer_lookup,
         )
         contact_rows = related_rows_for_customer(
-            contact_rows, customers, customer
+            contact_rows,
+            customers,
+            customer,
+            customer_lookup=customer_lookup,
         )
         message_rows = related_rows_for_customer(
-            message_rows, customers, customer
+            message_rows,
+            customers,
+            customer,
+            customer_lookup=customer_lookup,
         )
         visible_email_ids = {
             str(message.get("email_id") or "").strip()
@@ -4200,8 +4293,14 @@ def get_customers():
         customers.append({"row": i, **customer})
 
     user = current_user()
+    customer_lookup = (
+        None if user_is_admin(user) else CustomerLookup(customers)
+    )
     contact_rows = accessible_contact_rows(
-        get_contact_rows(spreadsheet), customers, user
+        get_contact_rows(spreadsheet),
+        customers,
+        user,
+        customer_lookup=customer_lookup,
     )
     latest_contact = {}
     latest_contact_followup = build_latest_contact_followups(contact_rows)
@@ -4228,10 +4327,16 @@ def get_customers():
 @app.route("/contact-log", methods=["GET"])
 def get_contact_log():
     spreadsheet = get_spreadsheet_with_retry()
+    customers = get_customer_rows(spreadsheet)
+    user = current_user()
+    customer_lookup = (
+        None if user_is_admin(user) else CustomerLookup(customers)
+    )
     contact_rows = accessible_contact_rows(
         get_contact_rows(spreadsheet),
-        get_customer_rows(spreadsheet),
-        current_user(),
+        customers,
+        user,
+        customer_lookup=customer_lookup,
     )
     filters = get_contact_log_filter_values(request.args)
     return jsonify(build_contact_log_payload(contact_rows, filters))
@@ -4240,10 +4345,16 @@ def get_contact_log():
 @app.route("/contact-log/export", methods=["GET"])
 def export_contact_log():
     spreadsheet = get_spreadsheet_with_retry()
+    customers = get_customer_rows(spreadsheet)
+    user = current_user()
+    customer_lookup = (
+        None if user_is_admin(user) else CustomerLookup(customers)
+    )
     contact_rows = accessible_contact_rows(
         get_contact_rows(spreadsheet),
-        get_customer_rows(spreadsheet),
-        current_user(),
+        customers,
+        user,
+        customer_lookup=customer_lookup,
     )
     filters = get_contact_log_filter_values(request.args)
     payload = build_contact_log_payload(contact_rows, filters)
@@ -4690,6 +4801,7 @@ def build_customer_timeline(
     *,
     customer_record=None,
     customers=None,
+    customer_lookup=None,
 ):
     """Build the customer-specific, user-facing activity stream.
 
@@ -4718,6 +4830,7 @@ def build_customer_timeline(
             message_rows,
             customers,
             customer_record,
+            customer_lookup=customer_lookup,
         )
         visible_email_ids = {
             str(message.get("email_id") or "").strip()
@@ -4865,10 +4978,12 @@ def get_customer_stats(customer_name):
     customer_name = unquote(customer_name).strip()
     spreadsheet = get_spreadsheet_with_retry()
     customers = get_customer_rows(spreadsheet)
+    customer_lookup = CustomerLookup(customers)
     customer = resolve_accessible_customer(
         customers,
         current_user(),
         customer_name=customer_name,
+        customer_lookup=customer_lookup,
     )
     if customer is None:
         return jsonify({"ok": False, "error": "customer_not_found"}), 404
@@ -4882,6 +4997,7 @@ def get_customer_stats(customer_name):
         customer,
         name_key="Customer",
         number_key="Customer number",
+        customer_lookup=customer_lookup,
     )
     total_sales = 0.0
     latest_order_date = None
@@ -4915,6 +5031,7 @@ def get_customer_stats(customer_name):
         get_contact_rows(spreadsheet),
         customers,
         customer,
+        customer_lookup=customer_lookup,
     )
     contacts = []
     for c in contact_rows:
@@ -4939,6 +5056,7 @@ def get_customer_stats(customer_name):
         customer_number=customer_number,
         customer_record=customer,
         customers=customers,
+        customer_lookup=customer_lookup,
     )
 
     return jsonify({
@@ -4984,16 +5102,25 @@ def get_customer_insights():
     today = stockholm_today()
     user = current_user()
     all_customers = get_customer_rows(spreadsheet)
+    customer_lookup = (
+        None if user_is_admin(user) else CustomerLookup(all_customers)
+    )
     customers = filter_accessible_customers(all_customers, user)
 
     contact_rows = accessible_contact_rows(
-        get_contact_rows(spreadsheet), all_customers, user
+        get_contact_rows(spreadsheet),
+        all_customers,
+        user,
+        customer_lookup=customer_lookup,
     )
     message_rows, recipient_rows, _ = get_email_rows(
         spreadsheet, include_events=False
     )
     message_rows = accessible_related_rows(
-        message_rows, all_customers, user
+        message_rows,
+        all_customers,
+        user,
+        customer_lookup=customer_lookup,
     )
     if not user_is_admin(user):
         visible_email_ids = {
@@ -5015,6 +5142,7 @@ def get_customer_insights():
         user,
         name_key="Customer",
         number_key="Customer number",
+        customer_lookup=customer_lookup,
     )
     calculation_started = time.perf_counter()
     latest_order = {}
@@ -5465,13 +5593,18 @@ def planning_activities():
         )
 
     now = stockholm_now()
+    planning_customer_lookup = CustomerLookup(planning_customers)
     owner_activities_all = [
         (row_index, row)
         for row_index, row in activity_rows
         if (
             planning_owner_matches(row, owner)
             and customer_access_allowed(
-                related_row_customer(row, planning_customers),
+                related_row_customer(
+                    row,
+                    planning_customers,
+                    customer_lookup=planning_customer_lookup,
+                ),
                 current_user(),
             )
         )
@@ -5496,7 +5629,11 @@ def planning_activities():
         if (
             owner_contact_matches(row, owner)
             and customer_access_allowed(
-                related_row_customer(row, planning_customers),
+                related_row_customer(
+                    row,
+                    planning_customers,
+                    customer_lookup=planning_customer_lookup,
+                ),
                 current_user(),
             )
         )
@@ -7120,6 +7257,7 @@ def build_planning_route_preview(
 ):
     _sheet, _headers, all_rows = get_planned_activity_snapshot(spreadsheet)
     customers = get_customer_rows(spreadsheet)
+    customer_lookup = CustomerLookup(customers)
     customer_by_row = {
         customer.get("row"): customer
         for customer in customers
@@ -7145,7 +7283,12 @@ def build_planning_route_preview(
         str(row.get("planned_activity_id") or "").strip()
         for _row_index, row in fixed_visit_rows
         if not customer_owned_by_user(
-            related_row_customer(row, customers), owner
+            related_row_customer(
+                row,
+                customers,
+                customer_lookup=customer_lookup,
+            ),
+            owner,
         )
         and str(row.get("planned_activity_id") or "").strip()
     })
@@ -7160,14 +7303,24 @@ def build_planning_route_preview(
         (row_index, row)
         for row_index, row in active_rows
         if customer_owned_by_user(
-            related_row_customer(row, customers), owner
+            related_row_customer(
+                row,
+                customers,
+                customer_lookup=customer_lookup,
+            ),
+            owner,
         )
     ]
     fixed_visit_rows = [
         (row_index, row)
         for row_index, row in fixed_visit_rows
         if customer_owned_by_user(
-            related_row_customer(row, customers), owner
+            related_row_customer(
+                row,
+                customers,
+                customer_lookup=customer_lookup,
+            ),
+            owner,
         )
     ]
     fixed_non_route = [
@@ -7882,19 +8035,31 @@ def route_payload_accessible(
     user,
     *,
     enforce_owner_scope=False,
+    customer_lookup=None,
 ):
     stops = [
         stop for stop in (payload or {}).get("stops", [])
         if isinstance(stop, dict)
     ]
+    lookup = customer_lookup or CustomerLookup(customers)
     return bool(stops) and all(
         (
             customer_owned_by_user(
-                related_row_customer(stop, customers), user
+                related_row_customer(
+                    stop,
+                    customers,
+                    customer_lookup=lookup,
+                ),
+                user,
             )
             if enforce_owner_scope
             else customer_access_allowed(
-                related_row_customer(stop, customers), user
+                related_row_customer(
+                    stop,
+                    customers,
+                    customer_lookup=lookup,
+                ),
+                user,
             )
         )
         for stop in stops
@@ -8084,6 +8249,7 @@ def planning_route_import():
             404,
         )
     route_customers = get_customer_rows(spreadsheet)
+    route_customer_lookup = CustomerLookup(route_customers)
     _sheet, _headers, all_rows = get_planned_activity_snapshot(spreadsheet)
     date_rows = planning_rows_for_date(all_rows, owner, route_date)
     active_date_rows = [
@@ -8100,7 +8266,12 @@ def planning_route_import():
             in {"manual", "follow_up"}
             and not is_yes(row.get("time_is_estimated"))
             and not customer_owned_by_user(
-                related_row_customer(row, route_customers), owner
+                related_row_customer(
+                    row,
+                    route_customers,
+                    customer_lookup=route_customer_lookup,
+                ),
+                owner,
             )
             and str(row.get("planned_activity_id") or "").strip()
         )
@@ -8117,6 +8288,7 @@ def planning_route_import():
         route_customers,
         owner,
         enforce_owner_scope=True,
+        customer_lookup=route_customer_lookup,
     ):
         return planning_error(
             "route_customer_owner_changed",
@@ -8127,7 +8299,12 @@ def planning_route_import():
         (row_index, row)
         for row_index, row in date_rows
         if customer_owned_by_user(
-            related_row_customer(row, route_customers), owner
+            related_row_customer(
+                row,
+                route_customers,
+                customer_lookup=route_customer_lookup,
+            ),
+            owner,
         )
     ]
     required_by_customer_row = defaultdict(list)

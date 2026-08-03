@@ -64,6 +64,68 @@ class Ownership1BTests(TestCase):
         with self.client.session_transaction() as flask_session:
             flask_session["user"] = profile
 
+    def test_customer_lookup_matches_resolver_precedence_and_ambiguity(self):
+        canonical = customer(2, "Canonical Store", "Olle", "canonical-id")
+        canonical["customer_number"] = " C-100 "
+        duplicate_number_a = customer(
+            3, "Duplicate Name", "Olle", "duplicate-a"
+        )
+        duplicate_number_a["customer_number"] = "DUP-1"
+        duplicate_number_b = customer(
+            4, " duplicate name ", "Sofia", "duplicate-b"
+        )
+        duplicate_number_b["customer_number"] = " dup-1 "
+        customers = [canonical, duplicate_number_a, duplicate_number_b]
+        lookup = app_module.CustomerLookup(customers)
+
+        cases = [
+            (
+                "customer_id wins",
+                {
+                    "customer_id": " canonical-id ",
+                    "customer_number": "DUP-1",
+                    "customer_name": "Duplicate Name",
+                    "row": 4,
+                },
+                canonical,
+            ),
+            ("customer number", {"customer_number": "c-100"}, canonical),
+            ("customer name", {"customer_name": " canonical store "}, canonical),
+            ("customer row", {"row": "2"}, canonical),
+            (
+                "missing strong id does not fall back",
+                {
+                    "customer_id": "missing-id",
+                    "customer_number": "C-100",
+                    "customer_name": "Canonical Store",
+                    "row": 2,
+                },
+                None,
+            ),
+        ]
+        for label, identifiers, expected in cases:
+            with self.subTest(label=label):
+                indexed = app_module.resolve_customer(
+                    customers,
+                    customer_lookup=lookup,
+                    **identifiers,
+                )
+                unshared = app_module.resolve_customer(customers, **identifiers)
+                self.assertIs(indexed, expected)
+                self.assertIs(unshared, expected)
+
+        for label, identifiers in (
+            ("ambiguous number", {"customer_number": "dup-1", "row": 2}),
+            ("ambiguous name", {"customer_name": "DUPLICATE NAME", "row": 2}),
+        ):
+            with self.subTest(label=label):
+                with self.assertRaises(app_module.CustomerResolutionError):
+                    app_module.resolve_customer(
+                        customers,
+                        customer_lookup=lookup,
+                        **identifiers,
+                    )
+
     def test_only_users_admin_y_is_admin_and_frontend_uses_boolean(self):
         for value in ("Y", " y ", "y"):
             with self.subTest(value=value):
