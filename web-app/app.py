@@ -6195,6 +6195,7 @@ def calculate_route_proposal_for_user(
     required_rows=(),
     max_total_seconds=MAX_TOTAL_SECONDS,
     respect_requested_rows=False,
+    owner=None,
 ):
     try:
         customers = get_customer_rows(spreadsheet)
@@ -6223,13 +6224,16 @@ def calculate_route_proposal_for_user(
 
     required_rows = tuple(sorted(set(required_rows or ())))
     requested_rows = tuple(sorted(set(client_requested_rows or ())))
-    if not user_is_admin(user):
+    customer_scope_owner = owner or (
+        None if user_is_admin(user) else user
+    )
+    if customer_scope_owner is not None:
         owned_rows = {
             customer.get("row")
             for customer in customers
             if (
                 isinstance(customer.get("row"), int)
-                and customer_owned_by_user(customer, user)
+                and customer_owned_by_user(customer, customer_scope_owner)
             )
         }
         if set(required_rows) - owned_rows:
@@ -6281,7 +6285,10 @@ def calculate_route_proposal_for_user(
                     ),
                 })
             continue
-        if not user_is_admin(user) and not customer_owned_by_user(customer, user):
+        if (
+            customer_scope_owner is not None
+            and not customer_owned_by_user(customer, customer_scope_owner)
+        ):
             continue
         latitude = parse_coordinate_value(
             customer.get("latitude_google") or customer.get("latitude"),
@@ -6393,7 +6400,7 @@ def calculate_route_proposal_for_user(
         start=start,
         candidates=candidates,
         requested_rows=requested_rows,
-        user=user,
+        user=owner or user,
         route_date=route_date,
         max_total_seconds=max_total_seconds,
     )
@@ -7118,15 +7125,7 @@ def build_planning_route_preview(
         for customer in customers
         if isinstance(customer.get("row"), int)
     }
-    date_rows = [
-        (row_index, row)
-        for row_index, row in planning_rows_for_date(
-            all_rows, owner, route_date
-        )
-        if customer_access_allowed(
-            related_row_customer(row, customers), current_user()
-        )
-    ]
+    date_rows = planning_rows_for_date(all_rows, owner, route_date)
     active_rows = [
         (row_index, row)
         for row_index, row in date_rows
@@ -7140,6 +7139,35 @@ def build_planning_route_preview(
             and str(row.get("source") or "").strip().casefold()
             in {"manual", "follow_up"}
             and not is_yes(row.get("time_is_estimated"))
+        )
+    ]
+    changed_owner_activity_ids = sorted({
+        str(row.get("planned_activity_id") or "").strip()
+        for _row_index, row in fixed_visit_rows
+        if not customer_owned_by_user(
+            related_row_customer(row, customers), owner
+        )
+        and str(row.get("planned_activity_id") or "").strip()
+    })
+    if changed_owner_activity_ids:
+        return None, planning_error(
+            "planning_customer_owner_changed",
+            "Kundens ansvarig har ändrats. Flytta eller ta bort aktiviteten innan rutten skapas.",
+            409,
+            planned_activity_ids=changed_owner_activity_ids,
+        )
+    active_rows = [
+        (row_index, row)
+        for row_index, row in active_rows
+        if customer_owned_by_user(
+            related_row_customer(row, customers), owner
+        )
+    ]
+    fixed_visit_rows = [
+        (row_index, row)
+        for row_index, row in fixed_visit_rows
+        if customer_owned_by_user(
+            related_row_customer(row, customers), owner
         )
     ]
     fixed_non_route = [
@@ -7209,14 +7237,19 @@ def build_planning_route_preview(
         )
 
     explicitly_requested_rows = set(candidate_rows or ())
+    owned_customer_rows = {
+        customer.get("row")
+        for customer in customers
+        if (
+            isinstance(customer.get("row"), int)
+            and customer_owned_by_user(customer, owner)
+        )
+    }
     if not candidate_rows:
+        candidate_rows = tuple(owned_customer_rows)
+    else:
         candidate_rows = tuple(
-            customer.get("row")
-            for customer in customers
-            if (
-                isinstance(customer.get("row"), int)
-                and customer_owned_by_user(customer, owner)
-            )
+            row for row in candidate_rows if row in owned_customer_rows
         )
     def activity_customer_identity(row):
         return (
@@ -7296,6 +7329,7 @@ def build_planning_route_preview(
         start=start,
         client_requested_rows=candidate_rows,
         user=current_user(),
+        owner=owner,
         route_date=route_date,
         required_rows=required_rows,
         max_total_seconds=max_total_seconds,
@@ -7563,11 +7597,22 @@ def apply_planning_route(
                 409,
                 customer_id=customer_id,
             )
-        if not customer_access_allowed(matches[0], current_user()):
+        if not customer_owned_by_user(matches[0], owner):
+            changed_activity_ids = sorted({
+                str(activity_id or "").strip()
+                for stop in preview_stops
+                if str(stop.get("customer_id") or "").strip() == customer_id
+                for activity_id in (
+                    stop.get("required_activity_ids")
+                    or [stop.get("planned_activity_id")]
+                )
+                if str(activity_id or "").strip()
+            })
             return None, planning_error(
-                "customer_not_found",
-                "En butik i rutten kunde inte hittas.",
-                404,
+                "route_customer_owner_changed",
+                "En kund i rutten har bytt ansvarig. Beräkna rutten igen.",
+                409,
+                planned_activity_ids=changed_activity_ids,
             )
         resolved_customers_by_id[customer_id] = matches[0]
 
@@ -7831,14 +7876,26 @@ def apply_planning_route(
     }, None
 
 
-def route_payload_accessible(payload, customers, user):
+def route_payload_accessible(
+    payload,
+    customers,
+    user,
+    *,
+    enforce_owner_scope=False,
+):
     stops = [
         stop for stop in (payload or {}).get("stops", [])
         if isinstance(stop, dict)
     ]
     return bool(stops) and all(
-        customer_access_allowed(
-            related_row_customer(stop, customers), user
+        (
+            customer_owned_by_user(
+                related_row_customer(stop, customers), user
+            )
+            if enforce_owner_scope
+            else customer_access_allowed(
+                related_row_customer(stop, customers), user
+            )
         )
         for stop in stops
     )
@@ -8027,29 +8084,56 @@ def planning_route_import():
             404,
         )
     route_customers = get_customer_rows(spreadsheet)
+    _sheet, _headers, all_rows = get_planned_activity_snapshot(spreadsheet)
+    date_rows = planning_rows_for_date(all_rows, owner, route_date)
+    active_date_rows = [
+        (row_index, row)
+        for row_index, row in date_rows
+        if str(row.get("status") or "").strip().casefold() == "planned"
+    ]
+    changed_owner_activity_ids = sorted({
+        str(row.get("planned_activity_id") or "").strip()
+        for _row_index, row in active_date_rows
+        if (
+            normalize_planning_contact_type(row.get("contact_type")) == "visit"
+            and str(row.get("source") or "").strip().casefold()
+            in {"manual", "follow_up"}
+            and not is_yes(row.get("time_is_estimated"))
+            and not customer_owned_by_user(
+                related_row_customer(row, route_customers), owner
+            )
+            and str(row.get("planned_activity_id") or "").strip()
+        )
+    })
+    if changed_owner_activity_ids:
+        return planning_error(
+            "planning_customer_owner_changed",
+            "Kundens ansvarig har ändrats. Flytta eller ta bort aktiviteten innan rutten importeras.",
+            409,
+            planned_activity_ids=changed_owner_activity_ids,
+        )
     if not route_payload_accessible(
-        saved, route_customers, current_user()
+        saved,
+        route_customers,
+        owner,
+        enforce_owner_scope=True,
     ):
         return planning_error(
-            "no_daily_route",
-            "Det finns inget sparat ruttförslag för idag.",
-            404,
+            "route_customer_owner_changed",
+            "En kund i den sparade rutten har bytt ansvarig. Beräkna rutten igen.",
+            409,
         )
-
-    _sheet, _headers, all_rows = get_planned_activity_snapshot(spreadsheet)
-    date_rows = [
+    scoped_date_rows = [
         (row_index, row)
-        for row_index, row in planning_rows_for_date(
-            all_rows, owner, route_date
-        )
-        if customer_access_allowed(
-            related_row_customer(row, route_customers), current_user()
+        for row_index, row in date_rows
+        if customer_owned_by_user(
+            related_row_customer(row, route_customers), owner
         )
     ]
     required_by_customer_row = defaultdict(list)
     invalid_required_activity_ids = []
     fixed_non_route = []
-    for _row_index, row in date_rows:
+    for _row_index, row in scoped_date_rows:
         if str(row.get("status") or "").strip().casefold() != "planned":
             continue
         public_row = public_planned_activity(row)

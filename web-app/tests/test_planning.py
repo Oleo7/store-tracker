@@ -1906,6 +1906,122 @@ class PlanningRouteApiTests(PlanningApiTestCase):
             )
         return response, calculate
 
+    def test_admin_preview_for_seller_filters_candidates_to_current_owner(self):
+        self.login("admin")
+        sofia_stop = self.route_stop(3, 1, 21)
+
+        def calculate_for_sofia(**kwargs):
+            self.assertEqual(kwargs["user"]["user_name"], "admin")
+            self.assertEqual(kwargs["owner"]["user_name"], "sofia")
+            self.assertEqual(kwargs["client_requested_rows"], (3,))
+            return self.route_payload([sofia_stop]), None
+
+        with (
+            patch.object(
+                app_module,
+                "calculate_route_proposal_for_user",
+                side_effect=calculate_for_sofia,
+            ),
+            patch.object(
+                app_module,
+                "get_route_travel_time_provider",
+                return_value=ConstantRoadProvider(),
+            ),
+        ):
+            response = self.client.post(
+                "/planning/route-preview",
+                json={
+                    "user_name": "sofia",
+                    "route_date": "2026-07-28",
+                    "start": {"latitude": 57.7, "longitude": 11.9},
+                    "candidate_rows": [2, 3],
+                },
+            )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertEqual(
+            [stop["customer_row"] for stop in response.get_json()["stops"]],
+            [3],
+        )
+
+    def test_admin_cannot_apply_signed_seller_preview_after_owner_change(self):
+        self.login("admin")
+        sofia_stop = self.route_stop(3, 1, 21)
+        with (
+            patch.object(
+                app_module,
+                "calculate_route_proposal_for_user",
+                return_value=(self.route_payload([sofia_stop]), None),
+            ),
+            patch.object(
+                app_module,
+                "get_route_travel_time_provider",
+                return_value=ConstantRoadProvider(),
+            ),
+        ):
+            preview = self.client.post(
+                "/planning/route-preview",
+                json={
+                    "user_name": "sofia",
+                    "route_date": "2026-07-28",
+                    "start": {"latitude": 57.7, "longitude": 11.9},
+                    "candidate_rows": [3],
+                },
+            )
+        self.assertEqual(preview.status_code, 200, preview.get_json())
+
+        customers = self.spreadsheet.worksheet("customers_enriched")
+        owner_column = customers.row_values(1).index("sales_person") + 1
+        customers.update_cell(3, owner_column, "Olle")
+        applied = self.client.post(
+            "/planning/route-apply",
+            json={
+                "user_name": "sofia",
+                "client_request_id": "admin-apply-stale-sofia-preview",
+                "preview_token": preview.get_json()["preview_token"],
+            },
+        )
+
+        self.assertEqual(applied.status_code, 409, applied.get_json())
+        self.assertEqual(
+            applied.get_json()["error"],
+            "route_customer_owner_changed",
+        )
+        self.assertFalse(any(
+            row["source"] == "route" for row in self.planning_rows()
+        ))
+
+    def test_old_required_visit_reports_owner_change_without_becoming_stop(self):
+        required = self.append_planning_row(
+            planned_activity_id="sofia-required-before-reassignment",
+            owner={"user_name": "sofia", "name": "Sofia"},
+            customer_row=3,
+            scheduled_at="2026-07-28T10:30:00+02:00",
+        )
+        customers = self.spreadsheet.worksheet("customers_enriched")
+        owner_column = customers.row_values(1).index("sales_person") + 1
+        customers.update_cell(3, owner_column, "Olle")
+        self.login("admin")
+
+        response = self.client.post(
+            "/planning/route-preview",
+            json={
+                "user_name": "sofia",
+                "route_date": "2026-07-28",
+                "start": {"latitude": 57.7, "longitude": 11.9},
+                "candidate_rows": [3],
+            },
+        )
+
+        self.assertEqual(response.status_code, 409, response.get_json())
+        body = response.get_json()
+        self.assertEqual(body["error"], "planning_customer_owner_changed")
+        self.assertEqual(
+            body["planned_activity_ids"],
+            [required["planned_activity_id"]],
+        )
+        self.assertNotIn("Butik B", str(body))
+
     def test_route_ownership_uses_user_name_when_display_name_is_full_name(self):
         users = self.spreadsheet.worksheet(app_module.USERS_SHEET)
         headers = users.row_values(1)
