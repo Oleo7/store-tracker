@@ -656,7 +656,7 @@ class PlanningActivityApiTests(PlanningApiTestCase):
 
         self.assertEqual(self.planning_rows(), [])
 
-    def test_seller_can_plan_other_customer_but_not_read_another_calendar(self):
+    def test_seller_cannot_plan_other_customer_or_read_another_calendar(self):
         create = self.client.post(
             "/planning/activities",
             json=self.manual_payload(
@@ -669,12 +669,10 @@ class PlanningActivityApiTests(PlanningApiTestCase):
             "?start=2026-07-27&end=2026-08-02&user_name=sofia"
         )
 
-        self.assertEqual(create.status_code, 201, create.get_json())
-        self.assertEqual(create.get_json()["activity"]["user_name"], "olle")
-        self.assertEqual(create.get_json()["activity"]["customer"], "Butik B")
+        self.assertEqual(create.status_code, 404, create.get_json())
         self.assertEqual(read.status_code, 403, read.get_json())
         self.assertNotIn("Sofia", str(read.get_json()))
-        self.assertEqual(len(self.planning_rows()), 1)
+        self.assertEqual(len(self.planning_rows()), 0)
 
     def test_admin_can_create_and_read_for_another_seller(self):
         self.login("admin")
@@ -953,7 +951,7 @@ class PlanningActivityApiTests(PlanningApiTestCase):
             },
         )
 
-        self.assertEqual(forbidden.status_code, 403, forbidden.get_json())
+        self.assertEqual(forbidden.status_code, 404, forbidden.get_json())
         self.assertNotIn("Sofia", str(forbidden.get_json()))
         self.assertIn(completed_directly.status_code, {400, 409})
         self.assertEqual(skipped.status_code, 200, skipped.get_json())
@@ -1320,7 +1318,7 @@ class PlanningActivityApiTests(PlanningApiTestCase):
             ),
             self.manual_payload(
                 client_request_id="concurrent-create-b",
-                customer_row=3,
+                customer_row=4,
             ),
         ]
         threads = [
@@ -1342,7 +1340,7 @@ class PlanningActivityApiTests(PlanningApiTestCase):
             {row["customer_id"] for row in self.planning_rows()},
             {
                 "11111111-1111-4111-8111-111111111111",
-                "22222222-2222-4222-8222-222222222222",
+                "33333333-3333-4333-8333-333333333333",
             },
         )
 
@@ -1478,8 +1476,8 @@ class PlanningContactCompletionTests(PlanningApiTestCase):
             },
         )
 
-        self.assertEqual(response.status_code, 409, response.get_json())
-        self.assertEqual(response.get_json()["error"], "ambiguous_customer")
+        self.assertEqual(response.status_code, 404, response.get_json())
+        self.assertEqual(response.get_json()["error"], "customer_not_found")
         self.assertEqual(self.contact_rows(), [])
 
     def test_phone_completion_does_not_require_freezer_and_retry_is_idempotent(self):
@@ -1664,7 +1662,7 @@ class PlanningContactCompletionTests(PlanningApiTestCase):
             },
         )
 
-        self.assertEqual(viewer.status_code, 403, viewer.get_json())
+        self.assertEqual(viewer.status_code, 404, viewer.get_json())
         self.assertEqual(
             admin_without_owner.status_code,
             422,
@@ -1704,10 +1702,10 @@ class PlanningContactCompletionTests(PlanningApiTestCase):
             ),
         )
 
-        self.assertEqual(response.status_code, 422, response.get_json())
+        self.assertEqual(response.status_code, 404, response.get_json())
         self.assertEqual(
             response.get_json()["error"],
-            "activity_owner_not_sales_user",
+            "customer_not_found",
         )
         self.assertEqual(self.contact_rows(), [])
 
@@ -1907,6 +1905,122 @@ class PlanningRouteApiTests(PlanningApiTestCase):
                 },
             )
         return response, calculate
+
+    def test_admin_preview_for_seller_filters_candidates_to_current_owner(self):
+        self.login("admin")
+        sofia_stop = self.route_stop(3, 1, 21)
+
+        def calculate_for_sofia(**kwargs):
+            self.assertEqual(kwargs["user"]["user_name"], "admin")
+            self.assertEqual(kwargs["owner"]["user_name"], "sofia")
+            self.assertEqual(kwargs["client_requested_rows"], (3,))
+            return self.route_payload([sofia_stop]), None
+
+        with (
+            patch.object(
+                app_module,
+                "calculate_route_proposal_for_user",
+                side_effect=calculate_for_sofia,
+            ),
+            patch.object(
+                app_module,
+                "get_route_travel_time_provider",
+                return_value=ConstantRoadProvider(),
+            ),
+        ):
+            response = self.client.post(
+                "/planning/route-preview",
+                json={
+                    "user_name": "sofia",
+                    "route_date": "2026-07-28",
+                    "start": {"latitude": 57.7, "longitude": 11.9},
+                    "candidate_rows": [2, 3],
+                },
+            )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertEqual(
+            [stop["customer_row"] for stop in response.get_json()["stops"]],
+            [3],
+        )
+
+    def test_admin_cannot_apply_signed_seller_preview_after_owner_change(self):
+        self.login("admin")
+        sofia_stop = self.route_stop(3, 1, 21)
+        with (
+            patch.object(
+                app_module,
+                "calculate_route_proposal_for_user",
+                return_value=(self.route_payload([sofia_stop]), None),
+            ),
+            patch.object(
+                app_module,
+                "get_route_travel_time_provider",
+                return_value=ConstantRoadProvider(),
+            ),
+        ):
+            preview = self.client.post(
+                "/planning/route-preview",
+                json={
+                    "user_name": "sofia",
+                    "route_date": "2026-07-28",
+                    "start": {"latitude": 57.7, "longitude": 11.9},
+                    "candidate_rows": [3],
+                },
+            )
+        self.assertEqual(preview.status_code, 200, preview.get_json())
+
+        customers = self.spreadsheet.worksheet("customers_enriched")
+        owner_column = customers.row_values(1).index("sales_person") + 1
+        customers.update_cell(3, owner_column, "Olle")
+        applied = self.client.post(
+            "/planning/route-apply",
+            json={
+                "user_name": "sofia",
+                "client_request_id": "admin-apply-stale-sofia-preview",
+                "preview_token": preview.get_json()["preview_token"],
+            },
+        )
+
+        self.assertEqual(applied.status_code, 409, applied.get_json())
+        self.assertEqual(
+            applied.get_json()["error"],
+            "route_customer_owner_changed",
+        )
+        self.assertFalse(any(
+            row["source"] == "route" for row in self.planning_rows()
+        ))
+
+    def test_old_required_visit_reports_owner_change_without_becoming_stop(self):
+        required = self.append_planning_row(
+            planned_activity_id="sofia-required-before-reassignment",
+            owner={"user_name": "sofia", "name": "Sofia"},
+            customer_row=3,
+            scheduled_at="2026-07-28T10:30:00+02:00",
+        )
+        customers = self.spreadsheet.worksheet("customers_enriched")
+        owner_column = customers.row_values(1).index("sales_person") + 1
+        customers.update_cell(3, owner_column, "Olle")
+        self.login("admin")
+
+        response = self.client.post(
+            "/planning/route-preview",
+            json={
+                "user_name": "sofia",
+                "route_date": "2026-07-28",
+                "start": {"latitude": 57.7, "longitude": 11.9},
+                "candidate_rows": [3],
+            },
+        )
+
+        self.assertEqual(response.status_code, 409, response.get_json())
+        body = response.get_json()
+        self.assertEqual(body["error"], "planning_customer_owner_changed")
+        self.assertEqual(
+            body["planned_activity_ids"],
+            [required["planned_activity_id"]],
+        )
+        self.assertNotIn("Butik B", str(body))
 
     def test_route_ownership_uses_user_name_when_display_name_is_full_name(self):
         users = self.spreadsheet.worksheet(app_module.USERS_SHEET)
