@@ -498,7 +498,9 @@ class PriorityTests(TestCase):
         self.assertGreaterEqual(priority[0]["priority_score"], 50)
         self.assertTrue(any("Över normal återköpstid" in reason for reason in priority[0]["reasons"]))
         self.assertEqual(priority[0]["next_action"]["action_type"], "reorder")
-        self.assertEqual(priority[0]["next_action"]["label"], "Ring för återorder")
+        self.assertEqual(priority[0]["next_action"]["label"], "Driv återorder")
+        self.assertNotIn("Ring", priority[0]["next_action"]["label"])
+        self.assertEqual(priority[0]["next_action"]["primary_cta"], "Planera besök")
 
     def test_planned_self_ordering_followup_caps_reorder_priority(self):
         order_features = build_order_features(
@@ -616,6 +618,8 @@ class PriorityTests(TestCase):
         self.assertIsNotNone(priority[0]["expected_cycle_days"])
         self.assertGreater(priority[0]["overdue_days"], 0)
         self.assertEqual(priority[0]["next_action"]["action_type"], "trial_reorder")
+        self.assertEqual(priority[0]["next_action"]["label"], "Följ upp första ordern")
+        self.assertEqual(priority[0]["next_action"]["primary_cta"], "Planera besök")
 
     def test_single_order_positive_trial_is_capped_below_absolute_top(self):
         order_features = build_order_features(
@@ -921,9 +925,13 @@ class PriorityTests(TestCase):
         by_customer = {item["customer"]: item for item in priority}
 
         self.assertEqual(by_customer["New A"]["next_action"]["action_type"], "new_ab")
+        self.assertEqual(by_customer["New A"]["next_action"]["label"], "Bearbeta ny A/B-kund")
+        self.assertEqual(by_customer["New A"]["next_action"]["primary_cta"], "Planera besök")
         self.assertEqual(by_customer["New A"]["next_action"]["reason"], "Segment A · ingen order ännu")
         self.assertEqual(by_customer["Recent Order"]["next_action"]["action_type"], "monitor")
         self.assertEqual(by_customer["Fallback"]["next_action"]["action_type"], "route_fill")
+        self.assertEqual(by_customer["Fallback"]["next_action"]["label"], "Bearbeta vid besöksrutt")
+        self.assertEqual(by_customer["Fallback"]["next_action"]["primary_cta"], "Planera besök")
 
     def test_followup_insights_endpoint_omits_duplicate_priority_customers(self):
         customers = [

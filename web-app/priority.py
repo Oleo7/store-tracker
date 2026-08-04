@@ -785,16 +785,16 @@ def _next_action(
             "action_type": "trial_reorder",
             "tone": "urgent" if overdue_days >= 21 else "warning",
             "reason": "Första ordern är redo för uppföljning",
-            "primary_cta": "Ring",
+            "primary_cta": "Planera besök",
         }
 
     if order_count > 0 and overdue_days is not None and overdue_days >= 7:
         return {
-            "label": "Ring för återorder",
+            "label": "Driv återorder",
             "action_type": "reorder",
             "tone": "urgent" if overdue_days >= 21 else "warning",
             "reason": f"Över normal återköpstid +{overdue_days} dagar",
-            "primary_cta": "Ring",
+            "primary_cta": "Planera besök",
         }
 
     if latest_contact_class == "Positiv" and not has_order_after_latest_contact:
@@ -822,7 +822,7 @@ def _next_action(
             "action_type": "new_ab",
             "tone": "opportunity",
             "reason": f"Segment {segment_value} · ingen order ännu",
-            "primary_cta": "Kontakta",
+            "primary_cta": "Planera besök",
         }
 
     if last_order_date and 0 <= (today - last_order_date).days <= 10:
@@ -844,11 +844,11 @@ def _next_action(
         }
 
     return {
-        "label": "Bearbeta vid rutt",
+        "label": "Bearbeta vid besöksrutt",
         "action_type": "route_fill",
         "tone": "low",
         "reason": "Lägre prioritet just nu",
-        "primary_cta": "Öppna",
+        "primary_cta": "Planera besök",
     }
 
 
