@@ -202,7 +202,10 @@ class PlanningFrontendContractTests(TestCase):
         self.assertNotIn('id="chip-route-proposal"', list_view.group(1))
         self.assertNotIn('id="route-proposal-panel"', list_view.group(1))
         self.assertIn('id="route-mode-btn"', list_view.group(1))
-        self.assertIn("Fyll dagen automatiskt", self.html)
+        self.assertIn(
+            'id="planning-route-preview-btn" type="button">Skapa ruttförslag</button>',
+            self.html,
+        )
         self.assertIn("LEGACY ROLLBACK SUPPORT", self.html)
 
     def test_planning_error_preserves_admin_owner_and_backend_message(self):
