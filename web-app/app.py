@@ -17,6 +17,7 @@ from google.oauth2.service_account import Credentials
 from urllib.parse import unquote
 from datetime import datetime, date, time as datetime_time, timedelta, timezone
 from collections import defaultdict
+import copy
 from io import BytesIO
 from queue import Empty, Full, Queue
 import os
@@ -105,6 +106,7 @@ from planning_suggestions import (
     mutation_fingerprint as suggestion_mutation_fingerprint,
     public_suggestion,
 )
+from sheets_availability import SheetReadCache, read_with_retry
 
 load_dotenv()
 
@@ -313,6 +315,8 @@ PERFORMANCE_SHEETS = {
     "email_recipients",
     "email_events",
     "planned_activities",
+    "planning_suggestions",
+    "score_events",
     "users",
 }
 
@@ -347,6 +351,13 @@ def record_performance_step(step, started_at, row_count=None):
     })
 
 
+def record_google_sheet_read(cache_hit):
+    if not cache_hit and has_request_context() and getattr(
+        g, "performance_request_id", ""
+    ):
+        g.google_sheets_read_count += 1
+
+
 @contextmanager
 def performance_step(step):
     started_at = time.perf_counter()
@@ -364,6 +375,7 @@ def start_performance_measurement():
     g.performance_request_id = uuid.uuid4().hex
     g.performance_started_at = time.perf_counter()
     g.performance_steps = []
+    g.google_sheets_read_count = 0
     return None
 
 
@@ -393,6 +405,9 @@ def finalize_response(response):
         "status_code": response.status_code,
         "total_ms": total_ms,
         "response_size_bytes": response_size,
+        "google_sheets_read_count": getattr(
+            g, "google_sheets_read_count", 0
+        ),
     }
     entries = [{**common, "step": "total", "duration_ms": total_ms, "row_count": None}]
     entries.extend({**common, **step} for step in g.performance_steps)
@@ -567,6 +582,36 @@ _route_proposal_daily_lock = threading.RLock()
 _planning_write_lock = threading.RLock()
 
 
+READ_CACHE_TITLES = {
+    "customers_enriched",
+    "order_rows",
+    "sales_activities",
+    "users",
+    "email_messages",
+    "email_recipients",
+    "email_events",
+    "planned_activities",
+    "planning_suggestions",
+    "score_events",
+}
+
+
+def sheets_read_cache_ttl(environ=None):
+    environment = os.environ if environ is None else environ
+    try:
+        return max(1.0, min(60.0, float(
+            environment.get("SHEETS_READ_CACHE_TTL_SECONDS") or 12
+        )))
+    except (TypeError, ValueError):
+        return 12.0
+
+
+_sheet_read_cache = SheetReadCache(ttl_seconds=sheets_read_cache_ttl())
+_priority_snapshot_condition = threading.Condition(threading.RLock())
+_priority_snapshot_entry = None
+_priority_snapshot_loading = set()
+
+
 _spreadsheet_cache = None
 
 
@@ -600,6 +645,7 @@ def ensure_customer_name_column(sheet, headers):
     original_headers = list(headers)
     insert_at = original_headers.index("phone") + 1
     sheet.insert_cols([["name"]], col=insert_at)
+    invalidate_sheet_for_write(sheet)
     return original_headers[:insert_at - 1] + ["name"] + original_headers[insert_at - 1:]
 
 
@@ -613,6 +659,7 @@ def ensure_worksheet_columns(sheet, headers, columns):
         if grid_columns and grid_columns < target_column:
             sheet.resize(cols=target_column)
         sheet.update_cell(1, target_column, column)
+        invalidate_sheet_for_write(sheet)
         normalized_headers.append(column)
     return normalized_headers
 
@@ -628,7 +675,10 @@ def ensure_unique_worksheet_columns(sheet, headers, columns):
         return normalized_headers
 
     try:
-        rows = sheet.get_all_values()
+        rows = read_with_retry(
+            sheet.get_all_values,
+            on_retry=_log_sheet_read_retry(f"schema.{sheet.title}"),
+        )
         if rows:
             for column, indexes in duplicate_groups.items():
                 primary_idx = indexes[0]
@@ -653,6 +703,7 @@ def ensure_unique_worksheet_columns(sheet, headers, columns):
         )
         for idx in duplicate_indexes:
             sheet.delete_columns(idx + 1)
+            invalidate_sheet_for_write(sheet)
             del normalized_headers[idx]
     except Exception as exc:
         app.logger.warning("Could not deduplicate worksheet columns for %s: %s", sheet.title, exc)
@@ -665,7 +716,10 @@ def ensure_contact_worksheet_schema(sheet):
     with _planning_write_lock:
         headers = ensure_worksheet_columns(
             sheet,
-            sheet.row_values(1),
+            read_with_retry(
+                lambda: sheet.row_values(1),
+                on_retry=_log_sheet_read_retry("schema.sales_activities"),
+            ),
             CONTACT_COLUMNS,
         )
         return ensure_unique_worksheet_columns(
@@ -690,8 +744,12 @@ def build_worksheet_row(headers, row_data, single_value_columns=None):
 
 
 def get_spreadsheet(force_reconnect=False):
-    global _spreadsheet_cache
+    global _spreadsheet_cache, _email_sheets_cache
     if _spreadsheet_cache is None or force_reconnect:
+        if force_reconnect:
+            _sheet_read_cache.clear()
+            invalidate_priority_snapshot()
+            _email_sheets_cache = None
         creds = Credentials.from_service_account_info(json.loads(os.environ["GOOGLE_CREDENTIALS"]), scopes=SCOPES)
         _spreadsheet_cache = gspread.authorize(creds).open_by_key(SHEET_ID)
     return _spreadsheet_cache
@@ -701,9 +759,94 @@ def get_spreadsheet_with_retry():
     """Return spreadsheet, reconnecting once on stale-connection errors."""
     with performance_step("sheets.open"):
         try:
-            return get_spreadsheet()
+            return read_with_retry(
+                get_spreadsheet,
+                on_retry=_log_sheet_read_retry("spreadsheet"),
+            )
         except RequestsConnectionError:
-            return get_spreadsheet(force_reconnect=True)
+            return read_with_retry(
+                lambda: get_spreadsheet(force_reconnect=True),
+                on_retry=_log_sheet_read_retry("spreadsheet_reconnect"),
+            )
+
+
+def _log_sheet_read_retry(label):
+    def log_retry(error, attempt, attempts, delay):
+        app.logger.warning(
+            "Sheets read retry for %s (%s/%s, %.2fs): %s",
+            label, attempt, attempts, delay, error,
+        )
+    return log_retry
+
+
+def get_worksheet(spreadsheet, title):
+    sheet = _sheet_read_cache.worksheet(
+        spreadsheet,
+        title,
+        loader=lambda: spreadsheet.worksheet(title),
+    )
+    try:
+        sheet._store_tracker_spreadsheet = spreadsheet
+    except Exception:
+        pass
+    return sheet
+
+
+def sheet_cache_enabled(spreadsheet):
+    return bool(
+        spreadsheet
+        and (
+            spreadsheet.__class__.__module__.startswith("gspread")
+            or getattr(
+                spreadsheet, "_store_tracker_enable_read_cache", False
+            )
+        )
+    )
+
+
+def cached_worksheet_values(sheet, spreadsheet=None):
+    spreadsheet = (
+        spreadsheet
+        or getattr(sheet, "_store_tracker_spreadsheet", None)
+        or _spreadsheet_cache
+    )
+    title = str(getattr(sheet, "title", "") or "").strip()
+    if (
+        title not in READ_CACHE_TITLES
+        or not sheet_cache_enabled(spreadsheet)
+    ):
+        return read_with_retry(
+            sheet.get_all_values,
+            on_retry=_log_sheet_read_retry(f"values.{title or 'other'}"),
+        ), False
+    values, cache_hit = _sheet_read_cache.values(
+        spreadsheet,
+        title,
+        loader=sheet.get_all_values,
+    )
+    return values, cache_hit
+
+
+def invalidate_priority_snapshot():
+    global _priority_snapshot_entry
+    with _priority_snapshot_condition:
+        _priority_snapshot_entry = None
+        _priority_snapshot_condition.notify_all()
+
+
+def invalidate_sheet_cache(spreadsheet, *titles, worksheets=False):
+    _sheet_read_cache.invalidate(spreadsheet, *titles, worksheets=worksheets)
+    if set(titles) & READ_CACHE_TITLES:
+        invalidate_priority_snapshot()
+
+
+def invalidate_sheet_for_write(sheet):
+    title = str(getattr(sheet, "title", "") or "").strip()
+    spreadsheet = getattr(sheet, "spreadsheet", None)
+    if spreadsheet is None:
+        spreadsheet = _spreadsheet_cache
+    if title:
+        invalidate_sheet_cache(spreadsheet, title)
 
 
 def get_route_travel_time_provider():
@@ -765,8 +908,13 @@ def route_matrix_candidate_limit(environ=None):
 
 def worksheet_to_dicts(worksheet, expected_columns=None, required_columns=None):
     with performance_step(_performance_sheet_step(worksheet)) as measurement:
-        rows = worksheet.get_all_values()
+        rows, cache_hit = cached_worksheet_values(worksheet)
         measurement["row_count"] = max(0, len(rows) - 1)
+    record_performance_step(
+        f"sheets.cache.{'hit' if cache_hit else 'miss'}",
+        time.perf_counter(),
+        max(0, len(rows) - 1),
+    )
     if not rows:
         return []
 
@@ -795,15 +943,22 @@ def worksheet_to_dicts(worksheet, expected_columns=None, required_columns=None):
 
 def get_or_create_worksheet(spreadsheet, title, columns, rows=1000):
     try:
-        sheet = spreadsheet.worksheet(title)
+        sheet = get_worksheet(spreadsheet, title)
     except WorksheetNotFound:
         sheet = spreadsheet.add_worksheet(title=title, rows=rows, cols=max(len(columns), 10))
+        try:
+            sheet._store_tracker_spreadsheet = spreadsheet
+        except Exception:
+            pass
         sheet.append_row(columns)
+        invalidate_sheet_cache(spreadsheet, title, worksheets=True)
         return sheet
 
-    headers = [str(header).strip() for header in sheet.row_values(1)]
+    values, _cache_hit = cached_worksheet_values(sheet, spreadsheet)
+    headers = [str(header).strip() for header in (values[0] if values else [])]
     if not headers:
         sheet.append_row(columns)
+        invalidate_sheet_cache(spreadsheet, title)
     else:
         ensure_worksheet_columns(sheet, headers, columns)
     return sheet
@@ -923,7 +1078,7 @@ def ensure_email_worksheets(spreadsheet, *, include_events=True):
         if _email_sheets_cache and _email_sheets_cache[0] == spreadsheet_identity:
             sheets = _email_sheets_cache[1]
         else:
-            contact_sheet = spreadsheet.worksheet("sales_activities")
+            contact_sheet = get_worksheet(spreadsheet, "sales_activities")
             ensure_contact_worksheet_schema(contact_sheet)
             sheets = {
                 EMAIL_MESSAGES_SHEET: get_or_create_worksheet(
@@ -944,7 +1099,7 @@ def ensure_email_worksheets(spreadsheet, *, include_events=True):
 
 def get_user_rows(spreadsheet):
     return worksheet_to_dicts(
-        spreadsheet.worksheet(USERS_SHEET),
+        get_worksheet(spreadsheet, USERS_SHEET),
         expected_columns=USER_COLUMNS,
         required_columns=USER_COLUMNS,
     )
@@ -969,7 +1124,7 @@ def find_active_user(spreadsheet, user_name):
 
 def get_settings(spreadsheet):
     rows = worksheet_to_dicts(
-        spreadsheet.worksheet(SETTINGS_SHEET),
+        get_worksheet(spreadsheet, SETTINGS_SHEET),
         expected_columns=SETTINGS_COLUMNS,
         required_columns=["key", "value"],
     )
@@ -1051,7 +1206,7 @@ def get_email_proposal_template_config(settings, proposal_type, product_catalog)
 
 
 def save_email_proposal_template_config(spreadsheet, proposal_type, config):
-    sheet = spreadsheet.worksheet(SETTINGS_SHEET)
+    sheet = get_worksheet(spreadsheet, SETTINGS_SHEET)
     descriptions = {
         "subject": "Standardämne för mejlförslag",
         "intro_text": "Standardbrödtext för mejlförslag",
@@ -1076,9 +1231,11 @@ def save_email_proposal_template_config(spreadsheet, proposal_type, config):
     )
 
     with _settings_write_lock:
-        headers = ensure_worksheet_columns(sheet, sheet.row_values(1), SETTINGS_COLUMNS)
+        headers = ensure_worksheet_columns(
+            sheet, read_with_retry(lambda: sheet.row_values(1)), SETTINGS_COLUMNS
+        )
         key_column = headers.index("key")
-        rows = sheet.get_all_values()
+        rows = read_with_retry(sheet.get_all_values)
         row_by_key = {}
         for row_index, row in enumerate(rows[1:], start=2):
             key = str(row[key_column] if key_column < len(row) else "").strip()
@@ -1095,7 +1252,8 @@ def save_email_proposal_template_config(spreadsheet, proposal_type, config):
                     "value": value,
                     "description": description,
                 })
-                row_by_key[key] = len(sheet.get_all_values())
+                row_by_key[key] = len(read_with_retry(sheet.get_all_values))
+        invalidate_sheet_for_write(sheet)
 
 
 def get_email_rows(spreadsheet, *, include_events=True):
@@ -1142,7 +1300,14 @@ def append_dict_rows(sheet, columns, values, value_input_option="RAW", single_va
         return []
 
     with _worksheet_append_lock:
-        headers = ensure_worksheet_columns(sheet, sheet.row_values(1), columns)
+        headers = ensure_worksheet_columns(
+            sheet,
+            read_with_retry(
+                lambda: sheet.row_values(1),
+                on_retry=_log_sheet_read_retry(f"append.{sheet.title}.headers"),
+            ),
+            columns,
+        )
         rendered_rows = [
             build_worksheet_row(
                 headers,
@@ -1151,7 +1316,10 @@ def append_dict_rows(sheet, columns, values, value_input_option="RAW", single_va
             )
             for row in values
         ]
-        existing_rows = sheet.get_all_values()
+        existing_rows = read_with_retry(
+            sheet.get_all_values,
+            on_retry=_log_sheet_read_retry(f"append.{sheet.title}.rows"),
+        )
         first_row = max(2, len(existing_rows) + 1)
         last_row = first_row + len(rendered_rows) - 1
 
@@ -1167,15 +1335,23 @@ def append_dict_rows(sheet, columns, values, value_input_option="RAW", single_va
             }],
             value_input_option=value_input_option,
         )
+        invalidate_sheet_for_write(sheet)
         return list(range(first_row, last_row + 1))
 
 
 def find_sheet_row(sheet, column, value, normalizer=lambda item: str(item or "").strip()):
-    headers = [str(header).strip() for header in sheet.row_values(1)]
+    headers = [str(header).strip() for header in read_with_retry(
+        lambda: sheet.row_values(1),
+        on_retry=_log_sheet_read_retry(f"find.{sheet.title}.headers"),
+    )]
     if column not in headers:
         return None, headers, {}
     target = normalizer(value)
-    for row_index, row in enumerate(sheet.get_all_values()[1:], start=2):
+    values = read_with_retry(
+        sheet.get_all_values,
+        on_retry=_log_sheet_read_retry(f"find.{sheet.title}.rows"),
+    )
+    for row_index, row in enumerate(values[1:], start=2):
         padded = row + [""] * (len(headers) - len(row))
         item = dict(zip(headers, padded))
         if normalizer(item.get(column)) == target:
@@ -1192,12 +1368,18 @@ def update_sheet_row(sheet, row_index, headers, updates):
         data.append({"range": f"{cell}:{cell}", "values": [[value]]})
     if data:
         sheet.batch_update(data, value_input_option="RAW")
+        invalidate_sheet_for_write(sheet)
 
 
 def worksheet_snapshot(sheet, expected_columns=None):
     with performance_step(_performance_sheet_step(sheet)) as measurement:
-        values = sheet.get_all_values()
+        values, cache_hit = cached_worksheet_values(sheet)
         measurement["row_count"] = max(0, len(values) - 1)
+    record_performance_step(
+        f"sheets.cache.{'hit' if cache_hit else 'miss'}",
+        time.perf_counter(),
+        max(0, len(values) - 1),
+    )
     if not values:
         return list(expected_columns or []), []
     headers = [str(header).strip() for header in values[0]]
@@ -1221,6 +1403,7 @@ def batch_update_sheet_rows(sheet, headers, row_updates):
         })
     if data:
         sheet.batch_update(data, value_input_option="RAW")
+        invalidate_sheet_for_write(sheet)
 
 
 def batch_update_sheet_changes(sheet, headers, row_changes, new_rows=()):
@@ -1234,7 +1417,10 @@ def batch_update_sheet_changes(sheet, headers, row_changes, new_rows=()):
             data.append({"range": f"{cell}:{cell}", "values": [[value]]})
     appended_indexes = []
     if new_rows:
-        existing = sheet.get_all_values()
+        existing = read_with_retry(
+            sheet.get_all_values,
+            on_retry=_log_sheet_read_retry(f"batch.{sheet.title}.rows"),
+        )
         first_row = max(2, len(existing) + 1)
         last_row = first_row + len(new_rows) - 1
         grid_rows = getattr(sheet, "row_count", 0) or 0
@@ -1253,6 +1439,7 @@ def batch_update_sheet_changes(sheet, headers, row_changes, new_rows=()):
         appended_indexes = list(range(first_row, last_row + 1))
     if data:
         sheet.batch_update(data, value_input_option="RAW")
+        invalidate_sheet_for_write(sheet)
     return appended_indexes
 
 
@@ -1277,7 +1464,7 @@ def current_user():
 
 def get_order_rows(spreadsheet):
     return worksheet_to_dicts(
-        spreadsheet.worksheet("order_rows"),
+        get_worksheet(spreadsheet, "order_rows"),
         expected_columns=ORDER_COLUMNS,
         required_columns=ORDER_REQUIRED_COLUMNS,
     )
@@ -1285,17 +1472,22 @@ def get_order_rows(spreadsheet):
 
 def get_contact_rows(spreadsheet):
     return worksheet_to_dicts(
-        spreadsheet.worksheet("sales_activities"),
+        get_worksheet(spreadsheet, "sales_activities"),
         expected_columns=CONTACT_COLUMNS,
         required_columns=CONTACT_REQUIRED_COLUMNS,
     )
 
 
 def get_customer_rows(spreadsheet):
-    sheet = spreadsheet.worksheet("customers_enriched")
+    sheet = get_worksheet(spreadsheet, "customers_enriched")
     with performance_step(_performance_sheet_step(sheet)) as measurement:
-        customer_values = sheet.get_all_values()
+        customer_values, cache_hit = cached_worksheet_values(sheet, spreadsheet)
         measurement["row_count"] = max(0, len(customer_values) - 1)
+    record_performance_step(
+        f"sheets.cache.{'hit' if cache_hit else 'miss'}",
+        time.perf_counter(),
+        max(0, len(customer_values) - 1),
+    )
     customer_headers = customer_values[0] if customer_values else []
     customers = []
     for i, row in enumerate(customer_values[1:], start=2):
@@ -1918,6 +2110,8 @@ def resolve_planning_owner(
     requested_user_name=None,
     *,
     default_admin_to_first_seller=False,
+    customers=None,
+    users=None,
 ):
     caller = current_user()
     caller_name = str(caller.get("user_name") or "").strip()
@@ -1931,8 +2125,11 @@ def resolve_planning_owner(
         )
 
     try:
-        customers = get_customer_rows(spreadsheet)
-        users = get_user_rows(spreadsheet)
+        customers = (
+            customers if customers is not None
+            else get_customer_rows(spreadsheet)
+        )
+        users = users if users is not None else get_user_rows(spreadsheet)
         if (
             user_is_admin(caller)
             and default_admin_to_first_seller
@@ -2681,8 +2878,8 @@ def format_datetime_value(value, fallback=""):
 
 
 def get_customer_by_row(spreadsheet, row_number):
-    sheet = spreadsheet.worksheet("customers_enriched")
-    rows = sheet.get_all_values()
+    sheet = get_worksheet(spreadsheet, "customers_enriched")
+    rows, _cache_hit = cached_worksheet_values(sheet, spreadsheet)
     if not rows or row_number < 2 or row_number > len(rows):
         return None
     headers = [str(header).strip() for header in rows[0]]
@@ -2709,6 +2906,11 @@ def planning_suggestion_service(spreadsheet):
         lock=_planning_write_lock,
         now=stockholm_now(),
         zone=STOCKHOLM_ZONE,
+        worksheet_getter=get_worksheet,
+        values_reader=lambda sheet: cached_worksheet_values(
+            sheet, spreadsheet
+        )[0],
+        invalidator=invalidate_sheet_for_write,
     )
 
 
@@ -2722,30 +2924,21 @@ def planning_suggestion_sort_key(item):
 
 
 def planning_suggestion_candidates(spreadsheet, owner, activity_rows=()):
-    customers = get_customer_rows(spreadsheet)
-    contacts = get_contact_rows(spreadsheet)
-    orders = get_order_rows(spreadsheet)
     if planning_suggestion_stub_enabled():
+        customers = get_customer_rows(spreadsheet)
+        contacts = get_contact_rows(spreadsheet)
+        orders = get_order_rows(spreadsheet)
         candidates = build_phase1_stub_candidates(
             owner, customers, contacts=contacts, orders=orders
         )
     else:
-        try:
-            message_rows, recipient_rows, _events = get_email_rows(
-                spreadsheet, include_events=False
-            )
-        except (WorksheetNotFound, AttributeError):
-            message_rows, recipient_rows = [], []
+        snapshot = get_authoritative_priority_snapshot(
+            spreadsheet,
+            today=stockholm_today(),
+            planned_activity_rows=activity_rows,
+        )
         with performance_step("suggestions.scoring") as measurement:
-            priorities, _email_snapshot = build_current_priority_snapshot(
-                customers=customers,
-                order_rows=orders,
-                contact_rows=contacts,
-                message_rows=message_rows,
-                recipient_rows=recipient_rows,
-                today=stockholm_today(),
-                planned_activity_rows=activity_rows,
-            )
+            priorities = snapshot["priorities"]
             measurement["row_count"] = len(priorities)
         owner_keys = user_route_identity_keys(owner)
         priorities = [
@@ -3129,7 +3322,7 @@ def ensure_followup_source_contact_id(
     source_contact_id="",
     owner=None,
 ):
-    sheet = spreadsheet.worksheet("sales_activities")
+    sheet = get_worksheet(spreadsheet, "sales_activities")
     headers = ensure_contact_worksheet_schema(sheet)
     requested = str(source_contact_id or "").strip()
     customers = get_customer_rows(spreadsheet)
@@ -3194,7 +3387,7 @@ def sync_followup_date_to_source_contact(
     requested = str(source_contact_id or "").strip()
     if not requested:
         return False
-    sheet = spreadsheet.worksheet("sales_activities")
+    sheet = get_worksheet(spreadsheet, "sales_activities")
     headers = ensure_contact_worksheet_schema(sheet)
     row_index, headers, _ = find_sheet_row(
         sheet,
@@ -3877,9 +4070,10 @@ def send_brevo_transactional_email(*, sender, recipient_email, recipient_name, r
     return message_id
 
 
-def build_sales_activity_for_email(spreadsheet, *, email_id, email_type, customer_name, user,
+def build_sales_activity_for_email(spreadsheet, *, email_id, email_type,
+                                   customer_name, customer_id="", user,
                                    recipients, partial):
-    sheet = spreadsheet.worksheet("sales_activities")
+    sheet = get_worksheet(spreadsheet, "sales_activities")
     headers = ensure_contact_worksheet_schema(sheet)
     type_label = EMAIL_PROPOSAL_TYPES[normalize_proposal_type(email_type)]
     result = f"Mejlförslag delvis skickat – {type_label}" if partial else f"Mejlförslag skickat – {type_label}"
@@ -3887,6 +4081,7 @@ def build_sales_activity_for_email(spreadsheet, *, email_id, email_type, custome
         "date_time": now_text(),
         "sales_person": user.get("name") or user.get("user_name", ""),
         "customer": customer_name,
+        "customer_id": str(customer_id or "").strip(),
         "contact_channel": "Mejl",
         "result": result,
         "comment": f"Mottagare: {', '.join(recipients)}",
@@ -4306,6 +4501,7 @@ def send_email_proposal(row):
                 email_id=draft_id,
                 email_type=email_type,
                 customer_name=current_draft["customer"]["customer"],
+                customer_id=current_draft["customer"].get("customer_id", ""),
                 user=user,
                 recipients=successes,
                 partial=bool(failures),
@@ -4648,10 +4844,11 @@ def brevo_reconcile(secret):
 @app.route("/customers", methods=["GET"])
 def get_customers():
     spreadsheet = get_spreadsheet_with_retry()
-    sheet = spreadsheet.worksheet("customers_enriched")
+    sheet = get_worksheet(spreadsheet, "customers_enriched")
     with performance_step(_performance_sheet_step(sheet)) as measurement:
-        all_rows = sheet.get_all_values()
+        all_rows, cache_hit = cached_worksheet_values(sheet, spreadsheet)
         measurement["row_count"] = max(0, len(all_rows) - 1)
+    record_google_sheet_read(cache_hit)
     headers = all_rows[0]
 
     customers = []
@@ -5570,6 +5767,70 @@ def build_current_priority_snapshot(
     return priority_customers, email_engagement_by_customer
 
 
+def get_authoritative_priority_snapshot(
+    spreadsheet, *, today, planned_activity_rows=None
+):
+    """Return one short-lived global Scoring v2 universe before owner filtering."""
+    global _priority_snapshot_entry
+    date_key = today.isoformat() if isinstance(today, date) else str(today)
+    cache_enabled = sheet_cache_enabled(spreadsheet)
+    generation = (
+        _sheet_read_cache.generation
+        if cache_enabled else time.monotonic_ns()
+    )
+    key = (id(spreadsheet), date_key, generation)
+    with _priority_snapshot_condition:
+        while True:
+            if _priority_snapshot_entry and _priority_snapshot_entry[0] == key:
+                return copy.deepcopy(_priority_snapshot_entry[1])
+            if key not in _priority_snapshot_loading:
+                _priority_snapshot_loading.add(key)
+                break
+            _priority_snapshot_condition.wait()
+    try:
+        customers = get_customer_rows(spreadsheet)
+        order_rows = get_order_rows(spreadsheet)
+        contact_rows = get_contact_rows(spreadsheet)
+        message_rows, recipient_rows, _events = get_email_rows(
+            spreadsheet, include_events=False
+        )
+        if planned_activity_rows is None:
+            try:
+                _sheet, _headers, indexed = get_planned_activity_snapshot(
+                    spreadsheet
+                )
+                planned_activity_rows = [row for _index, row in indexed]
+            except (WorksheetNotFound, AttributeError):
+                planned_activity_rows = []
+        priorities, email_snapshot = build_current_priority_snapshot(
+            customers=customers,
+            order_rows=order_rows,
+            contact_rows=contact_rows,
+            message_rows=message_rows,
+            recipient_rows=recipient_rows,
+            today=today,
+            planned_activity_rows=planned_activity_rows or (),
+        )
+        payload = {
+            "priorities": priorities,
+            "email_engagement": email_snapshot,
+            "customers": customers,
+            "order_rows": order_rows,
+            "contact_rows": contact_rows,
+            "message_rows": message_rows,
+            "recipient_rows": recipient_rows,
+            "planned_activity_rows": list(planned_activity_rows or ()),
+        }
+        with _priority_snapshot_condition:
+            if cache_enabled and _sheet_read_cache.generation == generation:
+                _priority_snapshot_entry = (key, copy.deepcopy(payload))
+        return copy.deepcopy(payload)
+    finally:
+        with _priority_snapshot_condition:
+            _priority_snapshot_loading.discard(key)
+            _priority_snapshot_condition.notify_all()
+
+
 def calibration_score_band(value):
     score = max(0, min(100, int(round(parse_number_value(value, 0)))))
     if score <= 49:
@@ -5744,22 +6005,24 @@ def get_customer_insights():
     spreadsheet = get_spreadsheet_with_retry()
     today = stockholm_today()
     user = current_user()
-    all_customers = get_customer_rows(spreadsheet)
+    global_snapshot = get_authoritative_priority_snapshot(
+        spreadsheet, today=today
+    )
+    all_customers = global_snapshot["customers"]
     customer_lookup = (
         None if user_is_admin(user) else CustomerLookup(all_customers)
     )
     customers = filter_accessible_customers(all_customers, user)
 
-    all_contact_rows = get_contact_rows(spreadsheet)
+    all_contact_rows = global_snapshot["contact_rows"]
     contact_rows = accessible_contact_rows(
         all_contact_rows,
         all_customers,
         user,
         customer_lookup=customer_lookup,
     )
-    all_message_rows, all_recipient_rows, _ = get_email_rows(
-        spreadsheet, include_events=False
-    )
+    all_message_rows = global_snapshot["message_rows"]
+    all_recipient_rows = global_snapshot["recipient_rows"]
     message_rows = all_message_rows
     recipient_rows = all_recipient_rows
     message_rows = accessible_related_rows(
@@ -5782,7 +6045,7 @@ def get_customer_insights():
     blocked_recipients = blocked_recipient_reasons(recipient_rows)
 
     # Latest order date and order count per customer
-    all_order_rows = get_order_rows(spreadsheet)
+    all_order_rows = global_snapshot["order_rows"]
     order_rows = accessible_related_rows(
         all_order_rows,
         all_customers,
@@ -5814,25 +6077,8 @@ def get_customer_insights():
             order_references[name].add(ref)
 
     priority_started = time.perf_counter()
-    try:
-        _planned_sheet, _planned_headers, indexed_planned = (
-            get_planned_activity_snapshot(spreadsheet)
-        )
-        planned_activity_rows = [row for _index, row in indexed_planned]
-    except (WorksheetNotFound, AttributeError):
-        planned_activity_rows = []
-    except Exception:
-        app.logger.exception("Could not load planned activities for priority suppression")
-        planned_activity_rows = []
-    priority_customers, email_engagement_by_customer = build_current_priority_snapshot(
-        customers=all_customers,
-        order_rows=all_order_rows,
-        contact_rows=all_contact_rows,
-        message_rows=all_message_rows,
-        recipient_rows=all_recipient_rows,
-        today=today,
-        planned_activity_rows=planned_activity_rows,
-    )
+    priority_customers = global_snapshot["priorities"]
+    email_engagement_by_customer = global_snapshot["email_engagement"]
     accessible_customer_ids = {
         str(customer.get("customer_id") or "").strip()
         for customer in customers
@@ -6089,7 +6335,9 @@ def planning_suggestions():
         )
     requested_owner = request.args.get("owner") or request.args.get("user_name")
     owner, owner_error = resolve_planning_owner(
-        spreadsheet, requested_owner, default_admin_to_first_seller=True
+        spreadsheet,
+        requested_owner,
+        default_admin_to_first_seller=True,
     )
     if owner_error is not None:
         return owner_error
@@ -6121,7 +6369,7 @@ def planning_calibration_export():
     user = current_user()
     customers = get_customer_rows(spreadsheet)
     try:
-        event_sheet = spreadsheet.worksheet(SCORE_EVENTS_SHEET)
+        event_sheet = get_worksheet(spreadsheet, SCORE_EVENTS_SHEET)
         events = worksheet_to_dicts(
             event_sheet, expected_columns=SCORE_EVENT_COLUMNS
         )
@@ -6757,7 +7005,7 @@ def planning_activities():
         _sheet, _headers, activity_rows = get_planned_activity_snapshot(
             spreadsheet
         )
-        contact_sheet = spreadsheet.worksheet("sales_activities")
+        contact_sheet = get_worksheet(spreadsheet, "sales_activities")
         ensure_contact_worksheet_schema(contact_sheet)
         _contact_headers, indexed_contacts = worksheet_snapshot(
             contact_sheet,
@@ -7545,28 +7793,11 @@ def calculate_route_proposal_for_user(
     owner=None,
 ):
     try:
-        customers = get_customer_rows(spreadsheet)
-        contact_rows = get_contact_rows(spreadsheet)
-        order_rows = get_order_rows(spreadsheet)
-        message_rows, recipient_rows, _ = get_email_rows(
-            spreadsheet, include_events=False
+        snapshot = get_authoritative_priority_snapshot(
+            spreadsheet, today=route_date
         )
-        try:
-            _planned_sheet, _planned_headers, indexed_planned = (
-                get_planned_activity_snapshot(spreadsheet)
-            )
-            planned_activity_rows = [row for _index, row in indexed_planned]
-        except Exception:
-            planned_activity_rows = []
-        priority_customers, _ = build_current_priority_snapshot(
-            customers=customers,
-            order_rows=order_rows,
-            contact_rows=contact_rows,
-            message_rows=message_rows,
-            recipient_rows=recipient_rows,
-            today=route_date,
-            planned_activity_rows=planned_activity_rows,
-        )
+        customers = snapshot["customers"]
+        priority_customers = snapshot["priorities"]
     except Exception:
         app.logger.exception(
             "Could not build priority snapshot for route proposal"
@@ -10134,8 +10365,8 @@ def update_customer_contact(row):
     )
     if customer is None:
         return jsonify({"ok": False, "error": "customer_not_found"}), 404
-    sheet = spreadsheet.worksheet("customers_enriched")
-    headers = sheet.row_values(1)
+    sheet = get_worksheet(spreadsheet, "customers_enriched")
+    headers = read_with_retry(lambda: sheet.row_values(1))
     if "name" in data:
         headers = ensure_customer_name_column(sheet, headers)
 
@@ -10208,6 +10439,7 @@ def update_customer_contact(row):
 
     if "modified" in headers:
         sheet.update_cell(row, headers.index("modified") + 1, True)
+    invalidate_sheet_for_write(sheet)
 
     result = {"ok": True}
     if address_changed:
@@ -10326,7 +10558,7 @@ def add_contact(customer_name):
     ):
         return jsonify({"ok": False, "error": "customer_not_found"}), 404
     customer_name = str(requested_customer.get("customer") or "").strip()
-    sheet = spreadsheet.worksheet("sales_activities")
+    sheet = get_worksheet(spreadsheet, "sales_activities")
     headers = ensure_contact_worksheet_schema(sheet)
     session_caller = current_user()
     calendar_coupled = bool(follow_up_enabled or planned_activity_id)

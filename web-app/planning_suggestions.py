@@ -169,34 +169,53 @@ def _timestamp(now):
     return now.isoformat(timespec="seconds")
 
 
-def _ensure_columns(sheet, columns):
-    headers = [_text(item) for item in sheet.row_values(1)]
+def _ensure_columns(sheet, columns, values_reader=None, invalidator=None):
+    values = values_reader(sheet) if values_reader else None
+    headers = [
+        _text(item) for item in (
+            values[0] if values else sheet.row_values(1)
+        )
+    ]
     if not headers:
         sheet.append_row(columns)
+        if invalidator:
+            invalidator(sheet)
         return list(columns)
     missing = [column for column in columns if column not in headers]
     if missing:
         start = len(headers) + 1
         sheet.insert_cols([[column] for column in missing], col=start)
         headers.extend(missing)
+        if invalidator:
+            invalidator(sheet)
     return headers
 
 
-def _get_or_create(spreadsheet, title, columns, rows):
+def _get_or_create(spreadsheet, title, columns, rows, worksheet_getter=None,
+                   values_reader=None, invalidator=None):
     try:
-        sheet = spreadsheet.worksheet(title)
+        sheet = (
+            worksheet_getter(spreadsheet, title)
+            if worksheet_getter else spreadsheet.worksheet(title)
+        )
     except WorksheetNotFound:
         sheet = spreadsheet.add_worksheet(
             title=title, rows=rows, cols=max(10, len(columns))
         )
+        try:
+            sheet._store_tracker_spreadsheet = spreadsheet
+        except Exception:
+            pass
         sheet.append_row(columns)
+        if invalidator:
+            invalidator(sheet)
         return sheet
-    _ensure_columns(sheet, columns)
+    _ensure_columns(sheet, columns, values_reader, invalidator)
     return sheet
 
 
-def _snapshot(sheet, expected_columns):
-    values = sheet.get_all_values()
+def _snapshot(sheet, expected_columns, values_reader=None):
+    values = values_reader(sheet) if values_reader else sheet.get_all_values()
     if not values:
         return list(expected_columns), []
     headers = [_text(item) for item in values[0]]
@@ -210,20 +229,23 @@ def _snapshot(sheet, expected_columns):
     return headers, rows
 
 
-def _append(sheet, columns, row):
-    headers = _ensure_columns(sheet, columns)
+def _append(sheet, columns, row, invalidator=None, values_reader=None):
+    headers = _ensure_columns(sheet, columns, values_reader, invalidator)
     values = [[row.get(header, "") for header in headers]]
-    first_row = max(2, len(sheet.get_all_values()) + 1)
+    existing = values_reader(sheet) if values_reader else sheet.get_all_values()
+    first_row = max(2, len(existing) + 1)
     if getattr(sheet, "row_count", 0) and first_row > sheet.row_count:
         sheet.resize(rows=sheet.row_count + 100)
     sheet.batch_update([{
         "range": f"A{first_row}:{rowcol_to_a1(first_row, len(headers))}",
         "values": values,
     }], value_input_option="RAW")
+    if invalidator:
+        invalidator(sheet)
     return first_row
 
 
-def _update(sheet, row_index, headers, changes):
+def _update(sheet, row_index, headers, changes, invalidator=None):
     data = []
     for name, value in changes.items():
         if name not in headers:
@@ -232,6 +254,8 @@ def _update(sheet, row_index, headers, changes):
         data.append({"range": f"{cell}:{cell}", "values": [[value]]})
     if data:
         sheet.batch_update(data, value_input_option="RAW")
+        if invalidator:
+            invalidator(sheet)
 
 
 def public_suggestion(row, live_candidate=None):
@@ -268,24 +292,32 @@ def public_suggestion(row, live_candidate=None):
 
 
 class PlanningSuggestionService:
-    def __init__(self, spreadsheet, *, lock, now, zone):
+    def __init__(self, spreadsheet, *, lock, now, zone,
+                 worksheet_getter=None, values_reader=None, invalidator=None):
         self.spreadsheet = spreadsheet
         self.lock = lock
         self.now = now.astimezone(zone)
         self.zone = zone
+        self.worksheet_getter = worksheet_getter
+        self.values_reader = values_reader
+        self.invalidator = invalidator
 
     def ensure_schema(self):
         suggestion_sheet = _get_or_create(
-            self.spreadsheet, SUGGESTIONS_SHEET, SUGGESTION_COLUMNS, 2000
+            self.spreadsheet, SUGGESTIONS_SHEET, SUGGESTION_COLUMNS, 2000,
+            self.worksheet_getter, self.values_reader, self.invalidator,
         )
         event_sheet = _get_or_create(
-            self.spreadsheet, SCORE_EVENTS_SHEET, SCORE_EVENT_COLUMNS, 4000
+            self.spreadsheet, SCORE_EVENTS_SHEET, SCORE_EVENT_COLUMNS, 4000,
+            self.worksheet_getter, self.values_reader, self.invalidator,
         )
         return suggestion_sheet, event_sheet
 
     def snapshot(self):
         suggestion_sheet, event_sheet = self.ensure_schema()
-        headers, rows = _snapshot(suggestion_sheet, SUGGESTION_COLUMNS)
+        headers, rows = _snapshot(
+            suggestion_sheet, SUGGESTION_COLUMNS, self.values_reader
+        )
         return suggestion_sheet, event_sheet, headers, rows
 
     def _event(self, event_sheet, event_type, row, *, request_id="",
@@ -298,7 +330,9 @@ class PlanningSuggestionService:
                 _text(request_id) or _text(after) or _timestamp(self.now),
             )),
         ))
-        _headers, events = _snapshot(event_sheet, SCORE_EVENT_COLUMNS)
+        _headers, events = _snapshot(
+            event_sheet, SCORE_EVENT_COLUMNS, self.values_reader
+        )
         if any(_text(item.get("event_id")) == event_id for _, item in events):
             return event_id
         _append(event_sheet, SCORE_EVENT_COLUMNS, {
@@ -334,7 +368,7 @@ class PlanningSuggestionService:
             "resolved_by_type": _text(resolved_by_type),
             "resolved_by_id": _text(resolved_by_id),
             "client_request_id": _text(request_id),
-        })
+        }, self.invalidator, self.values_reader)
         return event_id
 
     @staticmethod
@@ -486,7 +520,7 @@ class PlanningSuggestionService:
                     "updated_at": _timestamp(self.now),
                     "last_evaluated_at": _timestamp(self.now),
                 }
-                _update(sheet, row_index, headers, changes)
+                _update(sheet, row_index, headers, changes, self.invalidator)
                 updated = {**row, **changes}
                 self._event(
                     events,
@@ -572,7 +606,7 @@ class PlanningSuggestionService:
                         "updated_at": _timestamp(self.now),
                         "last_evaluated_at": _timestamp(self.now),
                     })
-                    _update(sheet, row_index, headers, changes)
+                    _update(sheet, row_index, headers, changes, self.invalidator)
                     row = {**row, **changes}
                     stored_by_id[suggestion_id] = (row_index, row)
                     if event_type:
@@ -599,7 +633,10 @@ class PlanningSuggestionService:
             suggestion_id, candidate, row = visible[0]
             if row is None:
                 row = self._candidate_row(owner, candidate)
-                _append(sheet, SUGGESTION_COLUMNS, row)
+                _append(
+                    sheet, SUGGESTION_COLUMNS, row, self.invalidator,
+                    self.values_reader,
+                )
             self._event(events, "suggestion_created", self._live_event_row(row, candidate),
                         before="", after="pending")
             return public_suggestion(row, candidate), pending_count
@@ -708,7 +745,7 @@ class PlanningSuggestionService:
             elif action == "reopen":
                 changes["planned_activity_id"] = ""
                 event_type = "linked_activity_cancelled"
-            _update(sheet, row_index, headers, changes)
+            _update(sheet, row_index, headers, changes, self.invalidator)
             updated = {**row, **changes}
             event_row = self._live_event_row(updated, live_candidate)
             self._event(
@@ -750,7 +787,7 @@ class PlanningSuggestionService:
                     "updated_at": _timestamp(self.now),
                     "last_evaluated_at": _timestamp(self.now),
                 }
-                _update(sheet, row_index, headers, changes)
+                _update(sheet, row_index, headers, changes, self.invalidator)
                 updated = {**row, **changes}
                 self._event(
                     events, "suggestion_resolved", updated,
