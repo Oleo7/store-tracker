@@ -462,6 +462,42 @@ class PlanningSuggestionService:
                 candidate_by_id[suggestion_id] = candidate
                 ordered.append((suggestion_id, candidate))
 
+            current_customer_ids = {
+                _text(candidate.get("customer_id"))
+                for candidate in candidate_by_id.values()
+            }
+            # A transfer changes operational ownership. Resolve any active row
+            # still held by the previous owner before the new owner can
+            # materialize the same customer's current context.
+            for row_index, row in stored:
+                if (
+                    _key(row.get("user_name")) == owner_key
+                    or _text(row.get("customer_id")) not in current_customer_ids
+                    or _key(row.get("status")) not in ACTIVE_STATUSES
+                ):
+                    continue
+                before = _key(row.get("status"))
+                changes = {
+                    "status": "resolved",
+                    "resolved_at": _timestamp(self.now),
+                    "resolved_by_type": "ownership_transfer",
+                    "resolved_by_id": _text(owner.get("user_name")),
+                    "revision": _revision(row) + 1,
+                    "updated_at": _timestamp(self.now),
+                    "last_evaluated_at": _timestamp(self.now),
+                }
+                _update(sheet, row_index, headers, changes)
+                updated = {**row, **changes}
+                self._event(
+                    events,
+                    "suggestion_resolved",
+                    updated,
+                    before=before,
+                    after="resolved",
+                    resolved_by_type="ownership_transfer",
+                    resolved_by_id=_text(owner.get("user_name")),
+                )
+
             # Reconcile due snoozes and linked activity terminal states.
             for suggestion_id, (row_index, row) in list(stored_by_id.items()):
                 status = _key(row.get("status")) or "pending"

@@ -1650,14 +1650,14 @@ class PlanningContactCompletionTests(PlanningApiTestCase):
             json={**payload, "client_request_id": "admin-no-owner"},
         )
         admin_for_seller = self.client.post(
-            "/customers/Butik%20A/contacts",
+            "/customers/Butik%20B/contacts",
             json={
                 **payload,
                 "client_request_id": "admin-for-sofia",
                 "user_name": "sofia",
                 "customer_id": app_module.get_customer_by_row(
                     self.spreadsheet,
-                    2,
+                    3,
                 )["customer_id"],
             },
         )

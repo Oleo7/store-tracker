@@ -118,7 +118,7 @@ class PlanningSuggestionV2IntegrationTests(PlanningApiTestCase):
             payload["suggestion"]["suggestion_id"],
         )
 
-    def test_candidate_filter_uses_username_for_all_production_seller_shapes(self):
+    def test_candidate_scoring_uses_global_universe_for_all_seller_shapes(self):
         seller_shapes = (
             ("Johan", "Johan Persson"),
             ("Daniel", "Daniel Andersson"),
@@ -136,9 +136,8 @@ class PlanningSuggestionV2IntegrationTests(PlanningApiTestCase):
                         self.spreadsheet,
                         {"user_name": user_name, "name": name},
                     )
-                self.assertEqual(
-                    build_snapshot.call_args.kwargs["responsible"],
-                    user_name,
+                self.assertNotIn(
+                    "responsible", build_snapshot.call_args.kwargs
                 )
 
     @staticmethod

@@ -8622,8 +8622,18 @@
       }
     } catch (error) {
       showPlanningEditorError(error.message || "Aktiviteten kunde inte sparas.");
-      if (suggestionSeed && error.code === "suggestion_stale") {
-        loadPlanningRecommendation();
+      if (suggestionSeed && [
+        "suggestion_stale",
+        "suggestion_plan_already_materialized",
+        "suggestion_activity_integrity_conflict",
+      ].includes(error.code)) {
+        Promise.allSettled([
+          loadPlanningWeek(),
+          loadPlanningRecommendation(),
+        ]);
+        if (error.code !== "suggestion_stale") {
+          showToast("Planeringen laddades om efter en synkroniseringskonflikt");
+        }
       }
     } finally {
       if (document.body.contains(button)) {

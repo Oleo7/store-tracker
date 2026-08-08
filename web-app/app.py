@@ -302,6 +302,7 @@ PERFORMANCE_ENDPOINTS = {
     "/customer-insights",
     "/followup-insights",
     "/planning/activities",
+    "/planning/suggestions",
     "/customers/<customer_name>/stats",
 }
 PERFORMANCE_SHEETS = {
@@ -1379,6 +1380,42 @@ def customer_owned_by_user(customer, user):
     )
 
 
+def user_can_be_sales_owner(user, customers):
+    """Keep authentication role separate from operational CRM ownership."""
+    if not user or not is_yes(user.get("active")):
+        return False
+    if user_is_seller(user):
+        return True
+    return bool(
+        user_is_admin(user)
+        and any(customer_owned_by_user(customer, user) for customer in customers)
+    )
+
+
+def canonical_owner_for_customer(spreadsheet, customer, *, users=None):
+    """Resolve the current customer owner to the canonical users.user_name."""
+    owner_key = normalize_key((customer or {}).get("sales_person"))
+    if not owner_key:
+        return None
+    users = users if users is not None else get_user_rows(spreadsheet)
+    matches = [
+        user for user in users
+        if is_yes(user.get("active")) and owner_key in user_route_identity_keys(user)
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def contact_currently_owned_by(
+    contact, owner, customers, *, customer_lookup=None
+):
+    """Apply current master ownership while preserving contact actor history."""
+    lookup = customer_lookup or CustomerLookup(customers)
+    customer = related_row_customer(
+        contact, customers, customer_lookup=lookup
+    )
+    return bool(customer and customer_owned_by_user(customer, owner))
+
+
 def customer_access_allowed(customer, user):
     return bool(customer) and (
         user_is_admin(user) or customer_owned_by_user(customer, user)
@@ -1894,6 +1931,8 @@ def resolve_planning_owner(
         )
 
     try:
+        customers = get_customer_rows(spreadsheet)
+        users = get_user_rows(spreadsheet)
         if (
             user_is_admin(caller)
             and default_admin_to_first_seller
@@ -1905,14 +1944,28 @@ def resolve_planning_owner(
             active_sellers = sorted(
                 (
                     user
-                    for user in get_user_rows(spreadsheet)
-                    if is_yes(user.get("active")) and user_is_seller(user)
+                    for user in users
+                    if user_can_be_sales_owner(user, customers)
                 ),
                 key=lambda user: normalize_key(user.get("user_name")),
             )
-            owner = active_sellers[0] if active_sellers else None
+            caller_owner = next((
+                user for user in active_sellers
+                if normalize_key(user.get("user_name"))
+                == normalize_key(caller_name)
+            ), None)
+            owner = caller_owner or (
+                active_sellers[0] if active_sellers else None
+            )
         else:
-            owner = find_active_user(spreadsheet, requested)
+            requested_key = normalize_key(requested)
+            owner = next((
+                user for user in users
+                if is_yes(user.get("active")) and requested_key in {
+                    normalize_key(user.get("user_name")),
+                    normalize_key(user.get("name")),
+                }
+            ), None)
     except Exception:
         app.logger.exception("Could not resolve planning owner")
         return None, planning_error(
@@ -1926,13 +1979,13 @@ def resolve_planning_owner(
             "Den valda säljaren är inte aktiv.",
             404,
         )
-    if not user_is_seller(owner) and not user_is_admin(caller):
+    if not user_can_be_sales_owner(owner, customers) and not user_is_admin(caller):
         return None, planning_error(
             "planning_access_forbidden",
             "Ditt konto saknar behörighet till Planering.",
             403,
         )
-    if not user_is_seller(owner):
+    if not user_can_be_sales_owner(owner, customers):
         return None, planning_error(
             "planning_owner_not_sales_user",
             "Den valda användaren kan inte ha en säljplanering.",
@@ -2683,26 +2736,22 @@ def planning_suggestion_candidates(spreadsheet, owner, activity_rows=()):
             )
         except (WorksheetNotFound, AttributeError):
             message_rows, recipient_rows = [], []
-        responsible = str(owner.get("user_name") or "").strip()
-        responsible = next(
-            (
-                str(customer.get("sales_person") or "").strip()
-                for customer in customers
-                if normalize_key(customer.get("sales_person"))
-                == normalize_key(responsible)
-            ),
-            responsible,
-        )
-        priorities, _email_snapshot = build_current_priority_snapshot(
-            customers=customers,
-            order_rows=orders,
-            contact_rows=contacts,
-            message_rows=message_rows,
-            recipient_rows=recipient_rows,
-            today=stockholm_today(),
-            planned_activity_rows=activity_rows,
-            responsible=responsible,
-        )
+        with performance_step("suggestions.scoring") as measurement:
+            priorities, _email_snapshot = build_current_priority_snapshot(
+                customers=customers,
+                order_rows=orders,
+                contact_rows=contacts,
+                message_rows=message_rows,
+                recipient_rows=recipient_rows,
+                today=stockholm_today(),
+                planned_activity_rows=activity_rows,
+            )
+            measurement["row_count"] = len(priorities)
+        owner_keys = user_route_identity_keys(owner)
+        priorities = [
+            priority for priority in priorities
+            if normalize_key(priority.get("sales_person")) in owner_keys
+        ]
         priorities = apply_workflow_suppressions(
             priorities,
             priority_workflow_suppressions(spreadsheet, priorities),
@@ -2847,13 +2896,60 @@ def sync_suggestion_from_activity(spreadsheet, activity, *, request_id):
             raise
 
 
-def resolve_suggestions_for_contact(
-    spreadsheet, *, owner, customer_id, contact_id, request_id
+def resolve_suggestions_for_customer_event(
+    spreadsheet, *, customer_id, resolved_by_type, resolved_by_id, request_id
 ):
-    if not customer_id:
-        return
-    planning_suggestion_service(spreadsheet).resolve_customer(
+    """Resolve against the current canonical owner, never the event actor."""
+    canonical_id = str(customer_id or "").strip()
+    event_id = str(resolved_by_id or "").strip()
+    if not canonical_id or not event_id:
+        return []
+    customers = get_customer_rows(spreadsheet)
+    customer = resolve_customer(customers, customer_id=canonical_id)
+    if not customer:
+        return []
+    try:
+        owner = canonical_owner_for_customer(spreadsheet, customer)
+    except Exception:
+        owner = None
+    if not owner:
+        # Compatibility for a temporarily unavailable users worksheet: an
+        # already materialized row can safely supply user_name only when its
+        # stored owner identity still matches the current customer owner.
+        try:
+            _sheet, _events, _headers, stored = (
+                planning_suggestion_service(spreadsheet).snapshot()
+            )
+            current_owner_key = normalize_key(customer.get("sales_person"))
+            owner_names = {
+                str(row.get("user_name") or "").strip()
+                for _index, row in stored
+                if str(row.get("customer_id") or "").strip() == canonical_id
+                and current_owner_key in {
+                    normalize_key(row.get("user_name")),
+                    normalize_key(row.get("sales_person")),
+                }
+            }
+            if len(owner_names) == 1:
+                owner = {"user_name": owner_names.pop()}
+        except Exception:
+            owner = None
+    if not owner:
+        return []
+    return planning_suggestion_service(spreadsheet).resolve_customer(
         owner_name=owner.get("user_name"),
+        customer_id=canonical_id,
+        resolved_by_type=resolved_by_type,
+        resolved_by_id=event_id,
+        request_id=request_id,
+    )
+
+
+def resolve_suggestions_for_contact(
+    spreadsheet, *, owner=None, customer_id, contact_id, request_id
+):
+    return resolve_suggestions_for_customer_event(
+        spreadsheet,
         customer_id=customer_id,
         resolved_by_type="contact",
         resolved_by_id=contact_id,
@@ -2862,12 +2958,10 @@ def resolve_suggestions_for_contact(
 
 
 def resolve_suggestions_for_email(
-    spreadsheet, *, owner, customer_id, email_id
+    spreadsheet, *, owner=None, customer_id, email_id
 ):
-    if not customer_id or not email_id:
-        return
-    planning_suggestion_service(spreadsheet).resolve_customer(
-        owner_name=owner.get("user_name"),
+    return resolve_suggestions_for_customer_event(
+        spreadsheet,
         customer_id=customer_id,
         resolved_by_type="email",
         resolved_by_id=email_id,
@@ -3030,21 +3124,33 @@ def ensure_followup_source_contact_id(
     spreadsheet,
     *,
     customer_name,
+    customer_id="",
+    customer_number="",
     source_contact_id="",
     owner=None,
 ):
     sheet = spreadsheet.worksheet("sales_activities")
     headers = ensure_contact_worksheet_schema(sheet)
     requested = str(source_contact_id or "").strip()
-    customer_key = normalize_key(customer_name)
+    customers = get_customer_rows(spreadsheet)
+    customer_lookup = CustomerLookup(customers)
+    target_customer = resolve_customer(
+        customers,
+        customer_id=customer_id,
+        customer_number=customer_number,
+        customer_name=customer_name,
+        customer_lookup=customer_lookup,
+    )
     candidate = None
     for row_index, row in worksheet_snapshot(
         sheet,
         expected_columns=CONTACT_COLUMNS,
     )[1]:
-        if normalize_key(row.get("customer")) != customer_key:
+        if target_customer is None or related_row_customer(
+            row, customers, customer_lookup=customer_lookup
+        ) is not target_customer:
             continue
-        if owner and not owner_contact_matches(row, owner):
+        if owner and not customer_owned_by_user(target_customer, owner):
             continue
         contact_id = str(row.get("contact_id") or "").strip()
         if requested and contact_id == requested:
@@ -3067,7 +3173,8 @@ def ensure_followup_source_contact_id(
         contact_id = stable_planning_uuid(
             "legacy-contact",
             row_index,
-            customer_key,
+            str((target_customer or {}).get("customer_id") or "")
+            or normalize_key(customer_name),
             row.get("date_time"),
         )
         update_sheet_row(
@@ -3225,26 +3332,16 @@ def build_unscheduled_followup_groups(
     today,
 ):
     """Return the owner's unresolved follow-ups independently of selected week."""
-    customer_by_id = {
-        str(customer.get("customer_id") or "").strip(): customer
-        for customer in customers
-        if str(customer.get("customer_id") or "").strip()
-    }
-    customers_by_name = defaultdict(list)
-    for customer in customers:
-        customers_by_name[normalize_key(customer.get("customer"))].append(customer)
+    customer_lookup = CustomerLookup(customers)
 
     def customer_identity(row):
-        customer_id = str(row.get("customer_id") or "").strip()
-        if customer_id:
-            return ("id", customer_id)
-        name_key = normalize_key(row.get("customer"))
-        matches = customers_by_name.get(name_key, [])
-        if len(matches) == 1:
-            matched_id = str(matches[0].get("customer_id") or "").strip()
-            if matched_id:
-                return ("id", matched_id)
-        return ("name", name_key) if name_key and len(matches) <= 1 else None
+        customer = related_row_customer(
+            row, customers, customer_lookup=customer_lookup
+        )
+        if not customer:
+            return None
+        customer_id = str(customer.get("customer_id") or "").strip()
+        return ("id", customer_id) if customer_id else None
 
     latest_contact_by_customer = {}
     for row_index, row in indexed_contacts:
@@ -3318,12 +3415,9 @@ def build_unscheduled_followup_groups(
             continue
 
         customer_id = str(row.get("customer_id") or "").strip()
-        customer = customer_by_id.get(customer_id)
-        if customer is None:
-            name_matches = customers_by_name.get(
-                normalize_key(row.get("customer")), []
-            )
-            customer = name_matches[0] if len(name_matches) == 1 else None
+        customer = related_row_customer(
+            row, customers, customer_lookup=customer_lookup
+        )
         item = {
             "customer_id": (
                 str(customer.get("customer_id") or "").strip()
@@ -5186,8 +5280,9 @@ def build_customer_timeline(
     customer_key = normalize_key(customer_name)
     timeline = []
 
+    canonical_rows = customer_record is not None and customers is not None
     for contact in contact_rows:
-        if normalize_key(contact.get("customer")) != customer_key:
+        if not canonical_rows and normalize_key(contact.get("customer")) != customer_key:
             continue
         # Email proposal sends have their own richer timeline item below.
         if str(contact.get("email_id", "")).strip():
@@ -5216,27 +5311,31 @@ def build_customer_timeline(
             if str(recipient.get("email_id") or "").strip()
             in visible_email_ids
         ]
-    live_records = [
-        record for record in build_live_email_records(message_rows, recipient_rows)
-        if customer_identity_matches(
-            customer_name,
-            customer_number,
-            record.get("customer"),
-            record.get("customer_number"),
-        )
-    ]
-    attributed_orders = attribute_orders_to_live_emails(
-        live_records,
-        [
-            order
-            for order in group_customer_orders(order_rows)
+    live_records = build_live_email_records(message_rows, recipient_rows)
+    if not canonical_rows:
+        live_records = [
+            record for record in live_records
+            if customer_identity_matches(
+                customer_name,
+                customer_number,
+                record.get("customer"),
+                record.get("customer_number"),
+            )
+        ]
+    grouped_orders = group_customer_orders(order_rows)
+    if not canonical_rows:
+        grouped_orders = [
+            order for order in grouped_orders
             if customer_identity_matches(
                 customer_name,
                 customer_number,
                 order.get("customer"),
                 order.get("customer_number"),
             )
-        ],
+        ]
+    attributed_orders = attribute_orders_to_live_emails(
+        live_records,
+        grouped_orders,
     )
 
     event_specs = (
@@ -5380,13 +5479,6 @@ def get_customer_stats(customer_name):
 
     unique_references = set()
     for o in order_rows:
-        if not customer_identity_matches(
-            customer_name,
-            customer_number,
-            o.get("Customer"),
-            o.get("Customer number"),
-        ):
-            continue
         try:
             cleaned = "".join(c for c in o["Total"] if c.isdigit() or c in ".,").replace(",", ".")
             if cleaned:
@@ -5410,8 +5502,6 @@ def get_customer_stats(customer_name):
     )
     contacts = []
     for c in contact_rows:
-        if normalize_key(c.get("customer")) != normalize_key(customer_name):
-            continue
         contact = {k: c[k] for k in ("customer", "date_time", "sales_person", "contact_channel", "result", "comment", "customer_contact_person", "follow_up_date",
                                      *FREEZER_COLUMNS)}
         contact["_sort_date"] = parse_date_value(c["date_time"]) or date.min
@@ -5465,12 +5555,18 @@ def build_current_priority_snapshot(
         customers,
         order_features,
         contact_features,
-        responsible,
+        None,
         today,
         limit=len(customers),
         email_features=email_engagement_by_customer,
         planned_activities=planned_activity_rows,
     )
+    if responsible:
+        responsible_key = normalize_key(responsible)
+        priority_customers = [
+            customer for customer in priority_customers
+            if normalize_key(customer.get("sales_person")) == responsible_key
+        ]
     return priority_customers, email_engagement_by_customer
 
 
@@ -5654,15 +5750,18 @@ def get_customer_insights():
     )
     customers = filter_accessible_customers(all_customers, user)
 
+    all_contact_rows = get_contact_rows(spreadsheet)
     contact_rows = accessible_contact_rows(
-        get_contact_rows(spreadsheet),
+        all_contact_rows,
         all_customers,
         user,
         customer_lookup=customer_lookup,
     )
-    message_rows, recipient_rows, _ = get_email_rows(
+    all_message_rows, all_recipient_rows, _ = get_email_rows(
         spreadsheet, include_events=False
     )
+    message_rows = all_message_rows
+    recipient_rows = all_recipient_rows
     message_rows = accessible_related_rows(
         message_rows,
         all_customers,
@@ -5683,8 +5782,9 @@ def get_customer_insights():
     blocked_recipients = blocked_recipient_reasons(recipient_rows)
 
     # Latest order date and order count per customer
+    all_order_rows = get_order_rows(spreadsheet)
     order_rows = accessible_related_rows(
-        get_order_rows(spreadsheet),
+        all_order_rows,
         all_customers,
         user,
         name_key="Customer",
@@ -5725,14 +5825,23 @@ def get_customer_insights():
         app.logger.exception("Could not load planned activities for priority suppression")
         planned_activity_rows = []
     priority_customers, email_engagement_by_customer = build_current_priority_snapshot(
-        customers=customers,
-        order_rows=order_rows,
-        contact_rows=contact_rows,
-        message_rows=message_rows,
-        recipient_rows=recipient_rows,
+        customers=all_customers,
+        order_rows=all_order_rows,
+        contact_rows=all_contact_rows,
+        message_rows=all_message_rows,
+        recipient_rows=all_recipient_rows,
         today=today,
         planned_activity_rows=planned_activity_rows,
     )
+    accessible_customer_ids = {
+        str(customer.get("customer_id") or "").strip()
+        for customer in customers
+    }
+    priority_customers = [
+        priority for priority in priority_customers
+        if str(priority.get("customer_id") or "").strip()
+        in accessible_customer_ids
+    ]
     priority_customers = apply_workflow_suppressions(
         priority_customers,
         priority_workflow_suppressions(spreadsheet, priority_customers),
@@ -5890,16 +5999,22 @@ def suggestion_request_revision(data, field="expected_revision"):
 
 
 def suggestion_queue_payload(spreadsheet, owner):
-    _activity_sheet, _activity_headers, indexed_activities = (
-        get_planned_activity_snapshot(spreadsheet)
-    )
-    activity_rows = [row for _index, row in indexed_activities]
-    candidates = planning_suggestion_candidates(
-        spreadsheet, owner, activity_rows
-    )
-    suggestion, pending_count = planning_suggestion_service(
-        spreadsheet
-    ).queue(owner, candidates, activity_rows)
+    with performance_step("suggestions.activity_snapshot") as measurement:
+        _activity_sheet, _activity_headers, indexed_activities = (
+            get_planned_activity_snapshot(spreadsheet)
+        )
+        activity_rows = [row for _index, row in indexed_activities]
+        measurement["row_count"] = len(activity_rows)
+    with performance_step("suggestions.candidates") as measurement:
+        candidates = planning_suggestion_candidates(
+            spreadsheet, owner, activity_rows
+        )
+        measurement["row_count"] = len(candidates)
+    with performance_step("suggestions.queue") as measurement:
+        suggestion, pending_count = planning_suggestion_service(
+            spreadsheet
+        ).queue(owner, candidates, activity_rows)
+        measurement["row_count"] = pending_count
     return suggestion, pending_count
 
 
@@ -5911,6 +6026,54 @@ def suggestion_candidates_by_id(owner, candidates):
         ): candidate
         for candidate in candidates
     }
+
+
+def planned_suggestion_payload_matches(
+    activity, *, customer_id, contact_type, scheduled_at, note
+):
+    return all((
+        str(activity.get("customer_id") or "").strip()
+        == str(customer_id or "").strip(),
+        normalize_planning_contact_type(activity.get("contact_type"))
+        == normalize_planning_contact_type(contact_type),
+        planning_datetime_text(activity.get("scheduled_at"))
+        == planning_datetime_text(scheduled_at),
+        str(activity.get("note") or "").strip() == str(note or "").strip(),
+        str(activity.get("source") or "").strip().casefold()
+        == "system_suggestion",
+    ))
+
+
+def reconcile_suggestion_activity_link(
+    service, suggestion, activity, *, live_candidate=None, contact_type=""
+):
+    activity_id = str(activity.get("planned_activity_id") or "").strip()
+    status = str(suggestion.get("status") or "pending").strip().casefold()
+    linked_id = str(suggestion.get("planned_activity_id") or "").strip()
+    if status == "planned" and linked_id == activity_id:
+        return suggestion
+    if status != "pending":
+        raise SuggestionError(
+            "suggestion_activity_integrity_conflict",
+            "Rekommendationen och den planerade aktiviteten har motstridigt state.",
+            409,
+        )
+    repair_request_id = f"repair-plan:{activity_id}"
+    repaired, _duplicate = service.transition(
+        suggestion.get("suggestion_id"),
+        owner_name=suggestion.get("user_name"),
+        action="plan",
+        expected_revision=planning_revision(suggestion),
+        request_id=repair_request_id,
+        fingerprint=suggestion_mutation_fingerprint(
+            "plan", suggestion.get("suggestion_id"), repair_request_id,
+            {"planned_activity_id": activity_id},
+        ),
+        planned_activity_id=activity_id,
+        actual_contact_type=contact_type,
+        live_candidate=live_candidate,
+    )
+    return repaired
 
 
 @app.route("/planning/suggestions", methods=["GET"])
@@ -6156,6 +6319,63 @@ def plan_planning_suggestion(suggestion_id):
                 source="system_suggestion",
                 source_contact_id="",
             )
+            active_suggestion_activities = [
+                row for row in activity_rows
+                if str(row.get("source_suggestion_id") or "").strip()
+                == suggestion_id
+                and str(row.get("status") or "planned").strip().casefold()
+                == "planned"
+            ]
+            if len(active_suggestion_activities) > 1:
+                activity_ids = [
+                    str(row.get("planned_activity_id") or "").strip()
+                    for row in active_suggestion_activities
+                ]
+                app.logger.error(
+                    "suggestion_activity_integrity_conflict suggestion_id=%s activity_ids=%s",
+                    suggestion_id,
+                    activity_ids,
+                )
+                return planning_error(
+                    "suggestion_activity_integrity_conflict",
+                    "Rekommendationen har flera aktiva aktiviteter och mÃ¥ste granskas.",
+                    409,
+                )
+            if active_suggestion_activities:
+                activity = active_suggestion_activities[0]
+                updated = reconcile_suggestion_activity_link(
+                    service,
+                    suggestion,
+                    activity,
+                    live_candidate=live_candidate,
+                    contact_type=activity.get("contact_type"),
+                )
+                same_payload = planned_suggestion_payload_matches(
+                    activity,
+                    customer_id=customer.get("customer_id"),
+                    contact_type=contact_type,
+                    scheduled_at=scheduled_at,
+                    note=note,
+                )
+                if not same_payload:
+                    return planning_error(
+                        "suggestion_plan_already_materialized",
+                        "Rekommendationen har redan en planerad aktivitet med annat innehÃ¥ll.",
+                        409,
+                        activity=public_planned_activity(activity),
+                    )
+                next_suggestion, pending_count = suggestion_queue_payload(
+                    spreadsheet, owner
+                )
+                return jsonify({
+                    "ok": True,
+                    "duplicate": True,
+                    "repaired": True,
+                    "activity": public_planned_activity(activity),
+                    "suggestion": public_suggestion(updated, live_candidate),
+                    "next_suggestion": next_suggestion,
+                    "pending_count": pending_count,
+                }), 200
             existing_activity = next((
                 row for row in activity_rows
                 if str(row.get("planned_activity_id") or "").strip() == activity_id
@@ -6344,6 +6564,13 @@ def planning_activities():
                 404,
                 field="customer_id",
             )
+        if not customer_owned_by_user(customer, owner):
+            return planning_error(
+                "planning_owner_customer_mismatch",
+                "Kunden tillhör inte längre den valda säljaren.",
+                409,
+                field="customer_id",
+            )
         if customer_is_cancelled(customer):
             return planning_error(
                 "customer_cancelled",
@@ -6356,6 +6583,8 @@ def planning_activities():
             resolved_source_contact_id = ensure_followup_source_contact_id(
                 spreadsheet,
                 customer_name=customer.get("customer"),
+                customer_id=customer.get("customer_id"),
+                customer_number=customer.get("customer_number"),
                 source_contact_id=data.get("source_contact_id"),
                 owner=owner,
             )
@@ -6549,7 +6778,14 @@ def planning_activities():
         (row_index, row)
         for row_index, row in activity_rows
         if (
-            planning_owner_matches(row, owner)
+            customer_owned_by_user(
+                related_row_customer(
+                    row,
+                    planning_customers,
+                    customer_lookup=planning_customer_lookup,
+                ),
+                owner,
+            )
             and customer_access_allowed(
                 related_row_customer(
                     row,
@@ -6578,7 +6814,12 @@ def planning_activities():
         (row_index, row)
         for row_index, row in indexed_contacts
         if (
-            owner_contact_matches(row, owner)
+            contact_currently_owned_by(
+                row,
+                owner,
+                planning_customers,
+                customer_lookup=planning_customer_lookup,
+            )
             and customer_access_allowed(
                 related_row_customer(
                     row,
@@ -6589,10 +6830,6 @@ def planning_activities():
             )
         )
     ]
-    planning_customer_by_key = {
-        normalize_key(customer.get("customer")): customer
-        for customer in planning_customers
-    }
     unplanned_contacts = []
     for row_index, row in owner_contacts:
         if str(row.get("planned_activity_id") or "").strip():
@@ -6600,8 +6837,10 @@ def planning_activities():
         contact_date = parse_date_value(row.get("date_time"))
         if contact_date and start_date <= contact_date <= end_date:
             item = public_unplanned_contact(row, row_index)
-            customer = planning_customer_by_key.get(
-                normalize_key(row.get("customer"))
+            customer = related_row_customer(
+                row,
+                planning_customers,
+                customer_lookup=planning_customer_lookup,
             )
             item.update({
                 "customer_row": customer.get("row") if customer else None,
@@ -6664,8 +6903,10 @@ def planning_activities():
                         source_index, source_row = row_index, row
             if source_row is None:
                 continue
-            customer = planning_customer_by_key.get(
-                normalize_key(customer_key)
+            customer = related_row_customer(
+                source_row,
+                planning_customers,
+                customer_lookup=planning_customer_lookup,
             )
             unscheduled_followups.append({
                 "customer": str(source_row.get("customer") or "").strip(),
@@ -6733,7 +6974,7 @@ def planning_activities():
                 "display_name": str(user.get("name") or "").strip(),
             }
             for user in get_user_rows(spreadsheet)
-            if is_yes(user.get("active")) and user_is_seller(user)
+            if user_can_be_sales_owner(user, planning_customers)
         ]
         available_users.sort(
             key=lambda user: normalize_key(user.get("user_name"))
@@ -6887,16 +7128,6 @@ def update_planning_activity(activity_id):
             activity_id,
             client_request_id,
         )
-        if (
-            normalize_key(current.get("user_name"))
-            != normalize_key(caller.get("user_name"))
-            and not user_is_admin(caller)
-        ):
-            return planning_error(
-                "planning_owner_forbidden",
-                "Du får inte ändra en annan säljares aktivitet.",
-                403,
-            )
         current_status = str(
             current.get("status") or "planned"
         ).strip().casefold()
@@ -10151,22 +10382,6 @@ def add_contact(customer_name):
                 "Aktivitetens säljare kunde inte verifieras. Försök igen.",
                 503,
             )
-        if not activity_owner or not user_is_seller(activity_owner):
-            return planning_error(
-                "activity_owner_not_sales_user",
-                "Aktiviteten saknar en aktiv säljare och kan inte loggas.",
-                422,
-            )
-        if (
-            normalize_key(activity_owner.get("user_name"))
-            != normalize_key(caller.get("user_name"))
-            and not user_is_admin(caller)
-        ):
-            return planning_error(
-                "planning_owner_forbidden",
-                "Du får inte logga en annan säljares aktivitet.",
-                403,
-            )
         try:
             planned_customer = resolve_planning_customer(
                 spreadsheet,
@@ -10192,6 +10407,27 @@ def add_contact(customer_name):
                 "Aktiviteten hör till en annan butik.",
                 409,
             )
+        current_activity_owner = canonical_owner_for_customer(
+            spreadsheet, planned_customer
+        )
+        if not current_activity_owner or not user_can_be_sales_owner(
+            current_activity_owner, customers
+        ):
+            return planning_error(
+                "activity_owner_not_sales_user",
+                "Aktiviteten saknar en aktiv säljare och kan inte loggas.",
+                422,
+            )
+        if (
+            normalize_key(current_activity_owner.get("user_name"))
+            != normalize_key(caller.get("user_name"))
+            and not user_is_admin(caller)
+        ):
+            return planning_error(
+                "planning_owner_forbidden",
+                "Du får inte logga en annan säljares aktivitet.",
+                403,
+            )
         if str(planned_row.get("status") or "").strip().casefold() in {
             "cancelled",
             "skipped",
@@ -10201,7 +10437,7 @@ def add_contact(customer_name):
                 "Aktiviteten är inte längre aktiv.",
                 409,
             )
-        owner = public_user(activity_owner)
+        owner = public_user(current_activity_owner)
         if not contact_type:
             contact_type = normalize_planning_contact_type(
                 planned_row.get("contact_type")
@@ -10217,7 +10453,7 @@ def add_contact(customer_name):
         requested_owner_name = str(data.get("user_name") or "").strip()
         if (
             user_is_admin(caller)
-            and not user_is_seller(caller)
+            and not customer_owned_by_user(requested_customer, caller)
             and not requested_owner_name
         ):
             return planning_error(
@@ -10259,7 +10495,7 @@ def add_contact(customer_name):
                 404,
                 field="user_name",
             )
-        if not user_is_seller(requested_owner):
+        if not user_can_be_sales_owner(requested_owner, customers):
             if normalize_key(requested_owner_name) == normalize_key(
                 caller.get("user_name")
             ) and not user_is_admin(caller):
@@ -10300,6 +10536,12 @@ def add_contact(customer_name):
             "customer_not_found",
             "Butiken kunde inte hittas.",
             404,
+        )
+    if calendar_coupled and not customer_owned_by_user(customer, owner):
+        return planning_error(
+            "planning_owner_customer_mismatch",
+            "Kunden tillhör inte längre den valda säljaren.",
+            409,
         )
 
     if follow_up_enabled:
