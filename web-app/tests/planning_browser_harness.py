@@ -176,6 +176,7 @@ Object.defineProperty(navigator, "geolocation", {
     app_module.app.config.update(
         SECRET_KEY="planning-browser-harness-secret",
         TESTING=False,
+        PLANNING_SUGGESTIONS_STUB=True,
     )
     app_module.get_spreadsheet_with_retry = lambda: browser_spreadsheet
     app_module.get_route_travel_time_provider = lambda: road_provider

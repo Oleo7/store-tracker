@@ -39,6 +39,7 @@ from gspread.utils import rowcol_to_a1
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 from requests.exceptions import ConnectionError as RequestsConnectionError
 from priority import (
+    apply_workflow_suppressions,
     build_contact_features,
     build_order_features,
     build_priority_customers,
@@ -92,6 +93,17 @@ from reminder_email import (
     stockholm_now,
     stockholm_time_text,
     stockholm_today,
+)
+from planning_suggestions import (
+    PlanningSuggestionService,
+    SCORE_EVENT_COLUMNS,
+    SCORE_EVENTS_SHEET,
+    SuggestionError,
+    build_phase1_stub_candidates,
+    decision_context_hash,
+    deterministic_suggestion_id,
+    mutation_fingerprint as suggestion_mutation_fingerprint,
+    public_suggestion,
 )
 
 load_dotenv()
@@ -494,6 +506,9 @@ PLANNED_ACTIVITY_COLUMNS = [
     "revision",
     "created_at",
     "updated_at",
+    "source_suggestion_id",
+    "source_trigger_key",
+    "recommended_contact_type",
 ]
 PLANNING_CONTACT_TYPES = {"visit", "phone", "email"}
 PLANNING_CONTACT_TYPE_LABELS = {
@@ -507,7 +522,7 @@ PLANNING_CONTACT_DURATIONS = {
     "email": 10,
 }
 PLANNING_STATUSES = {"planned", "completed", "skipped", "cancelled"}
-PLANNING_SOURCES = {"manual", "follow_up", "route"}
+PLANNING_SOURCES = {"manual", "follow_up", "route", "system_suggestion"}
 PLANNING_PREVIEW_MAX_AGE_SECONDS = 30 * 60
 PLANNING_ROUTE_START_HOUR = 9
 PLANNING_ROUTE_CONFLICT_MINUTES = 15
@@ -1985,6 +2000,15 @@ def public_planned_activity(row, *, now=None):
         "revision": planning_revision(row),
         "created_at": str(row.get("created_at") or "").strip(),
         "updated_at": str(row.get("updated_at") or "").strip(),
+        "source_suggestion_id": str(
+            row.get("source_suggestion_id") or ""
+        ).strip(),
+        "source_trigger_key": str(
+            row.get("source_trigger_key") or ""
+        ).strip(),
+        "recommended_contact_type": normalize_planning_contact_type(
+            row.get("recommended_contact_type")
+        ),
     }
 
 
@@ -2014,7 +2038,13 @@ def customer_identity_matches(
     left_number,
     right_name,
     right_number,
+    left_customer_id="",
+    right_customer_id="",
 ):
+    left_id_key = normalize_key(left_customer_id)
+    right_id_key = normalize_key(right_customer_id)
+    if left_id_key and right_id_key:
+        return left_id_key == right_id_key
     left_number_key = normalize_key(left_number)
     right_number_key = normalize_key(right_number)
     if left_number_key and right_number_key:
@@ -2610,6 +2640,231 @@ def get_customer_by_row(spreadsheet, row_number):
     return customer if str(customer.get("customer", "")).strip() else None
 
 
+def planning_suggestion_stub_enabled():
+    configured = app.config.get("PLANNING_SUGGESTIONS_STUB")
+    if configured is None:
+        configured = os.environ.get("PLANNING_SUGGESTIONS_STUB")
+    enabled = str(configured or "").strip().casefold() in {
+        "1", "true", "yes", "on"
+    }
+    return enabled and application_environment() not in PILOT_ENVIRONMENTS
+
+
+def planning_suggestion_service(spreadsheet):
+    return PlanningSuggestionService(
+        spreadsheet,
+        lock=_planning_write_lock,
+        now=stockholm_now(),
+        zone=STOCKHOLM_ZONE,
+    )
+
+
+def planning_suggestion_sort_key(item):
+    return (
+        -float(item.get("priority_score") or 0),
+        -float(item.get("expected_order_dfp") or 0),
+        int(item.get("trigger_precedence") or 99),
+        str(item.get("customer_row") or item.get("customer_id") or ""),
+    )
+
+
+def planning_suggestion_candidates(spreadsheet, owner, activity_rows=()):
+    customers = get_customer_rows(spreadsheet)
+    contacts = get_contact_rows(spreadsheet)
+    orders = get_order_rows(spreadsheet)
+    if planning_suggestion_stub_enabled():
+        candidates = build_phase1_stub_candidates(
+            owner, customers, contacts=contacts, orders=orders
+        )
+    else:
+        try:
+            message_rows, recipient_rows, _events = get_email_rows(
+                spreadsheet, include_events=False
+            )
+        except (WorksheetNotFound, AttributeError):
+            message_rows, recipient_rows = [], []
+        priorities, _email_snapshot = build_current_priority_snapshot(
+            customers=customers,
+            order_rows=orders,
+            contact_rows=contacts,
+            message_rows=message_rows,
+            recipient_rows=recipient_rows,
+            today=stockholm_today(),
+            planned_activity_rows=activity_rows,
+            responsible=owner.get("name"),
+        )
+        priorities = apply_workflow_suppressions(
+            priorities,
+            priority_workflow_suppressions(spreadsheet, priorities),
+        )
+        candidates = []
+        for priority in priorities:
+            if not str(priority.get("customer_id") or "").strip():
+                continue
+            suppression = str(
+                priority.get("recommendation_suppression_reason") or ""
+            ).strip()
+            primary_trigger = str(
+                priority.get("primary_trigger_type") or ""
+            ).strip()
+            recommendation_visible = bool(
+                primary_trigger and priority.get("recommendation_eligible")
+            )
+            context_hash = decision_context_hash(
+                owner=owner.get("user_name"),
+                customer_id=priority.get("customer_id"),
+                lifecycle=(
+                    priority.get("decision_context_lifecycle")
+                    or priority.get("lifecycle")
+                ),
+                order_count=priority.get("order_count"),
+                latest_order_reference=priority.get("latest_order_reference"),
+                latest_order_date=(
+                    priority.get("latest_delivery_date")
+                    or priority.get("latest_order_date")
+                ),
+                latest_contact_id=priority.get("latest_human_contact_id"),
+                latest_contact_result=priority.get("latest_contact_result"),
+                latest_contact_date=priority.get("latest_human_contact_date"),
+                active_email_intent_event=priority.get(
+                    "active_email_intent_event"
+                ),
+            )
+            candidates.append({
+                "decision_context_hash": context_hash,
+                "customer_id": priority.get("customer_id"),
+                "customer_key": (
+                    priority.get("customer_number")
+                    or normalize_key(priority.get("customer"))
+                ),
+                "customer_row": priority.get("row"),
+                "customer": priority.get("customer"),
+                "priority_score": priority.get("priority_score"),
+                "expected_order_dfp": priority.get("expected_order_dfp"),
+                "lifecycle": priority.get("lifecycle"),
+                "decision_context_lifecycle": priority.get(
+                    "decision_context_lifecycle"
+                ),
+                "score_version": "v2",
+                "intent_timing": priority.get("intent_timing"),
+                "value_index": priority.get("value_index"),
+                "strategic_index": priority.get("strategic_index"),
+                "recommendation_eligible": priority.get("recommendation_eligible"),
+                "recommendation_suppression_reason": suppression,
+                "reason_code": priority.get("primary_reason_code"),
+                "reason_text": priority.get("primary_reason_text"),
+                "primary_trigger_type": primary_trigger or "scoring_context",
+                "primary_trigger_key": primary_trigger or "scoring_context",
+                "covered_trigger_keys": priority.get("covered_trigger_keys") or [],
+                "trigger_precedence": {
+                    "established_reorder_due": 1,
+                    "first_order_onboarding": 1,
+                    "first_order_reorder": 1,
+                    "positive_dialogue_followup": 2,
+                    "strategic_contact_due": 3,
+                    "stockfiller_click_followup": 4,
+                    "product_sheet_click_followup": 5,
+                    "legacy_missed_followup": 6,
+                }.get(primary_trigger, 99),
+                "externally_suppressed": not recommendation_visible,
+            })
+    now = stockholm_now().astimezone(STOCKHOLM_ZONE)
+    externally_planned_customer_ids = {
+        str(row.get("customer_id") or "").strip()
+        for row in activity_rows
+        if str(row.get("status") or "planned").strip().casefold() == "planned"
+        and not str(row.get("source_suggestion_id") or "").strip()
+        and (
+            parse_planning_datetime(row.get("scheduled_at")) is not None
+            and parse_planning_datetime(row.get("scheduled_at")) >= now
+        )
+    }
+    candidates = [
+        {
+            **candidate,
+            "externally_suppressed": (
+                bool(candidate.get("externally_suppressed"))
+                or str(candidate.get("customer_id") or "").strip()
+                in externally_planned_customer_ids
+            ),
+        }
+        for candidate in candidates
+    ]
+    return sorted(candidates, key=planning_suggestion_sort_key)
+
+
+def sync_suggestion_from_activity(spreadsheet, activity, *, request_id):
+    suggestion_id = str(activity.get("source_suggestion_id") or "").strip()
+    if not suggestion_id:
+        return
+    service = planning_suggestion_service(spreadsheet)
+    try:
+        _sheet, _events, _headers, _row_index, suggestion = service.find(
+            suggestion_id
+        )
+        status = str(activity.get("status") or "planned").strip().casefold()
+        suggestion_status = str(
+            suggestion.get("status") or "pending"
+        ).strip().casefold()
+        if status == "completed" and suggestion_status in {
+            "pending", "snoozed", "planned"
+        }:
+            action = "resolve"
+        elif status in {"cancelled", "skipped"} and suggestion_status == "planned":
+            action = "reopen"
+        else:
+            return
+        fingerprint = suggestion_mutation_fingerprint(
+            action,
+            suggestion_id,
+            request_id,
+            {"planned_activity_id": activity.get("planned_activity_id")},
+        )
+        service.transition(
+            suggestion_id,
+            owner_name=suggestion.get("user_name"),
+            action=action,
+            expected_revision=int(float(suggestion.get("revision") or 1)),
+            request_id=request_id,
+            fingerprint=fingerprint,
+            resolved_by_type="activity" if action == "resolve" else "",
+            resolved_by_id=(
+                activity.get("planned_activity_id") if action == "resolve" else ""
+            ),
+        )
+    except SuggestionError as exc:
+        if exc.code not in {"suggestion_not_pending", "suggestion_not_found"}:
+            raise
+
+
+def resolve_suggestions_for_contact(
+    spreadsheet, *, owner, customer_id, contact_id, request_id
+):
+    if not customer_id:
+        return
+    planning_suggestion_service(spreadsheet).resolve_customer(
+        owner_name=owner.get("user_name"),
+        customer_id=customer_id,
+        resolved_by_type="contact",
+        resolved_by_id=contact_id,
+        request_id=request_id,
+    )
+
+
+def resolve_suggestions_for_email(
+    spreadsheet, *, owner, customer_id, email_id
+):
+    if not customer_id or not email_id:
+        return
+    planning_suggestion_service(spreadsheet).resolve_customer(
+        owner_name=owner.get("user_name"),
+        customer_id=customer_id,
+        resolved_by_type="email",
+        resolved_by_id=email_id,
+        request_id=f"email:{email_id}",
+    )
+
+
 def customer_is_cancelled(customer):
     value = str(customer.get("cancelled_flag", "") or "").strip().casefold()
     return value in {"1", "y", "yes", "ja", "true", "cancelled", "canceled", "avslutad"}
@@ -2637,6 +2892,9 @@ def build_planned_activity_row(
     last_mutation_request_id="",
     last_mutation_fingerprint="",
     revision=1,
+    source_suggestion_id="",
+    source_trigger_key="",
+    recommended_contact_type="",
 ):
     contact_type = normalize_planning_contact_type(contact_type)
     source = str(source or "manual").strip().casefold()
@@ -2674,6 +2932,11 @@ def build_planned_activity_row(
         "revision": max(1, int(revision or 1)),
         "created_at": str(created_at or now_value).strip(),
         "updated_at": str(updated_at or now_value).strip(),
+        "source_suggestion_id": str(source_suggestion_id or "").strip(),
+        "source_trigger_key": str(source_trigger_key or "").strip(),
+        "recommended_contact_type": normalize_planning_contact_type(
+            recommended_contact_type
+        ),
     }
 
 
@@ -3435,6 +3698,7 @@ def build_email_proposal_draft(
         "customer": {
             "row": row_number,
             "customer": str(customer.get("customer", "")).strip(),
+            "customer_id": str(customer.get("customer_id", "")).strip(),
             "customer_number": str(customer.get("customer_number", "")).strip(),
             "cancelled": customer_is_cancelled(customer),
         },
@@ -3942,6 +4206,18 @@ def send_email_proposal(row):
                 recipients=successes,
                 partial=bool(failures),
             )
+            try:
+                resolve_suggestions_for_email(
+                    spreadsheet,
+                    owner=user,
+                    customer_id=current_draft["customer"].get("customer_id", ""),
+                    email_id=draft_id,
+                )
+            except Exception:
+                app.logger.exception(
+                    "Could not resolve planning suggestion after sent email %s",
+                    draft_id,
+                )
         response_payload = {
             "ok": bool(successes),
             "email_id": draft_id,
@@ -4434,6 +4710,7 @@ def build_live_email_records(message_rows, recipient_rows):
 
         email_id = str(message.get("email_id", "")).strip()
         customer = str(message.get("customer", "")).strip()
+        customer_id = str(message.get("customer_id", "")).strip()
         customer_number = str(message.get("customer_number", "")).strip()
         customer_key = normalize_key(customer)
         sent_at = parse_datetime_value(message.get("sent_at"))
@@ -4511,6 +4788,7 @@ def build_live_email_records(message_rows, recipient_rows):
             "email_id": email_id,
             "customer": customer,
             "customer_key": customer_key,
+            "customer_id": customer_id,
             "customer_number": customer_number,
             "sent_at": sent_at,
             "message": message,
@@ -4540,11 +4818,16 @@ def group_customer_orders(order_rows):
     for index, order in enumerate(order_rows):
         customer = str(order.get("Customer", "")).strip()
         customer_key = normalize_key(customer)
+        customer_id = str(order.get("customer_id", "")).strip()
         customer_number = str(order.get("Customer number", "")).strip()
         identity_key = (
-            f"number:{normalize_key(customer_number)}"
-            if normalize_key(customer_number)
-            else f"name:{customer_key}"
+            f"id:{normalize_key(customer_id)}"
+            if normalize_key(customer_id)
+            else (
+                f"number:{normalize_key(customer_number)}"
+                if normalize_key(customer_number)
+                else f"name:{customer_key}"
+            )
         )
         order_date = parse_date_value(order.get("Order date"))
         is_ordered = (
@@ -4568,6 +4851,7 @@ def group_customer_orders(order_rows):
         group = grouped.setdefault(group_key, {
             "customer": customer,
             "customer_key": customer_key,
+            "customer_id": customer_id,
             "customer_number": customer_number,
             "identity_key": identity_key,
             "reference": reference,
@@ -4599,6 +4883,8 @@ def attribute_orders_to_live_emails(live_records, grouped_orders, window_days=EM
                 record.get("customer_number"),
                 order.get("customer"),
                 order.get("customer_number"),
+                record.get("customer_id"),
+                order.get("customer_id"),
             )
             and 0 <= (order["date"] - record["sent_at"].date()).days <= window_days
         ]
@@ -4609,7 +4895,9 @@ def attribute_orders_to_live_emails(live_records, grouped_orders, window_days=EM
     return attributed
 
 
-def build_email_engagement_snapshot(message_rows, recipient_rows, order_rows, today=None):
+def build_email_engagement_snapshot(
+    message_rows, recipient_rows, order_rows, today=None, customers=()
+):
     """Return the latest live email outcome for every customer.
 
     Rank 1 is the most actionable. The click filter is deliberately delayed for
@@ -4618,15 +4906,64 @@ def build_email_engagement_snapshot(message_rows, recipient_rows, order_rows, to
     """
     today = today or stockholm_today()
     records = build_live_email_records(message_rows, recipient_rows)
+    if customers:
+        by_id = {
+            normalize_key(row.get("customer_id")): row
+            for row in customers if normalize_key(row.get("customer_id"))
+        }
+        by_number = {
+            normalize_key(row.get("customer_number")): row
+            for row in customers if normalize_key(row.get("customer_number"))
+        }
+        name_matches = defaultdict(list)
+        for row in customers:
+            if normalize_key(row.get("customer")):
+                name_matches[normalize_key(row.get("customer"))].append(row)
+        canonical_records = []
+        for record in records:
+            master = None
+            record_id = normalize_key(record.get("customer_id"))
+            record_number = normalize_key(record.get("customer_number"))
+            if record_id:
+                master = by_id.get(record_id)
+                if master is None:
+                    continue
+            if master is None and record_number:
+                master = by_number.get(record_number)
+            if master is None:
+                matches = name_matches.get(record.get("customer_key"), [])
+                master = (
+                    matches[0]
+                    if not record_id and not record_number and len(matches) == 1
+                    else None
+                )
+            if master is None:
+                continue
+            canonical_records.append({
+                **record,
+                "customer_id": str(master.get("customer_id") or "").strip(),
+                "customer_number": str(master.get("customer_number") or "").strip(),
+                "customer_key": normalize_key(master.get("customer")),
+            })
+        records = canonical_records
     attributed = attribute_orders_to_live_emails(records, group_customer_orders(order_rows))
     latest_by_customer = {}
     for record in records:
-        current = latest_by_customer.get(record["customer_key"])
+        identity_key = (
+            f"id:{normalize_key(record.get('customer_id'))}"
+            if normalize_key(record.get("customer_id"))
+            else (
+                f"number:{normalize_key(record.get('customer_number'))}"
+                if normalize_key(record.get("customer_number"))
+            else record["customer_key"]
+            )
+        )
+        current = latest_by_customer.get(identity_key)
         if current is None or record["sent_at"] > current["sent_at"]:
-            latest_by_customer[record["customer_key"]] = record
+            latest_by_customer[identity_key] = record
 
     snapshots = {}
-    for customer_key, record in latest_by_customer.items():
+    for identity_key, record in latest_by_customer.items():
         status = ""
         label = ""
         priority = None
@@ -4675,7 +5012,10 @@ def build_email_engagement_snapshot(message_rows, recipient_rows, order_rows, to
             wait_days_remaining = max(0, EMAIL_CLICK_FOLLOWUP_WAIT_DAYS - days_since_click)
             clicked_without_order = wait_days_remaining == 0
 
-        snapshots[customer_key] = {
+        snapshots[identity_key] = {
+            "customer_id": record.get("customer_id", ""),
+            "customer_number": record.get("customer_number", ""),
+            "customer_key": record.get("customer_key", ""),
             "email_followup_status": status,
             "email_followup_label": label,
             "email_followup_priority": priority,
@@ -4688,9 +5028,34 @@ def build_email_engagement_snapshot(message_rows, recipient_rows, order_rows, to
             "email_followup_wait_days_remaining": wait_days_remaining,
             "email_order_within_10_days": has_order,
             "email_followup_email_id": record["email_id"],
+            "email_stockfiller_first_clicked_at": (
+                record["stockfiller_first_clicked_at"].isoformat(sep=" ", timespec="seconds")
+                if record.get("stockfiller_first_clicked_at") else ""
+            ),
+            "email_product_sheet_first_clicked_at": (
+                record["product_first_clicked_at"].isoformat(sep=" ", timespec="seconds")
+                if record.get("product_first_clicked_at") else ""
+            ),
         }
 
     return snapshots
+
+
+def email_engagement_for_customer(snapshots, customer):
+    customer_id = normalize_key(customer.get("customer_id"))
+    customer_number = normalize_key(customer.get("customer_number"))
+    customer_name = normalize_key(customer.get("customer"))
+    values = list((snapshots or {}).values())
+    if customer_id:
+        match = next((row for row in values if normalize_key(row.get("customer_id")) == customer_id), None)
+        if match:
+            return match
+    if customer_number:
+        match = next((row for row in values if normalize_key(row.get("customer_number")) == customer_number), None)
+        if match:
+            return match
+    name_matches = [row for row in values if normalize_key(row.get("customer_key")) == customer_name]
+    return name_matches[0] if customer_name and len(name_matches) == 1 else {}
 
 
 def _email_rate(numerator, denominator):
@@ -5077,23 +5442,195 @@ def build_current_priority_snapshot(
     message_rows,
     recipient_rows,
     today,
+    planned_activity_rows=(),
+    responsible=None,
 ):
     """Calculate the authoritative priority snapshot used by all endpoints."""
     order_features = build_order_features(order_rows)
     contact_features = build_contact_features(contact_rows, order_features)
     email_engagement_by_customer = build_email_engagement_snapshot(
-        message_rows, recipient_rows, order_rows, today=today
+        message_rows, recipient_rows, order_rows, today=today, customers=customers
     )
     priority_customers = build_priority_customers(
         customers,
         order_features,
         contact_features,
-        None,
+        responsible,
         today,
         limit=len(customers),
         email_features=email_engagement_by_customer,
+        planned_activities=planned_activity_rows,
     )
     return priority_customers, email_engagement_by_customer
+
+
+def calibration_score_band(value):
+    score = max(0, min(100, int(round(parse_number_value(value, 0)))))
+    if score <= 49:
+        return "0-49"
+    if score <= 69:
+        return "50-69"
+    if score <= 79:
+        return "70-79"
+    if score <= 89:
+        return "80-89"
+    return "90-100"
+
+
+def build_calibration_rows(score_events, order_rows, customers):
+    """Join persisted event scores to later orders without recomputing history."""
+    by_id = {
+        normalize_key(row.get("customer_id")): row
+        for row in customers if normalize_key(row.get("customer_id"))
+    }
+    by_number = {
+        normalize_key(row.get("customer_number")): row
+        for row in customers if normalize_key(row.get("customer_number"))
+    }
+    names = defaultdict(list)
+    for row in customers:
+        if normalize_key(row.get("customer")):
+            names[normalize_key(row.get("customer"))].append(row)
+
+    orders_by_customer = defaultdict(list)
+    for order in group_customer_orders(order_rows):
+        master = None
+        order_id = normalize_key(order.get("customer_id"))
+        order_number = normalize_key(order.get("customer_number"))
+        if order_id:
+            master = by_id.get(order_id)
+            if master is None:
+                continue
+        if master is None and order_number:
+            master = by_number.get(order_number)
+        if master is None:
+            matches = names.get(order.get("customer_key"), [])
+            master = (
+                matches[0]
+                if not order_id and not order_number and len(matches) == 1
+                else None
+            )
+        customer_id = str((master or {}).get("customer_id") or "").strip()
+        if customer_id:
+            orders_by_customer[customer_id].append(order)
+
+    rows = []
+    for event in sorted(
+        score_events,
+        key=lambda row: (
+            str(row.get("occurred_at") or ""), str(row.get("event_id") or "")
+        ),
+    ):
+        occurred = parse_datetime_value(event.get("occurred_at"))
+        customer_id = str(event.get("customer_id") or "").strip()
+        later_orders = [
+            order for order in orders_by_customer.get(customer_id, [])
+            if occurred and order.get("date") and order["date"] >= occurred.date()
+        ]
+        first_order = min(
+            later_orders,
+            key=lambda order: (order["date"], order.get("reference") or ""),
+        ) if later_orders else None
+        rows.append({
+            "event_id": str(event.get("event_id") or ""),
+            "event_type": str(event.get("event_type") or ""),
+            "occurred_at": str(event.get("occurred_at") or ""),
+            "customer_id": customer_id,
+            "suggestion_id": str(event.get("suggestion_id") or ""),
+            "decision_context_hash": str(event.get("decision_context_hash") or ""),
+            "primary_trigger_key": str(event.get("primary_trigger_key") or ""),
+            "score_version": str(event.get("score_version") or ""),
+            "lifecycle": str(event.get("lifecycle") or ""),
+            "recommendation_eligible": str(event.get("recommendation_eligible") or ""),
+            "suppression_reason": str(event.get("suppression_reason") or ""),
+            "priority_score": event.get("priority_score", ""),
+            "priority_score_band": calibration_score_band(event.get("priority_score")),
+            "intent_timing": event.get("intent_timing", ""),
+            "value_index": event.get("value_index", ""),
+            "strategic_index": event.get("strategic_index", ""),
+            "expected_order_dfp": event.get("expected_order_dfp", ""),
+            "recommended_contact_type": str(event.get("recommended_contact_type") or ""),
+            "actual_planned_contact_type": str(event.get("actual_planned_contact_type") or ""),
+            "status_before": str(event.get("status_before") or ""),
+            "status_after": str(event.get("status_after") or ""),
+            "resolved_by_type": str(event.get("resolved_by_type") or ""),
+            "resolved_by_id": str(event.get("resolved_by_id") or ""),
+            "order_outcome": "order_after_event" if first_order else "no_later_order",
+            "first_order_date_after_event": (
+                first_order["date"].isoformat() if first_order else ""
+            ),
+            "first_order_reference_after_event": (
+                str(first_order.get("reference") or "") if first_order else ""
+            ),
+        })
+    return rows
+
+
+def priority_workflow_suppressions(spreadsheet, priority_customers):
+    try:
+        users = get_user_rows(spreadsheet)
+        owners = {}
+        for user in users:
+            if not is_yes(user.get("active")):
+                continue
+            user_name = str(user.get("user_name") or "").strip()
+            owners[normalize_key(user_name)] = user_name
+            owners[normalize_key(user.get("name"))] = user_name
+        _sheet, _events, _headers, stored = planning_suggestion_service(
+            spreadsheet
+        ).snapshot()
+    except (WorksheetNotFound, AttributeError):
+        return {}
+    except Exception:
+        app.logger.exception("Could not load suggestion suppression state")
+        return {}
+
+    by_identity = {
+        (
+            normalize_key(row.get("user_name")),
+            str(row.get("customer_id") or "").strip(),
+            str(row.get("decision_context_hash") or "").strip(),
+        ): row
+        for _index, row in stored
+    }
+    now = stockholm_now().astimezone(STOCKHOLM_ZONE)
+    suppressions = {}
+    for priority in priority_customers:
+        customer_id = str(priority.get("customer_id") or "").strip()
+        owner_name = owners.get(normalize_key(priority.get("sales_person")), "")
+        if not customer_id or not owner_name:
+            continue
+        context_hash = decision_context_hash(
+            owner=owner_name,
+            customer_id=customer_id,
+            lifecycle=(
+                priority.get("decision_context_lifecycle")
+                or priority.get("lifecycle")
+            ),
+            order_count=priority.get("order_count"),
+            latest_order_reference=priority.get("latest_order_reference"),
+            latest_order_date=(
+                priority.get("latest_delivery_date")
+                or priority.get("latest_order_date")
+            ),
+            latest_contact_id=priority.get("latest_human_contact_id"),
+            latest_contact_result=priority.get("latest_contact_result"),
+            latest_contact_date=priority.get("latest_human_contact_date"),
+            active_email_intent_event=priority.get(
+                "active_email_intent_event"
+            ),
+        )
+        row = by_identity.get((normalize_key(owner_name), customer_id, context_hash))
+        status = str((row or {}).get("status") or "").strip().casefold()
+        if status == "snoozed":
+            due = parse_planning_instant((row or {}).get("snooze_until"))
+            if due and due > now:
+                suppressions[customer_id] = "snoozed"
+        elif status == "dismissed":
+            suppressions[customer_id] = "dismissed"
+        elif status == "planned":
+            suppressions[customer_id] = "suggestion_planned"
+    return suppressions
 
 
 @app.route("/customer-insights", methods=["GET"])
@@ -5167,6 +5704,16 @@ def get_customer_insights():
             order_references[name].add(ref)
 
     priority_started = time.perf_counter()
+    try:
+        _planned_sheet, _planned_headers, indexed_planned = (
+            get_planned_activity_snapshot(spreadsheet)
+        )
+        planned_activity_rows = [row for _index, row in indexed_planned]
+    except (WorksheetNotFound, AttributeError):
+        planned_activity_rows = []
+    except Exception:
+        app.logger.exception("Could not load planned activities for priority suppression")
+        planned_activity_rows = []
     priority_customers, email_engagement_by_customer = build_current_priority_snapshot(
         customers=customers,
         order_rows=order_rows,
@@ -5174,6 +5721,11 @@ def get_customer_insights():
         message_rows=message_rows,
         recipient_rows=recipient_rows,
         today=today,
+        planned_activity_rows=planned_activity_rows,
+    )
+    priority_customers = apply_workflow_suppressions(
+        priority_customers,
+        priority_workflow_suppressions(spreadsheet, priority_customers),
     )
     record_performance_step(
         "calculation.priority",
@@ -5234,17 +5786,34 @@ def get_customer_insights():
             blocked_recipients,
             today,
         )
-        email_engagement = email_engagement_by_customer.get(normalize_key(name), {})
+        email_engagement = email_engagement_for_customer(
+            email_engagement_by_customer, customer
+        )
         insights[name] = {
             "missad_uppfoljning": missad,
             "customer_risk": risk,
             "priority_level": priority.get("priority_level", ""),
             "priority_score": priority.get("priority_score"),
+            "score_version": priority.get("score_version", "v2"),
+            "lifecycle": priority.get("lifecycle", ""),
+            "intent_timing": priority.get("intent_timing"),
+            "value_index": priority.get("value_index"),
+            "strategic_index": priority.get("strategic_index"),
+            "recommendation_eligible": priority.get("recommendation_eligible", False),
+            "recommendation_suppression_reason": priority.get(
+                "recommendation_suppression_reason", ""
+            ),
+            "primary_reason_code": priority.get("primary_reason_code", ""),
+            "primary_reason_text": priority.get("primary_reason_text", ""),
+            "primary_trigger_type": priority.get("primary_trigger_type", ""),
+            "covered_trigger_keys": priority.get("covered_trigger_keys", []),
+            "planning_status_text": priority.get("planning_status_text", ""),
             "priority_type": priority.get("priority_type", ""),
             "recommended_action": priority.get("recommended_action", ""),
             "reasons": priority.get("reasons", []),
             "next_action": priority.get("next_action", {}),
             "order_count": priority.get("order_count", 0),
+            "first_order_sku_count": priority.get("first_order_sku_count", 0),
             "total_dfp": priority.get("total_dfp"),
             "expected_order_dfp": priority.get("expected_order_dfp"),
             "latest_order_date": priority.get("latest_order_date", ""),
@@ -5294,6 +5863,378 @@ def get_customer_insights():
         len(insights),
     )
     return jsonify(insights)
+
+
+def suggestion_error_response(exc):
+    return planning_error(
+        exc.code, str(exc), exc.status, **dict(exc.extra or {})
+    )
+
+
+def suggestion_request_revision(data, field="expected_revision"):
+    try:
+        revision = int(data.get(field))
+    except (TypeError, ValueError):
+        return None
+    return revision if revision >= 1 else None
+
+
+def suggestion_queue_payload(spreadsheet, owner):
+    _activity_sheet, _activity_headers, indexed_activities = (
+        get_planned_activity_snapshot(spreadsheet)
+    )
+    activity_rows = [row for _index, row in indexed_activities]
+    candidates = planning_suggestion_candidates(
+        spreadsheet, owner, activity_rows
+    )
+    suggestion, pending_count = planning_suggestion_service(
+        spreadsheet
+    ).queue(owner, candidates, activity_rows)
+    return suggestion, pending_count
+
+
+def suggestion_candidates_by_id(owner, candidates):
+    return {
+        deterministic_suggestion_id(
+            owner.get("user_name"), candidate.get("customer_id"),
+            candidate.get("decision_context_hash")
+        ): candidate
+        for candidate in candidates
+    }
+
+
+@app.route("/planning/suggestions", methods=["GET"])
+def planning_suggestions():
+    try:
+        spreadsheet = get_spreadsheet_with_retry()
+    except Exception:
+        app.logger.exception("Could not open suggestion store")
+        return planning_error(
+            "suggestion_store_unavailable",
+            "Rekommendationerna kunde inte laddas. Försök igen.",
+            503,
+        )
+    requested_owner = request.args.get("owner") or request.args.get("user_name")
+    owner, owner_error = resolve_planning_owner(
+        spreadsheet, requested_owner, default_admin_to_first_seller=True
+    )
+    if owner_error is not None:
+        return owner_error
+    try:
+        suggestion, pending_count = suggestion_queue_payload(
+            spreadsheet, owner
+        )
+    except Exception:
+        app.logger.exception("Could not build suggestion queue")
+        return planning_error(
+            "suggestion_store_unavailable",
+            "Rekommendationerna kunde inte laddas. Försök igen.",
+            503,
+        )
+    return jsonify({
+        "ok": True,
+        "suggestion": suggestion,
+        "pending_count": pending_count,
+        "generated_at": planning_timestamp(),
+        "score_version": (
+            "phase1" if planning_suggestion_stub_enabled() else "v2"
+        ),
+    })
+
+
+@app.route("/planning/calibration-export", methods=["GET"])
+def planning_calibration_export():
+    spreadsheet = get_spreadsheet_with_retry()
+    user = current_user()
+    customers = get_customer_rows(spreadsheet)
+    try:
+        event_sheet = spreadsheet.worksheet(SCORE_EVENTS_SHEET)
+        events = worksheet_to_dicts(
+            event_sheet, expected_columns=SCORE_EVENT_COLUMNS
+        )
+    except WorksheetNotFound:
+        events = []
+    if not user_is_admin(user):
+        allowed_owner_keys = {
+            normalize_key(user.get("user_name")), normalize_key(user.get("name"))
+        }
+        events = [
+            event for event in events
+            if normalize_key(event.get("user_name")) in allowed_owner_keys
+            or normalize_key(event.get("sales_person")) in allowed_owner_keys
+        ]
+    rows = build_calibration_rows(events, get_order_rows(spreadsheet), customers)
+    return jsonify({
+        "score_bands": ["0-49", "50-69", "70-79", "80-89", "90-100"],
+        "rows": rows,
+    })
+
+
+def mutate_planning_suggestion(suggestion_id, action):
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return planning_error("invalid_request", "Begäran är ogiltig.", 400)
+    client_request_id = normalize_client_request_id(data.get("client_request_id"))
+    if not client_request_id:
+        return planning_error(
+            "invalid_client_request_id", "Ett giltigt request-ID krävs.", 400,
+            field="client_request_id"
+        )
+    expected_revision = suggestion_request_revision(data)
+    if expected_revision is None:
+        return planning_error(
+            "invalid_expected_revision", "Rekommendationens revision är ogiltig.",
+            400, field="expected_revision"
+        )
+    try:
+        spreadsheet = get_spreadsheet_with_retry()
+        service = planning_suggestion_service(spreadsheet)
+        _sheet, _events, _headers, _row_index, row = service.find(suggestion_id)
+        owner, owner_error = resolve_planning_owner(
+            spreadsheet, row.get("user_name")
+        )
+        if owner_error is not None:
+            return owner_error
+        _activity_sheet, _activity_headers, indexed_activities = (
+            get_planned_activity_snapshot(spreadsheet)
+        )
+        activity_rows = [item for _index, item in indexed_activities]
+        live_candidate = suggestion_candidates_by_id(
+            owner,
+            planning_suggestion_candidates(spreadsheet, owner, activity_rows),
+        ).get(suggestion_id)
+        fingerprint = suggestion_mutation_fingerprint(
+            action, suggestion_id, client_request_id
+        )
+        updated, duplicate = service.transition(
+            suggestion_id,
+            owner_name=owner.get("user_name"),
+            action=action,
+            expected_revision=expected_revision,
+            request_id=client_request_id,
+            fingerprint=fingerprint,
+            live_candidate=live_candidate,
+        )
+        next_suggestion, pending_count = suggestion_queue_payload(
+            spreadsheet, owner
+        )
+    except SuggestionError as exc:
+        return suggestion_error_response(exc)
+    except Exception:
+        app.logger.exception("Could not mutate planning suggestion")
+        return planning_error(
+            "suggestion_store_unavailable",
+            "Rekommendationen kunde inte sparas. Försök igen.",
+            503,
+        )
+    return jsonify({
+        "ok": True,
+        "duplicate": duplicate,
+        "suggestion": public_suggestion(updated, live_candidate),
+        "next_suggestion": next_suggestion,
+        "pending_count": pending_count,
+    })
+
+
+@app.route("/planning/suggestions/<suggestion_id>/snooze", methods=["POST"])
+def snooze_planning_suggestion(suggestion_id):
+    return mutate_planning_suggestion(suggestion_id, "snooze")
+
+
+@app.route("/planning/suggestions/<suggestion_id>/dismiss", methods=["POST"])
+def dismiss_planning_suggestion(suggestion_id):
+    return mutate_planning_suggestion(suggestion_id, "dismiss")
+
+
+@app.route("/planning/suggestions/<suggestion_id>/plan", methods=["POST"])
+def plan_planning_suggestion(suggestion_id):
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return planning_error("invalid_request", "Begäran är ogiltig.", 400)
+    client_request_id = normalize_client_request_id(data.get("client_request_id"))
+    if not client_request_id:
+        return planning_error(
+            "invalid_client_request_id", "Ett giltigt request-ID krävs.", 400,
+            field="client_request_id"
+        )
+    expected_revision = suggestion_request_revision(
+        data, "expected_suggestion_revision"
+    )
+    if expected_revision is None:
+        return planning_error(
+            "invalid_expected_revision", "Rekommendationens revision är ogiltig.",
+            400, field="expected_suggestion_revision"
+        )
+    contact_type = normalize_planning_contact_type(data.get("contact_type"))
+    if contact_type not in PLANNING_CONTACT_TYPES:
+        return planning_error(
+            "invalid_contact_type", "Välj Besök, Telefon eller Mejl.", 400,
+            field="contact_type"
+        )
+    scheduled_at = parse_planning_datetime(data.get("scheduled_at"))
+    if scheduled_at is None:
+        return planning_error(
+            "invalid_scheduled_at", "Ange ett giltigt datum och klockslag.", 400,
+            field="scheduled_at"
+        )
+    note = str(data.get("note") or "").strip()
+    if len(note) > 300:
+        return planning_error(
+            "note_too_long", "Anteckningen får vara högst 300 tecken.", 400,
+            field="note"
+        )
+    try:
+        spreadsheet = get_spreadsheet_with_retry()
+        service = planning_suggestion_service(spreadsheet)
+        with _planning_write_lock:
+            _suggestion_sheet, _events, _headers, _row_index, suggestion = (
+                service.find(suggestion_id)
+            )
+            owner, owner_error = resolve_planning_owner(
+                spreadsheet, suggestion.get("user_name")
+            )
+            if owner_error is not None:
+                return owner_error
+            if str(data.get("customer_id") or "").strip() != str(
+                suggestion.get("customer_id") or ""
+            ).strip():
+                return planning_error(
+                    "suggestion_customer_mismatch",
+                    "Rekommendationen kan inte flyttas till en annan kund.",
+                    409,
+                    field="customer_id",
+                )
+            customer = resolve_planning_customer(
+                spreadsheet, {"customer_id": suggestion.get("customer_id")}
+            )
+            if not customer or customer_is_cancelled(customer):
+                return planning_error(
+                    "suggestion_stale",
+                    "Rekommendationens kund eller affärskontext har ändrats.",
+                    409,
+                )
+            _activity_sheet, _activity_headers, indexed_activities = (
+                get_planned_activity_snapshot(spreadsheet)
+            )
+            activity_rows = [row for _index, row in indexed_activities]
+            live_candidates = planning_suggestion_candidates(
+                spreadsheet, owner, activity_rows
+            )
+            live_candidate = suggestion_candidates_by_id(
+                owner, live_candidates
+            ).get(suggestion_id)
+            live_candidate_is_actionable = bool(
+                live_candidate
+                and not live_candidate.get("externally_suppressed")
+                and live_candidate.get("primary_trigger_key") != "scoring_context"
+            )
+            plan_request_scope = planning_request_scope(
+                current_user(), "suggestion-plan", suggestion_id,
+                client_request_id
+            )
+            activity_id = stable_planning_uuid(
+                "suggestion-activity", suggestion_id, plan_request_scope
+            )
+            create_fingerprint = planning_create_fingerprint(
+                actor=current_user(),
+                owner=owner,
+                customer_id=customer.get("customer_id"),
+                contact_type=contact_type,
+                scheduled_at=scheduled_at,
+                duration_minutes=PLANNING_CONTACT_DURATIONS[contact_type],
+                note=note,
+                source="system_suggestion",
+                source_contact_id="",
+            )
+            existing_activity = next((
+                row for row in activity_rows
+                if str(row.get("planned_activity_id") or "").strip() == activity_id
+                or str(row.get("client_request_id") or "").strip()
+                == plan_request_scope
+            ), None)
+            if existing_activity:
+                if str(existing_activity.get("create_fingerprint") or "").strip() not in {
+                    "", create_fingerprint
+                }:
+                    return planning_error(
+                        "idempotency_payload_mismatch",
+                        "Samma request-ID har redan använts med ett annat innehåll.",
+                        409,
+                    )
+                activity = existing_activity
+            else:
+                if not live_candidate_is_actionable:
+                    return planning_error(
+                        "suggestion_stale",
+                        "Rekommendationen har ändrats. Ingen aktivitet skapades.",
+                        409,
+                    )
+                if expected_revision != planning_revision(suggestion):
+                    return planning_error(
+                        "suggestion_stale",
+                        "Rekommendationen har ändrats. Ingen aktivitet skapades.",
+                        409,
+                    )
+                activity = build_planned_activity_row(
+                    activity_id=activity_id,
+                    owner=owner,
+                    customer=customer,
+                    contact_type=contact_type,
+                    scheduled_at=scheduled_at,
+                    note=note,
+                    source="system_suggestion",
+                    client_request_id=plan_request_scope,
+                    create_fingerprint=create_fingerprint,
+                    revision=1,
+                    source_suggestion_id=suggestion_id,
+                    source_trigger_key=live_candidate.get("primary_trigger_key"),
+                    recommended_contact_type="phone",
+                )
+                append_dict_row(
+                    _activity_sheet, PLANNED_ACTIVITY_COLUMNS, activity
+                )
+            transition_fingerprint = suggestion_mutation_fingerprint(
+                "plan", suggestion_id, client_request_id, {
+                    "customer_id": customer.get("customer_id"),
+                    "contact_type": contact_type,
+                    "scheduled_at": planning_datetime_text(scheduled_at),
+                    "duration_minutes": PLANNING_CONTACT_DURATIONS[contact_type],
+                    "note": note,
+                }
+            )
+            updated, duplicate = service.transition(
+                suggestion_id,
+                owner_name=owner.get("user_name"),
+                action="plan",
+                expected_revision=expected_revision,
+                request_id=client_request_id,
+                fingerprint=transition_fingerprint,
+                planned_activity_id=activity_id,
+                actual_contact_type=contact_type,
+                live_candidate=live_candidate,
+            )
+        next_suggestion, pending_count = suggestion_queue_payload(
+            spreadsheet, owner
+        )
+    except SuggestionError as exc:
+        return suggestion_error_response(exc)
+    except CustomerResolutionError as exc:
+        return planning_error(exc.code, str(exc), exc.status)
+    except Exception:
+        app.logger.exception("Could not plan suggestion")
+        return planning_error(
+            "suggestion_store_unavailable",
+            "Aktiviteten kunde inte planeras. Försök igen med samma request-ID.",
+            503,
+        )
+    return jsonify({
+        "ok": True,
+        "duplicate": duplicate,
+        "activity": public_planned_activity(activity),
+        "suggestion": public_suggestion(updated, live_candidate),
+        "next_suggestion": next_suggestion,
+        "pending_count": pending_count,
+    }), (200 if duplicate else 201)
 
 
 @app.route("/planning/activities", methods=["GET", "POST"])
@@ -6030,6 +6971,21 @@ def update_planning_activity(activity_id):
                     "Aktiviteten är uppdaterad men uppföljningsdatumet kunde inte synkas. Försök igen med samma request-ID.",
                     503,
                 )
+            try:
+                sync_suggestion_from_activity(
+                    spreadsheet,
+                    current,
+                    request_id=mutation_request_scope,
+                )
+            except Exception:
+                app.logger.exception(
+                    "Could not repair linked suggestion on activity retry"
+                )
+                return planning_error(
+                    "suggestion_sync_failed",
+                    "Aktiviteten sparades men rekommendationen kunde inte synkas. Försök igen med samma request-ID.",
+                    503,
+                )
             return jsonify({
                 "ok": True,
                 "duplicate": True,
@@ -6189,6 +7145,19 @@ def update_planning_activity(activity_id):
                 "Aktiviteten är uppdaterad men uppföljningsdatumet kunde inte synkas. Försök igen med samma request-ID.",
                 503,
             )
+        try:
+            sync_suggestion_from_activity(
+                spreadsheet,
+                updated,
+                request_id=mutation_request_scope,
+            )
+        except Exception:
+            app.logger.exception("Activity updated but suggestion sync failed")
+            return planning_error(
+                "suggestion_sync_failed",
+                "Aktiviteten sparades men rekommendationen kunde inte synkas. Försök igen med samma request-ID.",
+                503,
+            )
 
     return jsonify({
         "ok": True,
@@ -6341,6 +7310,13 @@ def calculate_route_proposal_for_user(
         message_rows, recipient_rows, _ = get_email_rows(
             spreadsheet, include_events=False
         )
+        try:
+            _planned_sheet, _planned_headers, indexed_planned = (
+                get_planned_activity_snapshot(spreadsheet)
+            )
+            planned_activity_rows = [row for _index, row in indexed_planned]
+        except Exception:
+            planned_activity_rows = []
         priority_customers, _ = build_current_priority_snapshot(
             customers=customers,
             order_rows=order_rows,
@@ -6348,6 +7324,7 @@ def calculate_route_proposal_for_user(
             message_rows=message_rows,
             recipient_rows=recipient_rows,
             today=route_date,
+            planned_activity_rows=planned_activity_rows,
         )
     except Exception:
         app.logger.exception(
@@ -9692,6 +10669,20 @@ def add_contact(customer_name):
                     "step": "create_follow_up",
                     "message": str(exc)[:200],
                 })
+
+    if contact_saved:
+        try:
+            resolve_suggestions_for_contact(
+                spreadsheet,
+                owner=owner,
+                customer_id=str((customer or {}).get("customer_id") or "").strip(),
+                contact_id=contact_id,
+                request_id=(client_request_id or contact_id),
+            )
+        except Exception:
+            # Recommendation state is deliberately isolated from the existing
+            # contact/calendar save path. A later queue reconciliation retries.
+            app.logger.exception("Contact saved but suggestion resolution failed")
 
     if partial_errors:
         return jsonify({

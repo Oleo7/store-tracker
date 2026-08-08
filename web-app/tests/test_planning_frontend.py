@@ -71,13 +71,61 @@ class PlanningFrontendContractTests(TestCase):
         )
 
     def test_planning_candidate_list_is_ranked_and_loaded_ten_at_a_time(self):
-        self.assertIn("Butiker att planera in", self.html)
+        self.assertIn("Prioriterade kunder", self.html)
+        self.assertNotIn("Dagens fokus", self.html)
         self.assertNotIn("Gamla uppföljningar att planera in", self.html)
         self.assertNotIn("Kommande uppföljningar", self.html)
         self.assertIn("const PLANNING_CANDIDATE_BATCH_SIZE = 10", self.html)
         self.assertIn(".sort(prioritySort)", self.html)
         self.assertIn("latest_contact_comment", self.html)
+        self.assertIn("Orderpotential ca ${Math.round(potential)} DFP", self.html)
+        self.assertIn("insight.planning_status_text", self.html)
+        self.assertIn("insight.primary_reason_text", self.html)
         self.assertIn("Visa fler (${candidates.length - visible.length} kvar)", self.html)
+
+    def test_phase1_renders_one_nonblocking_recommendation_card(self):
+        self.assertIn('id="planning-recommendation"', self.html)
+        self.assertIn("Rekommendationer · ${planningRecommendationPendingCount} kvar", self.html)
+        for label in ("Kontakta nu", "Planera", "Snooza", "Ej relevant"):
+            self.assertIn(f">{label}</button>", self.html)
+        render = re.search(
+            r"function renderPlanningRecommendation\(.*?\) \{(.*?)\n  \}",
+            self.html,
+            flags=re.DOTALL,
+        )
+        self.assertIsNotNone(render)
+        self.assertNotIn(".map(", render.group(1))
+        self.assertNotIn("Orderpotential", render.group(1))
+        self.assertIn("Förslag: Telefon", render.group(1))
+        self.assertIn("Kalendern och övrig planering fungerar fortfarande", self.html)
+        self.assertIn("loadPlanningRecommendation();", self.html)
+
+    def test_phase1_actions_wait_for_success_and_lock_suggestion_customer(self):
+        self.assertIn("Kunden är låst för den här rekommendationen", self.html)
+        self.assertIn('contact_type: "phone"', self.html)
+        self.assertIn("expected_suggestion_revision", self.html)
+        self.assertIn("source_suggestion_id", self.html)
+        self.assertIn("replaceWithNextRecommendation(payload)", self.html)
+        self.assertIn("replaceWithNextRecommendation(result)", self.html)
+        self.assertIn("if (!suggestionLocked) setupPlanningCustomerCombobox", self.html)
+        self.assertIn("loadPlanningRecommendation().finally", self.html)
+        self.assertRegex(
+            self.html,
+            r"(?s)@media \(max-width: 620px\).*?planning-recommendation-actions.*?repeat\(2",
+        )
+
+    def test_recommendation_customer_binding_never_falls_back_to_customer_row(self):
+        binding = re.search(
+            r"function planningRecommendationCustomer\(.*?\) \{(.*?)\n  \}",
+            self.html,
+            flags=re.DOTALL,
+        )
+        self.assertIsNotNone(binding)
+        body = binding.group(1)
+        self.assertIn("suggestion.customer_id", body)
+        self.assertIn("if (!customerId) return null", body)
+        self.assertNotIn("customer_row", body)
+        self.assertNotIn("customer.row", body)
 
     def test_planning_calendar_has_two_compact_time_lanes(self):
         self.assertIn("Telefon/Email", self.html)

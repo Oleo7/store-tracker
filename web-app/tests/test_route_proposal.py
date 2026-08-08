@@ -205,6 +205,23 @@ class SolverTests(TestCase):
         )
         self.assertEqual(solution.route_indices, (1,))
 
+    def test_geography_can_select_a_slightly_lower_scored_customer(self):
+        candidates = [candidate(2, 60), candidate(3, 55)]
+        matrix = complete_matrix(
+            [600, 60],
+            [
+                [0, 40000],
+                [40000, 0],
+            ],
+        )
+        solution = solve_route(
+            candidates,
+            matrix,
+            max_total_seconds=1800,
+            service_seconds_per_stop=1200,
+        )
+        self.assertEqual(solution.route_indices, (1,))
+
     def test_full_tie_is_stable_by_row_sequence(self):
         candidates = [candidate(9, 50), candidate(4, 50)]
         matrix = complete_matrix(
@@ -836,6 +853,30 @@ class RouteEndpointTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual([stop["row"] for stop in payload["stops"]], [2])
         self.assertEqual(payload["stops"][0]["priority_score"], 88)
+
+    def test_non_eligible_recommendation_customer_remains_route_candidate(self):
+        self.login()
+        for reason in (
+            "recent_human_contact", "dismissed", "snoozed",
+            "suggestion_planned",
+        ):
+            with self.subTest(reason=reason):
+                self.priorities[0]["recommendation_eligible"] = False
+                self.priorities[0]["recommendation_suppression_reason"] = reason
+                self.priorities[0]["primary_trigger_type"] = "strategic_contact_due"
+
+                response = self.client.post("/route-proposal", json={
+                    "start": {"latitude": 57.7089, "longitude": 11.9746},
+                    "candidate_rows": [2],
+                })
+
+                self.assertEqual(response.status_code, 200, response.get_json())
+                self.assertEqual(
+                    [stop["row"] for stop in response.get_json()["stops"]], [2]
+                )
+
+    def test_route_matrix_candidate_limit_default_is_not_reduced(self):
+        self.assertEqual(app_module.route_matrix_candidate_limit({}), 60)
 
     def test_only_requested_rows_can_be_selected(self):
         self.login(role="Administratör", admin=True)

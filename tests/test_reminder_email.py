@@ -35,6 +35,12 @@ from reminder_email import (  # noqa: E402
     round_store_count_to_ten,
     split_email_values,
 )
+from planning_suggestions import (  # noqa: E402
+    SCORE_EVENT_COLUMNS,
+    SCORE_EVENTS_SHEET,
+    SUGGESTION_COLUMNS,
+    SUGGESTIONS_SHEET,
+)
 
 
 class FakeWorksheet:
@@ -71,15 +77,22 @@ class FakeWorksheet:
 
     def batch_update(self, data, value_input_option=None):
         for item in data:
-            match = __import__("re").match(r"A(\d+):[A-Z]+(\d+)", item["range"])
+            match = __import__("re").match(
+                r"([A-Z]+)(\d+):([A-Z]+)(\d+)", item["range"]
+            )
             if not match:
                 continue
-            first_row = int(match.group(1))
-            for offset, row in enumerate(item["values"]):
-                row_number = first_row + offset
-                while len(self.values) < row_number:
-                    self.values.append([])
-                self.values[row_number - 1] = list(row)
+            first_column, first_row, _last_column, _last_row = match.groups()
+            column_number = 0
+            for character in first_column:
+                column_number = column_number * 26 + ord(character) - ord("A") + 1
+            for row_offset, values in enumerate(item["values"]):
+                for column_offset, value in enumerate(values):
+                    self.update_cell(
+                        int(first_row) + row_offset,
+                        column_number + column_offset,
+                        value,
+                    )
 
 
 class FakeSpreadsheet:
@@ -1156,6 +1169,7 @@ class EmailPriorityScoringTests(unittest.TestCase):
             self.TODAY,
             limit=len(customers),
             email_features=email_features,
+            scoring_version="legacy",
         )
         by_customer = {item["customer"]: item for item in priority}
 
@@ -1224,6 +1238,7 @@ class EmailPriorityScoringTests(unittest.TestCase):
             self.TODAY,
             limit=2,
             email_features=email_features,
+            scoring_version="legacy",
         )
         by_customer = {item["customer"]: item for item in result}
         handled_without_email = app_module.build_priority_customers(
@@ -1233,6 +1248,7 @@ class EmailPriorityScoringTests(unittest.TestCase):
             None,
             self.TODAY,
             limit=1,
+            scoring_version="legacy",
         )[0]
 
         self.assertLessEqual(by_customer["Waiting"]["priority_score"], 49)
@@ -1280,6 +1296,7 @@ class EmailPriorityScoringTests(unittest.TestCase):
             self.TODAY,
             limit=2,
             email_features=email_features,
+            scoring_version="legacy",
         )
         by_customer = {item["customer"]: item for item in result}
 
@@ -1304,13 +1321,16 @@ class EmailPriorityScoringTests(unittest.TestCase):
         recent_result = app_module.build_priority_customers(
             [customer], {}, {}, None, self.TODAY, limit=1,
             email_features={"ordered": recent},
+            scoring_version="legacy",
         )[0]
         stale_result = app_module.build_priority_customers(
             [customer], {}, {}, None, self.TODAY, limit=1,
             email_features={"ordered": stale},
+            scoring_version="legacy",
         )[0]
         baseline = app_module.build_priority_customers(
             [customer], {}, {}, None, self.TODAY, limit=1,
+            scoring_version="legacy",
         )[0]
 
         self.assertLess(recent_result["priority_score"], baseline["priority_score"])
@@ -1496,7 +1516,12 @@ class ReminderSendRouteTests(unittest.TestCase):
         messages = FakeWorksheet("email_messages", EMAIL_MESSAGES_COLUMNS, [])
         recipients = FakeWorksheet("email_recipients", EMAIL_RECIPIENTS_COLUMNS, [])
         events = FakeWorksheet("email_events", EMAIL_EVENTS_COLUMNS, [])
-        self.spreadsheet = FakeSpreadsheet([customers, order_rows, contacts, settings, messages, recipients, events])
+        suggestions = FakeWorksheet(SUGGESTIONS_SHEET, SUGGESTION_COLUMNS, [])
+        score_events = FakeWorksheet(SCORE_EVENTS_SHEET, SCORE_EVENT_COLUMNS, [])
+        self.spreadsheet = FakeSpreadsheet([
+            customers, order_rows, contacts, settings, messages, recipients,
+            events, suggestions, score_events,
+        ])
         app_module.app.config.update(TESTING=True, SECRET_KEY="test-secret")
         self.spreadsheet_patcher = patch.object(app_module, "get_spreadsheet_with_retry", return_value=self.spreadsheet)
         self.spreadsheet_patcher.start()
@@ -1514,6 +1539,43 @@ class ReminderSendRouteTests(unittest.TestCase):
         response = self.client.get("/customers/2/email-proposal-draft")
         self.assertEqual(response.status_code, 200)
         return response.get_json()["draft"]
+
+    def _add_active_suggestion(self, suggestion_id="suggestion-email-1"):
+        customer_sheet = self.spreadsheet.worksheet("customers_enriched")
+        if "customer_id" not in customer_sheet.values[0]:
+            customer_sheet.values[0].append("customer_id")
+            for index, customer_row in enumerate(customer_sheet.values[1:]):
+                customer_row.append("customer-1" if index == 0 else "")
+        row = {
+            "suggestion_id": suggestion_id,
+            "decision_context_hash": "context-email-1",
+            "customer_id": "customer-1",
+            "customer_key": "C-1",
+            "customer_row": "2",
+            "customer": "Butiken",
+            "user_name": "olle",
+            "sales_person": "Olle",
+            "recommended_contact_type": "phone",
+            "status": "pending",
+            "generated_at": "2026-07-27 10:12:00",
+            "updated_at": "2026-07-27 10:12:00",
+            "last_evaluated_at": "2026-07-27 10:12:00",
+            "score_version": "phase1",
+            "revision": 1,
+        }
+        self.spreadsheet.worksheet(SUGGESTIONS_SHEET).append_row([
+            row.get(column, "") for column in SUGGESTION_COLUMNS
+        ])
+        return suggestion_id
+
+    def _suggestion(self, suggestion_id):
+        return next(
+            row for row in app_module.worksheet_to_dicts(
+                self.spreadsheet.worksheet(SUGGESTIONS_SHEET),
+                expected_columns=SUGGESTION_COLUMNS,
+            )
+            if row["suggestion_id"] == suggestion_id
+        )
 
     @staticmethod
     def _payload(draft):
@@ -1633,6 +1695,7 @@ class ReminderSendRouteTests(unittest.TestCase):
         self.assertEqual(missing_subject.get_json()["error"], "missing_email_content")
 
     def test_test_mode_redirects_two_recipients_and_keeps_sales_timeline_clean(self):
+        suggestion_id = self._add_active_suggestion()
         draft = self._draft()
         self.assertEqual([row["greeting_name"] for row in draft["recipients"]], ["Anna", "Klara"])
         with patch.object(app_module, "send_brevo_transactional_email", side_effect=["msg-a", "msg-b"]) as send:
@@ -1665,6 +1728,7 @@ class ReminderSendRouteTests(unittest.TestCase):
             },
         )
         self.assertEqual(timeline, [])
+        self.assertEqual(self._suggestion(suggestion_id)["status"], "pending")
 
         duplicate = self.client.post("/customers/2/email-proposal/send", json=self._payload(draft))
         self.assertEqual(duplicate.status_code, 409)
@@ -1698,6 +1762,77 @@ class ReminderSendRouteTests(unittest.TestCase):
         self.assertEqual(len(activities), 1)
         self.assertEqual(activities[0]["result"], "Mejlförslag skickat – Påminnelse")
         self.assertEqual(activities[0]["email_id"], draft["draft_id"])
+
+    def test_live_email_resolves_active_suggestion(self):
+        suggestion_id = self._add_active_suggestion()
+        with patch.object(app_module, "EMAIL_SEND_MODE", "live"):
+            draft = self._draft()
+            with patch.object(
+                app_module,
+                "send_brevo_transactional_email",
+                side_effect=["msg-live-a", "msg-live-b"],
+            ):
+                response = self.client.post(
+                    "/customers/2/email-proposal/send", json=self._payload(draft)
+                )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        suggestion = self._suggestion(suggestion_id)
+        self.assertEqual(suggestion["status"], "resolved")
+        self.assertEqual(suggestion["resolved_by_type"], "email")
+        self.assertEqual(suggestion["resolved_by_id"], draft["draft_id"])
+
+    def test_duplicate_live_send_does_not_repeat_suggestion_resolution(self):
+        suggestion_id = self._add_active_suggestion()
+        with patch.object(app_module, "EMAIL_SEND_MODE", "live"):
+            draft = self._draft()
+            with patch.object(
+                app_module,
+                "send_brevo_transactional_email",
+                side_effect=["msg-live-a", "msg-live-b"],
+            ):
+                first = self.client.post(
+                    "/customers/2/email-proposal/send", json=self._payload(draft)
+                )
+                duplicate = self.client.post(
+                    "/customers/2/email-proposal/send", json=self._payload(draft)
+                )
+
+        self.assertEqual(first.status_code, 200, first.get_json())
+        self.assertEqual(duplicate.status_code, 409, duplicate.get_json())
+        suggestion = self._suggestion(suggestion_id)
+        self.assertEqual(suggestion["status"], "resolved")
+        self.assertEqual(int(suggestion["revision"]), 2)
+        events = app_module.worksheet_to_dicts(
+            self.spreadsheet.worksheet(SCORE_EVENTS_SHEET),
+            expected_columns=SCORE_EVENT_COLUMNS,
+        )
+        resolved = [
+            event for event in events
+            if event["suggestion_id"] == suggestion_id
+            and event["status_after"] == "resolved"
+        ]
+        self.assertEqual(len(resolved), 1)
+
+    def test_suggestion_resolution_failure_does_not_fail_sent_email(self):
+        self._add_active_suggestion()
+        with patch.object(app_module, "EMAIL_SEND_MODE", "live"):
+            draft = self._draft()
+            with patch.object(
+                app_module,
+                "send_brevo_transactional_email",
+                side_effect=["msg-live-a", "msg-live-b"],
+            ), patch.object(
+                app_module,
+                "resolve_suggestions_for_email",
+                side_effect=RuntimeError("suggestion store unavailable"),
+            ):
+                response = self.client.post(
+                    "/customers/2/email-proposal/send", json=self._payload(draft)
+                )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertTrue(response.get_json()["ok"])
 
     def test_hard_bounced_address_is_unselected_and_cannot_be_forced(self):
         app_module.append_dict_row(self.spreadsheet.worksheet("email_recipients"), EMAIL_RECIPIENTS_COLUMNS, {

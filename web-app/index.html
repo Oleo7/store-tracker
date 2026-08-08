@@ -2763,6 +2763,7 @@
       min-height: 44px;
     }
     .planning-controls,
+    .planning-recommendation,
     .planning-agenda-card,
     .planning-backlog-card {
       border: 1px solid var(--pb-border);
@@ -2776,6 +2777,51 @@
       z-index: 8;
       padding: 12px;
     }
+    .planning-recommendation {
+      margin-top: 12px;
+      padding: 14px;
+    }
+    .planning-recommendation[hidden] { display: none; }
+    .planning-recommendation-heading {
+      margin-bottom: 8px;
+      color: var(--pb-muted);
+      font-size: 0.72rem;
+      font-weight: 900;
+      letter-spacing: 0.055em;
+      text-transform: uppercase;
+    }
+    .planning-recommendation-card {
+      padding: 13px;
+      border: 1px solid var(--pb-border-strong);
+      border-radius: 12px;
+      background: var(--pb-surface-soft);
+    }
+    .planning-recommendation-customer {
+      border: 0;
+      padding: 0;
+      background: transparent;
+      color: var(--pb-ink);
+      cursor: pointer;
+      font: inherit;
+      font-size: 1rem;
+      font-weight: 900;
+      text-align: left;
+      text-decoration: underline;
+      text-underline-offset: 3px;
+    }
+    .planning-recommendation-priority,
+    .planning-recommendation-reason,
+    .planning-recommendation-channel { margin-top: 5px; }
+    .planning-recommendation-priority { font-size: 0.82rem; font-weight: 850; }
+    .planning-recommendation-reason,
+    .planning-recommendation-channel { color: var(--pb-muted); font-size: 0.78rem; }
+    .planning-recommendation-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 12px;
+    }
+    .planning-recommendation-actions .planning-compact-btn { min-height: 44px; }
     .planning-toolbar-row,
     .planning-week-nav,
     .planning-agenda-heading,
@@ -3571,6 +3617,11 @@
       .planning-agenda-heading { flex-direction: column; }
       .planning-agenda-actions { width: 100%; }
       .planning-agenda-actions .planning-compact-btn { flex: 1; }
+      .planning-recommendation-actions {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+      .planning-recommendation-actions .planning-compact-btn { width: 100%; }
       .planning-modal-backdrop { align-items: stretch; padding: 0; }
       .planning-modal { min-height: 100%; max-height: 100dvh; border-radius: 0; }
       .planning-modal-content { padding: 15px 14px 20px; }
@@ -3880,6 +3931,8 @@
       <div class="planning-week-strip" id="planning-week-strip"></div>
     </section>
 
+    <section class="planning-recommendation" id="planning-recommendation" aria-live="polite" hidden></section>
+
     <div class="planning-main-grid">
       <section class="planning-agenda-card" aria-labelledby="planning-day-title">
         <div class="planning-agenda-heading">
@@ -3900,7 +3953,7 @@
       <aside class="planning-backlog-card" aria-labelledby="planning-backlog-title">
         <div class="planning-backlog-heading">
           <div>
-            <h2 class="planning-section-title" id="planning-backlog-title">Butiker att planera in</h2>
+            <h2 class="planning-section-title" id="planning-backlog-title">Prioriterade kunder</h2>
           </div>
         </div>
         <div id="planning-backlog" aria-live="polite">
@@ -4348,6 +4401,12 @@
   let planningActiveUsersCache = [];
   let planningLoading = false;
   let planningLoadSerial = 0;
+  let planningRecommendation = null;
+  let planningRecommendationPendingCount = 0;
+  let planningRecommendationLoading = false;
+  let planningRecommendationRequestSerial = 0;
+  let planningRecommendationReturnContext = null;
+  let planningRecommendationMutationRequestId = "";
   let planningEditorActivity = null;
   let planningEditorCustomer = null;
   let planningEditorSeed = null;
@@ -6516,9 +6575,13 @@
   document.getElementById("settings-back-btn").addEventListener("click", closeEmailSettings);
 
   // ── Open detail ──
-  async function openDetail(row) {
+  async function openDetail(row, options = {}) {
     const c = customers.find(c => c.row === row);
     if (!c) return;
+    if (options.returnView) detailReturnView = options.returnView;
+    if (options.returnState) planningRecommendationReturnContext = {
+      ...options.returnState,
+    };
     currentCustomer = c;
     document.getElementById("d-plan-btn").style.display =
       currentUserCanPlan() && !isCancelledCustomer(c) ? "" : "none";
@@ -6716,7 +6779,21 @@
 
   document.getElementById("back-btn").addEventListener("click", () => {
     showView(detailReturnView);
-    if (detailReturnView === "planning") loadPlanningWeek();
+    if (detailReturnView === "planning") {
+      const context = planningRecommendationReturnContext;
+      if (context) {
+        planningSelectedUserName = context.owner || planningSelectedUserName;
+        planningSelectedDate = context.selectedDate || planningSelectedDate;
+        planningWeekStart = context.weekStart || planningWeekStart;
+        planningRecommendationReturnContext = null;
+        renderPlanningWeekStrip();
+        loadPlanningRecommendation().finally(() => {
+          window.scrollTo({ top: Number(context.scrollY || 0) });
+        });
+      } else {
+        loadPlanningRecommendation();
+      }
+    }
   });
 
   // ── Open contact form ──
@@ -7233,6 +7310,183 @@
     return payload;
   }
 
+  function planningRecommendationCustomer(suggestion = planningRecommendation) {
+    if (!suggestion) return null;
+    const customerId = String(suggestion.customer_id || "").trim();
+    if (!customerId) return null;
+    return customers.find(customer =>
+      String(customer.customer_id || "").trim() === customerId
+    ) || null;
+  }
+
+  function focusAfterRecommendationChange() {
+    setTimeout(() => {
+      const target = planningRecommendation
+        ? document.getElementById("planning-recommendation-customer")
+        : document.getElementById("planning-day-title");
+      if (target) {
+        target.setAttribute("tabindex", "-1");
+        target.focus();
+      }
+    }, 0);
+  }
+
+  function renderPlanningRecommendation({ error = null } = {}) {
+    const section = document.getElementById("planning-recommendation");
+    if (error) {
+      section.hidden = false;
+      section.innerHTML = `<div class="planning-state" style="padding:10px">
+        <strong>Kunde inte ladda rekommendationen</strong>
+        Kalendern och övrig planering fungerar fortfarande.
+        <br><button class="planning-compact-btn" id="planning-recommendation-retry" type="button">Försök igen</button>
+      </div>`;
+      document.getElementById("planning-recommendation-retry")?.addEventListener("click", loadPlanningRecommendation);
+      return;
+    }
+    if (planningRecommendationLoading && !planningRecommendation) {
+      section.hidden = false;
+      section.innerHTML = '<div class="planning-state" style="padding:10px">Laddar rekommendation…</div>';
+      return;
+    }
+    if (!planningRecommendation || planningRecommendationPendingCount < 1) {
+      section.hidden = true;
+      section.innerHTML = "";
+      return;
+    }
+    const disabled = planningRecommendationLoading ? "disabled" : "";
+    section.hidden = false;
+    section.innerHTML = `
+      <div class="planning-recommendation-heading">Rekommendationer · ${planningRecommendationPendingCount} kvar</div>
+      <div class="planning-recommendation-card">
+        <button class="planning-recommendation-customer" id="planning-recommendation-customer" type="button" ${disabled}>${esc(planningRecommendation.customer || "Okänd kund")}</button>
+        <div class="planning-recommendation-priority">Prioritet ${Number(planningRecommendation.priority_score || 0)}</div>
+        <div class="planning-recommendation-reason">${esc(planningRecommendation.reason_text || "")}</div>
+        <div class="planning-recommendation-channel">Förslag: Telefon</div>
+        <div class="planning-recommendation-actions">
+          <button class="planning-compact-btn primary" id="planning-recommendation-contact" type="button" ${disabled}>Kontakta nu</button>
+          <button class="planning-compact-btn" id="planning-recommendation-plan" type="button" ${disabled}>Planera</button>
+          <button class="planning-compact-btn" id="planning-recommendation-snooze" type="button" ${disabled}>Snooza</button>
+          <button class="planning-compact-btn danger" id="planning-recommendation-dismiss" type="button" ${disabled}>Ej relevant</button>
+        </div>
+      </div>`;
+    document.getElementById("planning-recommendation-customer")?.addEventListener("click", openRecommendationCustomer);
+    document.getElementById("planning-recommendation-contact")?.addEventListener("click", openRecommendationCustomer);
+    document.getElementById("planning-recommendation-plan")?.addEventListener("click", openRecommendationPlanner);
+    document.getElementById("planning-recommendation-snooze")?.addEventListener("click", snoozePlanningRecommendation);
+    document.getElementById("planning-recommendation-dismiss")?.addEventListener("click", dismissPlanningRecommendation);
+  }
+
+  async function loadPlanningRecommendation() {
+    const requestSerial = ++planningRecommendationRequestSerial;
+    let failed = false;
+    planningRecommendationLoading = true;
+    renderPlanningRecommendation();
+    try {
+      const params = planningOwnerQuery(new URLSearchParams());
+      const payload = await planningFetchJson(`/planning/suggestions?${params.toString()}`);
+      if (requestSerial !== planningRecommendationRequestSerial) return;
+      planningRecommendation = payload.suggestion || null;
+      planningRecommendationPendingCount = Number(payload.pending_count || 0);
+      renderPlanningRecommendation();
+    } catch (error) {
+      if (requestSerial !== planningRecommendationRequestSerial) return;
+      failed = true;
+      planningRecommendation = null;
+      planningRecommendationPendingCount = 0;
+      renderPlanningRecommendation({ error });
+    } finally {
+      if (requestSerial === planningRecommendationRequestSerial) {
+        planningRecommendationLoading = false;
+        if (!failed) renderPlanningRecommendation();
+      }
+    }
+  }
+
+  function replaceWithNextRecommendation(response) {
+    planningRecommendation = response?.next_suggestion || null;
+    planningRecommendationPendingCount = Number(response?.pending_count || 0);
+    planningRecommendationMutationRequestId = "";
+    renderPlanningRecommendation();
+    focusAfterRecommendationChange();
+  }
+
+  function openRecommendationCustomer() {
+    if (planningRecommendationLoading || !planningRecommendation) return;
+    const customer = planningRecommendationCustomer();
+    if (!customer) {
+      showToast("Kunden kunde inte öppnas");
+      return;
+    }
+    planningRecommendationLoading = true;
+    renderPlanningRecommendation();
+    openDetail(Number(customer.row), {
+      returnView: "planning",
+      returnState: {
+        owner: planningSelectedUserName,
+        selectedDate: planningSelectedDate,
+        weekStart: planningWeekStart,
+        scrollY: window.scrollY,
+      },
+    }).finally(() => {
+      planningRecommendationLoading = false;
+    });
+  }
+
+  function openRecommendationPlanner() {
+    if (planningRecommendationLoading || !planningRecommendation) return;
+    const customer = planningRecommendationCustomer();
+    if (!customer) {
+      showToast("Kunden kunde inte planeras");
+      return;
+    }
+    openPlanningEditor({
+      customer,
+      date: planningSelectedDate,
+      seed: {
+        contact_type: "phone",
+        source_suggestion_id: planningRecommendation.suggestion_id,
+        source_trigger_key: planningRecommendation.trigger_key,
+        expected_suggestion_revision: planningRecommendation.revision,
+      },
+    });
+  }
+
+  async function mutateVisibleRecommendation(action) {
+    if (planningRecommendationLoading || !planningRecommendation) return;
+    planningRecommendationLoading = true;
+    planningRecommendationMutationRequestId = planningRecommendationMutationRequestId || planningClientRequestId(`suggestion-${action}`);
+    renderPlanningRecommendation();
+    try {
+      const payload = await planningFetchJson(
+        `/planning/suggestions/${encodeURIComponent(planningRecommendation.suggestion_id)}/${action}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            client_request_id: planningRecommendationMutationRequestId,
+            expected_revision: Number(planningRecommendation.revision || 1),
+          }),
+        }
+      );
+      replaceWithNextRecommendation(payload);
+      showToast(action === "snooze" ? "Rekommendationen är snoozad i 7 dagar" : "Rekommendationen markerades som ej relevant");
+    } catch (error) {
+      showToast(error.message || "Rekommendationen kunde inte sparas");
+      renderPlanningRecommendation();
+    } finally {
+      planningRecommendationLoading = false;
+      renderPlanningRecommendation();
+    }
+  }
+
+  function snoozePlanningRecommendation() {
+    return mutateVisibleRecommendation("snooze");
+  }
+
+  function dismissPlanningRecommendation() {
+    return mutateVisibleRecommendation("dismiss");
+  }
+
   function openPlanningView({ date = "" } = {}) {
     const targetDate = planningDateFromKey(date) ? date : (planningSelectedDate || planningTodayKey());
     planningSelectedDate = targetDate;
@@ -7311,6 +7565,7 @@
         .map(normalizePlanningUser)
         .filter(user => user.user_name);
       renderPlanning();
+      loadPlanningRecommendation();
     } catch (error) {
       if (requestSerial !== planningLoadSerial) return;
       renderPlanningLoadError(error);
@@ -7905,7 +8160,18 @@
     const ownerKeys = planningOwnerIdentityKeys();
     return customers
       .filter(customer => ownerKeys.has(normalizeRouteIdentity(customer.sales_person)))
-      .sort(prioritySort);
+      .sort((a, b) => {
+        const ia = getCustomerInsight(a);
+        const ib = getCustomerInsight(b);
+        return (
+          (Number(ib.priority_score || 0) - Number(ia.priority_score || 0)) ||
+          (Number(ib.expected_order_dfp || 0) - Number(ia.expected_order_dfp || 0)) ||
+          (Number(a.row || Number.MAX_SAFE_INTEGER) - Number(b.row || Number.MAX_SAFE_INTEGER)) ||
+          String(a.customer_id || a.customer || "").localeCompare(
+            String(b.customer_id || b.customer || ""), "sv"
+          )
+        );
+      });
   }
 
   function renderPlanningCandidates() {
@@ -7922,11 +8188,22 @@
       return;
     }
     target.innerHTML = `<div class="planning-backlog-list">${visible.map((customer, index) => {
-      const comment = String(getCustomerInsight(customer).latest_contact_comment || "Ingen tidigare kommentar.").trim();
+      const insight = getCustomerInsight(customer);
+      const score = Math.max(0, Math.min(100, Math.round(Number(insight.priority_score || 0))));
+      const potential = Number(insight.expected_order_dfp || 0);
+      const status = String(
+        insight.planning_status_text || insight.primary_reason_text ||
+        insight.latest_contact_comment || "Ingen aktuell status."
+      ).trim();
+      const metrics = [
+        `Prioritet ${score}`,
+        potential > 0 ? `Orderpotential ca ${Math.round(potential)} DFP` : "",
+        status,
+      ].filter(Boolean).join(" · ");
       return `<div class="planning-backlog-item">
         <div>
           <div class="planning-backlog-customer">${esc(customer.customer || "Okänd kund")}</div>
-          <div class="planning-backlog-meta">${esc(comment)}</div>
+          <div class="planning-backlog-meta">${esc(metrics)}</div>
         </div>
         <button class="planning-compact-btn" type="button" data-planning-candidate-index="${index}">Planera</button>
       </div>`;
@@ -8163,24 +8440,28 @@
       `<option value="${escAttr(item.row)}" ${Number(item.row) === Number(planningEditorCustomer?.row) ? "selected" : ""}>${esc(item.customer)}${item.city ? ` · ${esc(item.city)}` : ""}</option>`
     ).join("");
     const editing = Boolean(planningEditorActivity);
+    const suggestionLocked = Boolean(planningEditorSeed?.source_suggestion_id);
     openPlanningModal(
       editing ? "Redigera aktivitet" : "Planera aktivitet",
       editing ? "Flytta eller uppdatera den planerade kontakten." : "Lägg in en kundkontakt i säljarens agenda.",
       `<form class="planning-dialog-form" id="planning-editor-form">
         <div class="planning-field">
           <label for="planning-editor-customer">Kund</label>
-          <div class="planning-combobox">
-            <input id="planning-editor-customer-search"
-              type="text"
-              role="combobox"
-              aria-autocomplete="list"
-              aria-controls="planning-editor-customer-list"
-              aria-expanded="false"
-              autocomplete="off"
-              placeholder="Sök namn, ort, adress eller kundnummer"
-              value="${escAttr(planningEditorCustomer?.customer || "")}" />
-            <div class="planning-combobox-list" id="planning-editor-customer-list" role="listbox" hidden></div>
-          </div>
+          ${suggestionLocked
+            ? `<input id="planning-editor-customer-search" type="text" value="${escAttr(planningEditorCustomer?.customer || "")}" disabled aria-describedby="planning-editor-customer-locked" />
+               <div class="planning-field-help" id="planning-editor-customer-locked">Kunden är låst för den här rekommendationen.</div>`
+            : `<div class="planning-combobox">
+                <input id="planning-editor-customer-search"
+                  type="text"
+                  role="combobox"
+                  aria-autocomplete="list"
+                  aria-controls="planning-editor-customer-list"
+                  aria-expanded="false"
+                  autocomplete="off"
+                  placeholder="Sök namn, ort, adress eller kundnummer"
+                  value="${escAttr(planningEditorCustomer?.customer || "")}" />
+                <div class="planning-combobox-list" id="planning-editor-customer-list" role="listbox" hidden></div>
+              </div>`}
           <select id="planning-editor-customer" hidden aria-hidden="true" tabindex="-1">
             <option value="">Välj kund…</option>
             ${customerOptions}
@@ -8222,7 +8503,7 @@
       </form>`
     );
     document.getElementById("planning-editor-cancel").addEventListener("click", closePlanningModal);
-    setupPlanningCustomerCombobox(selectable);
+    if (!suggestionLocked) setupPlanningCustomerCombobox(selectable);
     document.getElementById("planning-editor-form").addEventListener("input", () => {
       planningEditorRequestId = planningClientRequestId(
         editing ? "planning-edit" : "planning-create"
@@ -8275,6 +8556,9 @@
       return;
     }
     const editing = Boolean(planningEditorActivity);
+    const suggestionSeed = planningEditorSeed?.source_suggestion_id
+      ? { ...planningEditorSeed }
+      : null;
     const payload = {
       contact_type: contactType,
       scheduled_at: scheduledAt,
@@ -8296,6 +8580,11 @@
         payload.source = "follow_up";
         payload.source_contact_id = planningEditorSeed.source_contact_id;
       }
+      if (suggestionSeed) {
+        payload.expected_suggestion_revision = Number(
+          suggestionSeed.expected_suggestion_revision || 1
+        );
+      }
     }
     button.disabled = true;
     const originalLabel = button.textContent;
@@ -8303,8 +8592,10 @@
     try {
       const path = editing
         ? `/planning/activities/${encodeURIComponent(planningActivityId(planningEditorActivity))}`
-        : "/planning/activities";
-      await planningFetchJson(path, {
+        : suggestionSeed
+          ? `/planning/suggestions/${encodeURIComponent(suggestionSeed.source_suggestion_id)}/plan`
+          : "/planning/activities";
+      const result = await planningFetchJson(path, {
         method: editing ? "PATCH" : "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
@@ -8313,9 +8604,27 @@
       planningSelectedDate = dateKey;
       planningWeekStart = planningStartOfWeek(dateKey);
       showToast(editing ? "Aktiviteten uppdaterades" : "Aktiviteten planerades");
-      await loadPlanningWeek();
+      if (suggestionSeed) {
+        if (result.activity && planningData) {
+          const normalized = normalizePlanningActivity(result.activity);
+          planningData.activities = [
+            ...(planningData.activities || []).filter(activity =>
+              planningActivityId(activity) !== planningActivityId(normalized)
+            ),
+            normalized,
+          ];
+          renderPlanningAgenda();
+          renderPlanningWeekStrip();
+        }
+        replaceWithNextRecommendation(result);
+      } else {
+        await loadPlanningWeek();
+      }
     } catch (error) {
       showPlanningEditorError(error.message || "Aktiviteten kunde inte sparas.");
+      if (suggestionSeed && error.code === "suggestion_stale") {
+        loadPlanningRecommendation();
+      }
     } finally {
       if (document.body.contains(button)) {
         button.disabled = false;
@@ -8653,6 +8962,9 @@
   document.getElementById("planning-owner-select").addEventListener("change", event => {
     planningSelectedUserName = event.target.value;
     planningCandidateVisibleCount = PLANNING_CANDIDATE_BATCH_SIZE;
+    planningRecommendation = null;
+    planningRecommendationPendingCount = 0;
+    renderPlanningRecommendation();
     loadPlanningWeek();
   });
   document.getElementById("planning-modal-close").addEventListener("click", closePlanningModal);
