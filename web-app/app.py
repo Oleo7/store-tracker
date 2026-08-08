@@ -2683,6 +2683,16 @@ def planning_suggestion_candidates(spreadsheet, owner, activity_rows=()):
             )
         except (WorksheetNotFound, AttributeError):
             message_rows, recipient_rows = [], []
+        responsible = str(owner.get("user_name") or "").strip()
+        responsible = next(
+            (
+                str(customer.get("sales_person") or "").strip()
+                for customer in customers
+                if normalize_key(customer.get("sales_person"))
+                == normalize_key(responsible)
+            ),
+            responsible,
+        )
         priorities, _email_snapshot = build_current_priority_snapshot(
             customers=customers,
             order_rows=orders,
@@ -2691,7 +2701,7 @@ def planning_suggestion_candidates(spreadsheet, owner, activity_rows=()):
             recipient_rows=recipient_rows,
             today=stockholm_today(),
             planned_activity_rows=activity_rows,
-            responsible=owner.get("name"),
+            responsible=responsible,
         )
         priorities = apply_workflow_suppressions(
             priorities,

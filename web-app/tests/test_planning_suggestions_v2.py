@@ -69,6 +69,78 @@ class PlanningSuggestionV2IntegrationTests(PlanningApiTestCase):
                 row.get(column, "") for column in app_module.ORDER_COLUMNS
             ])
 
+    def test_production_owner_identity_materializes_only_johans_queue(self):
+        user = {
+            "user_name": "Johan",
+            "name": "Johan Persson",
+            "role": "Säljare",
+            "email": "johan@example.com",
+            "password": "secret",
+            "active": "Y",
+            "admin": "N",
+        }
+        users = self.spreadsheet.worksheet(app_module.USERS_SHEET)
+        users.append_row([user.get(column, "") for column in app_module.USER_COLUMNS])
+
+        customers = self.spreadsheet.worksheet("customers_enriched")
+        sales_person_column = customers.values[0].index("sales_person") + 1
+        customers.update_cell(2, sales_person_column, "Johan")
+        self.append_repeat_orders()
+
+        self.login("Johan")
+        response = self.client.get("/planning/suggestions")
+        payload = response.get_json()
+
+        self.assertEqual(response.status_code, 200, payload)
+        self.assertEqual(payload["pending_count"], 1)
+        self.assertEqual(payload["suggestion"]["customer"], "Butik A")
+        owner = {"user_name": "Johan", "name": "Johan Persson"}
+        candidates = app_module.planning_suggestion_candidates(
+            self.spreadsheet, owner
+        )
+        self.assertEqual(
+            [candidate["customer_id"] for candidate in candidates],
+            ["11111111-1111-4111-8111-111111111111"],
+        )
+
+        rows = self.spreadsheet.worksheet(SUGGESTIONS_SHEET).dict_rows()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["user_name"], "Johan")
+        self.assertEqual(rows[0]["sales_person"], "Johan Persson")
+
+        self.login("admin")
+        admin_response = self.client.get("/planning/suggestions?owner=Johan")
+        admin_payload = admin_response.get_json()
+        self.assertEqual(admin_response.status_code, 200, admin_payload)
+        self.assertEqual(admin_payload["pending_count"], 1)
+        self.assertEqual(
+            admin_payload["suggestion"]["suggestion_id"],
+            payload["suggestion"]["suggestion_id"],
+        )
+
+    def test_candidate_filter_uses_username_for_all_production_seller_shapes(self):
+        seller_shapes = (
+            ("Johan", "Johan Persson"),
+            ("Daniel", "Daniel Andersson"),
+            ("Sofia", "Sofia Andersson"),
+            ("Olle", "Olle Rönningberg"),
+        )
+        for user_name, name in seller_shapes:
+            with self.subTest(user_name=user_name):
+                with patch.object(
+                    app_module,
+                    "build_current_priority_snapshot",
+                    return_value=([], {}),
+                ) as build_snapshot:
+                    app_module.planning_suggestion_candidates(
+                        self.spreadsheet,
+                        {"user_name": user_name, "name": name},
+                    )
+                self.assertEqual(
+                    build_snapshot.call_args.kwargs["responsible"],
+                    user_name,
+                )
+
     @staticmethod
     def clock(day):
         instant = datetime.combine(
