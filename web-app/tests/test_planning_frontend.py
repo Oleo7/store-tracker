@@ -82,16 +82,44 @@ class PlanningFrontendContractTests(TestCase):
         )
         self.assertIsNotNone(renderer)
         body = renderer.group(1)
-        self.assertIn("planningRecommendationPreview.slice(0, 10)", body)
+        self.assertIn("const visible = planningRecommendationPreview", body)
+        self.assertIn("planning-backlog-load-more", body)
+        self.assertIn("Ladda fler", body)
+        self.assertIn(
+            "const hasMore = visible.length < Math.max(",
+            body,
+        )
+        self.assertIn(
+            "0, planningRecommendationPendingCount - 1",
+            body,
+        )
+        self.assertIn("${hasMore ?", body)
         self.assertNotIn("planningCandidateCustomers()", body)
         self.assertNotIn("priority_score", body)
         self.assertNotIn("expected_order_dfp", body)
         self.assertNotIn("Orderpotential", body)
         self.assertNotIn("Visa fler", body)
 
+    def test_planning_preview_load_more_is_snapshot_based_and_resets_by_owner(self):
+        self.assertIn("let planningRecommendationPreviewLimit = 10", self.html)
+        self.assertIn("planningRecommendationPreviewLimit + 5", self.html)
+        self.assertIn('params.set("preview_limit", String(previewLimit))', self.html)
+        self.assertIn(
+            "planningRecommendationPreview = Array.isArray(payload.queue_preview)",
+            self.html,
+        )
+        owner_change = re.search(
+            r'planning-owner-select"\)\.addEventListener\("change".*?\n  \}\);',
+            self.html,
+            flags=re.DOTALL,
+        )
+        self.assertIsNotNone(owner_change)
+        self.assertIn("planningRecommendationPreviewLimit = 10", owner_change.group(0))
+
     def test_phase1_renders_one_nonblocking_recommendation_card(self):
         self.assertIn('id="planning-recommendation"', self.html)
-        self.assertIn("NÄSTA ÅTGÄRD · ${planningRecommendationPendingCount} kvar", self.html)
+        self.assertIn('<div class="planning-recommendation-heading">NÄSTA ÅTGÄRD</div>', self.html)
+        self.assertNotIn("planningRecommendationPendingCount} kvar", self.html)
         for label in ("Ring nu", "Planera", "Snooza", "Dölj detta förslag"):
             self.assertIn(f">{label}</button>", self.html)
         render = re.search(

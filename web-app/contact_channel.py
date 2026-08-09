@@ -9,6 +9,13 @@ PHONE_TRIGGERS = {
     "positive_dialogue_followup",
     "stockfiller_click_followup",
     "product_sheet_click_followup",
+    "email_open_followup",
+}
+
+EMAIL_INTENT_TRIGGERS = {
+    "stockfiller_click_followup",
+    "product_sheet_click_followup",
+    "email_open_followup",
 }
 
 
@@ -28,7 +35,7 @@ def normalized_phone(value):
 
 def recommend_contact_channel(
     *, lifecycle, overdue_days=None, trigger_key="", has_human_contact=False,
-    phone="", email_available=False, visible=True,
+    segment="", phone="", email_available=False, visible=True,
 ):
     """Apply business precedence first, then deterministic availability fallback."""
     if not visible:
@@ -36,9 +43,16 @@ def recommend_contact_channel(
 
     lifecycle = str(lifecycle or "").strip().casefold()
     trigger_key = str(trigger_key or "").strip().casefold()
+    segment = str(segment or "").strip().upper()[:1]
     phone_tel = normalized_phone(phone)
 
-    if lifecycle == "reactivation":
+    if trigger_key in EMAIL_INTENT_TRIGGERS:
+        base = "phone"
+        reason = f"{trigger_key}_phone"
+    elif trigger_key == "positive_dialogue_followup" and segment == "A":
+        base = "visit"
+        reason = "positive_dialogue_segment_a_visit"
+    elif lifecycle == "reactivation":
         base = "visit"
         reason = "reactivation_visit"
     elif lifecycle == "established":

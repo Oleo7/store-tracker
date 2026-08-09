@@ -2128,6 +2128,10 @@ class PlanningRouteApiTests(PlanningApiTestCase):
         self.assertEqual(stop["estimated_at"], "2026-07-28T10:30+02:00")
         self.assertFalse(body["conflicts"])
         self.assertTrue(body["preview_token"])
+        self.assertNotIn(
+            app_module.ROUTE_PROPOSALS_SHEET,
+            self.spreadsheet.sheets,
+        )
 
     def test_preview_schedules_long_drive_around_fixed_phone_interval(self):
         self.append_planning_row(

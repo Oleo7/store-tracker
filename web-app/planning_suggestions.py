@@ -644,14 +644,19 @@ class PlanningSuggestionService:
             if not visible:
                 return None, [], 0
             suggestion_id, candidate, row = visible[0]
+            created = row is None
             if row is None:
                 row = self._candidate_row(owner, candidate)
                 _append(
                     sheet, SUGGESTION_COLUMNS, row, self.invalidator,
                     self.values_reader,
                 )
-            self._event(events, "suggestion_created", self._live_event_row(row, candidate),
-                        before="", after="pending")
+            if created:
+                self._event(
+                    events, "suggestion_created",
+                    self._live_event_row(row, candidate),
+                    before="", after="pending",
+                )
             preview = []
             for _preview_id, preview_candidate, preview_row in visible[
                 1:1 + max(0, int(preview_limit or 0))

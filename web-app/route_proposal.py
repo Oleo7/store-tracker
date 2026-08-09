@@ -88,6 +88,113 @@ class RouteCandidate:
     required: bool = False
 
 
+def _haversine_km(origin: Coordinate, destination: Coordinate) -> float:
+    radius_km = 6371.0088
+    origin_lat = math.radians(origin.latitude)
+    destination_lat = math.radians(destination.latitude)
+    delta_lat = destination_lat - origin_lat
+    delta_lon = math.radians(destination.longitude - origin.longitude)
+    value = (
+        math.sin(delta_lat / 2) ** 2
+        + math.cos(origin_lat)
+        * math.cos(destination_lat)
+        * math.sin(delta_lon / 2) ** 2
+    )
+    return radius_km * 2 * math.asin(min(1.0, math.sqrt(value)))
+
+
+def anchor_aware_preselect_candidates(
+    *, start: Coordinate, candidates: Sequence[RouteCandidate],
+    anchor_rows: Sequence[int], limit: int = 35,
+) -> tuple[RouteCandidate, ...]:
+    """Select a deterministic business/geographic pool around fixed anchors."""
+    effective_limit = max(1, int(limit))
+    by_row = {candidate.row: candidate for candidate in candidates}
+    anchors = [
+        by_row[row] for row in anchor_rows
+        if row in by_row and by_row[row].required
+    ]
+    remaining_required = sorted(
+        (
+            candidate for candidate in candidates
+            if candidate.required and candidate.row not in set(anchor_rows)
+        ),
+        key=lambda candidate: candidate.row,
+    )
+    anchors.extend(remaining_required)
+    if len(anchors) > effective_limit:
+        raise RequiredStopsNotFeasible()
+
+    optional = sorted(
+        (candidate for candidate in candidates if not candidate.required),
+        key=lambda candidate: candidate.row,
+    )
+    if len(anchors) + len(optional) <= effective_limit:
+        return tuple([*anchors, *optional])
+
+    anchor_coordinates = [candidate.coordinate for candidate in anchors]
+    segments = list(zip(
+        [start, *anchor_coordinates],
+        [*anchor_coordinates, start],
+    ))
+
+    def stable(candidate):
+        return candidate.row
+
+    def anchor_distance(candidate):
+        return min(
+            _haversine_km(candidate.coordinate, anchor)
+            for anchor in anchor_coordinates
+        )
+
+    def detour(candidate):
+        return min(
+            _haversine_km(origin, candidate.coordinate)
+            + _haversine_km(candidate.coordinate, destination)
+            - _haversine_km(origin, destination)
+            for origin, destination in segments
+        )
+
+    detours = {candidate.row: max(0.0, detour(candidate)) for candidate in optional}
+    rankings = (
+        sorted(optional, key=lambda item: (-item.priority_score, stable(item))),
+        sorted(optional, key=lambda item: (
+            anchor_distance(item), -item.priority_score, stable(item)
+        )),
+        sorted(optional, key=lambda item: (
+            detours[item.row], -item.priority_score, stable(item)
+        )),
+        sorted(optional, key=lambda item: (
+            -(item.priority_score / (1.0 + detours[item.row])),
+            -item.priority_score,
+            stable(item),
+        )),
+    )
+    positions = [0] * len(rankings)
+    selected = list(anchors)
+    selected_rows = {candidate.row for candidate in selected}
+    while len(selected) < effective_limit:
+        added = False
+        for ranking_index, ranking in enumerate(rankings):
+            while (
+                positions[ranking_index] < len(ranking)
+                and ranking[positions[ranking_index]].row in selected_rows
+            ):
+                positions[ranking_index] += 1
+            if positions[ranking_index] >= len(ranking):
+                continue
+            candidate = ranking[positions[ranking_index]]
+            positions[ranking_index] += 1
+            selected.append(candidate)
+            selected_rows.add(candidate.row)
+            added = True
+            if len(selected) >= effective_limit:
+                break
+        if not added:
+            break
+    return tuple(selected)
+
+
 @dataclass(frozen=True)
 class TravelTimeResult:
     seconds: tuple[tuple[int | None, ...], ...]

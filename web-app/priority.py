@@ -871,6 +871,27 @@ def decision_context_lifecycle(delivery_count):
 
 FIRST_ORDER_HIGH_VALUE_INDEX = 70
 
+EMAIL_INTENT_STATUS = {
+    "stockfiller_clicked_no_order": {
+        "trigger": "stockfiller_click_followup",
+        "event_field": "email_stockfiller_first_clicked_at",
+        "engagement_label": "Stockfiller-klick",
+        "modifier": 8,
+    },
+    "product_sheet_clicked_no_order": {
+        "trigger": "product_sheet_click_followup",
+        "event_field": "email_product_sheet_first_clicked_at",
+        "engagement_label": "produktbladsklick",
+        "modifier": 4,
+    },
+    "opened_no_click": {
+        "trigger": "email_open_followup",
+        "event_field": "email_first_opened_at",
+        "engagement_label": "öppnat mejlförslag",
+        "modifier": 0,
+    },
+}
+
 
 def _stable_legacy_contact_id(row_index, customer_key, date_time_value):
     identity = ":".join(
@@ -884,42 +905,40 @@ def _active_email_intent(
     email_feature, latest_human_contact, last_order_date, *, blocked=False
 ):
     status = str(email_feature.get("email_followup_status") or "").strip()
-    if status == "stockfiller_clicked_no_order":
-        trigger = "stockfiller_click_followup"
-        first_click = parse_datetime(
-            email_feature.get("email_stockfiller_first_clicked_at")
-        )
-        modifier = 8
-        reason = "Följ upp Stockfiller-klick"
-    elif status == "product_sheet_clicked_no_order":
-        trigger = "product_sheet_click_followup"
-        first_click = parse_datetime(
-            email_feature.get("email_product_sheet_first_clicked_at")
-        )
-        modifier = 4
-        reason = "Följ upp produktbladsklick"
-    else:
+    intent = EMAIL_INTENT_STATUS.get(status)
+    if not intent:
         return {}
-    if not first_click:
+    first_event = parse_datetime(email_feature.get(intent["event_field"]))
+    if not first_event:
         return {}
-    if latest_human_contact and latest_human_contact > first_click:
+    if latest_human_contact and latest_human_contact > first_event:
         return {}
-    if last_order_date and last_order_date >= first_click.date():
+    if last_order_date and last_order_date >= first_event.date():
         return {}
     email_id = str(email_feature.get("email_followup_email_id") or "").strip()
     if not email_id:
         return {}
-    event_id = ":".join((email_id, trigger, first_click.isoformat(timespec="seconds")))
-    ready = not blocked and int(_parse_number(
+    trigger = intent["trigger"]
+    event_id = ":".join((
+        email_id, trigger, first_event.isoformat(timespec="seconds")
+    ))
+    wait_days = max(0, int(_parse_number(
         email_feature.get("email_followup_wait_days_remaining")
-    )) <= 0
+    )))
+    ready = not blocked and wait_days <= 0
+    proposal_label = str(
+        email_feature.get("email_followup_proposal_label") or "Påminnelse"
+    ).strip()
+    reason = f"Följ upp {intent['engagement_label']} – {proposal_label}"
     return {
         "trigger": trigger if ready else "",
         "event_id": event_id,
-        "modifier": modifier if ready else 0,
+        "modifier": intent["modifier"] if ready else 0,
         "reason": reason,
-        "first_clicked_at": first_click,
+        "first_event_at": first_event,
         "ready": ready,
+        "waiting": bool(not blocked and wait_days > 0),
+        "wait_days": wait_days,
     }
 
 
@@ -1005,13 +1024,14 @@ def _phase3_trigger_snapshot(
         )
 
     precedence = (
+        "stockfiller_click_followup",
+        "product_sheet_click_followup",
+        "email_open_followup",
         "established_reorder_due",
         "first_order_onboarding",
         "first_order_reorder",
         "positive_dialogue_followup",
         "strategic_contact_due",
-        "stockfiller_click_followup",
-        "product_sheet_click_followup",
         "legacy_missed_followup",
     )
     primary = next((key for key in precedence if key in triggers), "")
@@ -1273,6 +1293,11 @@ def build_priority_customers(
         elif future_follow_up_days is not None:
             suppression = "future_planned_activity"
             status_text = f"Uppföljning planerad om {future_follow_up_days} dagar"
+        elif active_email_intent.get("waiting"):
+            suppression = "recent_email_engagement_wait"
+            status_text = (
+                f"Avvakta mejlutfall i {active_email_intent.get('wait_days')} dagar"
+            )
         elif days_since_contact is not None and 0 <= days_since_contact <= 2:
             suppression = "recent_human_contact"
             status_text = "Nyligen kontaktad"
@@ -1631,6 +1656,7 @@ def _recommended_channel(action_type: str | None) -> str:
         "negative_reactivation",
         "stockfiller_click_followup",
         "product_sheet_click_followup",
+        "email_open_followup",
     }:
         return "telefon"
     return "avvakta"

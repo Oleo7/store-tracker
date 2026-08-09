@@ -4409,6 +4409,7 @@
   let planningRecommendation = null;
   let planningRecommendationPreview = [];
   let planningRecommendationPendingCount = 0;
+  let planningRecommendationPreviewLimit = 10;
   let planningRecommendationLoading = false;
   let planningRecommendationRequestSerial = 0;
   let planningRecommendationReturnContext = null;
@@ -7360,7 +7361,7 @@
     const disabled = planningRecommendationLoading ? "disabled" : "";
     section.hidden = false;
     section.innerHTML = `
-      <div class="planning-recommendation-heading">NÄSTA ÅTGÄRD · ${planningRecommendationPendingCount} kvar</div>
+      <div class="planning-recommendation-heading">NÄSTA ÅTGÄRD</div>
       <div class="planning-recommendation-card">
         <button class="planning-recommendation-customer" id="planning-recommendation-customer" type="button" ${disabled}>${esc(planningRecommendation.customer || "Okänd kund")}</button>
         <div class="planning-recommendation-reason">${esc(planningRecommendation.reason_text || "")}</div>
@@ -7379,15 +7380,17 @@
     document.getElementById("planning-recommendation-dismiss")?.addEventListener("click", dismissPlanningRecommendation);
   }
 
-  async function loadPlanningRecommendation() {
+  async function loadPlanningRecommendation({ previewLimit = planningRecommendationPreviewLimit } = {}) {
     const requestSerial = ++planningRecommendationRequestSerial;
     let failed = false;
     planningRecommendationLoading = true;
     renderPlanningRecommendation();
     try {
       const params = planningOwnerQuery(new URLSearchParams());
+      params.set("preview_limit", String(previewLimit));
       const payload = await planningFetchJson(`/planning/suggestions?${params.toString()}`);
       if (requestSerial !== planningRecommendationRequestSerial) return;
+      planningRecommendationPreviewLimit = Number(payload.preview_limit || previewLimit || 10);
       planningRecommendation = payload.suggestion || null;
       planningRecommendationPreview = Array.isArray(payload.queue_preview) ? payload.queue_preview : [];
       planningRecommendationPendingCount = Number(payload.pending_count || 0);
@@ -7409,6 +7412,7 @@
   }
 
   function replaceWithNextRecommendation(response) {
+    planningRecommendationPreviewLimit = Number(response?.preview_limit || 10);
     planningRecommendation = response?.next_suggestion || null;
     planningRecommendationPreview = Array.isArray(response?.queue_preview) ? response.queue_preview : [];
     planningRecommendationPendingCount = Number(response?.pending_count || 0);
@@ -7508,6 +7512,7 @@
     if (!userIsAdmin()) {
       planningSelectedUserName = String(currentUser?.user_name || "").trim();
     }
+    planningRecommendationPreviewLimit = 10;
     showView("planning");
     renderPlanningWeekStrip();
     return loadPlanningWeek();
@@ -8194,11 +8199,14 @@
       target.innerHTML = '<div class="planning-state" style="padding:14px 4px">Kön är tom just nu.</div>';
       return;
     }
-    const visible = planningRecommendationPreview.slice(0, 10);
+    const visible = planningRecommendationPreview;
     if (!visible.length) {
       target.innerHTML = '<div class="planning-state" style="padding:14px 4px">Inga fler kunder i kön.</div>';
       return;
     }
+    const hasMore = visible.length < Math.max(
+      0, planningRecommendationPendingCount - 1
+    );
     target.innerHTML = `<div class="planning-backlog-list">${visible.map((suggestion, index) => {
       const channel = PLANNING_CONTACT_TYPES[suggestion.recommended_contact_type]?.label || "Besök";
       return `<div class="planning-backlog-item">
@@ -8208,7 +8216,9 @@
         </div>
         <button class="planning-compact-btn" type="button" data-planning-preview-plan="${index}">Planera</button>
       </div>`;
-    }).join("")}</div>`;
+    }).join("")}</div>${hasMore ? `
+      <button class="planning-compact-btn" id="planning-backlog-load-more" type="button" ${planningRecommendationLoading ? "disabled" : ""}>Ladda fler</button>
+    ` : ""}`;
     target.querySelectorAll("[data-planning-preview-customer]").forEach(button => {
       button.addEventListener("click", () => {
         const suggestion = visible[Number(button.dataset.planningPreviewCustomer)];
@@ -8228,6 +8238,16 @@
         visible[Number(button.dataset.planningPreviewPlan)]
       ));
     });
+    document.getElementById("planning-backlog-load-more")?.addEventListener(
+      "click", loadMorePlanningRecommendations
+    );
+  }
+
+  function loadMorePlanningRecommendations() {
+    if (planningRecommendationLoading) return;
+    const nextLimit = planningRecommendationPreviewLimit + 5;
+    planningRecommendationPreviewLimit = nextLimit;
+    return loadPlanningRecommendation({ previewLimit: nextLimit });
   }
 
   const planningModalBackdrop = document.getElementById("planning-modal-backdrop");
@@ -8980,6 +9000,7 @@
   });
   document.getElementById("planning-owner-select").addEventListener("change", event => {
     planningSelectedUserName = event.target.value;
+    planningRecommendationPreviewLimit = 10;
     planningRecommendationRequestSerial += 1;
     planningRecommendation = null;
     planningRecommendationPreview = [];

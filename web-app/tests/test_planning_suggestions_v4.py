@@ -152,9 +152,8 @@ class PlanningSuggestionV4IntegrationTests(PlanningApiTestCase):
         self.assertEqual(payload["suggestion"]["trigger_key"], "legacy_missed_followup")
         self.assertEqual(self.planning_rows(), [])
 
-    def test_dismissed_legacy_context_cannot_be_bypassed_when_click_wait_ends(self):
+    def test_dismissed_legacy_context_does_not_hide_later_email_business_event(self):
         self.append_legacy_followup()
-        self.append_click()
         today_patch, now_patch = self.clock(date(2026, 8, 4))
         with today_patch, now_patch:
             waiting = self.client.get("/planning/suggestions").get_json()["suggestion"]
@@ -167,6 +166,7 @@ class PlanningSuggestionV4IntegrationTests(PlanningApiTestCase):
             )
         self.assertEqual(waiting["trigger_key"], "legacy_missed_followup")
         self.assertEqual(response.status_code, 200, response.get_json())
+        self.append_click()
 
         today_patch, now_patch = self.clock(date(2026, 8, 5))
         with today_patch, now_patch:
@@ -174,18 +174,18 @@ class PlanningSuggestionV4IntegrationTests(PlanningApiTestCase):
             candidate = app_module.planning_suggestion_candidates(
                 self.spreadsheet, {"user_name": "olle", "name": "Olle"}
             )[0]
-        self.assertIsNone(payload["suggestion"])
+        self.assertEqual(payload["suggestion"]["trigger_key"], "stockfiller_click_followup")
         self.assertEqual(candidate["primary_trigger_key"], "stockfiller_click_followup")
         self.assertEqual(
             app_module.deterministic_suggestion_id(
                 "olle", candidate["customer_id"], candidate["decision_context_hash"]
             ),
-            waiting["suggestion_id"],
+            payload["suggestion"]["suggestion_id"],
         )
+        self.assertNotEqual(payload["suggestion"]["suggestion_id"], waiting["suggestion_id"])
 
-    def test_snoozed_legacy_context_still_covers_email_after_wait_ends(self):
+    def test_snoozed_legacy_context_does_not_hide_later_email_business_event(self):
         self.append_legacy_followup()
-        self.append_click()
         today_patch, now_patch = self.clock(date(2026, 8, 4))
         with today_patch, now_patch:
             waiting = self.client.get("/planning/suggestions").get_json()["suggestion"]
@@ -197,6 +197,7 @@ class PlanningSuggestionV4IntegrationTests(PlanningApiTestCase):
                 },
             )
         self.assertEqual(response.status_code, 200, response.get_json())
+        self.append_click()
 
         today_patch, now_patch = self.clock(date(2026, 8, 5))
         with today_patch, now_patch:
@@ -204,16 +205,15 @@ class PlanningSuggestionV4IntegrationTests(PlanningApiTestCase):
             candidate = app_module.planning_suggestion_candidates(
                 self.spreadsheet, {"user_name": "olle", "name": "Olle"}
             )[0]
-        stored = self.spreadsheet.worksheet(SUGGESTIONS_SHEET).dict_rows()[0]
-        self.assertIsNone(payload["suggestion"])
-        self.assertEqual(stored["status"], "snoozed")
+        self.assertEqual(payload["suggestion"]["trigger_key"], "stockfiller_click_followup")
         self.assertEqual(candidate["primary_trigger_key"], "stockfiller_click_followup")
         self.assertEqual(
             app_module.deterministic_suggestion_id(
                 "olle", candidate["customer_id"], candidate["decision_context_hash"]
             ),
-            waiting["suggestion_id"],
+            payload["suggestion"]["suggestion_id"],
         )
+        self.assertNotEqual(payload["suggestion"]["suggestion_id"], waiting["suggestion_id"])
 
     def test_empty_calibration_export_is_read_only(self):
         before = set(self.spreadsheet.sheets)

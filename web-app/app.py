@@ -57,6 +57,7 @@ from route_proposal import (
     RouteProposalError,
     SERVICE_SECONDS_PER_STOP,
     TravelTimeConfigurationError,
+    anchor_aware_preselect_candidates,
     calculate_route_proposal,
     seconds_to_minutes,
 )
@@ -562,6 +563,9 @@ EMAIL_PROPOSAL_CONTACT_COOLDOWN_DAYS = 7
 EMAIL_PROPOSAL_SENT_COOLDOWN_DAYS = 10
 EMAIL_ORDER_ATTRIBUTION_DAYS = 10
 EMAIL_CLICK_FOLLOWUP_WAIT_DAYS = 3
+EMAIL_OPEN_FOLLOWUP_WAIT_DAYS = 10
+PLANNING_SUGGESTION_PREVIEW_DEFAULT = 10
+ANCHOR_ROUTE_CANDIDATE_LIMIT = 35
 # Backward-compatible names used by older tests and integrations.
 REMINDER_EMAIL_GRACE_DAYS = EMAIL_PROPOSAL_GRACE_DAYS
 REMINDER_EMAIL_CONTACT_COOLDOWN_DAYS = EMAIL_PROPOSAL_CONTACT_COOLDOWN_DAYS
@@ -2997,6 +3001,7 @@ def planning_suggestion_candidates(spreadsheet, owner, activity_rows=()):
                 "priority_score": priority.get("priority_score"),
                 "expected_order_dfp": priority.get("expected_order_dfp"),
                 "lifecycle": priority.get("lifecycle"),
+                "segment": priority.get("segment"),
                 "decision_context_lifecycle": priority.get(
                     "decision_context_lifecycle"
                 ),
@@ -3012,14 +3017,15 @@ def planning_suggestion_candidates(spreadsheet, owner, activity_rows=()):
                 "primary_trigger_key": primary_trigger or "scoring_context",
                 "covered_trigger_keys": priority.get("covered_trigger_keys") or [],
                 "trigger_precedence": {
-                    "established_reorder_due": 1,
-                    "first_order_onboarding": 1,
-                    "first_order_reorder": 1,
-                    "positive_dialogue_followup": 2,
-                    "strategic_contact_due": 3,
-                    "stockfiller_click_followup": 4,
-                    "product_sheet_click_followup": 5,
-                    "legacy_missed_followup": 6,
+                    "stockfiller_click_followup": 1,
+                    "product_sheet_click_followup": 2,
+                    "email_open_followup": 3,
+                    "established_reorder_due": 4,
+                    "first_order_onboarding": 5,
+                    "first_order_reorder": 6,
+                    "positive_dialogue_followup": 7,
+                    "strategic_contact_due": 8,
+                    "legacy_missed_followup": 9,
                 }.get(primary_trigger, 99),
                 "externally_suppressed": not recommendation_visible,
                 "overdue_days": priority.get("overdue_days"),
@@ -3072,6 +3078,7 @@ def planning_suggestion_candidates(spreadsheet, owner, activity_rows=()):
             lifecycle=candidate.get("lifecycle"),
             overdue_days=candidate.get("overdue_days"),
             trigger_key=candidate.get("primary_trigger_key"),
+            segment=candidate.get("segment"),
             has_human_contact=bool(
                 candidate.get("latest_human_contact_id")
                 or candidate.get("latest_human_contact_date")
@@ -5069,6 +5076,7 @@ def build_live_email_records(message_rows, recipient_rows):
         stockfiller_clicked_recipients = set()
         delivered_times = []
         opened_times = []
+        first_opened_times = []
         product_click_times = []
         stockfiller_click_times = []
         product_first_click_times = []
@@ -5084,7 +5092,14 @@ def build_live_email_records(message_rows, recipient_rows):
             )
 
             delivered_at = _email_event_datetime(recipient.get("delivered_at"))
-            opened_at = _email_event_datetime(recipient.get("last_opened_at"))
+            first_opened_at = _email_event_datetime(
+                recipient.get("first_opened_at")
+            )
+            opened_at = (
+                _email_event_datetime(recipient.get("last_opened_at"))
+                or first_opened_at
+            )
+            first_opened_at = first_opened_at or opened_at
             product_clicked_at = _email_event_datetime(recipient.get("product_sheet_last_clicked_at"))
             stockfiller_clicked_at = _email_event_datetime(recipient.get("stockfiller_last_clicked_at"))
             product_first_clicked_at = _email_event_datetime(
@@ -5112,7 +5127,10 @@ def build_live_email_records(message_rows, recipient_rows):
                 delivered_times.append(delivered_at)
             if opened:
                 opened_recipients.add(identity)
-                opened_times.append(opened_at)
+                if opened_at:
+                    opened_times.append(opened_at)
+                if first_opened_at:
+                    first_opened_times.append(first_opened_at)
             if product_clicked:
                 product_clicked_recipients.add(identity)
                 product_click_times.append(product_clicked_at)
@@ -5131,6 +5149,7 @@ def build_live_email_records(message_rows, recipient_rows):
             "customer_key": customer_key,
             "customer_id": customer_id,
             "customer_number": customer_number,
+            "proposal_type": normalize_proposal_type(message.get("email_type")),
             "sent_at": sent_at,
             "message": message,
             "recipients": sent_recipients,
@@ -5142,6 +5161,8 @@ def build_live_email_records(message_rows, recipient_rows):
             "stockfiller_clicked_recipients": stockfiller_clicked_recipients,
             "delivered_at": max(delivered_times) if delivered_times else None,
             "opened_at": max(opened_times) if opened_times else None,
+            "first_opened_at": min(first_opened_times)
+            if first_opened_times else None,
             "product_clicked_at": max(product_click_times) if product_click_times else None,
             "stockfiller_clicked_at": max(stockfiller_click_times) if stockfiller_click_times else None,
             "product_first_clicked_at": min(product_first_click_times)
@@ -5344,14 +5365,22 @@ def build_email_engagement_snapshot(
             "stockfiller_clicked_no_order", "product_sheet_clicked_no_order"
         }
         wait_days_remaining = 0
-        if clicked_without_order:
+        if clicked_without_order or status == "opened_no_click":
             if status == "stockfiller_clicked_no_order":
-                first_clicked_at = record["stockfiller_first_clicked_at"] or event_at
+                first_event_at = record["stockfiller_first_clicked_at"] or event_at
+                wait_days = EMAIL_CLICK_FOLLOWUP_WAIT_DAYS
+            elif status == "product_sheet_clicked_no_order":
+                first_event_at = record["product_first_clicked_at"] or event_at
+                wait_days = EMAIL_CLICK_FOLLOWUP_WAIT_DAYS
             else:
-                first_clicked_at = record["product_first_clicked_at"] or event_at
-            days_since_click = max(0, (today - first_clicked_at.date()).days)
-            wait_days_remaining = max(0, EMAIL_CLICK_FOLLOWUP_WAIT_DAYS - days_since_click)
-            clicked_without_order = wait_days_remaining == 0
+                first_event_at = record["first_opened_at"] or event_at
+                wait_days = EMAIL_OPEN_FOLLOWUP_WAIT_DAYS
+            days_since_event = max(0, (today - first_event_at.date()).days)
+            wait_days_remaining = max(0, wait_days - days_since_event)
+            if clicked_without_order:
+                clicked_without_order = wait_days_remaining == 0
+
+        proposal_type = normalize_proposal_type(record.get("proposal_type"))
 
         snapshots[identity_key] = {
             "customer_id": record.get("customer_id", ""),
@@ -5369,6 +5398,12 @@ def build_email_engagement_snapshot(
             "email_followup_wait_days_remaining": wait_days_remaining,
             "email_order_within_10_days": has_order,
             "email_followup_email_id": record["email_id"],
+            "email_followup_proposal_type": proposal_type,
+            "email_followup_proposal_label": EMAIL_PROPOSAL_TYPES[proposal_type],
+            "email_first_opened_at": (
+                record["first_opened_at"].isoformat(sep=" ", timespec="seconds")
+                if record.get("first_opened_at") else ""
+            ),
             "email_stockfiller_first_clicked_at": (
                 record["stockfiller_first_clicked_at"].isoformat(sep=" ", timespec="seconds")
                 if record.get("stockfiller_first_clicked_at") else ""
@@ -6292,7 +6327,19 @@ def preview_suggestion_request_revision(data, field="expected_suggestion_revisio
     return revision if revision >= 0 else None
 
 
-def suggestion_queue_payload(spreadsheet, owner):
+def suggestion_preview_limit(value):
+    if value in (None, ""):
+        return PLANNING_SUGGESTION_PREVIEW_DEFAULT
+    try:
+        parsed = int(str(value).strip())
+    except (TypeError, ValueError):
+        return PLANNING_SUGGESTION_PREVIEW_DEFAULT
+    return max(0, parsed)
+
+
+def suggestion_queue_payload(
+    spreadsheet, owner, preview_limit=PLANNING_SUGGESTION_PREVIEW_DEFAULT
+):
     with performance_step("suggestions.activity_snapshot") as measurement:
         _activity_sheet, _activity_headers, indexed_activities = (
             get_planned_activity_snapshot(spreadsheet)
@@ -6307,7 +6354,10 @@ def suggestion_queue_payload(spreadsheet, owner):
     with performance_step("suggestions.queue") as measurement:
         suggestion, queue_preview, pending_count = planning_suggestion_service(
             spreadsheet
-        ).queue(owner, candidates, activity_rows)
+        ).queue(
+            owner, candidates, activity_rows,
+            preview_limit=suggestion_preview_limit(preview_limit),
+        )
         measurement["row_count"] = pending_count
     return suggestion, queue_preview, pending_count
 
@@ -6389,9 +6439,10 @@ def planning_suggestions():
     )
     if owner_error is not None:
         return owner_error
+    preview_limit = suggestion_preview_limit(request.args.get("preview_limit"))
     try:
         suggestion, queue_preview, pending_count = suggestion_queue_payload(
-            spreadsheet, owner
+            spreadsheet, owner, preview_limit=preview_limit
         )
     except Exception:
         app.logger.exception("Could not build suggestion queue")
@@ -6405,7 +6456,7 @@ def planning_suggestions():
         "suggestion": suggestion,
         "queue_preview": queue_preview,
         "pending_count": pending_count,
-        "preview_limit": 10,
+        "preview_limit": preview_limit,
         "generated_at": planning_timestamp(),
         "score_version": (
             "phase1" if planning_suggestion_stub_enabled() else SCORE_VERSION
@@ -7871,6 +7922,7 @@ def calculate_route_proposal_for_user(
     user,
     route_date,
     required_rows=(),
+    anchor_rows=(),
     max_total_seconds=MAX_TOTAL_SECONDS,
     respect_requested_rows=False,
     owner=None,
@@ -8016,6 +8068,81 @@ def calculate_route_proposal_for_user(
         )
 
     candidate_count_before_preselection = len(candidates)
+    if required_set:
+        if len(required_set) > MAX_ROUTE_STOPS:
+            return None, route_proposal_error(
+                "required_stops_not_feasible",
+                "Dagens fasta besök överskrider max 15 stopp.",
+                422,
+            )
+        chronological_anchor_rows = tuple(
+            row for row in anchor_rows if row in required_set
+        ) or required_rows
+        try:
+            candidates = list(anchor_aware_preselect_candidates(
+                start=start,
+                candidates=candidates,
+                anchor_rows=chronological_anchor_rows,
+                limit=ANCHOR_ROUTE_CANDIDATE_LIMIT,
+            ))
+        except RouteProposalError as exc:
+            return None, route_proposal_error(
+                exc.code, exc.public_message, exc.http_status
+            )
+        stops = [{
+            "row": candidate.row,
+            "customer": candidate.customer,
+            "latitude": candidate.coordinate.latitude,
+            "longitude": candidate.coordinate.longitude,
+            "priority_score": candidate.priority_score,
+            "required": candidate.required,
+            "sequence": 0,
+            "leg_drive_minutes": 0,
+            "cumulative_drive_minutes": 0,
+            "cumulative_total_minutes": 0,
+        } for candidate in candidates]
+        return {
+            "ok": True,
+            "cached": False,
+            "generated_at": stockholm_now().isoformat(timespec="seconds"),
+            "route_date": route_date.isoformat(),
+            "route_owner": user_route_display_name(owner or user),
+            "start": {
+                "latitude": start.latitude,
+                "longitude": start.longitude,
+            },
+            "stops": stops,
+            "summary": {
+                "candidate_count": len(candidates),
+                "stop_count": 0,
+                "total_priority_score": 0,
+                "drive_minutes": 0,
+                "return_drive_minutes": 0,
+                "service_minutes": 0,
+                "total_minutes": 0,
+            },
+            "meta": {
+                "algorithm_version": "anchor_aware_v1",
+                "solver_status": "anchor_scheduler_pending",
+                "optimality_proven": False,
+                "shortlisted": len(candidates) < candidate_count_before_preselection,
+                "requested_candidate_count": len(requested_rows),
+                "eligible_candidate_count": candidate_count_before_preselection,
+                "matrix_candidate_count": len(candidates),
+                "max_total_minutes": max_total_seconds // 60,
+                "max_route_stops": MAX_ROUTE_STOPS,
+                "service_minutes_per_stop": SERVICE_SECONDS_PER_STOP // 60,
+                "includes_return_to_start": True,
+                "anchor_aware": True,
+                "anchor_count": len(required_set),
+                "candidate_count_before_anchor_preselection": (
+                    candidate_count_before_preselection
+                ),
+                "candidate_count_after_anchor_preselection": len(candidates),
+                "anchor_candidate_limit": ANCHOR_ROUTE_CANDIDATE_LIMIT,
+            },
+        }, None
+
     matrix_candidate_limit = route_matrix_candidate_limit()
     required_candidates = [
         candidate for candidate in candidates if candidate.required
@@ -8081,6 +8208,9 @@ def calculate_route_proposal_for_user(
         "matrix_candidate_limit": matrix_candidate_limit,
         "matrix_pair_count": proposal.provider_pair_count,
         "provider_cache_hits": proposal.provider_cache_hits,
+        "anchor_aware": False,
+        "anchor_count": 0,
+        "anchor_candidate_limit": ANCHOR_ROUTE_CANDIDATE_LIMIT,
     })
     app.logger.info(
         "route_metrics candidates_before=%s candidates_after=%s "
@@ -8439,7 +8569,11 @@ def schedule_planning_route_with_anchors(
     )
     if fixed_error is not None:
         return None, None, fixed_error
-    if len(stops) > MAX_ROUTE_STOPS:
+    required_stop_count = sum(1 for stop in stops if stop.get("required"))
+    if (
+        required_stop_count > MAX_ROUTE_STOPS
+        or (not required_stop_count and len(stops) > MAX_ROUTE_STOPS)
+    ):
         return None, None, planning_error(
             "required_schedule_not_feasible",
             "Dagens fasta och valfria besök överskrider max 15 stopp.",
@@ -8496,6 +8630,7 @@ def schedule_planning_route_with_anchors(
     ]
     cursor = route_start_at
     current_index = 0
+    route_limit = route_start_at + timedelta(seconds=MAX_TOTAL_SECONDS)
 
     def drive_minutes(origin_index, destination_index):
         try:
@@ -8539,6 +8674,36 @@ def schedule_planning_route_with_anchors(
             "service_minutes": service_minutes,
             "booked_at": booked_at,
         }
+
+    def required_tail_is_feasible(from_cursor, from_index, first_anchor_index):
+        tail_cursor = from_cursor
+        tail_index = from_index
+        for tail_anchor in anchors[first_anchor_index:]:
+            tail_booked = parse_planning_datetime(
+                tail_anchor.get("scheduled_at")
+            )
+            timing = simulate(tail_anchor, tail_cursor, tail_index)
+            if (
+                tail_booked is None
+                or timing is None
+                or timing["service_start"]
+                > tail_booked + timedelta(
+                    minutes=PLANNING_ROUTE_CONFLICT_MINUTES
+                )
+            ):
+                return False
+            tail_cursor = timing["service_end"]
+            tail_index = tail_anchor["_matrix_index"]
+        return_minutes = drive_minutes(tail_index, 0)
+        if return_minutes is None:
+            return False
+        return_departure = planning_next_unblocked_start(
+            tail_cursor, return_minutes, fixed_intervals
+        )
+        return (
+            return_departure + timedelta(minutes=return_minutes)
+            < route_limit
+        )
 
     def append_stop(stop, timing):
         nonlocal cursor, current_index
@@ -8589,7 +8754,7 @@ def schedule_planning_route_with_anchors(
         current_index = stop["_matrix_index"]
 
     remaining = list(optional)
-    for anchor in anchors:
+    for anchor_index, anchor in enumerate(anchors):
         anchor_booked = parse_planning_datetime(anchor.get("scheduled_at"))
         if anchor_booked is None:
             return None, None, planning_error(
@@ -8598,8 +8763,17 @@ def schedule_planning_route_with_anchors(
                 422,
                 planned_activity_id=anchor.get("planned_activity_id", ""),
             )
-        while remaining:
+        anchors_still_to_schedule = len(anchors) - anchor_index
+        while (
+            remaining
+            and len(scheduled) + anchors_still_to_schedule < MAX_ROUTE_STOPS
+        ):
             best = None
+            direct_to_anchor = drive_minutes(
+                current_index, anchor["_matrix_index"]
+            )
+            if direct_to_anchor is None:
+                break
             for candidate in remaining:
                 optional_timing = simulate(candidate, cursor, current_index)
                 if optional_timing is None:
@@ -8616,15 +8790,27 @@ def schedule_planning_route_with_anchors(
                     + timedelta(minutes=PLANNING_ROUTE_CONFLICT_MINUTES)
                 ):
                     continue
-                extra_minutes = (
+                if not required_tail_is_feasible(
+                    anchor_timing["service_end"],
+                    anchor["_matrix_index"],
+                    anchor_index + 1,
+                ):
+                    continue
+                marginal_minutes = max(1, (
                     optional_timing["drive_minutes"]
                     + optional_timing["service_minutes"]
                     + anchor_timing["drive_minutes"]
-                )
+                    - direct_to_anchor
+                ))
                 value_rate = float(candidate.get("priority_score") or 0) / max(
-                    1, extra_minutes
+                    1, marginal_minutes
                 )
-                score = (value_rate, float(candidate.get("priority_score") or 0))
+                score = (
+                    value_rate,
+                    float(candidate.get("priority_score") or 0),
+                    -marginal_minutes,
+                    -int(candidate.get("customer_row") or candidate.get("row") or 0),
+                )
                 if best is None or score > best[0]:
                     best = (score, candidate, optional_timing)
             if best is None:
@@ -8654,7 +8840,6 @@ def schedule_planning_route_with_anchors(
             )
         append_stop(anchor, anchor_timing)
 
-    route_limit = route_start_at + timedelta(seconds=MAX_TOTAL_SECONDS)
     while remaining and len(scheduled) < MAX_ROUTE_STOPS:
         best = None
         for candidate in remaining:
@@ -8670,9 +8855,33 @@ def schedule_planning_route_with_anchors(
             route_end = return_departure + timedelta(minutes=return_minutes)
             if route_end >= route_limit:
                 continue
-            extra = timing["drive_minutes"] + timing["service_minutes"] + return_minutes
-            value_rate = float(candidate.get("priority_score") or 0) / max(1, extra)
-            score = (value_rate, float(candidate.get("priority_score") or 0))
+            if anchors:
+                direct_return = drive_minutes(current_index, 0)
+                if direct_return is None:
+                    continue
+                marginal_minutes = max(1, (
+                    timing["drive_minutes"]
+                    + timing["service_minutes"]
+                    + return_minutes
+                    - direct_return
+                ))
+                value_rate = float(candidate.get("priority_score") or 0) / max(
+                    1, marginal_minutes
+                )
+                score = (
+                    value_rate,
+                    float(candidate.get("priority_score") or 0),
+                    -marginal_minutes,
+                    -int(candidate.get("customer_row") or candidate.get("row") or 0),
+                )
+            else:
+                extra = (
+                    timing["drive_minutes"]
+                    + timing["service_minutes"]
+                    + return_minutes
+                )
+                value_rate = float(candidate.get("priority_score") or 0) / max(1, extra)
+                score = (value_rate, float(candidate.get("priority_score") or 0))
             if best is None or score > best[0]:
                 best = (score, candidate, timing)
         if best is None:
@@ -8895,6 +9104,15 @@ def build_planning_route_preview(
             planned_activity_ids=invalid_required_activity_ids,
         )
     required_rows = tuple(sorted(required_row_values))
+    chronological_anchor_rows = tuple(
+        int(float(row.get("customer_row") or 0))
+        for _row_index, row in sorted(
+            fixed_visit_rows,
+            key=lambda indexed: planning_datetime_text(
+                indexed[1].get("scheduled_at")
+            ),
+        )
+    )
     required_activity_by_row = defaultdict(list)
     for _row_index, row in fixed_visit_rows:
         try:
@@ -9017,6 +9235,7 @@ def build_planning_route_preview(
         owner=owner,
         route_date=route_date,
         required_rows=required_rows,
+        anchor_rows=chronological_anchor_rows,
         max_total_seconds=max_total_seconds,
         respect_requested_rows=True,
     )
@@ -9109,6 +9328,9 @@ def build_planning_route_preview(
         )
     route_summary.update({
         "stop_count": len(stops),
+        "total_priority_score": sum(
+            int(stop.get("priority_score") or 0) for stop in stops
+        ),
         "drive_minutes": sum(
             max(0, int(stop.get("leg_drive_minutes") or 0))
             for stop in stops
@@ -9128,6 +9350,17 @@ def build_planning_route_preview(
         "route_end_at": route_timeline.get("route_end_at"),
         "timeline_elapsed_minutes": route_timeline.get(
             "elapsed_minutes"
+        ),
+    })
+    route_payload.setdefault("meta", {}).update({
+        "anchor_aware": bool(required_rows),
+        "anchor_count": len(required_rows),
+        "anchor_candidate_limit": ANCHOR_ROUTE_CANDIDATE_LIMIT,
+        "anchor_matrix_request_count": route_timeline.get(
+            "matrix_request_count", 0
+        ),
+        "anchor_matrix_cache_hits": route_timeline.get(
+            "matrix_cache_hits", 0
         ),
     })
     gps_notice = (

@@ -35,11 +35,15 @@ def contact(when, result="Neutral", contact_id="contact-1", follow_up=""):
     }
 
 
-def email_rows(*, kind="stockfiller", customer_id="cid-1", number="100", name="Butik"):
+def email_rows(
+    *, kind="stockfiller", proposal_type="reminder", customer_id="cid-1",
+    number="100", name="Butik",
+):
     message = {
         "email_id": "email-1", "customer_id": customer_id,
         "customer_number": number, "customer": name, "sent_at": "2026-08-01 09:00:00",
         "status": "sent", "is_test": "N",
+        "email_type": proposal_type,
     }
     recipient = {
         "email_id": "email-1", "send_status": "sent",
@@ -58,7 +62,11 @@ def email_rows(*, kind="stockfiller", customer_id="cid-1", number="100", name="B
             "product_sheet_last_clicked_at": "2026-08-02 10:00:00",
         })
     elif kind == "open":
-        recipient.update({"open_count": "1", "last_opened_at": "2026-08-02 10:00:00"})
+        recipient.update({
+            "open_count": "1",
+            "first_opened_at": "2026-08-02 10:00:00",
+            "last_opened_at": "2026-08-02 10:00:00",
+        })
     elif kind == "delivered":
         recipient.update({"delivered_at": "2026-08-02 10:00:00"})
     return [message], [recipient]
@@ -150,12 +158,25 @@ class Phase4EmailIntentTests(TestCase):
             identities.append((context, deterministic_suggestion_id("olle", "cid-1", context)))
         self.assertEqual(identities[0], identities[1])
 
-    def test_open_has_no_modifier_or_recommendation_trigger(self):
+    def test_open_has_no_modifier_during_wait_and_becomes_actionable_day_ten(self):
         baseline = scored(today=date(2026, 8, 2))[0]
         opened = scored(today=date(2026, 8, 2), email_feature=self.snapshot("open"))[0]
         self.assertEqual(opened["intent_timing"], baseline["intent_timing"])
         self.assertNotIn("email", opened["primary_trigger_type"])
-        self.assertEqual(opened["active_email_intent_event"], "")
+        self.assertTrue(opened["active_email_intent_event"])
+        self.assertEqual(
+            opened["recommendation_suppression_reason"],
+            "recent_email_engagement_wait",
+        )
+        ready = scored(
+            today=date(2026, 8, 12),
+            email_feature=self.snapshot("open", date(2026, 8, 12)),
+        )[0]
+        self.assertEqual(ready["primary_trigger_type"], "email_open_followup")
+        self.assertEqual(ready["intent_timing"], baseline["intent_timing"])
+        self.assertEqual(
+            opened["active_email_intent_event"], ready["active_email_intent_event"]
+        )
         delivered = scored(today=date(2026, 8, 2), email_feature=self.snapshot("delivered"))[0]
         self.assertEqual(delivered["intent_timing"], baseline["intent_timing"])
         self.assertEqual(delivered["active_email_intent_event"], "")
@@ -239,14 +260,14 @@ class Phase4EmailIntentTests(TestCase):
         self.assertEqual(after_order["active_email_intent_event"], "")
         self.assertEqual(after_contact["active_email_intent_event"], "")
 
-    def test_reorder_precedes_email_but_covered_keys_include_both(self):
+    def test_email_precedes_reorder_but_covered_keys_include_both(self):
         feature = self.snapshot("stockfiller", date(2026, 8, 5))
         item = scored(
             today=date(2026, 8, 8),
             orders=[order("O-1", "2026-06-01"), order("O-2", "2026-06-21")],
             email_feature=feature,
         )[0]
-        self.assertEqual(item["primary_trigger_type"], "established_reorder_due")
+        self.assertEqual(item["primary_trigger_type"], "stockfiller_click_followup")
         self.assertIn("stockfiller_click_followup", item["covered_trigger_keys"])
 
     def test_same_name_email_binds_only_to_matching_canonical_customer(self):
@@ -420,7 +441,7 @@ class Phase4LegacyFollowupTests(TestCase):
         self.assertEqual(waiting["intent_timing"] + 8, ready["intent_timing"])
         self.assertEqual(suggestion_identity(waiting), suggestion_identity(ready))
 
-    def test_full_precedence_keeps_reorder_above_positive_email_and_legacy(self):
+    def test_full_precedence_keeps_email_above_reorder_positive_and_legacy(self):
         legacy_positive = contact(
             "2026-07-01 10:00:00", result="Positiv",
             contact_id="all-signals", follow_up="2026-07-10",
@@ -434,7 +455,7 @@ class Phase4LegacyFollowupTests(TestCase):
             orders=[order("O-1", "2026-05-01"), order("O-2", "2026-05-21")],
             email_feature=ready,
         )[0]
-        self.assertEqual(item["primary_trigger_type"], "established_reorder_due")
+        self.assertEqual(item["primary_trigger_type"], "stockfiller_click_followup")
         self.assertEqual(
             item["covered_trigger_keys"],
             [
