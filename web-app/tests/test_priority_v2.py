@@ -111,7 +111,7 @@ class ScoringV2Tests(TestCase):
     def test_established_timing_boundaries(self):
         cases = {
             -15: 10, -14: 25, 0: 65, 7: 65, 8: 90, 30: 90,
-            31: 80, 60: 80, 61: 60, 90: 60,
+            31: 75, 60: 75, 61: 50, 90: 50,
         }
         for overdue, expected in cases.items():
             with self.subTest(overdue=overdue):

@@ -281,13 +281,17 @@ def public_suggestion(row, live_candidate=None):
             candidate.get("reason_text") or row.get("reason_text_at_creation")
         ),
         "recommended_contact_type": _text(
-            row.get("recommended_contact_type") or "phone"
+            candidate.get("recommended_contact_type")
+            or row.get("recommended_contact_type") or "phone"
         ),
+        "can_call": bool(candidate.get("can_call", False)),
+        "phone_tel": _text(candidate.get("phone_tel")),
         "trigger_key": _text(
             candidate.get("primary_trigger_key") or row.get("primary_trigger_key")
         ),
         "status": _key(row.get("status")) or "pending",
         "revision": _revision(row),
+        "materialized": True,
     }
 
 
@@ -411,6 +415,13 @@ class PlanningSuggestionService:
             "suppression_reason_at_creation": _text(
                 candidate.get("recommendation_suppression_reason")
             ),
+            "score_version": _text(
+                candidate.get("score_version") or row.get("score_version")
+            ),
+            "recommended_contact_type": _text(
+                candidate.get("recommended_contact_type")
+                or row.get("recommended_contact_type") or "phone"
+            ),
         }
 
     def _candidate_row(self, owner, candidate):
@@ -439,7 +450,9 @@ class PlanningSuggestionService:
             "customer": _text(candidate.get("customer")),
             "user_name": _text(owner.get("user_name")),
             "sales_person": _text(owner.get("name")),
-            "recommended_contact_type": "phone",
+            "recommended_contact_type": _text(
+                candidate.get("recommended_contact_type") or "phone"
+            ),
             "reason_code": _text(candidate.get("reason_code") or "phase1_test"),
             "reason_text_at_creation": _text(
                 candidate.get("reason_text") or "Följ upp kunden"
@@ -466,7 +479,7 @@ class PlanningSuggestionService:
             ),
         }
 
-    def queue(self, owner, candidates, activity_rows=()):
+    def queue(self, owner, candidates, activity_rows=(), preview_limit=10):
         """Reconcile stored state, sparsely materialize only the visible top row."""
         with self.lock:
             sheet, events, headers, stored = self.snapshot()
@@ -629,7 +642,7 @@ class PlanningSuggestionService:
 
             pending_count = len(visible)
             if not visible:
-                return None, 0
+                return None, [], 0
             suggestion_id, candidate, row = visible[0]
             if row is None:
                 row = self._candidate_row(owner, candidate)
@@ -639,7 +652,70 @@ class PlanningSuggestionService:
                 )
             self._event(events, "suggestion_created", self._live_event_row(row, candidate),
                         before="", after="pending")
-            return public_suggestion(row, candidate), pending_count
+            preview = []
+            for _preview_id, preview_candidate, preview_row in visible[
+                1:1 + max(0, int(preview_limit or 0))
+            ]:
+                if preview_row is None:
+                    item = public_suggestion(
+                        self._candidate_row(owner, preview_candidate),
+                        preview_candidate,
+                    )
+                    item.update({"revision": 0, "materialized": False})
+                else:
+                    item = public_suggestion(preview_row, preview_candidate)
+                preview.append(item)
+            return public_suggestion(row, candidate), preview, pending_count
+
+    def materialize_candidate(self, owner, candidate):
+        """Materialize exactly one recomputed candidate for revision-zero planning."""
+        with self.lock:
+            sheet, events, headers, stored = self.snapshot()
+            row = self._candidate_row(owner, candidate)
+            matches = [
+                existing for _index, existing in stored
+                if _text(existing.get("suggestion_id")) == row["suggestion_id"]
+            ]
+            if len(matches) > 1:
+                raise SuggestionError(
+                    "duplicate_suggestion_id",
+                    "Rekommendationen finns i flera exemplar och måste granskas.",
+                    409,
+                )
+            if matches:
+                existing = matches[0]
+                if _key(existing.get("user_name")) != _key(owner.get("user_name")):
+                    raise SuggestionError(
+                        "suggestion_not_found",
+                        "Rekommendationen kunde inte hittas.",
+                        404,
+                    )
+                if (
+                    _text(existing.get("customer_id")) != row["customer_id"]
+                    or _text(existing.get("decision_context_hash"))
+                    != row["decision_context_hash"]
+                ):
+                    raise SuggestionError(
+                        "suggestion_stale",
+                        "Rekommendationens kund eller affärskontext har ändrats.",
+                        409,
+                    )
+                if _key(existing.get("status")) != "pending":
+                    raise SuggestionError(
+                        "suggestion_not_pending",
+                        "Rekommendationen är inte längre tillgänglig för åtgärden.",
+                        409,
+                    )
+                return existing, False
+            _append(
+                sheet, SUGGESTION_COLUMNS, row, self.invalidator,
+                self.values_reader,
+            )
+            self._event(
+                events, "suggestion_created", self._live_event_row(row, candidate),
+                before="", after="pending",
+            )
+            return row, True
 
     def find(self, suggestion_id):
         sheet, events, headers, rows = self.snapshot()

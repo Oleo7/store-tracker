@@ -121,16 +121,18 @@ class SheetReadCache:
                     return self._copy(entry.rows), True
                 if key not in self._loading:
                     self._loading.add(key)
+                    load_generation = self._generation
                     break
                 self._condition.wait()
         try:
             loaded = read_with_retry(loader)
             frozen = tuple(tuple(cell for cell in row) for row in (loaded or []))
             with self._condition:
-                self._entries[key] = _Entry(
-                    expires_at=self.monotonic() + self.ttl_seconds,
-                    rows=frozen,
-                )
+                if self._generation == load_generation:
+                    self._entries[key] = _Entry(
+                        expires_at=self.monotonic() + self.ttl_seconds,
+                        rows=frozen,
+                    )
             return self._copy(frozen), False
         finally:
             with self._condition:

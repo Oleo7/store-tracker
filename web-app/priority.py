@@ -10,6 +10,7 @@ import uuid
 
 FREEZER_FIELDS = ("Franui", "Schufrulade", "Boujee", "polarbar", "none")
 OTHER_COMPETITOR_FREEZER_FIELDS = {"Schufrulade", "Boujee"}
+SCORE_VERSION = "v2.1"
 
 
 def normalize_customer_key(value: str) -> str:
@@ -777,9 +778,9 @@ def established_intent_timing(overdue_days: int) -> int:
     if overdue_days <= 30:
         return 90
     if overdue_days <= 60:
-        return 80
+        return 75
     if overdue_days <= 90:
-        return 60
+        return 50
     return 60
 
 
@@ -1058,9 +1059,9 @@ def build_priority_customers(
     email_features: dict | None = None,
     planned_activities=(),
     workflow_suppressions: dict | None = None,
-    scoring_version: str = "v2",
+    scoring_version: str = SCORE_VERSION,
 ) -> list[dict]:
-    """Build the authoritative v2 score for every active, in-scope customer."""
+    """Build the authoritative current score for every active, in-scope customer."""
     if str(scoring_version or "").strip().casefold() == "legacy":
         return _build_priority_customers_legacy(
             customers,
@@ -1382,7 +1383,7 @@ def build_priority_customers(
             "segment": segment,
             "lifecycle": lifecycle,
             "decision_context_lifecycle": context_lifecycle,
-            "score_version": "v2",
+            "score_version": SCORE_VERSION,
             "priority_score": priority_score,
             "intent_timing": intent_timing,
             "value_index": value_index,

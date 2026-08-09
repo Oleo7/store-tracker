@@ -150,6 +150,19 @@ class PlanningSuggestionV2IntegrationTests(PlanningApiTestCase):
             patch.object(app_module, "stockholm_now", return_value=instant),
         )
 
+    def materialize_boundary_customer(self):
+        owner = {"user_name": "olle", "name": "Olle"}
+        candidate = next(
+            item for item in app_module.planning_suggestion_candidates(
+                self.spreadsheet, owner
+            )
+            if item["customer_id"] == "11111111-1111-4111-8111-111111111111"
+        )
+        row, _created = app_module.planning_suggestion_service(
+            self.spreadsheet
+        ).materialize_candidate(owner, candidate)
+        return app_module.public_suggestion(row, candidate)
+
     def test_overdue_established_customer_materializes_one_v2_card(self):
         self.append_repeat_orders()
 
@@ -157,15 +170,15 @@ class PlanningSuggestionV2IntegrationTests(PlanningApiTestCase):
         payload = response.get_json()
 
         self.assertEqual(response.status_code, 200, payload)
-        self.assertEqual(payload["score_version"], "v2")
+        self.assertEqual(payload["score_version"], "v2.1")
         self.assertGreaterEqual(payload["pending_count"], 1)
         self.assertEqual(payload["suggestion"]["customer"], "Butik A")
         rows = self.spreadsheet.worksheet(SUGGESTIONS_SHEET).dict_rows()
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["primary_trigger_type"], "established_reorder_due")
-        self.assertEqual(rows[0]["score_version"], "v2")
+        self.assertEqual(rows[0]["score_version"], "v2.1")
         event = self.spreadsheet.worksheet(SCORE_EVENTS_SHEET).dict_rows()[0]
-        self.assertEqual(event["score_version"], "v2")
+        self.assertEqual(event["score_version"], "v2.1")
         self.assertEqual(event["lifecycle"], "established")
         self.assertEqual(event["recommendation_eligible"], "Y")
         for field in (
@@ -259,9 +272,7 @@ class PlanningSuggestionV2IntegrationTests(PlanningApiTestCase):
         day_91 = date(2026, 6, 1)
         today_patch, now_patch = self.clock(day_90)
         with today_patch, now_patch:
-            suggestion = self.client.get(
-                "/planning/suggestions"
-            ).get_json()["suggestion"]
+            suggestion = self.materialize_boundary_customer()
 
         today_patch, now_patch = self.clock(day_91)
         with today_patch, now_patch:
@@ -284,9 +295,7 @@ class PlanningSuggestionV2IntegrationTests(PlanningApiTestCase):
         day_91 = date(2026, 6, 1)
         today_patch, now_patch = self.clock(day_90)
         with today_patch, now_patch:
-            suggestion = self.client.get(
-                "/planning/suggestions"
-            ).get_json()["suggestion"]
+            suggestion = self.materialize_boundary_customer()
             dismissed = self.client.post(
                 f"/planning/suggestions/{suggestion['suggestion_id']}/dismiss",
                 json={
@@ -313,9 +322,7 @@ class PlanningSuggestionV2IntegrationTests(PlanningApiTestCase):
         day_91 = date(2026, 6, 1)
         today_patch, now_patch = self.clock(day_90)
         with today_patch, now_patch:
-            suggestion = self.client.get(
-                "/planning/suggestions"
-            ).get_json()["suggestion"]
+            suggestion = self.materialize_boundary_customer()
             snoozed = self.client.post(
                 f"/planning/suggestions/{suggestion['suggestion_id']}/snooze",
                 json={

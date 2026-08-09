@@ -70,23 +70,29 @@ class PlanningFrontendContractTests(TestCase):
             self.html,
         )
 
-    def test_planning_candidate_list_is_ranked_and_loaded_ten_at_a_time(self):
-        self.assertIn("Prioriterade kunder", self.html)
+    def test_planning_preview_uses_backend_queue_without_raw_score_backlog(self):
+        self.assertIn("Fler kunder att planera", self.html)
         self.assertNotIn("Dagens fokus", self.html)
         self.assertNotIn("Gamla uppföljningar att planera in", self.html)
         self.assertNotIn("Kommande uppföljningar", self.html)
-        self.assertIn("const PLANNING_CANDIDATE_BATCH_SIZE = 10", self.html)
-        self.assertIn(".sort(prioritySort)", self.html)
-        self.assertIn("latest_contact_comment", self.html)
-        self.assertIn("Orderpotential ca ${Math.round(potential)} DFP", self.html)
-        self.assertIn("insight.planning_status_text", self.html)
-        self.assertIn("insight.primary_reason_text", self.html)
-        self.assertIn("Visa fler (${candidates.length - visible.length} kvar)", self.html)
+        renderer = re.search(
+            r"function renderPlanningCandidates\(\) \{(.*?)\n  \}",
+            self.html,
+            flags=re.DOTALL,
+        )
+        self.assertIsNotNone(renderer)
+        body = renderer.group(1)
+        self.assertIn("planningRecommendationPreview.slice(0, 10)", body)
+        self.assertNotIn("planningCandidateCustomers()", body)
+        self.assertNotIn("priority_score", body)
+        self.assertNotIn("expected_order_dfp", body)
+        self.assertNotIn("Orderpotential", body)
+        self.assertNotIn("Visa fler", body)
 
     def test_phase1_renders_one_nonblocking_recommendation_card(self):
         self.assertIn('id="planning-recommendation"', self.html)
-        self.assertIn("Rekommendationer · ${planningRecommendationPendingCount} kvar", self.html)
-        for label in ("Kontakta nu", "Planera", "Snooza", "Ej relevant"):
+        self.assertIn("NÄSTA ÅTGÄRD · ${planningRecommendationPendingCount} kvar", self.html)
+        for label in ("Ring nu", "Planera", "Snooza", "Dölj detta förslag"):
             self.assertIn(f">{label}</button>", self.html)
         render = re.search(
             r"function renderPlanningRecommendation\(.*?\) \{(.*?)\n  \}",
@@ -96,18 +102,32 @@ class PlanningFrontendContractTests(TestCase):
         self.assertIsNotNone(render)
         self.assertNotIn(".map(", render.group(1))
         self.assertNotIn("Orderpotential", render.group(1))
-        self.assertIn("Förslag: Telefon", render.group(1))
+        self.assertIn("planningRecommendation.recommended_contact_type", render.group(1))
+        self.assertIn("!planningRecommendation.can_call", render.group(1))
+        button_positions = [
+            render.group(1).index(f">{label}</button>")
+            for label in ("Ring nu", "Planera", "Snooza", "Dölj detta förslag")
+        ]
+        self.assertEqual(button_positions, sorted(button_positions))
         self.assertIn("Kalendern och övrig planering fungerar fortfarande", self.html)
         self.assertIn("loadPlanningRecommendation();", self.html)
 
     def test_phase1_actions_wait_for_success_and_lock_suggestion_customer(self):
         self.assertIn("Kunden är låst för den här rekommendationen", self.html)
-        self.assertIn('contact_type: "phone"', self.html)
+        self.assertIn('contact_type: suggestion.recommended_contact_type || "visit"', self.html)
         self.assertIn("expected_suggestion_revision", self.html)
+        self.assertIn("suggestionSeed.expected_suggestion_revision ?? 0", self.html)
         self.assertIn("source_suggestion_id", self.html)
         self.assertIn("replaceWithNextRecommendation(payload)", self.html)
         self.assertIn("replaceWithNextRecommendation(result)", self.html)
         self.assertIn("if (!suggestionLocked) setupPlanningCustomerCombobox", self.html)
+        open_planner = re.search(
+            r"function openRecommendationPlanner\(.*?\) \{(.*?)\n  \}",
+            self.html,
+            flags=re.DOTALL,
+        )
+        self.assertIsNotNone(open_planner)
+        self.assertNotIn("planningFetchJson", open_planner.group(1))
         self.assertIn("loadPlanningRecommendation().finally", self.html)
         self.assertRegex(
             self.html,

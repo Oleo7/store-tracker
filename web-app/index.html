@@ -3221,11 +3221,16 @@
     }
     .planning-backlog-item:last-child { border-bottom: none; }
     .planning-backlog-customer {
+      padding: 0;
+      border: 0;
+      background: none;
       overflow: hidden;
       color: var(--pb-ink);
+      cursor: pointer;
       font-size: 0.8rem;
       font-weight: 850;
       text-overflow: ellipsis;
+      text-align: left;
       white-space: nowrap;
     }
     .planning-backlog-meta {
@@ -3953,7 +3958,7 @@
       <aside class="planning-backlog-card" aria-labelledby="planning-backlog-title">
         <div class="planning-backlog-heading">
           <div>
-            <h2 class="planning-section-title" id="planning-backlog-title">Prioriterade kunder</h2>
+            <h2 class="planning-section-title" id="planning-backlog-title">Fler kunder att planera</h2>
           </div>
         </div>
         <div id="planning-backlog" aria-live="polite">
@@ -4402,6 +4407,7 @@
   let planningLoading = false;
   let planningLoadSerial = 0;
   let planningRecommendation = null;
+  let planningRecommendationPreview = [];
   let planningRecommendationPendingCount = 0;
   let planningRecommendationLoading = false;
   let planningRecommendationRequestSerial = 0;
@@ -4415,15 +4421,12 @@
   let planningRoutePreview = null;
   let planningRouteApplyRequestId = "";
   let planningRouteImportRequestId = "";
-  let planningCandidateVisibleCount = 10;
-  let planningCandidateOwnerKey = "";
   let planningDragState = null;
   let planningDragFrame = 0;
   let planningDragAutoScrollFrame = 0;
   let planningDragRetry = null;
   const planningDragSavingIds = new Set();
   const planningDragSuppressedClicks = new Map();
-  const PLANNING_CANDIDATE_BATCH_SIZE = 10;
   const planningStatusRequestIds = new Map();
   const visitCompetitorButtons = Array.from(document.querySelectorAll(".visit-competitor-toggle"))
     .filter(btn => FREEZER_FIELD_SET.has(btn.dataset.competitor));
@@ -7349,29 +7352,29 @@
       return;
     }
     if (!planningRecommendation || planningRecommendationPendingCount < 1) {
-      section.hidden = true;
-      section.innerHTML = "";
+      section.hidden = false;
+      section.innerHTML = '<div class="planning-state" style="padding:10px"><strong>Inga nya åtgärder just nu</strong></div>';
+      renderPlanningCandidates();
       return;
     }
     const disabled = planningRecommendationLoading ? "disabled" : "";
     section.hidden = false;
     section.innerHTML = `
-      <div class="planning-recommendation-heading">Rekommendationer · ${planningRecommendationPendingCount} kvar</div>
+      <div class="planning-recommendation-heading">NÄSTA ÅTGÄRD · ${planningRecommendationPendingCount} kvar</div>
       <div class="planning-recommendation-card">
         <button class="planning-recommendation-customer" id="planning-recommendation-customer" type="button" ${disabled}>${esc(planningRecommendation.customer || "Okänd kund")}</button>
-        <div class="planning-recommendation-priority">Prioritet ${Number(planningRecommendation.priority_score || 0)}</div>
         <div class="planning-recommendation-reason">${esc(planningRecommendation.reason_text || "")}</div>
-        <div class="planning-recommendation-channel">Förslag: Telefon</div>
+        <div class="planning-recommendation-channel">Förslag: ${esc(PLANNING_CONTACT_TYPES[planningRecommendation.recommended_contact_type]?.label || "Besök")}</div>
         <div class="planning-recommendation-actions">
-          <button class="planning-compact-btn primary" id="planning-recommendation-contact" type="button" ${disabled}>Kontakta nu</button>
+          <button class="planning-compact-btn primary" id="planning-recommendation-contact" type="button" ${disabled || !planningRecommendation.can_call ? "disabled" : ""}>Ring nu</button>
           <button class="planning-compact-btn" id="planning-recommendation-plan" type="button" ${disabled}>Planera</button>
           <button class="planning-compact-btn" id="planning-recommendation-snooze" type="button" ${disabled}>Snooza</button>
-          <button class="planning-compact-btn danger" id="planning-recommendation-dismiss" type="button" ${disabled}>Ej relevant</button>
+          <button class="planning-compact-btn danger" id="planning-recommendation-dismiss" type="button" ${disabled}>Dölj detta förslag</button>
         </div>
       </div>`;
     document.getElementById("planning-recommendation-customer")?.addEventListener("click", openRecommendationCustomer);
-    document.getElementById("planning-recommendation-contact")?.addEventListener("click", openRecommendationCustomer);
-    document.getElementById("planning-recommendation-plan")?.addEventListener("click", openRecommendationPlanner);
+    document.getElementById("planning-recommendation-contact")?.addEventListener("click", callPlanningRecommendation);
+    document.getElementById("planning-recommendation-plan")?.addEventListener("click", () => openRecommendationPlanner());
     document.getElementById("planning-recommendation-snooze")?.addEventListener("click", snoozePlanningRecommendation);
     document.getElementById("planning-recommendation-dismiss")?.addEventListener("click", dismissPlanningRecommendation);
   }
@@ -7386,12 +7389,15 @@
       const payload = await planningFetchJson(`/planning/suggestions?${params.toString()}`);
       if (requestSerial !== planningRecommendationRequestSerial) return;
       planningRecommendation = payload.suggestion || null;
+      planningRecommendationPreview = Array.isArray(payload.queue_preview) ? payload.queue_preview : [];
       planningRecommendationPendingCount = Number(payload.pending_count || 0);
       renderPlanningRecommendation();
+      renderPlanningCandidates();
     } catch (error) {
       if (requestSerial !== planningRecommendationRequestSerial) return;
       failed = true;
       planningRecommendation = null;
+      planningRecommendationPreview = [];
       planningRecommendationPendingCount = 0;
       renderPlanningRecommendation({ error });
     } finally {
@@ -7404,9 +7410,11 @@
 
   function replaceWithNextRecommendation(response) {
     planningRecommendation = response?.next_suggestion || null;
+    planningRecommendationPreview = Array.isArray(response?.queue_preview) ? response.queue_preview : [];
     planningRecommendationPendingCount = Number(response?.pending_count || 0);
     planningRecommendationMutationRequestId = "";
     renderPlanningRecommendation();
+    renderPlanningCandidates();
     focusAfterRecommendationChange();
   }
 
@@ -7432,9 +7440,9 @@
     });
   }
 
-  function openRecommendationPlanner() {
-    if (planningRecommendationLoading || !planningRecommendation) return;
-    const customer = planningRecommendationCustomer();
+  function openRecommendationPlanner(suggestion = planningRecommendation) {
+    if (planningRecommendationLoading || !suggestion) return;
+    const customer = planningRecommendationCustomer(suggestion);
     if (!customer) {
       showToast("Kunden kunde inte planeras");
       return;
@@ -7443,12 +7451,18 @@
       customer,
       date: planningSelectedDate,
       seed: {
-        contact_type: "phone",
-        source_suggestion_id: planningRecommendation.suggestion_id,
-        source_trigger_key: planningRecommendation.trigger_key,
-        expected_suggestion_revision: planningRecommendation.revision,
+        contact_type: suggestion.recommended_contact_type || "visit",
+        source_suggestion_id: suggestion.suggestion_id,
+        source_trigger_key: suggestion.trigger_key,
+        expected_suggestion_revision: Number(suggestion.revision || 0),
       },
     });
+  }
+
+  function callPlanningRecommendation() {
+    const phoneTel = String(planningRecommendation?.phone_tel || "").trim();
+    if (!planningRecommendation?.can_call || !phoneTel) return;
+    window.location.href = `tel:${phoneTel}`;
   }
 
   async function mutateVisibleRecommendation(action) {
@@ -8175,49 +8189,44 @@
   }
 
   function renderPlanningCandidates() {
-    const ownerKey = [...planningOwnerIdentityKeys()].sort().join("|");
-    if (ownerKey !== planningCandidateOwnerKey) {
-      planningCandidateOwnerKey = ownerKey;
-      planningCandidateVisibleCount = PLANNING_CANDIDATE_BATCH_SIZE;
-    }
-    const candidates = planningCandidateCustomers();
-    const visible = candidates.slice(0, planningCandidateVisibleCount);
     const target = document.getElementById("planning-backlog");
-    if (!candidates.length) {
-      target.innerHTML = '<div class="planning-state" style="padding:14px 4px">Inga egna butiker hittades.</div>';
+    if (!planningRecommendation || planningRecommendationPendingCount < 1) {
+      target.innerHTML = '<div class="planning-state" style="padding:14px 4px">Kön är tom just nu.</div>';
       return;
     }
-    target.innerHTML = `<div class="planning-backlog-list">${visible.map((customer, index) => {
-      const insight = getCustomerInsight(customer);
-      const score = Math.max(0, Math.min(100, Math.round(Number(insight.priority_score || 0))));
-      const potential = Number(insight.expected_order_dfp || 0);
-      const status = String(
-        insight.planning_status_text || insight.primary_reason_text ||
-        insight.latest_contact_comment || "Ingen aktuell status."
-      ).trim();
-      const metrics = [
-        `Prioritet ${score}`,
-        potential > 0 ? `Orderpotential ca ${Math.round(potential)} DFP` : "",
-        status,
-      ].filter(Boolean).join(" · ");
+    const visible = planningRecommendationPreview.slice(0, 10);
+    if (!visible.length) {
+      target.innerHTML = '<div class="planning-state" style="padding:14px 4px">Inga fler kunder i kön.</div>';
+      return;
+    }
+    target.innerHTML = `<div class="planning-backlog-list">${visible.map((suggestion, index) => {
+      const channel = PLANNING_CONTACT_TYPES[suggestion.recommended_contact_type]?.label || "Besök";
       return `<div class="planning-backlog-item">
         <div>
-          <div class="planning-backlog-customer">${esc(customer.customer || "Okänd kund")}</div>
-          <div class="planning-backlog-meta">${esc(metrics)}</div>
+          <button class="planning-backlog-customer" type="button" data-planning-preview-customer="${index}">${esc(suggestion.customer || "Okänd kund")}</button>
+          <div class="planning-backlog-meta">${esc(suggestion.reason_text || "")} · ${esc(channel)}</div>
         </div>
-        <button class="planning-compact-btn" type="button" data-planning-candidate-index="${index}">Planera</button>
+        <button class="planning-compact-btn" type="button" data-planning-preview-plan="${index}">Planera</button>
       </div>`;
-    }).join("")}</div>
-      ${visible.length < candidates.length ? `<button class="planning-compact-btn" id="planning-load-more-btn" type="button">Visa fler (${candidates.length - visible.length} kvar)</button>` : ""}`;
-    target.querySelectorAll("[data-planning-candidate-index]").forEach(button => {
-      button.addEventListener("click", () => openPlanningEditor({
-        customer: visible[Number(button.dataset.planningCandidateIndex)],
-        date: planningSelectedDate,
-      }));
+    }).join("")}</div>`;
+    target.querySelectorAll("[data-planning-preview-customer]").forEach(button => {
+      button.addEventListener("click", () => {
+        const suggestion = visible[Number(button.dataset.planningPreviewCustomer)];
+        const customer = planningRecommendationCustomer(suggestion);
+        if (!customer) {
+          showToast("Kunden kunde inte öppnas");
+          return;
+        }
+        openDetail(Number(customer.row), {
+          returnView: "planning",
+          returnState: { owner: planningSelectedUserName, selectedDate: planningSelectedDate },
+        });
+      });
     });
-    document.getElementById("planning-load-more-btn")?.addEventListener("click", () => {
-      planningCandidateVisibleCount += PLANNING_CANDIDATE_BATCH_SIZE;
-      renderPlanningCandidates();
+    target.querySelectorAll("[data-planning-preview-plan]").forEach(button => {
+      button.addEventListener("click", () => openRecommendationPlanner(
+        visible[Number(button.dataset.planningPreviewPlan)]
+      ));
     });
   }
 
@@ -8582,7 +8591,7 @@
       }
       if (suggestionSeed) {
         payload.expected_suggestion_revision = Number(
-          suggestionSeed.expected_suggestion_revision || 1
+          suggestionSeed.expected_suggestion_revision ?? 0
         );
       }
     }
@@ -8971,8 +8980,9 @@
   });
   document.getElementById("planning-owner-select").addEventListener("change", event => {
     planningSelectedUserName = event.target.value;
-    planningCandidateVisibleCount = PLANNING_CANDIDATE_BATCH_SIZE;
+    planningRecommendationRequestSerial += 1;
     planningRecommendation = null;
+    planningRecommendationPreview = [];
     planningRecommendationPendingCount = 0;
     renderPlanningRecommendation();
     loadPlanningWeek();

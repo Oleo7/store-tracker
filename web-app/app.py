@@ -40,12 +40,14 @@ from gspread.utils import rowcol_to_a1
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 from requests.exceptions import ConnectionError as RequestsConnectionError
 from priority import (
+    SCORE_VERSION,
     apply_workflow_suppressions,
     build_contact_features,
     build_order_features,
     build_priority_customers,
     normalize_customer_key,
 )
+from contact_channel import recommend_contact_channel
 from route_proposal import (
     Coordinate,
     GoogleRoutesTravelTimeProvider,
@@ -2937,6 +2939,7 @@ def planning_suggestion_candidates(spreadsheet, owner, activity_rows=()):
             today=stockholm_today(),
             planned_activity_rows=activity_rows,
         )
+        customers = snapshot["customers"]
         with performance_step("suggestions.scoring") as measurement:
             priorities = snapshot["priorities"]
             measurement["row_count"] = len(priorities)
@@ -2997,7 +3000,7 @@ def planning_suggestion_candidates(spreadsheet, owner, activity_rows=()):
                 "decision_context_lifecycle": priority.get(
                     "decision_context_lifecycle"
                 ),
-                "score_version": "v2",
+                "score_version": priority.get("score_version", SCORE_VERSION),
                 "intent_timing": priority.get("intent_timing"),
                 "value_index": priority.get("value_index"),
                 "strategic_index": priority.get("strategic_index"),
@@ -3019,6 +3022,13 @@ def planning_suggestion_candidates(spreadsheet, owner, activity_rows=()):
                     "legacy_missed_followup": 6,
                 }.get(primary_trigger, 99),
                 "externally_suppressed": not recommendation_visible,
+                "overdue_days": priority.get("overdue_days"),
+                "latest_human_contact_id": priority.get(
+                    "latest_human_contact_id"
+                ),
+                "latest_human_contact_date": priority.get(
+                    "latest_human_contact_date"
+                ),
             })
     now = stockholm_now().astimezone(STOCKHOLM_ZONE)
     externally_planned_customer_ids = {
@@ -3042,6 +3052,36 @@ def planning_suggestion_candidates(spreadsheet, owner, activity_rows=()):
         }
         for candidate in candidates
     ]
+    customers_by_id = {
+        str(customer.get("customer_id") or "").strip(): customer
+        for customer in customers
+        if str(customer.get("customer_id") or "").strip()
+    }
+    enriched = []
+    for candidate in candidates:
+        customer = customers_by_id.get(
+            str(candidate.get("customer_id") or "").strip(), {}
+        )
+        email_available = any(
+            is_valid_email(address)
+            for address in split_email_values(
+                customer.get("email"), customer.get("email_last_order")
+            )
+        )
+        channel = recommend_contact_channel(
+            lifecycle=candidate.get("lifecycle"),
+            overdue_days=candidate.get("overdue_days"),
+            trigger_key=candidate.get("primary_trigger_key"),
+            has_human_contact=bool(
+                candidate.get("latest_human_contact_id")
+                or candidate.get("latest_human_contact_date")
+            ),
+            phone=customer.get("phone"),
+            email_available=email_available,
+            visible=not candidate.get("externally_suppressed"),
+        )
+        enriched.append({**candidate, **(channel or {})})
+    candidates = enriched
     return sorted(candidates, key=planning_suggestion_sort_key)
 
 
@@ -6159,7 +6199,7 @@ def get_customer_insights():
             "customer_risk": risk,
             "priority_level": priority.get("priority_level", ""),
             "priority_score": priority.get("priority_score"),
-            "score_version": priority.get("score_version", "v2"),
+            "score_version": priority.get("score_version", SCORE_VERSION),
             "lifecycle": priority.get("lifecycle", ""),
             "intent_timing": priority.get("intent_timing"),
             "value_index": priority.get("value_index"),
@@ -6244,6 +6284,14 @@ def suggestion_request_revision(data, field="expected_revision"):
     return revision if revision >= 1 else None
 
 
+def preview_suggestion_request_revision(data, field="expected_suggestion_revision"):
+    try:
+        revision = int(data.get(field))
+    except (TypeError, ValueError):
+        return None
+    return revision if revision >= 0 else None
+
+
 def suggestion_queue_payload(spreadsheet, owner):
     with performance_step("suggestions.activity_snapshot") as measurement:
         _activity_sheet, _activity_headers, indexed_activities = (
@@ -6257,11 +6305,11 @@ def suggestion_queue_payload(spreadsheet, owner):
         )
         measurement["row_count"] = len(candidates)
     with performance_step("suggestions.queue") as measurement:
-        suggestion, pending_count = planning_suggestion_service(
+        suggestion, queue_preview, pending_count = planning_suggestion_service(
             spreadsheet
         ).queue(owner, candidates, activity_rows)
         measurement["row_count"] = pending_count
-    return suggestion, pending_count
+    return suggestion, queue_preview, pending_count
 
 
 def suggestion_candidates_by_id(owner, candidates):
@@ -6342,7 +6390,7 @@ def planning_suggestions():
     if owner_error is not None:
         return owner_error
     try:
-        suggestion, pending_count = suggestion_queue_payload(
+        suggestion, queue_preview, pending_count = suggestion_queue_payload(
             spreadsheet, owner
         )
     except Exception:
@@ -6355,10 +6403,12 @@ def planning_suggestions():
     return jsonify({
         "ok": True,
         "suggestion": suggestion,
+        "queue_preview": queue_preview,
         "pending_count": pending_count,
+        "preview_limit": 10,
         "generated_at": planning_timestamp(),
         "score_version": (
-            "phase1" if planning_suggestion_stub_enabled() else "v2"
+            "phase1" if planning_suggestion_stub_enabled() else SCORE_VERSION
         ),
     })
 
@@ -6436,7 +6486,7 @@ def mutate_planning_suggestion(suggestion_id, action):
             fingerprint=fingerprint,
             live_candidate=live_candidate,
         )
-        next_suggestion, pending_count = suggestion_queue_payload(
+        next_suggestion, queue_preview, pending_count = suggestion_queue_payload(
             spreadsheet, owner
         )
     except SuggestionError as exc:
@@ -6453,6 +6503,7 @@ def mutate_planning_suggestion(suggestion_id, action):
         "duplicate": duplicate,
         "suggestion": public_suggestion(updated, live_candidate),
         "next_suggestion": next_suggestion,
+        "queue_preview": queue_preview,
         "pending_count": pending_count,
     })
 
@@ -6478,7 +6529,7 @@ def plan_planning_suggestion(suggestion_id):
             "invalid_client_request_id", "Ett giltigt request-ID krävs.", 400,
             field="client_request_id"
         )
-    expected_revision = suggestion_request_revision(
+    expected_revision = preview_suggestion_request_revision(
         data, "expected_suggestion_revision"
     )
     if expected_revision is None:
@@ -6508,12 +6559,20 @@ def plan_planning_suggestion(suggestion_id):
         spreadsheet = get_spreadsheet_with_retry()
         service = planning_suggestion_service(spreadsheet)
         with _planning_write_lock:
-            _suggestion_sheet, _events, _headers, _row_index, suggestion = (
-                service.find(suggestion_id)
-            )
-            owner, owner_error = resolve_planning_owner(
-                spreadsheet, suggestion.get("user_name")
-            )
+            if expected_revision == 0:
+                owner, owner_error = resolve_planning_owner(
+                    spreadsheet, data.get("user_name")
+                )
+                suggestion = {
+                    "customer_id": str(data.get("customer_id") or "").strip()
+                }
+            else:
+                _suggestion_sheet, _events, _headers, _row_index, suggestion = (
+                    service.find(suggestion_id)
+                )
+                owner, owner_error = resolve_planning_owner(
+                    spreadsheet, suggestion.get("user_name")
+                )
             if owner_error is not None:
                 return owner_error
             if str(data.get("customer_id") or "").strip() != str(
@@ -6549,6 +6608,26 @@ def plan_planning_suggestion(suggestion_id):
                 and not live_candidate.get("externally_suppressed")
                 and live_candidate.get("primary_trigger_key") != "scoring_context"
             )
+            if expected_revision == 0:
+                if not live_candidate_is_actionable:
+                    return planning_error(
+                        "suggestion_stale",
+                        "Rekommendationen har ändrats. Ingen aktivitet skapades.",
+                        409,
+                    )
+                if str(live_candidate.get("customer_id") or "").strip() != str(
+                    data.get("customer_id") or ""
+                ).strip():
+                    return planning_error(
+                        "suggestion_customer_mismatch",
+                        "Rekommendationen kan inte flyttas till en annan kund.",
+                        409,
+                        field="customer_id",
+                    )
+                suggestion, _materialized = service.materialize_candidate(
+                    owner, live_candidate
+                )
+                expected_revision = planning_revision(suggestion)
             plan_request_scope = planning_request_scope(
                 current_user(), "suggestion-plan", suggestion_id,
                 client_request_id
@@ -6612,7 +6691,7 @@ def plan_planning_suggestion(suggestion_id):
                         409,
                         activity=public_planned_activity(activity),
                     )
-                next_suggestion, pending_count = suggestion_queue_payload(
+                next_suggestion, queue_preview, pending_count = suggestion_queue_payload(
                     spreadsheet, owner
                 )
                 return jsonify({
@@ -6622,6 +6701,7 @@ def plan_planning_suggestion(suggestion_id):
                     "activity": public_planned_activity(activity),
                     "suggestion": public_suggestion(updated, live_candidate),
                     "next_suggestion": next_suggestion,
+                    "queue_preview": queue_preview,
                     "pending_count": pending_count,
                 }), 200
             existing_activity = next((
@@ -6666,7 +6746,9 @@ def plan_planning_suggestion(suggestion_id):
                     revision=1,
                     source_suggestion_id=suggestion_id,
                     source_trigger_key=live_candidate.get("primary_trigger_key"),
-                    recommended_contact_type="phone",
+                    recommended_contact_type=live_candidate.get(
+                        "recommended_contact_type"
+                    ),
                 )
                 append_dict_row(
                     _activity_sheet, PLANNED_ACTIVITY_COLUMNS, activity
@@ -6691,7 +6773,7 @@ def plan_planning_suggestion(suggestion_id):
                 actual_contact_type=contact_type,
                 live_candidate=live_candidate,
             )
-        next_suggestion, pending_count = suggestion_queue_payload(
+        next_suggestion, queue_preview, pending_count = suggestion_queue_payload(
             spreadsheet, owner
         )
     except SuggestionError as exc:
@@ -6711,6 +6793,7 @@ def plan_planning_suggestion(suggestion_id):
         "activity": public_planned_activity(activity),
         "suggestion": public_suggestion(updated, live_candidate),
         "next_suggestion": next_suggestion,
+        "queue_preview": queue_preview,
         "pending_count": pending_count,
     }), (200 if duplicate else 201)
 

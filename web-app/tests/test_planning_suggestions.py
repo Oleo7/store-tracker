@@ -234,7 +234,10 @@ class PlanningSuggestionApiTests(PlanningApiTestCase):
         self.assertEqual(
             rows[0]["source_suggestion_id"], suggestion["suggestion_id"]
         )
-        self.assertEqual(rows[0]["recommended_contact_type"], "phone")
+        self.assertEqual(
+            rows[0]["recommended_contact_type"],
+            suggestion["recommended_contact_type"],
+        )
         suggestion_rows = self.spreadsheet.worksheet(
             SUGGESTIONS_SHEET
         ).dict_rows()
