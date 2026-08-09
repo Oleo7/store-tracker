@@ -61,6 +61,19 @@ from route_proposal import (
     calculate_route_proposal,
     seconds_to_minutes,
 )
+from route_optimization import (
+    MAX_VISITS as ROUTE_OPTIMIZATION_MAX_VISITS,
+    ROUTE_ENGINE_VERSION,
+    ROUTE_MAX_SECONDS as ROUTE_OPTIMIZATION_MAX_SECONDS,
+    SERVICE_SECONDS as ROUTE_OPTIMIZATION_SERVICE_SECONDS,
+    RouteOptimizationError,
+    RouteOptimizationProvider,
+    TrustedCoordinate,
+    build_optimize_tours_request,
+    build_request_fingerprint as build_route_optimization_fingerprint,
+    coordinate_quality as route_coordinate_quality,
+    parse_optimize_tours_response,
+)
 from reminder_email import (
     EMAIL_PROPOSAL_PRODUCT_SETTINGS,
     EMAIL_PROPOSAL_TEMPLATE_FIELDS,
@@ -422,14 +435,17 @@ def finalize_response(response):
 @app.route("/health", methods=["GET"])
 def health():
     lock_health = planning_lock_health()
-    status = 200 if lock_health["safe"] else 503
+    route_health = route_optimization_configuration_health()
+    safe = bool(lock_health["safe"] and route_health["safe"])
+    status = 200 if safe else 503
     return jsonify({
-        "ok": lock_health["safe"],
+        "ok": safe,
         "mode": lock_health["mode"],
         "worker_count": lock_health["worker_count"],
-        "safe": lock_health["safe"],
-        "reason": lock_health["reason"],
+        "safe": safe,
+        "reason": lock_health["reason"] or route_health["reason"],
         "planning_write_lock": lock_health,
+        "route_optimization": route_health,
     }), status
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
@@ -496,6 +512,31 @@ ROUTE_PROPOSAL_COLUMNS = [
     "user_display_name",
     "generated_at",
     "payload_json",
+]
+ROUTE_OPTIMIZATION_RUNS_SHEET = "route_optimization_runs"
+ROUTE_OPTIMIZATION_RUN_COLUMNS = [
+    "run_id",
+    "actor_user_name",
+    "user_name",
+    "usage_iso_week",
+    "route_date",
+    "client_request_id",
+    "request_fingerprint",
+    "engine_version",
+    "status",
+    "counted_attempt",
+    "started_at",
+    "completed_at",
+    "timeout_seconds",
+    "shipment_count",
+    "required_count",
+    "performed_count",
+    "skipped_count",
+    "excluded_untrusted_coordinates",
+    "google_request_label",
+    "http_status",
+    "error_code",
+    "result_payload_json",
 ]
 PLANNED_ACTIVITIES_SHEET = "planned_activities"
 PLANNED_ACTIVITY_COLUMNS = [
@@ -585,6 +626,10 @@ _route_provider_lock = threading.Lock()
 _route_provider = None
 _route_provider_config = None
 _route_proposal_daily_lock = threading.RLock()
+_route_optimization_run_lock = threading.RLock()
+_route_optimization_provider_lock = threading.Lock()
+_route_optimization_provider = None
+_route_optimization_provider_config = None
 _planning_write_lock = threading.RLock()
 
 
@@ -599,7 +644,60 @@ READ_CACHE_TITLES = {
     "planned_activities",
     "planning_suggestions",
     "score_events",
+    ROUTE_OPTIMIZATION_RUNS_SHEET,
 }
+
+
+def route_engine_name(environ=None):
+    environment = os.environ if environ is None else environ
+    return str(environment.get("ROUTE_ENGINE") or "legacy").strip().casefold()
+
+
+def route_optimization_configuration_health(environ=None):
+    environment = os.environ if environ is None else environ
+    engine = route_engine_name(environment)
+    if engine not in {"legacy", "route_optimization"}:
+        return {
+            "safe": False,
+            "engine": engine,
+            "reason": "invalid_route_engine",
+        }
+    if engine == "legacy":
+        return {"safe": True, "engine": engine, "reason": ""}
+    missing = []
+    if not str(environment.get("ROUTE_OPTIMIZATION_PROJECT") or "").strip():
+        missing.append("ROUTE_OPTIMIZATION_PROJECT")
+    if not (
+        str(environment.get("ROUTE_OPTIMIZATION_GOOGLE_CREDENTIALS") or "").strip()
+        or str(environment.get("GOOGLE_CREDENTIALS") or "").strip()
+    ):
+        missing.append("ROUTE_OPTIMIZATION_GOOGLE_CREDENTIALS")
+    return {
+        "safe": not missing,
+        "engine": engine,
+        "reason": "" if not missing else "route_optimization_not_configured",
+        "missing": missing,
+    }
+
+
+def route_optimization_int_setting(name, default, minimum=1, maximum=1000):
+    try:
+        return max(minimum, min(maximum, int(os.environ.get(name) or default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def route_optimization_provider():
+    global _route_optimization_provider, _route_optimization_provider_config
+    config = (
+        str(os.environ.get("ROUTE_OPTIMIZATION_GOOGLE_CREDENTIALS") or ""),
+        str(os.environ.get("GOOGLE_CREDENTIALS") or ""),
+    )
+    with _route_optimization_provider_lock:
+        if _route_optimization_provider is None or _route_optimization_provider_config != config:
+            _route_optimization_provider = RouteOptimizationProvider()
+            _route_optimization_provider_config = config
+        return _route_optimization_provider
 
 
 def sheets_read_cache_ttl(environ=None):
@@ -8988,6 +9086,730 @@ def planning_route_conflicts(stops, fixed_non_route):
     return conflicts
 
 
+def route_optimization_error_response(error):
+    details = dict(getattr(error, "details", {}) or {})
+    return planning_error(
+        error.code,
+        error.public_message,
+        error.http_status,
+        **details,
+    )
+
+
+def route_optimization_run_sheet(spreadsheet):
+    return get_or_create_worksheet(
+        spreadsheet,
+        ROUTE_OPTIMIZATION_RUNS_SHEET,
+        ROUTE_OPTIMIZATION_RUN_COLUMNS,
+        rows=1000,
+    )
+
+
+def route_optimization_run_rows(spreadsheet):
+    sheet = route_optimization_run_sheet(spreadsheet)
+    headers, rows = worksheet_snapshot(
+        sheet, expected_columns=ROUTE_OPTIMIZATION_RUN_COLUMNS
+    )
+    return sheet, headers, rows
+
+
+def update_route_optimization_run(sheet, row_index, headers, updates, run_id):
+    """Update one ledger row and verify it after an uncertain Sheets write."""
+    try:
+        update_sheet_row(sheet, row_index, headers, updates)
+        return
+    except Exception:
+        invalidate_sheet_for_write(sheet)
+        _headers, rows = worksheet_snapshot(
+            sheet, expected_columns=ROUTE_OPTIMIZATION_RUN_COLUMNS
+        )
+        current = next((row for _index, row in rows if row.get("run_id") == run_id), None)
+        if current and all(str(current.get(key) or "") == str(value or "") for key, value in updates.items()):
+            return
+        raise
+
+
+def append_route_optimization_run(sheet, run):
+    try:
+        return append_dict_row(sheet, ROUTE_OPTIMIZATION_RUN_COLUMNS, run)
+    except Exception:
+        invalidate_sheet_for_write(sheet)
+        _headers, rows = worksheet_snapshot(
+            sheet, expected_columns=ROUTE_OPTIMIZATION_RUN_COLUMNS
+        )
+        existing = next((
+            row_index for row_index, row in rows
+            if str(row.get("run_id") or "") == str(run.get("run_id") or "")
+        ), None)
+        if existing is not None:
+            return existing
+        raise
+
+
+def route_optimization_usage_week(value=None):
+    current = value or stockholm_today()
+    year, week, _weekday = current.isocalendar()
+    return f"{year}-W{week:02d}"
+
+
+def route_optimization_reset_at(value=None):
+    current = value or stockholm_now()
+    start = current.date() + timedelta(days=(7 - current.weekday()))
+    return datetime.combine(start, datetime_time.min, tzinfo=STOCKHOLM_ZONE).isoformat()
+
+
+def _route_activity_duration_seconds(row, default_minutes):
+    try:
+        minutes = max(1, int(math.ceil(float(row.get("duration_minutes") or default_minutes))))
+    except (TypeError, ValueError, OverflowError):
+        minutes = default_minutes
+    return minutes * 60
+
+
+def build_route_optimization_inputs(
+    *, spreadsheet, owner, route_date, start, route_start_at_override=None
+):
+    """Build one coherent, full-owner automatic optimization universe."""
+    route_start_at = route_start_at_override or route_start_datetime(route_date)
+    _sheet, _headers, indexed_rows = get_planned_activity_snapshot(spreadsheet)
+    planned_rows = [row for _index, row in indexed_rows]
+    snapshot = get_authoritative_priority_snapshot(
+        spreadsheet,
+        today=route_date,
+        planned_activity_rows=planned_rows,
+    )
+    customers = list(snapshot.get("customers") or [])
+    active_customers = [customer for customer in customers if not customer_is_cancelled(customer)]
+    quality = route_coordinate_quality(active_customers)
+    owner_customers = [
+        customer for customer in active_customers
+        if customer_owned_by_user(customer, owner)
+        and str(customer.get("customer_id") or "").strip()
+    ]
+    active_by_id = defaultdict(list)
+    for customer in active_customers:
+        customer_id = str(customer.get("customer_id") or "").strip()
+        if customer_id:
+            active_by_id[customer_id].append(customer)
+    owner_customer_ids = {
+        str(customer.get("customer_id") or "").strip()
+        for customer in owner_customers
+    }
+    global_conflicts = sorted(
+        customer_id for customer_id in owner_customer_ids
+        if len(active_by_id.get(customer_id, ())) != 1
+    )
+    if global_conflicts:
+        return None, planning_error(
+            "customer_identity_conflict",
+            "En eller flera butiker har en tvetydig customer_id.",
+            409,
+            customer_ids=global_conflicts,
+        )
+    by_id_lists = defaultdict(list)
+    for customer in owner_customers:
+        by_id_lists[str(customer.get("customer_id") or "").strip()].append(customer)
+    duplicate_ids = sorted(customer_id for customer_id, matches in by_id_lists.items() if len(matches) != 1)
+    if duplicate_ids:
+        return None, planning_error(
+            "customer_identity_conflict",
+            "En eller flera butiker har en tvetydig customer_id.",
+            409,
+            customer_ids=duplicate_ids,
+        )
+    customers_by_id = {customer_id: matches[0] for customer_id, matches in by_id_lists.items()}
+    priorities_by_id = {
+        str(item.get("customer_id") or "").strip(): item
+        for item in (snapshot.get("priorities") or [])
+        if str(item.get("customer_id") or "").strip()
+    }
+    date_rows = planning_rows_for_date(indexed_rows, owner, route_date)
+    active_date_rows = [
+        row for _row_index, row in date_rows
+        if str(row.get("status") or "planned").strip().casefold() == "planned"
+    ]
+
+    mandatory_by_customer = defaultdict(list)
+    fixed_break_rows = []
+    for row in active_date_rows:
+        source = str(row.get("source") or "").strip().casefold()
+        if source == "route":
+            continue
+        contact_type = normalize_planning_contact_type(row.get("contact_type"))
+        if contact_type == "visit":
+            customer_id = str(row.get("customer_id") or "").strip()
+            if not customer_id or customer_id not in customers_by_id:
+                return None, planning_error(
+                    "route_required_customer_unavailable",
+                    "Ett obligatoriskt besök saknar en aktuell kundkoppling.",
+                    409,
+                    planned_activity_ids=[str(row.get("planned_activity_id") or "").strip()],
+                )
+            mandatory_by_customer[customer_id].append(row)
+        elif contact_type in {"phone", "email"}:
+            fixed_break_rows.append(row)
+    duplicates = {
+        customer_id: [str(row.get("planned_activity_id") or "").strip() for row in rows]
+        for customer_id, rows in mandatory_by_customer.items()
+        if len(rows) > 1
+    }
+    if duplicates:
+        return None, planning_error(
+            "route_duplicate_required_customer",
+            "Samma butik har flera obligatoriska besök samma dag.",
+            422,
+            duplicate_customers=duplicates,
+        )
+    if len(mandatory_by_customer) > ROUTE_OPTIMIZATION_MAX_VISITS:
+        return None, planning_error(
+            "route_too_many_required_visits",
+            "Dagen innehåller fler än 15 obligatoriska butiksbesök.",
+            422,
+        )
+
+    global_end = route_start_at + timedelta(seconds=ROUTE_OPTIMIZATION_MAX_SECONDS)
+    fixed_intervals = []
+    fixed_breaks = []
+    fixed_activities_for_fingerprint = []
+    pre_route_fixed_seconds = 0
+    for row in fixed_break_rows:
+        scheduled = parse_planning_datetime(row.get("scheduled_at"))
+        duration_seconds = _route_activity_duration_seconds(row, 10)
+        if scheduled is None:
+            return None, planning_error(
+                "route_fixed_activity_invalid",
+                "En fast telefon- eller mejlaktivitet saknar giltig tid.",
+                422,
+                planned_activity_id=row.get("planned_activity_id", ""),
+            )
+        end = scheduled + timedelta(seconds=duration_seconds)
+        if end <= route_start_at:
+            pre_route_fixed_seconds += duration_seconds
+        elif scheduled < route_start_at < end:
+            return None, planning_error(
+                "route_starts_during_fixed_activity",
+                "Ruttens starttid ligger mitt i en fast aktivitet.",
+                422,
+                planned_activity_id=row.get("planned_activity_id", ""),
+            )
+        elif end > global_end:
+            return None, planning_error(
+                "route_fixed_activity_outside_window",
+                "En fast aktivitet ligger utanför den tillåtna arbetsdagen.",
+                422,
+                planned_activity_id=row.get("planned_activity_id", ""),
+            )
+        else:
+            fixed_breaks.append({
+                "activity_id": str(row.get("planned_activity_id") or ""),
+                "scheduled_at": scheduled,
+                "duration_seconds": duration_seconds,
+            })
+        fixed_intervals.append((scheduled, end, row))
+        fixed_activities_for_fingerprint.append({
+            "activity_id": str(row.get("planned_activity_id") or ""),
+            "revision": planning_revision(row),
+            "contact_type": normalize_planning_contact_type(row.get("contact_type")),
+            "scheduled_at": scheduled,
+            "duration_seconds": duration_seconds,
+            "status": str(row.get("status") or "planned").strip().casefold(),
+        })
+
+    shipments = []
+    mandatory_ids = set(mandatory_by_customer)
+    untrusted_required_ids = sorted(
+        customer_id for customer_id in mandatory_ids
+        if not quality.get(customer_id, {}).get("trusted")
+    )
+    if untrusted_required_ids:
+        return None, planning_error(
+            "route_required_coordinate_untrusted",
+            "Ett eller flera obligatoriska besök saknar betrodda koordinater.",
+            422,
+            customer_ids=untrusted_required_ids,
+            planned_activity_ids=sorted(
+                str(row.get("planned_activity_id") or "").strip()
+                for customer_id in untrusted_required_ids
+                for row in mandatory_by_customer[customer_id]
+                if str(row.get("planned_activity_id") or "").strip()
+            ),
+        )
+    for customer_id, rows in mandatory_by_customer.items():
+        row = rows[0]
+        scheduled = parse_planning_datetime(row.get("scheduled_at"))
+        fixed_at = None if is_yes(row.get("time_is_estimated")) else scheduled
+        if fixed_at is not None:
+            if fixed_at < route_start_at or fixed_at + timedelta(seconds=ROUTE_OPTIMIZATION_SERVICE_SECONDS) > global_end:
+                return None, planning_error(
+                    "route_required_activity_outside_window",
+                    "Ett fast besök ligger utanför den tillåtna arbetsdagen.",
+                    422,
+                    planned_activity_id=row.get("planned_activity_id", ""),
+                )
+            fixed_intervals.append((
+                fixed_at,
+                fixed_at + timedelta(seconds=ROUTE_OPTIMIZATION_SERVICE_SECONDS),
+                row,
+            ))
+        coordinate_entry = quality.get(customer_id, {})
+        priority = priorities_by_id.get(customer_id, {})
+        shipments.append({
+            "customer_id": customer_id,
+            "priority_score": priority.get("priority_score") or 1,
+            "coordinate": coordinate_entry["coordinate"],
+            "required": True,
+            "fixed_at": fixed_at,
+            "activity_id": str(row.get("planned_activity_id") or ""),
+            "revision": planning_revision(row),
+        })
+
+    fixed_intervals.sort(key=lambda item: item[0])
+    for previous, current in zip(fixed_intervals, fixed_intervals[1:]):
+        if current[0] < previous[1]:
+            return None, planning_error(
+                "route_fixed_activity_conflict",
+                "Två fasta aktiviteter överlappar varandra.",
+                422,
+                planned_activity_ids=sorted(filter(None, [
+                    str(previous[2].get("planned_activity_id") or "").strip(),
+                    str(current[2].get("planned_activity_id") or "").strip(),
+                ])),
+            )
+
+    blocked_customer_ids = set()
+    for row in planned_rows:
+        if str(row.get("status") or "planned").strip().casefold() != "planned":
+            continue
+        if str(row.get("source") or "").strip().casefold() == "route":
+            continue
+        scheduled = parse_planning_datetime(row.get("scheduled_at"))
+        customer_id = str(row.get("customer_id") or "").strip()
+        if not scheduled or not customer_id:
+            continue
+        if scheduled.date() > route_date or (
+            scheduled.date() == route_date
+            and normalize_planning_contact_type(row.get("contact_type")) in {"phone", "email"}
+        ):
+            blocked_customer_ids.add(customer_id)
+    for contact in snapshot.get("contact_rows") or []:
+        if parse_date_value(contact.get("date_time")) == route_date:
+            customer_id = str(contact.get("customer_id") or "").strip()
+            if customer_id:
+                blocked_customer_ids.add(customer_id)
+
+    excluded_untrusted = 0
+    for customer_id, customer in customers_by_id.items():
+        if customer_id in mandatory_ids or customer_id in blocked_customer_ids:
+            continue
+        priority = priorities_by_id.get(customer_id, {})
+        try:
+            score = int(round(float(priority.get("priority_score") or 0)))
+        except (TypeError, ValueError, OverflowError):
+            score = 0
+        if not 1 <= score <= 100:
+            continue
+        coordinate_entry = quality.get(customer_id, {})
+        if not coordinate_entry.get("trusted"):
+            excluded_untrusted += 1
+            continue
+        shipments.append({
+            "customer_id": customer_id,
+            "priority_score": score,
+            "coordinate": coordinate_entry["coordinate"],
+            "required": False,
+            "fixed_at": None,
+            "activity_id": "",
+            "revision": 0,
+        })
+
+    if not shipments:
+        return None, planning_error(
+            "route_no_eligible_customers",
+            "Inga butiker är tillgängliga för automatisk ruttoptimering.",
+            422,
+        )
+
+    shipments.sort(key=lambda item: (not item["required"], item["customer_id"]))
+    timeout_seconds = route_optimization_int_setting(
+        "ROUTE_OPTIMIZATION_FIXED_TIMEOUT_SECONDS" if fixed_intervals else "ROUTE_OPTIMIZATION_TIMEOUT_SECONDS",
+        180 if fixed_intervals else 90,
+        minimum=30,
+        maximum=300,
+    )
+    trusted_start = TrustedCoordinate(round(start.latitude, 5), round(start.longitude, 5))
+    fingerprint = build_route_optimization_fingerprint(
+        owner_user_name=owner.get("user_name"),
+        route_date=route_date.isoformat(),
+        route_start=route_start_at,
+        route_mode="automatic",
+        start=trusted_start,
+        shipments=shipments,
+        fixed_activities=fixed_activities_for_fingerprint,
+    )
+    return {
+        "route_start_at": route_start_at,
+        "start": trusted_start,
+        "shipments": shipments,
+        "fixed_breaks": fixed_breaks,
+        "fixed_activities": fixed_activities_for_fingerprint,
+        "pre_route_fixed_seconds": pre_route_fixed_seconds,
+        "timeout_seconds": timeout_seconds,
+        "fingerprint": fingerprint,
+        "customers_by_id": customers_by_id,
+        "date_rows": date_rows,
+        "excluded_untrusted_coordinates": excluded_untrusted,
+        "required_count": len(mandatory_ids),
+    }, None
+
+
+def _parse_run_timestamp(value):
+    try:
+        parsed = datetime.fromisoformat(str(value or "").strip().replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=STOCKHOLM_ZONE)
+    return parsed.astimezone(STOCKHOLM_ZONE)
+
+
+def execute_route_optimization(*, spreadsheet, owner, inputs, client_request_id):
+    actor = current_user()
+    actor_user_name = str(actor.get("user_name") or "").strip()
+    owner_user_name = str(owner.get("user_name") or "").strip()
+    fingerprint = inputs["fingerprint"]
+    now = stockholm_now()
+    usage_week = route_optimization_usage_week(now.date())
+    cache_seconds = route_optimization_int_setting(
+        "ROUTE_OPTIMIZATION_CACHE_SECONDS", 1800, minimum=60, maximum=86400
+    )
+    owner_limit = route_optimization_int_setting(
+        "ROUTE_OPTIMIZATION_WEEKLY_OWNER_LIMIT", 2, minimum=1, maximum=100
+    )
+    team_limit = route_optimization_int_setting(
+        "ROUTE_OPTIMIZATION_WEEKLY_TEAM_LIMIT", 6, minimum=1, maximum=500
+    )
+
+    with _route_optimization_run_lock:
+        sheet, headers, rows = route_optimization_run_rows(spreadsheet)
+        same_request = next((
+            (row_index, row) for row_index, row in rows
+            if str(row.get("actor_user_name") or "").strip() == actor_user_name
+            and str(row.get("client_request_id") or "").strip() == client_request_id
+        ), None)
+        if same_request:
+            _row_index, row = same_request
+            if str(row.get("request_fingerprint") or "") != fingerprint:
+                return None, planning_error(
+                    "route_request_id_conflict",
+                    "Request-ID:t har redan använts för ett annat ruttunderlag.",
+                    409,
+                )
+            status = str(row.get("status") or "").strip().casefold()
+            if status == "completed":
+                try:
+                    return {
+                        "result": json.loads(row.get("result_payload_json") or "{}"),
+                        "run_id": row.get("run_id"),
+                        "cached": True,
+                    }, None
+                except (TypeError, ValueError):
+                    return None, planning_error(
+                        "route_result_cache_invalid",
+                        "Det sparade ruttresultatet är ogiltigt.",
+                        503,
+                    )
+            if status == "running":
+                started_at = _parse_run_timestamp(row.get("started_at"))
+                if started_at and (now - started_at).total_seconds() <= inputs["timeout_seconds"] + 60:
+                    return None, planning_error(
+                        "route_optimization_in_progress",
+                        "Samma ruttoptimering pågår redan.",
+                        409,
+                    )
+                update_route_optimization_run(
+                    sheet,
+                    same_request[0],
+                    headers,
+                    {
+                        "status": "indeterminate",
+                        "completed_at": planning_timestamp(),
+                        "error_code": "route_optimization_stale_running",
+                    },
+                    str(row.get("run_id") or ""),
+                )
+                return None, planning_error(
+                    "route_request_already_attempted",
+                    "Det tidigare ruttförsöket har okänt utfall. Starta ett nytt försök.",
+                    409,
+                )
+            return None, planning_error(
+                "route_request_already_attempted",
+                "Detta ruttförsök är redan avslutat. Starta ett nytt försök.",
+                409,
+            )
+
+        for row_index, row in rows:
+            if str(row.get("request_fingerprint") or "") != fingerprint:
+                continue
+            status = str(row.get("status") or "").strip().casefold()
+            completed_at = _parse_run_timestamp(row.get("completed_at"))
+            if status == "completed" and completed_at and (now - completed_at).total_seconds() <= cache_seconds:
+                try:
+                    return {
+                        "result": json.loads(row.get("result_payload_json") or "{}"),
+                        "run_id": row.get("run_id"),
+                        "cached": True,
+                    }, None
+                except (TypeError, ValueError):
+                    continue
+            if status == "running":
+                started_at = _parse_run_timestamp(row.get("started_at"))
+                if started_at and (now - started_at).total_seconds() <= inputs["timeout_seconds"] + 60:
+                    return None, planning_error(
+                        "route_optimization_in_progress",
+                        "Samma ruttoptimering pågår redan.",
+                        409,
+                    )
+                update_route_optimization_run(
+                    sheet,
+                    row_index,
+                    headers,
+                    {
+                        "status": "indeterminate",
+                        "completed_at": planning_timestamp(),
+                        "error_code": "route_optimization_stale_running",
+                    },
+                    str(row.get("run_id") or ""),
+                )
+
+        counted = [
+            row for _row_index, row in rows
+            if str(row.get("usage_iso_week") or "") == usage_week
+            and is_yes(row.get("counted_attempt"))
+        ]
+        owner_count = sum(
+            1 for row in counted
+            if normalize_key(row.get("user_name")) == normalize_key(owner_user_name)
+        )
+        if owner_count >= owner_limit or len(counted) >= team_limit:
+            return None, planning_error(
+                "route_optimization_quota_exceeded",
+                "Veckans kvot för automatisk ruttoptimering är slut.",
+                429,
+                reset_at=route_optimization_reset_at(now),
+            )
+
+        run_id = str(uuid.uuid4())
+        request_label = f"store-tracker:{run_id}"
+        run = {
+            "run_id": run_id,
+            "actor_user_name": actor_user_name,
+            "user_name": owner_user_name,
+            "usage_iso_week": usage_week,
+            "route_date": inputs["route_start_at"].date().isoformat(),
+            "client_request_id": client_request_id,
+            "request_fingerprint": fingerprint,
+            "engine_version": ROUTE_ENGINE_VERSION,
+            "status": "running",
+            "counted_attempt": "Y",
+            "started_at": planning_timestamp(),
+            "completed_at": "",
+            "timeout_seconds": inputs["timeout_seconds"],
+            "shipment_count": len(inputs["shipments"]),
+            "required_count": inputs["required_count"],
+            "performed_count": "",
+            "skipped_count": "",
+            "excluded_untrusted_coordinates": inputs["excluded_untrusted_coordinates"],
+            "google_request_label": request_label,
+            "http_status": "",
+            "error_code": "",
+            "result_payload_json": "",
+        }
+        row_index = append_route_optimization_run(sheet, run)
+
+    body = build_optimize_tours_request(
+        run_id=run_id,
+        owner_user_name=owner_user_name,
+        route_start=inputs["route_start_at"],
+        start=inputs["start"],
+        shipments=inputs["shipments"],
+        fixed_breaks=inputs["fixed_breaks"],
+        pre_route_fixed_seconds=inputs["pre_route_fixed_seconds"],
+        timeout_seconds=inputs["timeout_seconds"],
+    )
+    project = str(os.environ.get("ROUTE_OPTIMIZATION_PROJECT") or "").strip()
+    solve_started = time.perf_counter()
+    try:
+        response, http_status = route_optimization_provider().optimize(
+            project=project,
+            body=body,
+            timeout_seconds=inputs["timeout_seconds"],
+        )
+        parsed = parse_optimize_tours_response(
+            response,
+            shipments=inputs["shipments"],
+            owner_user_name=owner_user_name,
+            route_start=inputs["route_start_at"],
+            pre_route_fixed_seconds=inputs["pre_route_fixed_seconds"],
+            fixed_breaks=inputs["fixed_breaks"],
+        )
+    except RouteOptimizationError as error:
+        with _route_optimization_run_lock:
+            update_route_optimization_run(
+                sheet,
+                row_index,
+                headers,
+                {
+                    "status": "failed",
+                    "counted_attempt": "Y" if error.counted_attempt else "N",
+                    "completed_at": planning_timestamp(),
+                    "http_status": error.provider_status or "",
+                    "error_code": error.code,
+                },
+                run_id,
+            )
+        return None, route_optimization_error_response(error)
+
+    solve_duration_ms = round((time.perf_counter() - solve_started) * 1000, 1)
+    compact_result = {
+        "stops": parsed["stops"],
+        "summary": parsed["summary"],
+        "performed_count": parsed["performed_count"],
+        "skipped_count": parsed["skipped_count"],
+        "solve_duration_ms": solve_duration_ms,
+    }
+    compact_json = json.dumps(compact_result, ensure_ascii=False, separators=(",", ":"))
+    with _route_optimization_run_lock:
+        update_route_optimization_run(
+            sheet,
+            row_index,
+            headers,
+            {
+                "status": "completed",
+                "completed_at": planning_timestamp(),
+                "http_status": http_status,
+                "performed_count": parsed["performed_count"],
+                "skipped_count": parsed["skipped_count"],
+                "result_payload_json": compact_json,
+            },
+            run_id,
+        )
+    return {"result": compact_result, "run_id": run_id, "cached": False}, None
+
+
+def build_route_optimization_preview(
+    *, spreadsheet, owner, route_date, start, client_request_id
+):
+    inputs, input_error = build_route_optimization_inputs(
+        spreadsheet=spreadsheet,
+        owner=owner,
+        route_date=route_date,
+        start=start,
+    )
+    if input_error is not None:
+        return None, input_error
+    solved, solve_error = execute_route_optimization(
+        spreadsheet=spreadsheet,
+        owner=owner,
+        inputs=inputs,
+        client_request_id=client_request_id,
+    )
+    if solve_error is not None:
+        return None, solve_error
+    compact = solved["result"]
+    stops = []
+    for stop in compact.get("stops") or []:
+        customer_id = str(stop.get("customer_id") or "").strip()
+        customer = inputs["customers_by_id"].get(customer_id)
+        if not customer:
+            return None, planning_error(
+                "planning_changed",
+                "Kundunderlaget ändrades under optimeringen. Beräkna rutten igen.",
+                409,
+            )
+        stops.append({
+            **stop,
+            "customer_row": customer.get("row"),
+            "row": customer.get("row"),
+            "customer_number": str(customer.get("customer_number") or "").strip(),
+            "customer": str(customer.get("customer") or "").strip(),
+            "address": " ".join(filter(None, [
+                str(customer.get("address_google") or "").strip(),
+                str(customer.get("address_number_google") or "").strip(),
+            ])),
+            "city": str(customer.get("city_google") or "").strip(),
+            "latitude": inputs["shipments"][next(
+                index for index, shipment in enumerate(inputs["shipments"])
+                if shipment["customer_id"] == customer_id
+            )]["coordinate"].latitude,
+            "longitude": inputs["shipments"][next(
+                index for index, shipment in enumerate(inputs["shipments"])
+                if shipment["customer_id"] == customer_id
+            )]["coordinate"].longitude,
+            "contact_type": "visit",
+            "contact_type_label": PLANNING_CONTACT_TYPE_LABELS["visit"],
+            "time_is_estimated": not bool(stop.get("required")),
+        })
+    summary = dict(compact.get("summary") or {})
+    pre_route_minutes = round(inputs["pre_route_fixed_seconds"] / 60, 1)
+    summary.update({
+        "stop_count": len(stops),
+        "total_minutes": round(float(summary.get("route_minutes") or 0) + pre_route_minutes, 1),
+        "non_route_minutes": pre_route_minutes,
+        "conflict_count": 0,
+    })
+    route_payload = {
+        "ok": True,
+        "engine": "route_optimization",
+        "engine_version": ROUTE_ENGINE_VERSION,
+        "stops": stops,
+        "summary": summary,
+        "meta": {
+            "engine": "route_optimization",
+            "engine_version": ROUTE_ENGINE_VERSION,
+            "run_id": solved["run_id"],
+            "candidate_scope": "all_eligible_owner_customers",
+            "shipment_count": len(inputs["shipments"]),
+            "performed_count": compact.get("performed_count", len(stops)),
+            "skipped_count": compact.get("skipped_count", 0),
+            "excluded_untrusted_coordinates": inputs["excluded_untrusted_coordinates"],
+            "quota_cached": bool(solved["cached"]),
+            "timeout_seconds": inputs["timeout_seconds"],
+            "solve_duration_ms": compact.get("solve_duration_ms", 0),
+        },
+    }
+    generated_at = planning_timestamp()
+    preview = {
+        "ok": True,
+        "owner": owner,
+        "route_date": route_date.isoformat(),
+        "route_start_at": inputs["route_start_at"].isoformat(timespec="minutes"),
+        "generated_at": generated_at,
+        "expires_at": (stockholm_now() + timedelta(seconds=PLANNING_PREVIEW_MAX_AGE_SECONDS)).isoformat(timespec="seconds"),
+        "start": {"latitude": start.latitude, "longitude": start.longitude},
+        "stops": stops,
+        "summary": summary,
+        "conflicts": [],
+        "warnings": ([{
+            "code": "route_untrusted_coordinates_excluded",
+            "count": inputs["excluded_untrusted_coordinates"],
+            "message": "Butiker med osäkra koordinater utelämnades.",
+        }] if inputs["excluded_untrusted_coordinates"] else []),
+        "timeline": {"route_end_at": summary.get("route_end_at")},
+        "gps_notice": "Start och retur: din position nu",
+        "plan_fingerprint": planning_state_fingerprint(inputs["date_rows"]),
+        "route_optimization_fingerprint": inputs["fingerprint"],
+        "route_optimization_run_id": solved["run_id"],
+        "route_engine_version": ROUTE_ENGINE_VERSION,
+        "route_mode": "automatic",
+        "route_payload": route_payload,
+    }
+    token_payload = {key: value for key, value in preview.items() if key not in {"ok", "owner"}}
+    token_payload["user_name"] = owner.get("user_name")
+    preview["preview_token"] = planning_preview_serializer().dumps(token_payload)
+    return preview, None
+
+
 def build_planning_route_preview(
     *,
     spreadsheet,
@@ -10380,6 +11202,36 @@ def planning_route_apply():
             "Ruttförhandsgranskningen tillhör en annan säljare.",
             409,
         )
+    if str(preview.get("route_engine_version") or "") == ROUTE_ENGINE_VERSION:
+        start_data = preview.get("start") or {}
+        try:
+            preview_start = Coordinate(
+                latitude=float(start_data.get("latitude")),
+                longitude=float(start_data.get("longitude")),
+            )
+        except (TypeError, ValueError):
+            return planning_error(
+                "invalid_route_preview",
+                "Ruttförhandsgranskningen saknar giltig startposition.",
+                400,
+            )
+        current_inputs, current_error = build_route_optimization_inputs(
+            spreadsheet=spreadsheet,
+            owner=owner,
+            route_date=route_date,
+            start=preview_start,
+            route_start_at_override=parse_planning_datetime(
+                preview.get("route_start_at")
+            ),
+        )
+        if current_error is not None:
+            return current_error
+        if str(preview.get("route_optimization_fingerprint") or "") != current_inputs["fingerprint"]:
+            return planning_error(
+                "planning_changed",
+                "Planeringen eller kundunderlaget ändrades efter förhandsgranskningen. Beräkna rutten igen.",
+                409,
+            )
     try:
         result, apply_error = apply_planning_route(
             spreadsheet=spreadsheet,
@@ -10448,6 +11300,37 @@ def planning_route_preview():
             400,
             field="candidate_rows",
         )
+    engine = route_engine_name()
+    if engine not in {"legacy", "route_optimization"}:
+        return planning_error(
+            "invalid_route_engine",
+            "Ruttmotorn är felkonfigurerad.",
+            503,
+        )
+    client_request_id = normalize_client_request_id(data.get("client_request_id"))
+    if engine == "route_optimization" and not client_request_id:
+        return planning_error(
+            "invalid_client_request_id",
+            "Ett giltigt request-ID krävs för ruttoptimeringen.",
+            400,
+            field="client_request_id",
+        )
+    route_mode = str(data.get("route_mode") or "automatic").strip().casefold()
+    if engine == "route_optimization" and route_mode != "automatic":
+        return planning_error(
+            "invalid_route_mode",
+            "Google Route Optimization stöder endast automatiskt ruttläge.",
+            400,
+            field="route_mode",
+        )
+    if engine == "route_optimization":
+        configuration = route_optimization_configuration_health()
+        if not configuration["safe"]:
+            return planning_error(
+                "route_optimization_not_configured",
+                "Ruttoptimeringen är inte konfigurerad.",
+                503,
+            )
 
     try:
         spreadsheet = get_spreadsheet_with_retry()
@@ -10465,13 +11348,22 @@ def planning_route_preview():
     if owner_error is not None:
         return owner_error
     try:
-        preview, preview_error = build_planning_route_preview(
-            spreadsheet=spreadsheet,
-            owner=owner,
-            route_date=route_date,
-            start=start,
-            candidate_rows=tuple(sorted(set(candidate_rows))),
-        )
+        if engine == "route_optimization":
+            preview, preview_error = build_route_optimization_preview(
+                spreadsheet=spreadsheet,
+                owner=owner,
+                route_date=route_date,
+                start=start,
+                client_request_id=client_request_id,
+            )
+        else:
+            preview, preview_error = build_planning_route_preview(
+                spreadsheet=spreadsheet,
+                owner=owner,
+                route_date=route_date,
+                start=start,
+                candidate_rows=tuple(sorted(set(candidate_rows))),
+            )
     except Exception:
         app.logger.exception("Unexpected planning route preview failure")
         return planning_error(

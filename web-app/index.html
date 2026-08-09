@@ -4420,6 +4420,7 @@
   let planningEditorRequestId = "";
   let planningModalReturnFocus = null;
   let planningRoutePreview = null;
+  let planningRoutePreviewRequestId = "";
   let planningRouteApplyRequestId = "";
   let planningRouteImportRequestId = "";
   let planningDragState = null;
@@ -8829,11 +8830,16 @@
     }
     button.disabled = true;
     const oldText = button.textContent;
-    button.textContent = "Beräknar…";
+    button.textContent = "Optimerar rutten – det kan ta upp till 3 minuter.";
     try {
+      if (!planningRoutePreviewRequestId) {
+        planningRoutePreviewRequestId = planningClientRequestId("planning-route-preview");
+      }
       const position = await getCurrentPositionForRoute();
       const payload = {
         route_date: planningSelectedDate,
+        route_mode: "automatic",
+        client_request_id: planningRoutePreviewRequestId,
         start: {
           latitude: position.latitude,
           longitude: position.longitude,
@@ -8847,6 +8853,7 @@
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
+      planningRoutePreviewRequestId = "";
       planningRouteApplyRequestId = planningClientRequestId("planning-route-apply");
       renderPlanningRoutePreview(planningRoutePreview);
     } catch (error) {
