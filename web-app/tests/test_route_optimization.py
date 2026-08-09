@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import json
 import os
 from pathlib import Path
 import sys
@@ -24,9 +25,11 @@ from route_optimization import (
     build_optimize_tours_request,
     build_request_fingerprint,
     coordinate_quality,
+    load_service_account_credentials,
     parse_optimize_tours_response,
     priority_penalty,
 )
+import scripts.route_optimization_smoke as smoke_module
 from tests.test_planning import FakeWorksheet, default_spreadsheet
 
 
@@ -126,11 +129,15 @@ class RouteOptimizationModelTests(TestCase):
         )
         model = body["model"]
         self.assertEqual(body["searchMode"], "CONSUME_ALL_AVAILABLE_TIME")
-        self.assertTrue(model["considerRoadTraffic"])
+        self.assertIs(body["considerRoadTraffic"], True)
+        self.assertEqual(body["label"], "store-tracker:run-1")
+        self.assertNotIn("considerRoadTraffic", model)
+        self.assertNotIn("label", model)
         self.assertEqual(model["shipments"][0]["penaltyCost"], 740.0)
         self.assertNotIn("penaltyCost", model["shipments"][1])
         self.assertEqual(model["shipments"][0]["loadDemands"]["visit_slots"]["amount"], "1")
         vehicle = model["vehicles"][0]
+        self.assertEqual(vehicle["travelMode"], "DRIVING")
         self.assertEqual(vehicle["loadLimits"]["visit_slots"]["maxLoad"], "15")
         self.assertEqual(vehicle["loadLimits"]["visit_slots"]["startLoadInterval"], {"min": "0", "max": "0"})
         self.assertEqual(vehicle["startLocation"], vehicle["endLocation"])
@@ -140,6 +147,14 @@ class RouteOptimizationModelTests(TestCase):
         for private_value in ("Butik A", "customer@example.com", "+46700000000", "ring kunden"):
             self.assertNotIn(private_value, rendered)
 
+        at_start = build_optimize_tours_request(
+            run_id="route-start-window", owner_user_name="Olle", route_start=NOW,
+            start=START, shipments=[shipment(3, required=True, fixed_at=NOW)],
+        )
+        start_window = at_start["model"]["shipments"][0]["pickups"][0]["timeWindows"][0]
+        self.assertEqual(start_window["startTime"], at_start["model"]["globalStartTime"])
+        self.assertLess(start_window["startTime"], start_window["endTime"])
+
     def test_t3_full_universe_577_has_no_shortlist(self):
         items = [shipment(index) for index in range(1, 578)]
         body = build_optimize_tours_request(
@@ -147,6 +162,30 @@ class RouteOptimizationModelTests(TestCase):
             start=START, shipments=items,
         )
         self.assertEqual(len(body["model"]["shipments"]), 577)
+        validate_body = smoke_module.synthetic_request(solving_mode="VALIDATE_ONLY")
+        solve_body = smoke_module.synthetic_request(solving_mode="DEFAULT_SOLVE")
+        self.assertEqual(validate_body["solvingMode"], "VALIDATE_ONLY")
+        self.assertEqual(solve_body["solvingMode"], "DEFAULT_SOLVE")
+        self.assertEqual(len(validate_body["model"]["shipments"]), 20)
+        self.assertEqual(
+            validate_body["model"]["shipments"],
+            solve_body["model"]["shipments"],
+        )
+        with patch.dict(os.environ, {
+            "ROUTE_OPTIMIZATION_PROJECT": "synthetic-project",
+            "ROUTE_OPTIMIZATION_GOOGLE_CREDENTIALS": "synthetic-credentials",
+        }, clear=False), patch.object(
+            smoke_module, "load_service_account_credentials", return_value=object()
+        ), patch.object(
+            smoke_module, "RouteOptimizationProvider"
+        ) as provider_class, patch.object(
+            sys, "argv", ["route_optimization_smoke.py", "--validate-only"]
+        ), patch("builtins.print"):
+            provider_class.return_value.optimize.return_value = ({"routes": []}, 200)
+            self.assertEqual(smoke_module.main(), 0)
+        validate_call = provider_class.return_value.optimize.call_args.kwargs
+        self.assertEqual(validate_call["body"]["solvingMode"], "VALIDATE_ONLY")
+        self.assertEqual(len(validate_call["body"]["model"]["shipments"]), 20)
 
     def test_t4_coordinate_quality_bounds_and_generic_fallback_detection(self):
         customers = [{
@@ -275,7 +314,7 @@ class RouteOptimizationIntegrationTests(TestCase):
         self.environment = patch.dict(os.environ, {
             "ROUTE_ENGINE": "route_optimization",
             "ROUTE_OPTIMIZATION_PROJECT": "test-project",
-            "GOOGLE_CREDENTIALS": "test-placeholder",
+            "ROUTE_OPTIMIZATION_GOOGLE_CREDENTIALS": "test-placeholder",
             "ROUTE_OPTIMIZATION_WEEKLY_OWNER_LIMIT": "2",
             "ROUTE_OPTIMIZATION_WEEKLY_TEAM_LIMIT": "6",
         }, clear=False)
@@ -391,14 +430,18 @@ class RouteOptimizationIntegrationTests(TestCase):
                 response = successful_response(real, selected=(0,), start=app_module.route_start_datetime(NOW.date()))
                 return response, 200
 
-        with patch.object(app_module, "get_authoritative_priority_snapshot", return_value=snapshot), patch.object(app_module, "route_optimization_provider", return_value=Provider()):
+        with patch.dict(os.environ, {"PERFORMANCE_LOGGING_ENABLED": "true"}, clear=False), patch.object(
+            app_module, "get_authoritative_priority_snapshot", return_value=snapshot
+        ), patch.object(
+            app_module, "route_optimization_provider", return_value=Provider()
+        ), patch.object(app_module.app.logger, "info") as performance_logs:
             response = self.client.post("/planning/route-preview", json={
-                "route_date": NOW.date().isoformat(),
-                "route_mode": "automatic",
-                "candidate_rows": [2],
-                "client_request_id": "preview-universe-1",
-                "start": {"latitude": 57.7, "longitude": 11.9},
-            })
+                    "route_date": NOW.date().isoformat(),
+                    "route_mode": "automatic",
+                    "candidate_rows": [2],
+                    "client_request_id": "preview-universe-1",
+                    "start": {"latitude": 57.7, "longitude": 11.9},
+                })
         self.assertEqual(response.status_code, 200, response.get_json())
         self.assertEqual(len(captured["body"]["model"]["shipments"]), 2)
         self.assertEqual(self.spreadsheet.worksheet(app_module.PLANNED_ACTIVITIES_SHEET).dict_rows(), [])
@@ -406,6 +449,17 @@ class RouteOptimizationIntegrationTests(TestCase):
         ledger = self.spreadsheet.worksheet(app_module.ROUTE_OPTIMIZATION_RUNS_SHEET).dict_rows()
         self.assertEqual(len(ledger), 1)
         self.assertEqual(ledger[0]["status"], "completed")
+        performance_steps = {
+            json.loads(call.args[0]).get("step")
+            for call in performance_logs.call_args_list
+            if call.args and str(call.args[0]).startswith("{")
+        }
+        self.assertTrue({
+            "route_optimization.input_build",
+            "route_optimization.quota_reservation",
+            "route_optimization.google_solve",
+            "route_optimization.response_validation",
+        }.issubset(performance_steps))
 
     def test_t15_completed_fingerprint_reuses_result_without_call_or_quota(self):
         snapshot = self.priority_snapshot()
@@ -544,6 +598,13 @@ class RouteOptimizationIntegrationTests(TestCase):
         self.assertTrue(app_module.route_optimization_configuration_health({"ROUTE_ENGINE": "legacy"})["safe"])
         self.assertFalse(app_module.route_optimization_configuration_health({"ROUTE_ENGINE": "unknown"})["safe"])
         self.assertFalse(app_module.route_optimization_configuration_health({"ROUTE_ENGINE": "route_optimization"})["safe"])
+        self.assertFalse(app_module.route_optimization_configuration_health({
+            "ROUTE_ENGINE": "route_optimization",
+            "ROUTE_OPTIMIZATION_PROJECT": "project",
+            "GOOGLE_CREDENTIALS": "sheets-only",
+        })["safe"])
+        with self.assertRaises(RouteOptimizationError):
+            load_service_account_credentials({"GOOGLE_CREDENTIALS": "{}"})
         frontend = (WEB_APP_DIR / "index.html").read_text(encoding="utf-8")
         self.assertIn('client_request_id: planningRoutePreviewRequestId', frontend)
         self.assertIn('route_mode: "automatic"', frontend)

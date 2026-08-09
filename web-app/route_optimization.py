@@ -154,7 +154,12 @@ def _duration_seconds(value: Any) -> int:
     return max(0, int(round(float(text[:-1] or 0))))
 
 
-def _visit_request(shipment: Mapping[str, Any]) -> dict[str, Any]:
+def _visit_request(
+    shipment: Mapping[str, Any],
+    *,
+    global_start: datetime,
+    global_end: datetime,
+) -> dict[str, Any]:
     customer_id = str(shipment["customer_id"])
     coordinate = shipment["coordinate"]
     request: dict[str, Any] = {
@@ -168,8 +173,8 @@ def _visit_request(shipment: Mapping[str, Any]) -> dict[str, Any]:
     fixed_at = shipment.get("fixed_at")
     if fixed_at:
         request["timeWindows"] = [{
-            "startTime": _utc_text(fixed_at - timedelta(minutes=15)),
-            "endTime": _utc_text(fixed_at + timedelta(minutes=15)),
+            "startTime": _utc_text(max(global_start, fixed_at - timedelta(minutes=15))),
+            "endTime": _utc_text(min(global_end, fixed_at + timedelta(minutes=15))),
         }]
     return request
 
@@ -184,6 +189,7 @@ def build_optimize_tours_request(
     fixed_breaks: Iterable[Mapping[str, Any]] = (),
     pre_route_fixed_seconds: int = 0,
     timeout_seconds: int = 90,
+    solving_mode: str = "DEFAULT_SOLVE",
 ) -> dict[str, Any]:
     shipment_list = list(shipments)
     available_seconds = ROUTE_MAX_SECONDS - max(0, int(pre_route_fixed_seconds))
@@ -196,6 +202,7 @@ def build_optimize_tours_request(
     breaks = sorted(fixed_breaks, key=lambda item: item["scheduled_at"])
     vehicle: dict[str, Any] = {
         "label": f"owner:{str(owner_user_name).strip().casefold()}",
+        "travelMode": "DRIVING",
         "startLocation": {"latitude": start.latitude, "longitude": start.longitude},
         "endLocation": {"latitude": start.latitude, "longitude": start.longitude},
         "startTimeWindows": [{
@@ -230,7 +237,11 @@ def build_optimize_tours_request(
     for shipment in shipment_list:
         item: dict[str, Any] = {
             "label": f"customer:{shipment['customer_id']}",
-            "pickups": [_visit_request(shipment)],
+            "pickups": [_visit_request(
+                shipment,
+                global_start=route_start,
+                global_end=global_end,
+            )],
             "loadDemands": {"visit_slots": {"amount": "1"}},
         }
         if not shipment.get("required"):
@@ -239,15 +250,15 @@ def build_optimize_tours_request(
 
     return {
         "timeout": f"{int(timeout_seconds)}s",
-        "solvingMode": "DEFAULT_SOLVE",
+        "solvingMode": solving_mode,
         "searchMode": "CONSUME_ALL_AVAILABLE_TIME",
+        "label": f"store-tracker:{run_id}",
+        "considerRoadTraffic": True,
         "model": {
-            "label": f"store-tracker:{run_id}",
             "globalStartTime": _utc_text(route_start),
             "globalEndTime": _utc_text(global_end),
             "shipments": rendered_shipments,
             "vehicles": [vehicle],
-            "considerRoadTraffic": True,
         },
         "populatePolylines": False,
         "populateTransitionPolylines": False,
@@ -481,7 +492,7 @@ def parse_optimize_tours_response(
 
 def load_service_account_credentials(environ: Mapping[str, str] | None = None) -> Credentials:
     environment = os.environ if environ is None else environ
-    raw = environment.get("ROUTE_OPTIMIZATION_GOOGLE_CREDENTIALS") or environment.get("GOOGLE_CREDENTIALS")
+    raw = environment.get("ROUTE_OPTIMIZATION_GOOGLE_CREDENTIALS")
     if not raw:
         raise RouteOptimizationError("route_optimization_not_configured", "Ruttoptimeringen är inte konfigurerad.", 503)
     try:

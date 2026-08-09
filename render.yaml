@@ -18,6 +18,8 @@ services:
         value: legacy
       - key: ROUTE_OPTIMIZATION_PROJECT
         sync: false
+      - key: ROUTE_OPTIMIZATION_GOOGLE_CREDENTIALS
+        sync: false
       - key: ROUTE_OPTIMIZATION_WEEKLY_OWNER_LIMIT
         value: "2"
       - key: ROUTE_OPTIMIZATION_WEEKLY_TEAM_LIMIT

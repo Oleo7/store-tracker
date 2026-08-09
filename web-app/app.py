@@ -321,6 +321,7 @@ PERFORMANCE_ENDPOINTS = {
     "/followup-insights",
     "/planning/activities",
     "/planning/suggestions",
+    "/planning/route-preview",
     "/customers/<customer_name>/stats",
 }
 PERFORMANCE_SHEETS = {
@@ -667,10 +668,7 @@ def route_optimization_configuration_health(environ=None):
     missing = []
     if not str(environment.get("ROUTE_OPTIMIZATION_PROJECT") or "").strip():
         missing.append("ROUTE_OPTIMIZATION_PROJECT")
-    if not (
-        str(environment.get("ROUTE_OPTIMIZATION_GOOGLE_CREDENTIALS") or "").strip()
-        or str(environment.get("GOOGLE_CREDENTIALS") or "").strip()
-    ):
+    if not str(environment.get("ROUTE_OPTIMIZATION_GOOGLE_CREDENTIALS") or "").strip():
         missing.append("ROUTE_OPTIMIZATION_GOOGLE_CREDENTIALS")
     return {
         "safe": not missing,
@@ -691,7 +689,6 @@ def route_optimization_provider():
     global _route_optimization_provider, _route_optimization_provider_config
     config = (
         str(os.environ.get("ROUTE_OPTIMIZATION_GOOGLE_CREDENTIALS") or ""),
-        str(os.environ.get("GOOGLE_CREDENTIALS") or ""),
     )
     with _route_optimization_provider_lock:
         if _route_optimization_provider is None or _route_optimization_provider_config != config:
@@ -9488,6 +9485,17 @@ def execute_route_optimization(*, spreadsheet, owner, inputs, client_request_id)
     team_limit = route_optimization_int_setting(
         "ROUTE_OPTIMIZATION_WEEKLY_TEAM_LIMIT", 6, minimum=1, maximum=500
     )
+    quota_started = time.perf_counter()
+    quota_recorded = False
+
+    def finish_quota_instrumentation():
+        nonlocal quota_recorded
+        if not quota_recorded:
+            record_performance_step(
+                "route_optimization.quota_reservation",
+                quota_started,
+            )
+            quota_recorded = True
 
     with _route_optimization_run_lock:
         sheet, headers, rows = route_optimization_run_rows(spreadsheet)
@@ -9499,6 +9507,7 @@ def execute_route_optimization(*, spreadsheet, owner, inputs, client_request_id)
         if same_request:
             _row_index, row = same_request
             if str(row.get("request_fingerprint") or "") != fingerprint:
+                finish_quota_instrumentation()
                 return None, planning_error(
                     "route_request_id_conflict",
                     "Request-ID:t har redan använts för ett annat ruttunderlag.",
@@ -9507,12 +9516,14 @@ def execute_route_optimization(*, spreadsheet, owner, inputs, client_request_id)
             status = str(row.get("status") or "").strip().casefold()
             if status == "completed":
                 try:
+                    finish_quota_instrumentation()
                     return {
                         "result": json.loads(row.get("result_payload_json") or "{}"),
                         "run_id": row.get("run_id"),
                         "cached": True,
                     }, None
                 except (TypeError, ValueError):
+                    finish_quota_instrumentation()
                     return None, planning_error(
                         "route_result_cache_invalid",
                         "Det sparade ruttresultatet är ogiltigt.",
@@ -9521,6 +9532,7 @@ def execute_route_optimization(*, spreadsheet, owner, inputs, client_request_id)
             if status == "running":
                 started_at = _parse_run_timestamp(row.get("started_at"))
                 if started_at and (now - started_at).total_seconds() <= inputs["timeout_seconds"] + 60:
+                    finish_quota_instrumentation()
                     return None, planning_error(
                         "route_optimization_in_progress",
                         "Samma ruttoptimering pågår redan.",
@@ -9537,11 +9549,13 @@ def execute_route_optimization(*, spreadsheet, owner, inputs, client_request_id)
                     },
                     str(row.get("run_id") or ""),
                 )
+                finish_quota_instrumentation()
                 return None, planning_error(
                     "route_request_already_attempted",
                     "Det tidigare ruttförsöket har okänt utfall. Starta ett nytt försök.",
                     409,
                 )
+            finish_quota_instrumentation()
             return None, planning_error(
                 "route_request_already_attempted",
                 "Detta ruttförsök är redan avslutat. Starta ett nytt försök.",
@@ -9555,6 +9569,7 @@ def execute_route_optimization(*, spreadsheet, owner, inputs, client_request_id)
             completed_at = _parse_run_timestamp(row.get("completed_at"))
             if status == "completed" and completed_at and (now - completed_at).total_seconds() <= cache_seconds:
                 try:
+                    finish_quota_instrumentation()
                     return {
                         "result": json.loads(row.get("result_payload_json") or "{}"),
                         "run_id": row.get("run_id"),
@@ -9565,6 +9580,7 @@ def execute_route_optimization(*, spreadsheet, owner, inputs, client_request_id)
             if status == "running":
                 started_at = _parse_run_timestamp(row.get("started_at"))
                 if started_at and (now - started_at).total_seconds() <= inputs["timeout_seconds"] + 60:
+                    finish_quota_instrumentation()
                     return None, planning_error(
                         "route_optimization_in_progress",
                         "Samma ruttoptimering pågår redan.",
@@ -9592,6 +9608,7 @@ def execute_route_optimization(*, spreadsheet, owner, inputs, client_request_id)
             if normalize_key(row.get("user_name")) == normalize_key(owner_user_name)
         )
         if owner_count >= owner_limit or len(counted) >= team_limit:
+            finish_quota_instrumentation()
             return None, planning_error(
                 "route_optimization_quota_exceeded",
                 "Veckans kvot för automatisk ruttoptimering är slut.",
@@ -9626,6 +9643,7 @@ def execute_route_optimization(*, spreadsheet, owner, inputs, client_request_id)
             "result_payload_json": "",
         }
         row_index = append_route_optimization_run(sheet, run)
+        finish_quota_instrumentation()
 
     body = build_optimize_tours_request(
         run_id=run_id,
@@ -9638,21 +9656,38 @@ def execute_route_optimization(*, spreadsheet, owner, inputs, client_request_id)
         timeout_seconds=inputs["timeout_seconds"],
     )
     project = str(os.environ.get("ROUTE_OPTIMIZATION_PROJECT") or "").strip()
-    solve_started = time.perf_counter()
     try:
-        response, http_status = route_optimization_provider().optimize(
-            project=project,
-            body=body,
-            timeout_seconds=inputs["timeout_seconds"],
-        )
-        parsed = parse_optimize_tours_response(
-            response,
-            shipments=inputs["shipments"],
-            owner_user_name=owner_user_name,
-            route_start=inputs["route_start_at"],
-            pre_route_fixed_seconds=inputs["pre_route_fixed_seconds"],
-            fixed_breaks=inputs["fixed_breaks"],
-        )
+        solve_started = time.perf_counter()
+        try:
+            response, http_status = route_optimization_provider().optimize(
+                project=project,
+                body=body,
+                timeout_seconds=inputs["timeout_seconds"],
+            )
+        finally:
+            google_solve_duration_ms = round(
+                (time.perf_counter() - solve_started) * 1000,
+                1,
+            )
+            record_performance_step(
+                "route_optimization.google_solve",
+                solve_started,
+            )
+        validation_started = time.perf_counter()
+        try:
+            parsed = parse_optimize_tours_response(
+                response,
+                shipments=inputs["shipments"],
+                owner_user_name=owner_user_name,
+                route_start=inputs["route_start_at"],
+                pre_route_fixed_seconds=inputs["pre_route_fixed_seconds"],
+                fixed_breaks=inputs["fixed_breaks"],
+            )
+        finally:
+            record_performance_step(
+                "route_optimization.response_validation",
+                validation_started,
+            )
     except RouteOptimizationError as error:
         with _route_optimization_run_lock:
             update_route_optimization_run(
@@ -9670,7 +9705,7 @@ def execute_route_optimization(*, spreadsheet, owner, inputs, client_request_id)
             )
         return None, route_optimization_error_response(error)
 
-    solve_duration_ms = round((time.perf_counter() - solve_started) * 1000, 1)
+    solve_duration_ms = google_solve_duration_ms
     compact_result = {
         "stops": parsed["stops"],
         "summary": parsed["summary"],
@@ -9700,12 +9735,15 @@ def execute_route_optimization(*, spreadsheet, owner, inputs, client_request_id)
 def build_route_optimization_preview(
     *, spreadsheet, owner, route_date, start, client_request_id
 ):
-    inputs, input_error = build_route_optimization_inputs(
-        spreadsheet=spreadsheet,
-        owner=owner,
-        route_date=route_date,
-        start=start,
-    )
+    with performance_step("route_optimization.input_build") as measurement:
+        inputs, input_error = build_route_optimization_inputs(
+            spreadsheet=spreadsheet,
+            owner=owner,
+            route_date=route_date,
+            start=start,
+        )
+        if inputs:
+            measurement["row_count"] = len(inputs.get("shipments") or ())
     if input_error is not None:
         return None, input_error
     solved, solve_error = execute_route_optimization(
