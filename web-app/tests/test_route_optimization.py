@@ -187,6 +187,43 @@ class RouteOptimizationModelTests(TestCase):
         self.assertEqual(validate_call["body"]["solvingMode"], "VALIDATE_ONLY")
         self.assertEqual(len(validate_call["body"]["model"]["shipments"]), 20)
 
+        events = []
+        paid_items = smoke_module.synthetic_shipments()
+
+        def reject_saved_response(*args, **kwargs):
+            events.append("parse")
+            raise RouteOptimizationError("route_response_invalid", "invalid", 502)
+
+        with patch.dict(os.environ, {
+            "ROUTE_OPTIMIZATION_PROJECT": "synthetic-project",
+            "ROUTE_OPTIMIZATION_GOOGLE_CREDENTIALS": "synthetic-credentials",
+        }, clear=False), patch.object(
+            smoke_module, "load_service_account_credentials", return_value=object()
+        ), patch.object(
+            smoke_module, "RouteOptimizationProvider"
+        ) as paid_provider, patch.object(
+            smoke_module, "persist_paid_response",
+            side_effect=lambda response: events.append("persist") or Path("synthetic-response.json"),
+        ), patch.object(
+            smoke_module, "parse_optimize_tours_response",
+            side_effect=reject_saved_response,
+        ), patch.object(
+            sys, "argv", ["route_optimization_smoke.py", "--paid-synthetic-solve"]
+        ), patch("builtins.print") as print_mock:
+            paid_provider.return_value.optimize.return_value = (
+                successful_response(
+                    paid_items,
+                    selected=tuple(range(15)),
+                    start=smoke_module.SYNTHETIC_ROUTE_START,
+                ),
+                200,
+            )
+            self.assertEqual(smoke_module.main(), 2)
+        self.assertEqual(events, ["persist", "parse"])
+        report = json.loads(print_mock.call_args.args[0])
+        self.assertEqual(report["raw_response_path"], "synthetic-response.json")
+        self.assertFalse(report["parser_accepted"])
+
     def test_t4_coordinate_quality_bounds_and_generic_fallback_detection(self):
         customers = [{
             "customer_id": f"c-{index}",
@@ -241,6 +278,47 @@ class RouteOptimizationModelTests(TestCase):
         self.assertEqual([stop["customer_id"] for stop in parsed["stops"]], [items[1]["customer_id"]])
         self.assertEqual(parsed["performed_count"], 1)
         self.assertEqual(parsed["skipped_count"], 1)
+
+    def test_t7_protojson_shipment_identity_fallback_and_validation(self):
+        items = [shipment(1), shipment(2)]
+
+        skipped_zero = successful_response(items, selected=(1,))
+        skipped_zero["skippedShipments"] = [{
+            "label": f"customer:{items[0]['customer_id']}"
+        }]
+        parsed = parse_optimize_tours_response(
+            skipped_zero,
+            shipments=items,
+            owner_user_name="Olle",
+            route_start=NOW,
+        )
+        self.assertEqual(parsed["skipped_count"], 1)
+
+        performed_zero = successful_response(items, selected=(0,))
+        del performed_zero["routes"][0]["visits"][0]["shipmentIndex"]
+        parsed = parse_optimize_tours_response(
+            performed_zero,
+            shipments=items,
+            owner_user_name="Olle",
+            route_start=NOW,
+        )
+        self.assertEqual(parsed["stops"][0]["customer_id"], items[0]["customer_id"])
+
+        mismatched = successful_response(items, selected=(0,))
+        mismatched["routes"][0]["visits"][0]["shipmentLabel"] = (
+            f"customer:{items[1]['customer_id']}"
+        )
+        unknown = successful_response(items, selected=(1,))
+        unknown["skippedShipments"] = [{"label": "customer:unknown"}]
+        for response in (mismatched, unknown):
+            with self.subTest(response=response):
+                with self.assertRaises(RouteOptimizationError):
+                    parse_optimize_tours_response(
+                        response,
+                        shipments=items,
+                        owner_user_name="Olle",
+                        route_start=NOW,
+                    )
 
     def test_t8_response_parser_rejects_missing_mandatory_duplicate_and_seven_hours(self):
         mandatory = [shipment(1, required=True)]

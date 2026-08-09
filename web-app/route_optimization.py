@@ -154,6 +154,43 @@ def _duration_seconds(value: Any) -> int:
     return max(0, int(round(float(text[:-1] or 0))))
 
 
+def _response_shipment_index(
+    item: Mapping[str, Any],
+    *,
+    index_key: str,
+    label_key: str,
+    label_indexes: Mapping[str, int],
+    shipment_count: int,
+) -> int:
+    """Resolve a ProtoJSON shipment reference by source index and/or label."""
+    explicit_index = None
+    if index_key in item:
+        value = item[index_key]
+        if isinstance(value, bool):
+            raise ValueError("Invalid shipment index")
+        if isinstance(value, int):
+            explicit_index = value
+        elif isinstance(value, str) and value.strip().lstrip("-").isdigit():
+            explicit_index = int(value.strip())
+        else:
+            raise ValueError("Invalid shipment index")
+        if explicit_index < 0 or explicit_index >= shipment_count:
+            raise ValueError("Shipment index out of range")
+
+    label = str(item.get(label_key) or "").strip()
+    label_index = None
+    if label:
+        if label not in label_indexes:
+            raise ValueError("Unknown shipment label")
+        label_index = label_indexes[label]
+
+    if explicit_index is None and label_index is None:
+        raise ValueError("Missing shipment identity")
+    if explicit_index is not None and label_index is not None and explicit_index != label_index:
+        raise ValueError("Shipment index and label disagree")
+    return explicit_index if explicit_index is not None else label_index
+
+
 def _visit_request(
     shipment: Mapping[str, Any],
     *,
@@ -344,6 +381,15 @@ def parse_optimize_tours_response(
     fixed_breaks: Iterable[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     shipment_list = list(shipments)
+    shipment_labels = [f"customer:{str(item.get('customer_id') or '').strip()}" for item in shipment_list]
+    if any(label == "customer:" for label in shipment_labels) or len(set(shipment_labels)) != len(shipment_labels):
+        raise RouteOptimizationError(
+            "route_response_invalid",
+            "Google returnerade en ogiltig rutt.",
+            502,
+            counted_attempt=True,
+        )
+    label_indexes = {label: index for index, label in enumerate(shipment_labels)}
     validation_errors = list(response.get("validationErrors") or [])
     if validation_errors:
         raise RouteOptimizationError(
@@ -375,20 +421,22 @@ def parse_optimize_tours_response(
     stops = []
     for sequence, visit in enumerate(visits, start=1):
         try:
-            index = int(visit["shipmentIndex"])
-        except (KeyError, TypeError, ValueError):
+            index = _response_shipment_index(
+                visit,
+                index_key="shipmentIndex",
+                label_key="shipmentLabel",
+                label_indexes=label_indexes,
+                shipment_count=len(shipment_list),
+            )
+        except (TypeError, ValueError):
             raise RouteOptimizationError("route_response_invalid", "Google returnerade ett okänt stopp.", 502, counted_attempt=True)
         if (
-            index < 0
-            or index >= len(shipment_list)
-            or index in seen_indexes
+            index in seen_indexes
             or visit.get("isPickup") is not True
             or visit.get("visitRequestIndex") not in (None, 0)
         ):
             raise RouteOptimizationError("route_response_invalid", "Google returnerade ett okänt eller duplicerat stopp.", 502, counted_attempt=True)
         shipment = shipment_list[index]
-        if visit.get("shipmentLabel") not in (None, f"customer:{shipment['customer_id']}"):
-            raise RouteOptimizationError("route_response_invalid", "Google returnerade fel kundidentitet.", 502, counted_attempt=True)
         seen_indexes.add(index)
         if shipment.get("fixed_at"):
             try:
@@ -410,11 +458,19 @@ def parse_optimize_tours_response(
             "priority_score": clamp_priority_score(shipment.get("priority_score")),
         })
     skipped_items = list(response.get("skippedShipments") or [])
-    skipped_indexes = {
-        int(item["index"])
-        for item in skipped_items
-        if str(item.get("index", "")).lstrip("-").isdigit()
-    }
+    try:
+        skipped_indexes = {
+            _response_shipment_index(
+                item,
+                index_key="index",
+                label_key="label",
+                label_indexes=label_indexes,
+                shipment_count=len(shipment_list),
+            )
+            for item in skipped_items
+        }
+    except (TypeError, ValueError):
+        raise RouteOptimizationError("route_response_invalid", "Google returnerade en ogiltig skipplista.", 502, counted_attempt=True)
     if len(skipped_indexes) != len(skipped_items):
         raise RouteOptimizationError("route_response_invalid", "Google returnerade en ogiltig skipplista.", 502, counted_attempt=True)
     if mandatory_indexes - seen_indexes or mandatory_indexes & skipped_indexes:
