@@ -7690,10 +7690,12 @@
     return [
       ...planningActivitiesForDate(dateKey),
       ...planningUnplannedForDate(dateKey),
-    ].sort((left, right) =>
-      String(left.scheduled_at).localeCompare(String(right.scheduled_at)) ||
-      left.customer.localeCompare(right.customer, "sv")
-    );
+    ]
+      .filter(activity => activity.status !== "cancelled")
+      .sort((left, right) =>
+        String(left.scheduled_at).localeCompare(String(right.scheduled_at)) ||
+        left.customer.localeCompare(right.customer, "sv")
+      );
   }
 
   function renderPlanningWeekStrip() {
