@@ -320,6 +320,57 @@ class RouteOptimizationModelTests(TestCase):
                         route_start=NOW,
                     )
 
+    def test_t7a_response_parser_reports_shipment_identity_invalid(self):
+        items = [shipment(1), shipment(2)]
+        response = successful_response(items, selected=(0,))
+        response["routes"][0]["visits"][0]["shipmentLabel"] = f"customer:{items[1]['customer_id']}"
+        with self.assertRaises(RouteOptimizationError) as exc:
+            parse_optimize_tours_response(
+                response,
+                shipments=items,
+                owner_user_name="Olle",
+                route_start=NOW,
+            )
+        self.assertEqual(exc.exception.code, "route_response_invalid")
+        self.assertEqual(
+            exc.exception.details.get("diagnostic_reason"),
+            "shipment_identity_invalid",
+        )
+
+    def test_t7b_response_parser_reports_vehicle_label_mismatch(self):
+        items = [shipment(1)]
+        response = successful_response(items, selected=(0,))
+        response["routes"][0]["vehicleLabel"] = "owner:someone_else"
+        with self.assertRaises(RouteOptimizationError) as exc:
+            parse_optimize_tours_response(
+                response,
+                shipments=items,
+                owner_user_name="Olle",
+                route_start=NOW,
+            )
+        self.assertEqual(exc.exception.code, "route_response_invalid")
+        self.assertEqual(
+            exc.exception.details.get("diagnostic_reason"),
+            "vehicle_label_mismatch",
+        )
+
+    def test_t7c_response_parser_reports_traffic_infeasibility(self):
+        items = [shipment(1)]
+        response = successful_response(items, selected=(0,))
+        response["routes"][0]["hasTrafficInfeasibilities"] = True
+        with self.assertRaises(RouteOptimizationError) as exc:
+            parse_optimize_tours_response(
+                response,
+                shipments=items,
+                owner_user_name="Olle",
+                route_start=NOW,
+            )
+        self.assertEqual(exc.exception.code, "route_response_invalid")
+        self.assertEqual(
+            exc.exception.details.get("diagnostic_reason"),
+            "traffic_infeasibility",
+        )
+
     def test_t8_response_parser_rejects_missing_mandatory_duplicate_and_seven_hours(self):
         mandatory = [shipment(1, required=True)]
         cases = [
@@ -559,6 +610,37 @@ class RouteOptimizationIntegrationTests(TestCase):
                 self.assertEqual(response.status_code, 200, response.get_json())
         self.assertEqual(len(calls), 1)
         self.assertEqual(len(self.spreadsheet.worksheet(app_module.ROUTE_OPTIMIZATION_RUNS_SHEET).dict_rows()), 1)
+
+    def test_t15a_http_200_parse_failure_records_diagnostic_json(self):
+        snapshot = self.priority_snapshot()
+
+        class Provider:
+            def optimize(_self, *, project, body, timeout_seconds):
+                ids = [item["label"].split(":", 1)[1] for item in body["model"]["shipments"]]
+                response, status = successful_response(
+                    [{"customer_id": value} for value in ids], selected=(0,), start=app_module.route_start_datetime(NOW.date())
+                ), 200
+                response["routes"][0]["vehicleLabel"] = "owner:someone_else"
+                return response, status
+
+        with patch.object(app_module, "get_authoritative_priority_snapshot", return_value=snapshot), patch.object(app_module, "route_optimization_provider", return_value=Provider()):            response = self.client.post("/planning/route-preview", json={
+                "route_date": NOW.date().isoformat(),
+                "route_mode": "automatic",
+                "client_request_id": "parse-failure-200",
+                "start": {"latitude": 57.7, "longitude": 11.9},
+            })
+        self.assertEqual(response.status_code, 502)
+        rows = self.spreadsheet.worksheet(app_module.ROUTE_OPTIMIZATION_RUNS_SHEET).dict_rows()
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(str(row["http_status"]), "200")
+        payload = json.loads(str(row["result_payload_json"] or "{}"))
+        self.assertEqual(payload["diagnostic_reason"], "vehicle_label_mismatch")
+        self.assertEqual(payload["error_code"], "route_response_invalid")
+        self.assertEqual(payload["route_count"], 1)
+        self.assertEqual(payload["visit_count"], 1)
+        self.assertGreaterEqual(payload["skipped_count"], 0)
+        self.assertGreaterEqual(payload["solve_duration_ms"], 0)
 
     def test_t16_client_request_conflict_and_running_fingerprint_are_409(self):
         snapshot = self.priority_snapshot()
