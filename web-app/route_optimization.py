@@ -388,6 +388,7 @@ def parse_optimize_tours_response(
             "Google returnerade en ogiltig rutt.",
             502,
             counted_attempt=True,
+            details={"diagnostic_reason": "shipment_identity_invalid"},
         )
     label_indexes = {label: index for index, label in enumerate(shipment_labels)}
     validation_errors = list(response.get("validationErrors") or [])
@@ -405,8 +406,22 @@ def parse_optimize_tours_response(
         raise RouteOptimizationError(code, "Google kunde inte skapa en giltig rutt.", 422, counted_attempt=True)
     route = routes[0]
     expected_vehicle = f"owner:{str(owner_user_name).strip().casefold()}"
-    if route.get("vehicleLabel") != expected_vehicle or route.get("hasTrafficInfeasibilities") is True:
-        raise RouteOptimizationError("route_response_invalid", "Google returnerade en ogiltig rutt.", 502, counted_attempt=True)
+    if route.get("vehicleLabel") != expected_vehicle:
+        raise RouteOptimizationError(
+            "route_response_invalid",
+            "Google returnerade en ogiltig rutt.",
+            502,
+            counted_attempt=True,
+            details={"diagnostic_reason": "vehicle_label_mismatch"},
+        )
+    if route.get("hasTrafficInfeasibilities") is True:
+        raise RouteOptimizationError(
+            "route_response_invalid",
+            "Google returnerade en ogiltig rutt.",
+            502,
+            counted_attempt=True,
+            details={"diagnostic_reason": "traffic_infeasibility"},
+        )
     visits = list(route.get("visits") or [])
     if not visits and not mandatory_indexes:
         raise RouteOptimizationError(
@@ -429,13 +444,25 @@ def parse_optimize_tours_response(
                 shipment_count=len(shipment_list),
             )
         except (TypeError, ValueError):
-            raise RouteOptimizationError("route_response_invalid", "Google returnerade ett okänt stopp.", 502, counted_attempt=True)
+            raise RouteOptimizationError(
+                "route_response_invalid",
+                "Google returnerade ett okänt stopp.",
+                502,
+                counted_attempt=True,
+                details={"diagnostic_reason": "shipment_identity_invalid"},
+            )
         if (
             index in seen_indexes
             or visit.get("isPickup") is not True
             or visit.get("visitRequestIndex") not in (None, 0)
         ):
-            raise RouteOptimizationError("route_response_invalid", "Google returnerade ett okänt eller duplicerat stopp.", 502, counted_attempt=True)
+            raise RouteOptimizationError(
+                "route_response_invalid",
+                "Google returnerade ett okänt eller duplicerat stopp.",
+                502,
+                counted_attempt=True,
+                details={"diagnostic_reason": "shipment_identity_invalid"},
+            )
         shipment = shipment_list[index]
         seen_indexes.add(index)
         if shipment.get("fixed_at"):
@@ -470,15 +497,39 @@ def parse_optimize_tours_response(
             for item in skipped_items
         }
     except (TypeError, ValueError):
-        raise RouteOptimizationError("route_response_invalid", "Google returnerade en ogiltig skipplista.", 502, counted_attempt=True)
+        raise RouteOptimizationError(
+            "route_response_invalid",
+            "Google returnerade en ogiltig skipplista.",
+            502,
+            counted_attempt=True,
+            details={"diagnostic_reason": "shipment_identity_invalid"},
+        )
     if len(skipped_indexes) != len(skipped_items):
-        raise RouteOptimizationError("route_response_invalid", "Google returnerade en ogiltig skipplista.", 502, counted_attempt=True)
+        raise RouteOptimizationError(
+            "route_response_invalid",
+            "Google returnerade en ogiltig skipplista.",
+            502,
+            counted_attempt=True,
+            details={"diagnostic_reason": "shipment_identity_invalid"},
+        )
     if mandatory_indexes - seen_indexes or mandatory_indexes & skipped_indexes:
         raise RouteOptimizationError("route_required_visit_missing", "Ett obligatoriskt besök saknas i rutten.", 422, counted_attempt=True)
     if seen_indexes & skipped_indexes or any(index >= len(shipment_list) for index in skipped_indexes):
-        raise RouteOptimizationError("route_response_invalid", "Google returnerade en ogiltig skipplista.", 502, counted_attempt=True)
+        raise RouteOptimizationError(
+            "route_response_invalid",
+            "Google returnerade en ogiltig skipplista.",
+            502,
+            counted_attempt=True,
+            details={"diagnostic_reason": "shipment_identity_invalid"},
+        )
     if seen_indexes | skipped_indexes != set(range(len(shipment_list))):
-        raise RouteOptimizationError("route_response_invalid", "Google returnerade inte utfall för alla butiker.", 502, counted_attempt=True)
+        raise RouteOptimizationError(
+            "route_response_invalid",
+            "Google returnerade inte utfall för alla butiker.",
+            502,
+            counted_attempt=True,
+            details={"diagnostic_reason": "shipment_identity_invalid"},
+        )
 
     try:
         vehicle_start = _parse_time(route["vehicleStartTime"])

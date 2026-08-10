@@ -9689,6 +9689,31 @@ def execute_route_optimization(*, spreadsheet, owner, inputs, client_request_id)
                 validation_started,
             )
     except RouteOptimizationError as error:
+        http_status_value = (
+            error.provider_status
+            if error.provider_status is not None
+            else (http_status if "http_status" in locals() else "")
+        )
+        diagnostic_json = ""
+        if http_status_value == 200 and "response" in locals() and isinstance(response, dict):
+            routes = response.get("routes") if isinstance(response.get("routes"), list) else []
+            route = routes[0] if routes else {}
+            diagnostic_payload = {
+                "error_code": error.code,
+                "diagnostic_reason": error.details.get("diagnostic_reason") or error.code,
+                "solve_duration_ms": google_solve_duration_ms if "google_solve_duration_ms" in locals() else None,
+                "route_count": len(response.get("routes") or []),
+                "visit_count": len(route.get("visits") or []),
+                "skipped_count": len(response.get("skippedShipments") or []),
+                "break_count": len(route.get("breaks") or []),
+                "hasTrafficInfeasibilities": bool(route.get("hasTrafficInfeasibilities")),
+                "vehicle_label_matches": route.get("vehicleLabel") == f"owner:{str(owner_user_name).strip().casefold()}",
+            }
+            diagnostic_json = json.dumps(
+                diagnostic_payload,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
         with _route_optimization_run_lock:
             update_route_optimization_run(
                 sheet,
@@ -9698,8 +9723,9 @@ def execute_route_optimization(*, spreadsheet, owner, inputs, client_request_id)
                     "status": "failed",
                     "counted_attempt": "Y" if error.counted_attempt else "N",
                     "completed_at": planning_timestamp(),
-                    "http_status": error.provider_status or "",
+                    "http_status": http_status_value,
                     "error_code": error.code,
+                    "result_payload_json": diagnostic_json,
                 },
                 run_id,
             )
