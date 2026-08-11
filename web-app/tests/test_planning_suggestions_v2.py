@@ -216,6 +216,43 @@ class PlanningSuggestionV2IntegrationTests(PlanningApiTestCase):
         self.assertFalse(customer["recommendation_eligible"])
         self.assertGreater(customer["priority_score"], 0)
 
+    def test_cached_snapshot_does_not_reuse_empty_planning_input_for_queue(self):
+        self.spreadsheet._store_tracker_enable_read_cache = True
+        app_module._sheet_read_cache.clear()
+        app_module.invalidate_priority_snapshot()
+        self.append_repeat_orders()
+        customer_id = "11111111-1111-4111-8111-111111111111"
+        self.append_planning_row(
+            customer_row=2,
+            scheduled_at="2026-07-27T09:00:00+02:00",
+            source="manual",
+            client_request_id="cached-planning-input",
+        )
+        try:
+            # A prior caller can legitimately supply no planning rows. Its
+            # cached scoring result must not be reused by the planner's live
+            # activity snapshot for the same spreadsheet and day.
+            app_module.get_authoritative_priority_snapshot(
+                self.spreadsheet,
+                today=app_module.stockholm_today(),
+                planned_activity_rows=(),
+            )
+            response = self.client.get("/planning/suggestions")
+            payload = response.get_json()
+
+            self.assertEqual(response.status_code, 200, payload)
+            self.assertNotEqual(
+                (payload.get("suggestion") or {}).get("customer_id"),
+                customer_id,
+            )
+            self.assertNotIn(
+                customer_id,
+                [item["customer_id"] for item in payload["queue_preview"]],
+            )
+        finally:
+            app_module._sheet_read_cache.clear()
+            app_module.invalidate_priority_snapshot()
+
     def test_new_order_resolves_old_context_without_materializing_ineligible_context(self):
         self.append_repeat_orders()
         first = self.client.get("/planning/suggestions").get_json()["suggestion"]

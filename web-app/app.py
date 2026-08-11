@@ -6027,6 +6027,32 @@ def build_current_priority_snapshot(
     return priority_customers, email_engagement_by_customer
 
 
+def priority_planned_activity_signature(rows):
+    """Fingerprint only planning fields that affect priority suppression."""
+    relevant_rows = []
+    for row in rows or ():
+        row = row if isinstance(row, dict) else {}
+        relevant_rows.append({
+            "planned_activity_id": str(
+                row.get("planned_activity_id") or ""
+            ).strip(),
+            "customer_id": str(row.get("customer_id") or "").strip(),
+            "customer": str(row.get("customer") or "").strip(),
+            "status": str(row.get("status") or "").strip().casefold(),
+            "scheduled_at": planning_datetime_text(row.get("scheduled_at")),
+            "source_suggestion_id": str(
+                row.get("source_suggestion_id") or ""
+            ).strip(),
+            "source_contact_id": str(
+                row.get("source_contact_id") or ""
+            ).strip(),
+        })
+    relevant_rows.sort(
+        key=lambda row: canonical_payload_fingerprint(row)
+    )
+    return canonical_payload_fingerprint(relevant_rows)
+
+
 def get_authoritative_priority_snapshot(
     spreadsheet, *, today, planned_activity_rows=None
 ):
@@ -6038,7 +6064,20 @@ def get_authoritative_priority_snapshot(
         _sheet_read_cache.generation
         if cache_enabled else time.monotonic_ns()
     )
-    key = (id(spreadsheet), date_key, generation)
+    if planned_activity_rows is None:
+        try:
+            _sheet, _headers, indexed = get_planned_activity_snapshot(
+                spreadsheet
+            )
+            planned_activity_rows = [row for _index, row in indexed]
+        except (WorksheetNotFound, AttributeError):
+            planned_activity_rows = []
+    else:
+        planned_activity_rows = list(planned_activity_rows)
+    planning_signature = priority_planned_activity_signature(
+        planned_activity_rows
+    )
+    key = (id(spreadsheet), date_key, generation, planning_signature)
     with _priority_snapshot_condition:
         while True:
             if _priority_snapshot_entry and _priority_snapshot_entry[0] == key:
@@ -6054,14 +6093,6 @@ def get_authoritative_priority_snapshot(
         message_rows, recipient_rows, _events = get_email_rows(
             spreadsheet, include_events=False
         )
-        if planned_activity_rows is None:
-            try:
-                _sheet, _headers, indexed = get_planned_activity_snapshot(
-                    spreadsheet
-                )
-                planned_activity_rows = [row for _index, row in indexed]
-            except (WorksheetNotFound, AttributeError):
-                planned_activity_rows = []
         priorities, email_snapshot = build_current_priority_snapshot(
             customers=customers,
             order_rows=order_rows,
