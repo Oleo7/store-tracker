@@ -11376,7 +11376,7 @@ def planning_route_preview_status():
     if not client_request_id:
         return planning_error(
             "invalid_client_request_id",
-            "Ett giltigt request-ID krÃ¤vs fÃ¶r statuskontrollen.",
+            "Ett giltigt request-ID krävs för statuskontrollen.",
             400,
             field="client_request_id",
         )
@@ -11392,7 +11392,7 @@ def planning_route_preview_status():
         app.logger.exception("Could not read route optimization recovery status")
         return planning_error(
             "route_store_unavailable",
-            "RuttfÃ¶rslagets status kunde inte laddas. FÃ¶rsÃ¶k igen.",
+            "Ruttförslagets status kunde inte laddas. Försök igen.",
             503,
         )
     return jsonify({"ok": True, **status})

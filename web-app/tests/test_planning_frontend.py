@@ -340,6 +340,13 @@ class PlanningFrontendContractTests(TestCase):
         self.assertIn("sessionStorage.removeItem(", self.html)
         self.assertIn("PLANNING_ROUTE_RECOVERY_TTL_MS = 30 * 60 * 1000", self.html)
         self.assertIn("PLANNING_ROUTE_RECOVERY_POLL_MS = 15 * 1000", self.html)
+        save = self.html.split("function savePlanningRouteRecoveryState", 1)[1].split(
+            "function planningRouteError", 1
+        )[0]
+        self.assertIn("try {", save)
+        self.assertIn("sessionStorage.setItem(", save)
+        self.assertIn("state.storage_persisted = false", save)
+        self.assertIn("return state", save)
 
         create = self.html.split("async function openPlanningRoutePreview()", 1)[1].split(
             "function renderPlanningRoutePreview", 1
@@ -372,6 +379,22 @@ class PlanningFrontendContractTests(TestCase):
         self.assertIn('outcome.kind === "terminal_backend_error"', recovery)
         self.assertIn("planningRoutePreviewFetch(state.payload)", recovery)
         self.assertNotIn("/planning/route-apply", recovery)
+
+    def test_route_preview_context_switch_resets_ui_and_does_not_share_single_flight(self):
+        recovery = self.html.split("function planningRouteRecoveryForCurrentContext", 1)[1].split(
+            "async function openPlanningRoutePreview", 1
+        )[0]
+        resume = recovery.split("function resumePlanningRoutePreviewRecovery", 1)[1]
+        self.assertIn("!planningRouteRecoveryStateMatchesCurrentContext(storedState)", resume)
+        self.assertIn("window.clearTimeout(planningRouteRecoveryTimer)", resume)
+        self.assertIn("planningRouteResetPreviewButton()", resume)
+        self.assertIn("planningRouteRecoveryStateIsActive(state)", recovery)
+        self.assertIn("planningRouteRecoveryPromiseKey === requestKey", recovery)
+        self.assertIn("planningRouteRecoveryPromise === promise", recovery)
+        self.assertIn(
+            "runPlanningRouteRecoverySingleFlight(state.payload.client_request_id",
+            recovery,
+        )
 
     def test_legacy_followup_keeps_its_source_link(self):
         self.assertIn('payload.source = "follow_up"', self.html)

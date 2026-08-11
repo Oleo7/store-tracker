@@ -659,6 +659,9 @@ class RouteOptimizationIntegrationTests(TestCase):
         provider_patch = patch.object(app_module, "route_optimization_provider")
         provider = provider_patch.start()
         self.addCleanup(provider_patch.stop)
+        invalid = self.client.get("/planning/route-preview-status")
+        self.assertEqual(invalid.status_code, 400)
+        self.assertIn("krävs för statuskontrollen", invalid.get_json()["message"])
         missing = self.client.get(
             "/planning/route-preview-status?client_request_id=missing"
         )

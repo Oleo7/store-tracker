@@ -4428,6 +4428,7 @@
   const PLANNING_ROUTE_RECOVERY_WINDOW_MS = 5 * 60 * 1000;
   const PLANNING_ROUTE_RECOVERY_POLL_MS = 15 * 1000;
   let planningRouteRecoveryPromise = null;
+  let planningRouteRecoveryPromiseKey = "";
   let planningRouteRecoveryTimer = 0;
   let planningRouteRecoveryDeadlineMs = 0;
   let planningDragState = null;
@@ -8893,13 +8894,24 @@
   function planningRouteRecoveryForCurrentContext() {
     const state = readPlanningRouteRecoveryState();
     if (!state) return null;
-    if (
-      state.owner_user_name !== planningRouteCurrentOwnerUserName() ||
-      state.route_date !== planningSelectedDate
-    ) {
-      return null;
+    return planningRouteRecoveryStateMatchesCurrentContext(state) ? state : null;
+  }
+
+  function planningRouteRecoveryStateMatchesCurrentContext(state) {
+    return Boolean(state) &&
+      state.actor_user_name === String(currentUser?.user_name || "").trim() &&
+      state.owner_user_name === planningRouteCurrentOwnerUserName() &&
+      state.route_date === planningSelectedDate;
+  }
+
+  function planningRouteRecoveryStateIsActive(state) {
+    if (!planningRouteRecoveryStateMatchesCurrentContext(state)) return false;
+    if (state.storage_persisted === false) {
+      return String(state.payload?.client_request_id || "") === planningRoutePreviewRequestId;
     }
-    return state;
+    const pending = planningRouteRecoveryForCurrentContext();
+    return Boolean(pending) &&
+      pending.payload.client_request_id === state.payload.client_request_id;
   }
 
   function savePlanningRouteRecoveryState(payload) {
@@ -8912,10 +8924,15 @@
       created_at_ms: Date.now(),
       payload: immutablePayload,
     };
-    sessionStorage.setItem(
-      PLANNING_ROUTE_RECOVERY_STORAGE_KEY,
-      JSON.stringify(state)
-    );
+    try {
+      sessionStorage.setItem(
+        PLANNING_ROUTE_RECOVERY_STORAGE_KEY,
+        JSON.stringify(state)
+      );
+      state.storage_persisted = true;
+    } catch {
+      state.storage_persisted = false;
+    }
     return state;
   }
 
@@ -9018,7 +9035,7 @@
   }
 
   function schedulePlanningRouteRecovery(state, deadlineMs) {
-    if (!planningRouteRecoveryForCurrentContext()) return;
+    if (!planningRouteRecoveryStateIsActive(state)) return;
     if (Date.now() >= deadlineMs) {
       stopPlanningRouteAutomaticRecovery();
       return;
@@ -9032,13 +9049,20 @@
     }, PLANNING_ROUTE_RECOVERY_POLL_MS);
   }
 
-  function runPlanningRouteRecoverySingleFlight(operation) {
-    if (planningRouteRecoveryPromise) return planningRouteRecoveryPromise;
-    planningRouteRecoveryPromise = Promise.resolve()
+  function runPlanningRouteRecoverySingleFlight(requestKey, operation) {
+    if (planningRouteRecoveryPromise && planningRouteRecoveryPromiseKey === requestKey) {
+      return planningRouteRecoveryPromise;
+    }
+    const promise = Promise.resolve()
       .then(operation)
       .finally(() => {
-        planningRouteRecoveryPromise = null;
+        if (planningRouteRecoveryPromise === promise) {
+          planningRouteRecoveryPromise = null;
+          planningRouteRecoveryPromiseKey = "";
+        }
       });
+    planningRouteRecoveryPromise = promise;
+    planningRouteRecoveryPromiseKey = requestKey;
     return planningRouteRecoveryPromise;
   }
 
@@ -9056,6 +9080,7 @@
   ) {
     planningRoutePreviewRequestId = String(state.payload.client_request_id || "");
     const outcome = await planningRoutePreviewFetch(state.payload);
+    if (!planningRouteRecoveryStateIsActive(state)) return;
     if (outcome.kind === "success") {
       try {
         renderRecoveredPlanningRoutePreview(outcome.payload, { recovered });
@@ -9105,8 +9130,17 @@
   }
 
   function resumePlanningRoutePreviewRecovery({ manual = false, deadlineMs = 0 } = {}) {
-    const state = planningRouteRecoveryForCurrentContext();
-    if (!state) return Promise.resolve(false);
+    const storedState = readPlanningRouteRecoveryState();
+    if (!storedState || !planningRouteRecoveryStateMatchesCurrentContext(storedState)) {
+      if (planningRouteRecoveryTimer) {
+        window.clearTimeout(planningRouteRecoveryTimer);
+        planningRouteRecoveryTimer = 0;
+      }
+      planningRouteRecoveryDeadlineMs = 0;
+      planningRouteResetPreviewButton();
+      return Promise.resolve(false);
+    }
+    const state = storedState;
     planningRoutePreviewRequestId = String(state.payload.client_request_id || "");
     if (manual && planningRouteRecoveryTimer) {
       window.clearTimeout(planningRouteRecoveryTimer);
@@ -9122,7 +9156,7 @@
     }
     planningRouteRecoveryDeadlineMs = recoveryDeadline;
     planningRouteRecoveryMessage("Anslutningen bröts. Hämtar ruttförslaget…");
-    return runPlanningRouteRecoverySingleFlight(async () => {
+    return runPlanningRouteRecoverySingleFlight(state.payload.client_request_id, async () => {
       let status;
       try {
         status = await planningRoutePreviewStatus(state.payload.client_request_id);
@@ -9130,6 +9164,7 @@
         schedulePlanningRouteRecovery(state, recoveryDeadline);
         return false;
       }
+      if (!planningRouteRecoveryStateIsActive(state)) return false;
       if (status.state === "not_found") {
         await postPendingPlanningRoutePreview(state, {
           deadlineMs: recoveryDeadline,
@@ -9182,7 +9217,7 @@
       if (owner) payload.user_name = owner;
       const state = savePlanningRouteRecoveryState(payload);
       const deadlineMs = Number(state.created_at_ms) + PLANNING_ROUTE_RECOVERY_WINDOW_MS;
-      await runPlanningRouteRecoverySingleFlight(() =>
+      await runPlanningRouteRecoverySingleFlight(payload.client_request_id, () =>
         postPendingPlanningRoutePreview(state, {
           deadlineMs,
           recovered: false,
