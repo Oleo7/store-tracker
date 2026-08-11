@@ -611,6 +611,128 @@ class RouteOptimizationIntegrationTests(TestCase):
         self.assertEqual(len(calls), 1)
         self.assertEqual(len(self.spreadsheet.worksheet(app_module.ROUTE_OPTIMIZATION_RUNS_SHEET).dict_rows()), 1)
 
+    def test_completed_request_replay_reuses_exact_run_before_quota(self):
+        snapshot = self.priority_snapshot()
+        calls = []
+
+        class Provider:
+            def optimize(_self, *, project, body, timeout_seconds):
+                calls.append(body)
+                ids = [
+                    item["label"].split(":", 1)[1]
+                    for item in body["model"]["shipments"]
+                ]
+                return successful_response(
+                    [{"customer_id": value} for value in ids],
+                    selected=(0,),
+                    start=app_module.route_start_datetime(NOW.date()),
+                ), 200
+
+        payload = {
+            "route_date": NOW.date().isoformat(),
+            "route_mode": "automatic",
+            "client_request_id": "exact-recovery-replay",
+            "start": {"latitude": 57.7, "longitude": 11.9, "accuracy": 12},
+        }
+        with patch.dict(os.environ, {
+            "ROUTE_OPTIMIZATION_WEEKLY_OWNER_LIMIT": "1",
+            "ROUTE_OPTIMIZATION_WEEKLY_TEAM_LIMIT": "1",
+        }, clear=False), patch.object(
+            app_module, "get_authoritative_priority_snapshot", return_value=snapshot
+        ), patch.object(
+            app_module, "route_optimization_provider", return_value=Provider()
+        ):
+            first = self.client.post("/planning/route-preview", json=payload)
+            replay = self.client.post("/planning/route-preview", json=payload)
+
+        self.assertEqual(first.status_code, 200, first.get_json())
+        self.assertEqual(replay.status_code, 200, replay.get_json())
+        self.assertEqual(len(calls), 1)
+        rows = self.spreadsheet.worksheet(
+            app_module.ROUTE_OPTIMIZATION_RUNS_SHEET
+        ).dict_rows()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["client_request_id"], payload["client_request_id"])
+        self.assertEqual(sum(app_module.is_yes(row["counted_attempt"]) for row in rows), 1)
+
+    def test_recovery_status_is_read_only_actor_scoped_and_maps_run_states(self):
+        provider_patch = patch.object(app_module, "route_optimization_provider")
+        provider = provider_patch.start()
+        self.addCleanup(provider_patch.stop)
+        missing = self.client.get(
+            "/planning/route-preview-status?client_request_id=missing"
+        )
+        self.assertEqual(missing.get_json(), {"ok": True, "state": "not_found"})
+        self.assertNotIn(
+            app_module.ROUTE_OPTIMIZATION_RUNS_SHEET,
+            self.spreadsheet.added_sheets,
+        )
+
+        sheet = app_module.route_optimization_run_sheet(self.spreadsheet)
+        rows = [
+            {
+                "run_id": "running", "actor_user_name": "olle",
+                "client_request_id": "running-id", "status": "running",
+                "started_at": NOW.isoformat(), "timeout_seconds": 90,
+            },
+            {
+                "run_id": "completed", "actor_user_name": "olle",
+                "client_request_id": "completed-id", "status": "completed",
+            },
+            {
+                "run_id": "failed", "actor_user_name": "olle",
+                "client_request_id": "failed-id", "status": "failed",
+                "error_code": "route_provider_timeout",
+            },
+            {
+                "run_id": "stale", "actor_user_name": "olle",
+                "client_request_id": "stale-id", "status": "running",
+                "started_at": (NOW - timedelta(seconds=200)).isoformat(),
+                "timeout_seconds": 90,
+            },
+            {
+                "run_id": "unknown", "actor_user_name": "olle",
+                "client_request_id": "unknown-id", "status": "indeterminate",
+                "error_code": "route_unknown_outcome",
+            },
+            {
+                "run_id": "private", "actor_user_name": "sofia",
+                "client_request_id": "private-id", "status": "completed",
+            },
+        ]
+        for row in rows:
+            app_module.append_dict_row(
+                sheet, app_module.ROUTE_OPTIMIZATION_RUN_COLUMNS, row
+            )
+        before = sheet.dict_rows()
+        cases = {
+            "running-id": {"ok": True, "state": "running"},
+            "completed-id": {"ok": True, "state": "completed"},
+            "failed-id": {
+                "ok": True, "state": "failed",
+                "error_code": "route_provider_timeout",
+            },
+            "stale-id": {
+                "ok": True, "state": "indeterminate",
+                "error_code": "route_optimization_stale_running",
+            },
+            "unknown-id": {
+                "ok": True, "state": "indeterminate",
+                "error_code": "route_unknown_outcome",
+            },
+            "private-id": {"ok": True, "state": "not_found"},
+        }
+        for request_id, expected in cases.items():
+            with self.subTest(request_id=request_id):
+                response = self.client.get(
+                    "/planning/route-preview-status",
+                    query_string={"client_request_id": request_id},
+                )
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.get_json(), expected)
+        self.assertEqual(sheet.dict_rows(), before)
+        provider.assert_not_called()
+
     def test_t15a_http_200_parse_failure_records_diagnostic_json(self):
         snapshot = self.priority_snapshot()
 

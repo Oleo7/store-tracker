@@ -331,6 +331,48 @@ class PlanningFrontendContractTests(TestCase):
             self.html,
         )
 
+    def test_route_preview_persists_and_replays_the_exact_pending_request(self):
+        self.assertIn(
+            '"store-tracker:route-preview-recovery:v1"',
+            self.html,
+        )
+        self.assertIn("sessionStorage.setItem(", self.html)
+        self.assertIn("sessionStorage.removeItem(", self.html)
+        self.assertIn("PLANNING_ROUTE_RECOVERY_TTL_MS = 30 * 60 * 1000", self.html)
+        self.assertIn("PLANNING_ROUTE_RECOVERY_POLL_MS = 15 * 1000", self.html)
+
+        create = self.html.split("async function openPlanningRoutePreview()", 1)[1].split(
+            "function renderPlanningRoutePreview", 1
+        )[0]
+        self.assertLess(create.index("getCurrentPositionForRoute()"), create.index("savePlanningRouteRecoveryState(payload)"))
+        self.assertLess(create.index("savePlanningRouteRecoveryState(payload)"), create.index("postPendingPlanningRoutePreview(state"))
+
+        recovery = self.html.split("function resumePlanningRoutePreviewRecovery", 1)[1].split(
+            "async function openPlanningRoutePreview", 1
+        )[0]
+        self.assertIn("planningRoutePreviewStatus(state.payload.client_request_id)", recovery)
+        self.assertIn('status.state === "completed"', recovery)
+        self.assertIn("completedReplay: true", recovery)
+        self.assertNotIn("getCurrentPositionForRoute", recovery)
+        self.assertNotIn("planningClientRequestId", recovery)
+        self.assertIn('window.addEventListener("online"', self.html)
+        self.assertIn('document.addEventListener("visibilitychange"', self.html)
+
+    def test_route_preview_recovery_clears_after_render_and_never_applies(self):
+        recovery = self.html.split("function planningRouteCurrentOwnerUserName", 1)[1].split(
+            "function renderPlanningRoutePreview", 1
+        )[0]
+        rendered = recovery.split("function renderRecoveredPlanningRoutePreview", 1)[1].split(
+            "async function postPendingPlanningRoutePreview", 1
+        )[0]
+        self.assertLess(rendered.index("renderPlanningRoutePreview(payload)"), rendered.index("planningRouteApplyRequestId"))
+        self.assertLess(rendered.index("planningRouteApplyRequestId"), rendered.index("clearPlanningRouteRecoveryState()"))
+        self.assertIn('kind: "ambiguous_transport_or_body_failure"', recovery)
+        self.assertIn('outcome.kind === "in_progress"', recovery)
+        self.assertIn('outcome.kind === "terminal_backend_error"', recovery)
+        self.assertIn("planningRoutePreviewFetch(state.payload)", recovery)
+        self.assertNotIn("/planning/route-apply", recovery)
+
     def test_legacy_followup_keeps_its_source_link(self):
         self.assertIn('payload.source = "follow_up"', self.html)
         self.assertIn(

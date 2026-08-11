@@ -4423,6 +4423,13 @@
   let planningRoutePreviewRequestId = "";
   let planningRouteApplyRequestId = "";
   let planningRouteImportRequestId = "";
+  const PLANNING_ROUTE_RECOVERY_STORAGE_KEY = "store-tracker:route-preview-recovery:v1";
+  const PLANNING_ROUTE_RECOVERY_TTL_MS = 30 * 60 * 1000;
+  const PLANNING_ROUTE_RECOVERY_WINDOW_MS = 5 * 60 * 1000;
+  const PLANNING_ROUTE_RECOVERY_POLL_MS = 15 * 1000;
+  let planningRouteRecoveryPromise = null;
+  let planningRouteRecoveryTimer = 0;
+  let planningRouteRecoveryDeadlineMs = 0;
   let planningDragState = null;
   let planningDragFrame = 0;
   let planningDragAutoScrollFrame = 0;
@@ -7586,6 +7593,7 @@
         .filter(user => user.user_name);
       renderPlanning();
       loadPlanningRecommendation();
+      resumePlanningRoutePreviewRecovery();
     } catch (error) {
       if (requestSerial !== planningLoadSerial) return;
       renderPlanningLoadError(error);
@@ -8824,20 +8832,342 @@
       : "Rutten beräknas från din position nu";
   }
 
+  function planningRouteCurrentOwnerUserName() {
+    const selectedOwner = String(planningSelectedOwner() || "").trim();
+    if (selectedOwner) return selectedOwner;
+    return String(
+      normalizePlanningUser(planningData?.owner || currentUser || {}).user_name ||
+      currentUser?.user_name ||
+      ""
+    ).trim();
+  }
+
+  function planningRouteResetPreviewButton() {
+    const button = document.getElementById("planning-route-preview-btn");
+    if (!button) return;
+    button.disabled = false;
+    button.textContent = "Skapa ruttförslag";
+  }
+
+  function clearPlanningRouteRecoveryState() {
+    try {
+      sessionStorage.removeItem(PLANNING_ROUTE_RECOVERY_STORAGE_KEY);
+    } catch {}
+    planningRoutePreviewRequestId = "";
+    planningRouteRecoveryDeadlineMs = 0;
+    if (planningRouteRecoveryTimer) {
+      window.clearTimeout(planningRouteRecoveryTimer);
+      planningRouteRecoveryTimer = 0;
+    }
+  }
+
+  function readPlanningRouteRecoveryState() {
+    let state = null;
+    try {
+      state = JSON.parse(sessionStorage.getItem(PLANNING_ROUTE_RECOVERY_STORAGE_KEY) || "null");
+    } catch {
+      clearPlanningRouteRecoveryState();
+      return null;
+    }
+    const createdAtMs = Number(state?.created_at_ms);
+    const payload = state?.payload;
+    const now = Date.now();
+    const valid = state?.version === 1 &&
+      typeof state.actor_user_name === "string" && state.actor_user_name.trim() &&
+      typeof state.owner_user_name === "string" && state.owner_user_name.trim() &&
+      typeof state.route_date === "string" && planningDateFromKey(state.route_date) &&
+      Number.isFinite(createdAtMs) && createdAtMs <= now + 60000 &&
+      now - createdAtMs <= PLANNING_ROUTE_RECOVERY_TTL_MS &&
+      payload && typeof payload === "object" && !Array.isArray(payload) &&
+      String(payload.client_request_id || "").trim() &&
+      payload.route_date === state.route_date && payload.route_mode === "automatic" &&
+      Number.isFinite(Number(payload.start?.latitude)) &&
+      Number.isFinite(Number(payload.start?.longitude));
+    if (!valid || state.actor_user_name !== String(currentUser?.user_name || "").trim()) {
+      clearPlanningRouteRecoveryState();
+      return null;
+    }
+    return state;
+  }
+
+  function planningRouteRecoveryForCurrentContext() {
+    const state = readPlanningRouteRecoveryState();
+    if (!state) return null;
+    if (
+      state.owner_user_name !== planningRouteCurrentOwnerUserName() ||
+      state.route_date !== planningSelectedDate
+    ) {
+      return null;
+    }
+    return state;
+  }
+
+  function savePlanningRouteRecoveryState(payload) {
+    const immutablePayload = JSON.parse(JSON.stringify(payload));
+    const state = {
+      version: 1,
+      actor_user_name: String(currentUser?.user_name || "").trim(),
+      owner_user_name: planningRouteCurrentOwnerUserName(),
+      route_date: planningSelectedDate,
+      created_at_ms: Date.now(),
+      payload: immutablePayload,
+    };
+    sessionStorage.setItem(
+      PLANNING_ROUTE_RECOVERY_STORAGE_KEY,
+      JSON.stringify(state)
+    );
+    return state;
+  }
+
+  function planningRouteError(response, payload) {
+    const error = new Error(
+      payload?.message || payload?.detail || payload?.error_description ||
+      (typeof payload?.error === "string" ? payload.error : "") ||
+      `HTTP ${response.status}`
+    );
+    error.code = String(payload?.code || payload?.error || "");
+    error.status = response.status;
+    error.payload = payload;
+    return error;
+  }
+
+  function planningRoutePreviewPayloadIsValid(payload) {
+    if (!payload || typeof payload !== "object" || payload.ok === false) return false;
+    const source = payload.data && typeof payload.data === "object" ? payload.data : payload;
+    const stops = source.stops ?? source.activities;
+    const token = String(source.preview_token ?? source.token ?? "").trim();
+    return source && typeof source === "object" &&
+      Array.isArray(stops) &&
+      source.summary && typeof source.summary === "object" && !Array.isArray(source.summary) &&
+      Boolean(token);
+  }
+
+  async function planningRoutePreviewFetch(payload) {
+    let response;
+    try {
+      response = await fetch(`${API}/planning/route-preview`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+    } catch (error) {
+      return { kind: "ambiguous_transport_or_body_failure", error };
+    }
+
+    let result;
+    try {
+      const body = await response.text();
+      if (!body.trim()) throw new Error("empty_response_body");
+      result = JSON.parse(body);
+    } catch (error) {
+      return { kind: "ambiguous_transport_or_body_failure", error };
+    }
+
+    if (!response.ok || result?.ok === false) {
+      const error = planningRouteError(response, result);
+      const structuredError = result && typeof result === "object" &&
+        Boolean(String(result.code || result.error || "").trim());
+      if (!structuredError) {
+        return { kind: "ambiguous_transport_or_body_failure", error };
+      }
+      return {
+        kind: error.code === "route_optimization_in_progress"
+          ? "in_progress"
+          : "terminal_backend_error",
+        error,
+      };
+    }
+    if (!planningRoutePreviewPayloadIsValid(result)) {
+      return {
+        kind: "ambiguous_transport_or_body_failure",
+        error: new Error("invalid_route_preview_response"),
+      };
+    }
+    return { kind: "success", payload: result };
+  }
+
+  async function planningRoutePreviewStatus(clientRequestId) {
+    const params = new URLSearchParams({ client_request_id: clientRequestId });
+    const response = await fetch(`${API}/planning/route-preview-status?${params.toString()}`);
+    const payload = await response.json();
+    if (!response.ok || payload?.ok !== true || typeof payload.state !== "string") {
+      throw planningRouteError(response, payload);
+    }
+    return payload;
+  }
+
+  function planningRouteRecoveryMessage(message, { disabled = true } = {}) {
+    const button = document.getElementById("planning-route-preview-btn");
+    if (!button) return;
+    button.disabled = disabled;
+    button.textContent = message;
+  }
+
+  function pausePlanningRouteRecovery() {
+    if (planningRouteRecoveryTimer) {
+      window.clearTimeout(planningRouteRecoveryTimer);
+      planningRouteRecoveryTimer = 0;
+    }
+    planningRouteRecoveryDeadlineMs = 0;
+    planningRouteRecoveryMessage("Hämta ruttförslag", { disabled: false });
+  }
+
+  function stopPlanningRouteAutomaticRecovery() {
+    pausePlanningRouteRecovery();
+    showToast("Ruttförslaget kunde inte hämtas automatiskt. Hämta resultatet igen.");
+  }
+
+  function schedulePlanningRouteRecovery(state, deadlineMs) {
+    if (!planningRouteRecoveryForCurrentContext()) return;
+    if (Date.now() >= deadlineMs) {
+      stopPlanningRouteAutomaticRecovery();
+      return;
+    }
+    planningRouteRecoveryDeadlineMs = deadlineMs;
+    planningRouteRecoveryMessage("Rutten optimeras fortfarande – väntar på resultatet…");
+    if (planningRouteRecoveryTimer) return;
+    planningRouteRecoveryTimer = window.setTimeout(() => {
+      planningRouteRecoveryTimer = 0;
+      resumePlanningRoutePreviewRecovery({ deadlineMs });
+    }, PLANNING_ROUTE_RECOVERY_POLL_MS);
+  }
+
+  function runPlanningRouteRecoverySingleFlight(operation) {
+    if (planningRouteRecoveryPromise) return planningRouteRecoveryPromise;
+    planningRouteRecoveryPromise = Promise.resolve()
+      .then(operation)
+      .finally(() => {
+        planningRouteRecoveryPromise = null;
+      });
+    return planningRouteRecoveryPromise;
+  }
+
+  function renderRecoveredPlanningRoutePreview(payload, { recovered = false } = {}) {
+    planningRoutePreview = payload;
+    renderPlanningRoutePreview(payload);
+    planningRouteApplyRequestId = planningClientRequestId("planning-route-apply");
+    clearPlanningRouteRecoveryState();
+    planningRouteResetPreviewButton();
+    if (recovered) showToast("Ruttförslaget återhämtades");
+  }
+
+  async function postPendingPlanningRoutePreview(
+    state, { deadlineMs, completedReplay = false, recovered = false } = {}
+  ) {
+    planningRoutePreviewRequestId = String(state.payload.client_request_id || "");
+    const outcome = await planningRoutePreviewFetch(state.payload);
+    if (outcome.kind === "success") {
+      try {
+        renderRecoveredPlanningRoutePreview(outcome.payload, { recovered });
+      } catch {
+        planningRouteRecoveryMessage("Hämta ruttförslag", { disabled: false });
+        showToast("Ruttförslaget kunde inte visas. Hämta resultatet igen.");
+        if (!completedReplay) schedulePlanningRouteRecovery(state, deadlineMs);
+      }
+      return;
+    }
+    if (outcome.kind === "terminal_backend_error") {
+      clearPlanningRouteRecoveryState();
+      planningRouteResetPreviewButton();
+      showToast(
+        getRouteProposalFailureMessage(outcome.error) ||
+        outcome.error?.message ||
+        "Ruttförslaget kunde inte skapas"
+      );
+      return;
+    }
+    if (outcome.kind === "in_progress") {
+      planningRouteRecoveryMessage("Rutten optimeras fortfarande – väntar på resultatet…");
+      schedulePlanningRouteRecovery(state, deadlineMs);
+      return;
+    }
+    planningRouteRecoveryMessage("Anslutningen bröts. Hämtar ruttförslaget…");
+    showToast("Anslutningen bröts. Rutten kan fortfarande beräknas – hämtar resultatet…");
+    if (completedReplay) {
+      pausePlanningRouteRecovery();
+    } else {
+      schedulePlanningRouteRecovery(state, deadlineMs);
+    }
+  }
+
+  function terminalPlanningRouteRecovery(status) {
+    const error = {
+      code: String(status.error_code || ""),
+      payload: { code: status.error_code, error: status.error_code },
+    };
+    clearPlanningRouteRecoveryState();
+    planningRouteResetPreviewButton();
+    if (status.state === "indeterminate") {
+      showToast("Ruttförsöket har okänt utfall. Starta ett nytt försök manuellt.");
+    } else {
+      showToast(getRouteProposalFailureMessage(error) || "Ruttförslaget kunde inte skapas.");
+    }
+  }
+
+  function resumePlanningRoutePreviewRecovery({ manual = false, deadlineMs = 0 } = {}) {
+    const state = planningRouteRecoveryForCurrentContext();
+    if (!state) return Promise.resolve(false);
+    planningRoutePreviewRequestId = String(state.payload.client_request_id || "");
+    if (manual && planningRouteRecoveryTimer) {
+      window.clearTimeout(planningRouteRecoveryTimer);
+      planningRouteRecoveryTimer = 0;
+    }
+    const recoveryDeadline = manual
+      ? Date.now() + PLANNING_ROUTE_RECOVERY_WINDOW_MS
+      : (deadlineMs || planningRouteRecoveryDeadlineMs ||
+        Number(state.created_at_ms) + PLANNING_ROUTE_RECOVERY_WINDOW_MS);
+    if (Date.now() >= recoveryDeadline) {
+      stopPlanningRouteAutomaticRecovery();
+      return Promise.resolve(false);
+    }
+    planningRouteRecoveryDeadlineMs = recoveryDeadline;
+    planningRouteRecoveryMessage("Anslutningen bröts. Hämtar ruttförslaget…");
+    return runPlanningRouteRecoverySingleFlight(async () => {
+      let status;
+      try {
+        status = await planningRoutePreviewStatus(state.payload.client_request_id);
+      } catch {
+        schedulePlanningRouteRecovery(state, recoveryDeadline);
+        return false;
+      }
+      if (status.state === "not_found") {
+        await postPendingPlanningRoutePreview(state, {
+          deadlineMs: recoveryDeadline,
+          recovered: true,
+        });
+      } else if (status.state === "running") {
+        schedulePlanningRouteRecovery(state, recoveryDeadline);
+      } else if (status.state === "completed") {
+        await postPendingPlanningRoutePreview(state, {
+          deadlineMs: recoveryDeadline,
+          completedReplay: true,
+          recovered: true,
+        });
+      } else if (["failed", "indeterminate"].includes(status.state)) {
+        terminalPlanningRouteRecovery(status);
+      } else {
+        schedulePlanningRouteRecovery(state, recoveryDeadline);
+      }
+      return true;
+    });
+  }
+
   async function openPlanningRoutePreview() {
     const button = document.getElementById("planning-route-preview-btn");
     if (planningSelectedDate < planningTodayKey()) {
       showToast("En passerad dag kan inte fyllas automatiskt");
       return;
     }
+    const pending = planningRouteRecoveryForCurrentContext();
+    if (pending) {
+      return resumePlanningRoutePreviewRecovery({ manual: true });
+    }
+    if (readPlanningRouteRecoveryState()) clearPlanningRouteRecoveryState();
     button.disabled = true;
-    const oldText = button.textContent;
     button.textContent = "Optimerar rutten – det kan ta upp till 3 minuter.";
     try {
-      if (!planningRoutePreviewRequestId) {
-        planningRoutePreviewRequestId = planningClientRequestId("planning-route-preview");
-      }
       const position = await getCurrentPositionForRoute();
+      planningRoutePreviewRequestId = planningClientRequestId("planning-route-preview");
       const payload = {
         route_date: planningSelectedDate,
         route_mode: "automatic",
@@ -8850,19 +9180,25 @@
       };
       const owner = planningSelectedOwner();
       if (owner) payload.user_name = owner;
-      planningRoutePreview = await planningFetchJson("/planning/route-preview", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      planningRoutePreviewRequestId = "";
-      planningRouteApplyRequestId = planningClientRequestId("planning-route-apply");
-      renderPlanningRoutePreview(planningRoutePreview);
+      const state = savePlanningRouteRecoveryState(payload);
+      const deadlineMs = Number(state.created_at_ms) + PLANNING_ROUTE_RECOVERY_WINDOW_MS;
+      await runPlanningRouteRecoverySingleFlight(() =>
+        postPendingPlanningRoutePreview(state, {
+          deadlineMs,
+          recovered: false,
+        })
+      );
     } catch (error) {
-      showToast(getRouteProposalFailureMessage(error) || error.message || "Ruttförslaget kunde inte skapas");
+      if (!readPlanningRouteRecoveryState()) planningRoutePreviewRequestId = "";
+      showToast(
+        getRouteProposalFailureMessage(error) ||
+        error.message ||
+        "Ruttförslaget kunde inte skapas"
+      );
     } finally {
-      button.disabled = false;
-      button.textContent = oldText;
+      if (!planningRouteRecoveryPromise && !planningRouteRecoveryTimer) {
+        planningRouteResetPreviewButton();
+      }
     }
   }
 
@@ -8986,6 +9322,10 @@
     openPlanningEditor({ date: planningSelectedDate || planningTodayKey() })
   );
   document.getElementById("planning-route-preview-btn").addEventListener("click", openPlanningRoutePreview);
+  window.addEventListener("online", () => resumePlanningRoutePreviewRecovery());
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") resumePlanningRoutePreviewRecovery();
+  });
   document.getElementById("planning-prev-week-btn").addEventListener("click", () => {
     planningSelectedDate = planningAddDays(planningSelectedDate || planningTodayKey(), -7);
     planningWeekStart = planningStartOfWeek(planningSelectedDate);

@@ -9469,6 +9469,59 @@ def _parse_run_timestamp(value):
     return parsed.astimezone(STOCKHOLM_ZONE)
 
 
+def route_optimization_recovery_status(
+    spreadsheet, *, actor_user_name, client_request_id, now=None
+):
+    """Read one actor-scoped run status without mutating the audit ledger."""
+    try:
+        sheet = get_worksheet(spreadsheet, ROUTE_OPTIMIZATION_RUNS_SHEET)
+    except WorksheetNotFound:
+        return {"state": "not_found"}
+    _headers, rows = worksheet_snapshot(
+        sheet, expected_columns=ROUTE_OPTIMIZATION_RUN_COLUMNS
+    )
+    matching = [
+        row for _row_index, row in rows
+        if str(row.get("actor_user_name") or "").strip() == actor_user_name
+        and str(row.get("client_request_id") or "").strip() == client_request_id
+    ]
+    if not matching:
+        return {"state": "not_found"}
+
+    row = matching[-1]
+    status = str(row.get("status") or "").strip().casefold()
+    error_code = str(row.get("error_code") or "").strip()
+    if status == "completed":
+        return {"state": "completed"}
+    if status == "failed":
+        result = {"state": "failed"}
+        if error_code:
+            result["error_code"] = error_code
+        return result
+    if status == "running":
+        started_at = _parse_run_timestamp(row.get("started_at"))
+        try:
+            timeout_seconds = int(float(row.get("timeout_seconds") or 0))
+        except (TypeError, ValueError, OverflowError):
+            timeout_seconds = 0
+        current = now or stockholm_now()
+        if (
+            started_at is not None
+            and timeout_seconds > 0
+            and (current - started_at).total_seconds() <= timeout_seconds + 60
+        ):
+            return {"state": "running"}
+        return {
+            "state": "indeterminate",
+            "error_code": error_code or "route_optimization_stale_running",
+        }
+
+    result = {"state": "indeterminate"}
+    if error_code:
+        result["error_code"] = error_code
+    return result
+
+
 def execute_route_optimization(*, spreadsheet, owner, inputs, client_request_id):
     actor = current_user()
     actor_user_name = str(actor.get("user_name") or "").strip()
@@ -11313,6 +11366,36 @@ def planning_route_apply():
     if apply_error is not None:
         return apply_error
     return jsonify(result)
+
+
+@app.route("/planning/route-preview-status", methods=["GET"])
+def planning_route_preview_status():
+    client_request_id = normalize_client_request_id(
+        request.args.get("client_request_id")
+    )
+    if not client_request_id:
+        return planning_error(
+            "invalid_client_request_id",
+            "Ett giltigt request-ID krÃ¤vs fÃ¶r statuskontrollen.",
+            400,
+            field="client_request_id",
+        )
+    actor_user_name = str(current_user().get("user_name") or "").strip()
+    try:
+        spreadsheet = get_spreadsheet_with_retry()
+        status = route_optimization_recovery_status(
+            spreadsheet,
+            actor_user_name=actor_user_name,
+            client_request_id=client_request_id,
+        )
+    except Exception:
+        app.logger.exception("Could not read route optimization recovery status")
+        return planning_error(
+            "route_store_unavailable",
+            "RuttfÃ¶rslagets status kunde inte laddas. FÃ¶rsÃ¶k igen.",
+            503,
+        )
+    return jsonify({"ok": True, **status})
 
 
 @app.route("/planning/route-preview", methods=["POST"])
