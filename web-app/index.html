@@ -8884,7 +8884,13 @@
       payload.route_date === state.route_date && payload.route_mode === "automatic" &&
       Number.isFinite(Number(payload.start?.latitude)) &&
       Number.isFinite(Number(payload.start?.longitude));
-    if (!valid || state.actor_user_name !== String(currentUser?.user_name || "").trim()) {
+    if (!valid) {
+      clearPlanningRouteRecoveryState();
+      return null;
+    }
+    const actorUserName = String(currentUser?.user_name || "").trim();
+    if (!actorUserName) return null;
+    if (state.actor_user_name !== actorUserName) {
       clearPlanningRouteRecoveryState();
       return null;
     }

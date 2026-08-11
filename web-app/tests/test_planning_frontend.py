@@ -340,6 +340,14 @@ class PlanningFrontendContractTests(TestCase):
         self.assertIn("sessionStorage.removeItem(", self.html)
         self.assertIn("PLANNING_ROUTE_RECOVERY_TTL_MS = 30 * 60 * 1000", self.html)
         self.assertIn("PLANNING_ROUTE_RECOVERY_POLL_MS = 15 * 1000", self.html)
+        read = self.html.split("function readPlanningRouteRecoveryState", 1)[1].split(
+            "function planningRouteRecoveryForCurrentContext", 1
+        )[0]
+        self.assertIn("if (!valid)", read)
+        self.assertIn("const actorUserName = String(currentUser?.user_name || \"\").trim()", read)
+        self.assertIn("if (!actorUserName) return null", read)
+        self.assertIn("if (state.actor_user_name !== actorUserName)", read)
+        self.assertEqual(read.count("clearPlanningRouteRecoveryState()"), 3)
         save = self.html.split("function savePlanningRouteRecoveryState", 1)[1].split(
             "function planningRouteError", 1
         )[0]
