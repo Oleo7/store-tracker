@@ -395,6 +395,25 @@ class PlanningFrontendContractTests(TestCase):
         self.assertIn("planningRoutePreviewFetch(state.payload)", recovery)
         self.assertNotIn("/planning/route-apply", recovery)
 
+    def test_route_traffic_infeasible_has_shared_post_and_recovery_message(self):
+        expected = (
+            "Trafiken gör att rutten inte ryms inom dagens fasta tider och "
+            "sjutimmarsgräns. Justera planeringen och försök igen."
+        )
+        mapper = self.html.split(
+            "function getRouteProposalFailureMessage", 1
+        )[1].split("async function proposeRoute", 1)[0]
+        self.assertIn('normalizedCode === "route_traffic_infeasible"', mapper)
+        self.assertIn(expected, mapper)
+
+        recovery = self.html.split(
+            "async function postPendingPlanningRoutePreview", 1
+        )[1].split("async function openPlanningRoutePreview", 1)[0]
+        self.assertIn("getRouteProposalFailureMessage(outcome.error)", recovery)
+        self.assertIn("getRouteProposalFailureMessage(error)", recovery)
+        self.assertNotIn("getCurrentPositionForRoute", recovery)
+        self.assertNotIn("/planning/route-apply", recovery)
+
     def test_route_preview_context_switch_resets_ui_and_does_not_share_single_flight(self):
         recovery = self.html.split("function planningRouteRecoveryForCurrentContext", 1)[1].split(
             "async function openPlanningRoutePreview", 1

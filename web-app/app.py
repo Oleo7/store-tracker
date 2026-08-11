@@ -9871,7 +9871,8 @@ def execute_route_optimization(*, spreadsheet, owner, inputs, client_request_id)
         diagnostic_json = ""
         if http_status_value == 200 and "response" in locals() and isinstance(response, dict):
             routes = response.get("routes") if isinstance(response.get("routes"), list) else []
-            route = routes[0] if routes else {}
+            route_candidate = routes[0] if routes else {}
+            route = route_candidate if isinstance(route_candidate, dict) else {}
             diagnostic_payload = {
                 "error_code": error.code,
                 "diagnostic_reason": error.details.get("diagnostic_reason") or error.code,
@@ -9883,6 +9884,17 @@ def execute_route_optimization(*, spreadsheet, owner, inputs, client_request_id)
                 "hasTrafficInfeasibilities": bool(route.get("hasTrafficInfeasibilities")),
                 "vehicle_label_matches": route.get("vehicleLabel") == f"owner:{str(owner_user_name).strip().casefold()}",
             }
+            for key in (
+                "transition_count",
+                "expected_transition_count",
+                "transition_count_matches_expected",
+                "traffic_info_unavailable_count",
+                "route_metrics",
+                "skip_reason_counts",
+                "traffic_deficit_calculated",
+            ):
+                if key in error.details:
+                    diagnostic_payload[key] = error.details[key]
             diagnostic_json = json.dumps(
                 diagnostic_payload,
                 ensure_ascii=False,

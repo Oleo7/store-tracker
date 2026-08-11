@@ -371,6 +371,75 @@ def _parse_time(value: Any) -> datetime:
     return result.astimezone(timezone.utc)
 
 
+_TRAFFIC_DIAGNOSTIC_METRIC_KEYS = (
+    "travelDuration",
+    "waitDuration",
+    "delayDuration",
+    "breakDuration",
+    "visitDuration",
+    "totalDuration",
+    "travelDistanceMeters",
+)
+
+
+def _traffic_infeasibility_diagnostics(
+    response: Mapping[str, Any],
+    route: Mapping[str, Any],
+    *,
+    visits: list[Mapping[str, Any]],
+    transitions: list[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Return compact, non-sensitive facts without attempting local retiming."""
+    route_metrics = route.get("metrics")
+    compact_metrics: dict[str, Any] = {}
+    if isinstance(route_metrics, Mapping):
+        for key in _TRAFFIC_DIAGNOSTIC_METRIC_KEYS:
+            value = route_metrics.get(key)
+            if isinstance(value, bool):
+                continue
+            if isinstance(value, (int, float)):
+                if math.isfinite(float(value)):
+                    compact_metrics[key] = value
+            elif isinstance(value, str) and len(value) <= 80:
+                compact_metrics[key] = value
+
+    skip_reason_counts: dict[str, int] = {}
+    skipped_items = response.get("skippedShipments")
+    if isinstance(skipped_items, list):
+        for skipped in skipped_items:
+            if not isinstance(skipped, Mapping):
+                continue
+            reasons = skipped.get("reasons")
+            if not isinstance(reasons, list):
+                continue
+            for reason in reasons:
+                if not isinstance(reason, Mapping):
+                    continue
+                code = str(reason.get("code") or "").strip()
+                if not code or len(code) > 80:
+                    continue
+                if code not in skip_reason_counts and len(skip_reason_counts) >= 32:
+                    continue
+                skip_reason_counts[code] = skip_reason_counts.get(code, 0) + 1
+
+    expected_transition_count = len(visits) + 1
+    return {
+        "diagnostic_reason": "traffic_infeasibility",
+        "transition_count": len(transitions),
+        "expected_transition_count": expected_transition_count,
+        "transition_count_matches_expected": (
+            len(transitions) == expected_transition_count
+        ),
+        "traffic_info_unavailable_count": sum(
+            transition.get("trafficInfoUnavailable") is True
+            for transition in transitions
+        ),
+        "route_metrics": compact_metrics,
+        "skip_reason_counts": skip_reason_counts,
+        "traffic_deficit_calculated": False,
+    }
+
+
 def parse_optimize_tours_response(
     response: Mapping[str, Any],
     *,
@@ -399,12 +468,29 @@ def parse_optimize_tours_response(
             502,
             counted_attempt=True,
         )
-    routes = list(response.get("routes") or [])
+    routes_value = response.get("routes")
+    if routes_value is not None and not isinstance(routes_value, list):
+        raise RouteOptimizationError(
+            "route_response_invalid",
+            "Google returnerade en ogiltig rutt.",
+            502,
+            counted_attempt=True,
+            details={"diagnostic_reason": "route_structure_invalid"},
+        )
+    routes = list(routes_value or [])
     mandatory_indexes = {index for index, item in enumerate(shipment_list) if item.get("required")}
     if len(routes) != 1:
         code = "route_no_feasible_solution" if not routes and not mandatory_indexes else "route_response_invalid"
         raise RouteOptimizationError(code, "Google kunde inte skapa en giltig rutt.", 422, counted_attempt=True)
     route = routes[0]
+    if not isinstance(route, Mapping):
+        raise RouteOptimizationError(
+            "route_response_invalid",
+            "Google returnerade en ogiltig rutt.",
+            502,
+            counted_attempt=True,
+            details={"diagnostic_reason": "route_structure_invalid"},
+        )
     expected_vehicle = f"owner:{str(owner_user_name).strip().casefold()}"
     if route.get("vehicleLabel") != expected_vehicle:
         raise RouteOptimizationError(
@@ -414,15 +500,29 @@ def parse_optimize_tours_response(
             counted_attempt=True,
             details={"diagnostic_reason": "vehicle_label_mismatch"},
         )
-    if route.get("hasTrafficInfeasibilities") is True:
+    vehicle_index = route.get("vehicleIndex")
+    if (
+        isinstance(vehicle_index, bool)
+        or vehicle_index not in (None, 0, "0")
+    ):
         raise RouteOptimizationError(
             "route_response_invalid",
             "Google returnerade en ogiltig rutt.",
             502,
             counted_attempt=True,
-            details={"diagnostic_reason": "traffic_infeasibility"},
+            details={"diagnostic_reason": "vehicle_index_mismatch"},
         )
-    visits = list(route.get("visits") or [])
+    traffic_infeasible = route.get("hasTrafficInfeasibilities") is True
+    visits_value = route.get("visits")
+    if visits_value is not None and not isinstance(visits_value, list):
+        raise RouteOptimizationError(
+            "route_response_invalid",
+            "Google returnerade en ogiltig rutt.",
+            502,
+            counted_attempt=True,
+            details={"diagnostic_reason": "route_structure_invalid"},
+        )
+    visits = list(visits_value or [])
     if not visits and not mandatory_indexes:
         raise RouteOptimizationError(
             "route_no_feasible_solution",
@@ -435,6 +535,14 @@ def parse_optimize_tours_response(
     seen_indexes: set[int] = set()
     stops = []
     for sequence, visit in enumerate(visits, start=1):
+        if not isinstance(visit, Mapping):
+            raise RouteOptimizationError(
+                "route_response_invalid",
+                "Google returnerade ett okänt stopp.",
+                502,
+                counted_attempt=True,
+                details={"diagnostic_reason": "shipment_identity_invalid"},
+            )
         try:
             index = _response_shipment_index(
                 visit,
@@ -484,7 +592,24 @@ def parse_optimize_tours_response(
             "duration_minutes": SERVICE_SECONDS // 60,
             "priority_score": clamp_priority_score(shipment.get("priority_score")),
         })
-    skipped_items = list(response.get("skippedShipments") or [])
+    skipped_value = response.get("skippedShipments")
+    if skipped_value is not None and not isinstance(skipped_value, list):
+        raise RouteOptimizationError(
+            "route_response_invalid",
+            "Google returnerade en ogiltig skipplista.",
+            502,
+            counted_attempt=True,
+            details={"diagnostic_reason": "shipment_identity_invalid"},
+        )
+    skipped_items = list(skipped_value or [])
+    if any(not isinstance(item, Mapping) for item in skipped_items):
+        raise RouteOptimizationError(
+            "route_response_invalid",
+            "Google returnerade en ogiltig skipplista.",
+            502,
+            counted_attempt=True,
+            details={"diagnostic_reason": "shipment_identity_invalid"},
+        )
     try:
         skipped_indexes = {
             _response_shipment_index(
@@ -531,6 +656,67 @@ def parse_optimize_tours_response(
             details={"diagnostic_reason": "shipment_identity_invalid"},
         )
 
+    transitions_value = route.get("transitions")
+    if transitions_value is not None and not isinstance(transitions_value, list):
+        raise RouteOptimizationError(
+            "route_response_invalid",
+            "Google returnerade en ofullständig rutt.",
+            502,
+            counted_attempt=True,
+            details={"diagnostic_reason": "route_structure_invalid"},
+        )
+    transitions = list(transitions_value or [])
+    if any(not isinstance(transition, Mapping) for transition in transitions):
+        raise RouteOptimizationError(
+            "route_response_invalid",
+            "Google returnerade en ofullständig rutt.",
+            502,
+            counted_attempt=True,
+            details={"diagnostic_reason": "route_structure_invalid"},
+        )
+    if transitions and len(transitions) != len(visits) + 1:
+        raise RouteOptimizationError(
+            "route_response_invalid",
+            "Google returnerade en ofullständig rutt.",
+            502,
+            counted_attempt=True,
+            details={
+                "diagnostic_reason": "transition_count_invalid",
+                "transition_count": len(transitions),
+                "expected_transition_count": len(visits) + 1,
+                "transition_count_matches_expected": False,
+            },
+        )
+    if traffic_infeasible and len(transitions) != len(visits) + 1:
+        raise RouteOptimizationError(
+            "route_response_invalid",
+            "Google returnerade en ofullständig rutt.",
+            502,
+            counted_attempt=True,
+            details={
+                "diagnostic_reason": "transition_count_invalid",
+                "transition_count": len(transitions),
+                "expected_transition_count": len(visits) + 1,
+                "transition_count_matches_expected": False,
+            },
+        )
+    if traffic_infeasible:
+        raise RouteOptimizationError(
+            "route_traffic_infeasible",
+            (
+                "Trafiken gör att rutten inte ryms inom dagens fasta tider "
+                "och sjutimmarsgräns. Justera planeringen och försök igen."
+            ),
+            422,
+            counted_attempt=True,
+            details=_traffic_infeasibility_diagnostics(
+                response,
+                route,
+                visits=visits,
+                transitions=transitions,
+            ),
+        )
+
     try:
         vehicle_start = _parse_time(route["vehicleStartTime"])
         vehicle_end = _parse_time(route["vehicleEndTime"])
@@ -548,9 +734,6 @@ def parse_optimize_tours_response(
         or route_seconds + pre_route_fixed_seconds >= 25200
     ):
         raise RouteOptimizationError("route_response_invalid", "Rutten överskrider sjutimmarsgränsen.", 502, counted_attempt=True)
-    transitions = list(route.get("transitions") or [])
-    if transitions and len(transitions) != len(visits) + 1:
-        raise RouteOptimizationError("route_response_invalid", "Google returnerade en ofullständig rutt.", 502, counted_attempt=True)
     returned_breaks = list(route.get("breaks") or [])
     expected_breaks = sorted(fixed_breaks, key=lambda item: item["scheduled_at"])
     if len(returned_breaks) != len(expected_breaks):

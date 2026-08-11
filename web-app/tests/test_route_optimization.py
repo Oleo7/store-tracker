@@ -355,9 +355,13 @@ class RouteOptimizationModelTests(TestCase):
         )
 
     def test_t7c_response_parser_reports_traffic_infeasibility(self):
-        items = [shipment(1)]
+        items = [shipment(1), shipment(2)]
         response = successful_response(items, selected=(0,))
         response["routes"][0]["hasTrafficInfeasibilities"] = True
+        response["routes"][0]["transitions"][0]["trafficInfoUnavailable"] = True
+        response["skippedShipments"][0]["reasons"] = [{
+            "code": "CANNOT_BE_PERFORMED_WITHIN_VEHICLE_DURATION_LIMIT",
+        }]
         with self.assertRaises(RouteOptimizationError) as exc:
             parse_optimize_tours_response(
                 response,
@@ -365,11 +369,54 @@ class RouteOptimizationModelTests(TestCase):
                 owner_user_name="Olle",
                 route_start=NOW,
             )
-        self.assertEqual(exc.exception.code, "route_response_invalid")
+        error = exc.exception
+        self.assertEqual(error.code, "route_traffic_infeasible")
+        self.assertEqual(error.http_status, 422)
         self.assertEqual(
-            exc.exception.details.get("diagnostic_reason"),
-            "traffic_infeasibility",
+            error.public_message,
+            (
+                "Trafiken gör att rutten inte ryms inom dagens fasta tider "
+                "och sjutimmarsgräns. Justera planeringen och försök igen."
+            ),
         )
+        self.assertEqual(error.details["diagnostic_reason"], "traffic_infeasibility")
+        self.assertEqual(error.details["transition_count"], 2)
+        self.assertEqual(error.details["expected_transition_count"], 2)
+        self.assertTrue(error.details["transition_count_matches_expected"])
+        self.assertEqual(error.details["traffic_info_unavailable_count"], 1)
+        self.assertEqual(error.details["route_metrics"]["travelDuration"], "1200s")
+        self.assertEqual(error.details["skip_reason_counts"], {
+            "CANNOT_BE_PERFORMED_WITHIN_VEHICLE_DURATION_LIMIT": 1,
+        })
+        self.assertIs(error.details["traffic_deficit_calculated"], False)
+
+    def test_t7d_structural_error_precedes_traffic_infeasibility(self):
+        items = [shipment(1), shipment(2)]
+        duplicate = successful_response(items, selected=(0, 0))
+        incomplete = successful_response(items, selected=(0,))
+        incomplete["routes"][0]["transitions"].pop()
+        wrong_vehicle = successful_response(items, selected=(0,))
+        wrong_vehicle["routes"][0]["vehicleIndex"] = 1
+        cases = (
+            (duplicate, "shipment_identity_invalid"),
+            (incomplete, "transition_count_invalid"),
+            (wrong_vehicle, "vehicle_index_mismatch"),
+        )
+        for response, reason in cases:
+            response["routes"][0]["hasTrafficInfeasibilities"] = True
+            with self.subTest(reason=reason):
+                with self.assertRaises(RouteOptimizationError) as exc:
+                    parse_optimize_tours_response(
+                        response,
+                        shipments=items,
+                        owner_user_name="Olle",
+                        route_start=NOW,
+                    )
+                self.assertEqual(exc.exception.code, "route_response_invalid")
+                self.assertEqual(
+                    exc.exception.details.get("diagnostic_reason"),
+                    reason,
+                )
 
     def test_t8_response_parser_rejects_missing_mandatory_duplicate_and_seven_hours(self):
         mandatory = [shipment(1, required=True)]
@@ -688,6 +735,11 @@ class RouteOptimizationIntegrationTests(TestCase):
                 "error_code": "route_provider_timeout",
             },
             {
+                "run_id": "traffic-failed", "actor_user_name": "olle",
+                "client_request_id": "traffic-failed-id", "status": "failed",
+                "error_code": "route_traffic_infeasible",
+            },
+            {
                 "run_id": "stale", "actor_user_name": "olle",
                 "client_request_id": "stale-id", "status": "running",
                 "started_at": (NOW - timedelta(seconds=200)).isoformat(),
@@ -714,6 +766,10 @@ class RouteOptimizationIntegrationTests(TestCase):
             "failed-id": {
                 "ok": True, "state": "failed",
                 "error_code": "route_provider_timeout",
+            },
+            "traffic-failed-id": {
+                "ok": True, "state": "failed",
+                "error_code": "route_traffic_infeasible",
             },
             "stale-id": {
                 "ok": True, "state": "indeterminate",
@@ -765,6 +821,72 @@ class RouteOptimizationIntegrationTests(TestCase):
         self.assertEqual(payload["route_count"], 1)
         self.assertEqual(payload["visit_count"], 1)
         self.assertGreaterEqual(payload["skipped_count"], 0)
+        self.assertGreaterEqual(payload["solve_duration_ms"], 0)
+
+    def test_t15b_http_200_traffic_failure_records_compact_diagnostics(self):
+        snapshot = self.priority_snapshot()
+
+        class Provider:
+            def optimize(_self, *, project, body, timeout_seconds):
+                ids = [
+                    item["label"].split(":", 1)[1]
+                    for item in body["model"]["shipments"]
+                ]
+                response = successful_response(
+                    [{"customer_id": value} for value in ids],
+                    selected=(0,),
+                    start=app_module.route_start_datetime(NOW.date()),
+                )
+                route = response["routes"][0]
+                route["hasTrafficInfeasibilities"] = True
+                route["transitions"][0]["trafficInfoUnavailable"] = True
+                if response["skippedShipments"]:
+                    response["skippedShipments"][0]["reasons"] = [{
+                        "code": "CANNOT_BE_PERFORMED_WITHIN_VEHICLE_DURATION_LIMIT",
+                    }]
+                return response, 200
+
+        with patch.object(
+            app_module,
+            "get_authoritative_priority_snapshot",
+            return_value=snapshot,
+        ), patch.object(
+            app_module,
+            "route_optimization_provider",
+            return_value=Provider(),
+        ):
+            response = self.client.post("/planning/route-preview", json={
+                "route_date": NOW.date().isoformat(),
+                "route_mode": "automatic",
+                "client_request_id": "traffic-failure-200",
+                "start": {"latitude": 57.7, "longitude": 11.9},
+            })
+
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(response.get_json()["code"], "route_traffic_infeasible")
+        self.assertIn("Trafiken gör att rutten inte ryms", response.get_json()["message"])
+        rows = self.spreadsheet.worksheet(
+            app_module.ROUTE_OPTIMIZATION_RUNS_SHEET
+        ).dict_rows()
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(row["status"], "failed")
+        self.assertTrue(app_module.is_yes(row["counted_attempt"]))
+        self.assertEqual(str(row["http_status"]), "200")
+        self.assertEqual(row["error_code"], "route_traffic_infeasible")
+        payload = json.loads(str(row["result_payload_json"] or "{}"))
+        self.assertEqual(payload["diagnostic_reason"], "traffic_infeasibility")
+        self.assertEqual(payload["route_count"], 1)
+        self.assertEqual(payload["visit_count"], 1)
+        self.assertEqual(payload["transition_count"], 2)
+        self.assertEqual(payload["expected_transition_count"], 2)
+        self.assertGreaterEqual(payload["skipped_count"], 0)
+        self.assertEqual(payload["break_count"], 0)
+        self.assertTrue(payload["hasTrafficInfeasibilities"])
+        self.assertTrue(payload["vehicle_label_matches"])
+        self.assertEqual(payload["traffic_info_unavailable_count"], 1)
+        self.assertEqual(payload["route_metrics"]["travelDuration"], "1200s")
+        self.assertIs(payload["traffic_deficit_calculated"], False)
         self.assertGreaterEqual(payload["solve_duration_ms"], 0)
 
     def test_t16_client_request_conflict_and_running_fingerprint_are_409(self):

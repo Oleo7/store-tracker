@@ -5541,6 +5541,9 @@
     if (normalizedCode.includes("no_feasible") || normalizedCode.includes("route_not_found")) {
       return "Ingen genomförbar rutt hittades under sju timmar inklusive retur till start.";
     }
+    if (normalizedCode === "route_traffic_infeasible") {
+      return "Trafiken gör att rutten inte ryms inom dagens fasta tider och sjutimmarsgräns. Justera planeringen och försök igen.";
+    }
     if (
       normalizedCode.includes("travel")
       || normalizedCode.includes("matrix")
