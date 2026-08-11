@@ -38,6 +38,13 @@ class PlanningFrontendContractTests(TestCase):
         )
         self.assertIn("expected_revision: Number(activity.revision || 1)", self.html)
 
+    def test_ambiguous_contact_activity_reuses_the_original_request(self):
+        self.assertIn('result?.error === "ambiguous_planned_activity"', self.html)
+        self.assertIn("function openAmbiguousContactActivityDialog(payload, candidates)", self.html)
+        self.assertIn("...payload,", self.html)
+        self.assertIn("planned_activity_id: activity.planned_activity_id", self.html)
+        self.assertIn("contactRetryPayload = {", self.html)
+
     def test_customer_selector_is_accessible_search_combobox_using_customer_id(self):
         self.assertIn('role="combobox"', self.html)
         self.assertIn('aria-controls="planning-editor-customer-list"', self.html)

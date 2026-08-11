@@ -1450,6 +1450,119 @@ class PlanningContactCompletionTests(PlanningApiTestCase):
         payload.update(overrides)
         return payload
 
+    def direct_contact_payload(self, **overrides):
+        customer = app_module.get_customer_by_row(self.spreadsheet, 2)
+        payload = {
+            "client_request_id": "direct-contact-1",
+            "customer_id": customer["customer_id"],
+            "date_time": "2026-07-28 09:10",
+            "contact_channel": "Telefon",
+            "result": "Positiv",
+            "comment": "Bra dialog med butiken",
+            "customer_contact_person": "Klara",
+        }
+        payload.update(overrides)
+        return payload
+
+    def test_direct_contact_auto_links_unique_same_day_activity(self):
+        activity = self.append_planning_row(
+            planned_activity_id="direct-auto-link",
+            contact_type="phone",
+        )
+        response = self.client.post(
+            "/customers/Butik%20A/contacts",
+            json=self.direct_contact_payload(),
+        )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertEqual(len(self.contact_rows()), 1)
+        contact = self.contact_rows()[0]
+        self.assertEqual(contact["planned_activity_id"], activity["planned_activity_id"])
+        stored_activity = self.planning_rows()[0]
+        self.assertEqual(stored_activity["status"], "completed")
+        self.assertEqual(stored_activity["completed_contact_id"], contact["contact_id"])
+        planning = self.client.get(
+            "/planning/activities?start=2026-07-28&end=2026-07-28"
+        ).get_json()
+        self.assertFalse(planning["unplanned_contacts"])
+
+    def test_direct_contact_without_candidate_remains_unplanned(self):
+        response = self.client.post(
+            "/customers/Butik%20A/contacts",
+            json=self.direct_contact_payload(),
+        )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertEqual(self.contact_rows()[0]["planned_activity_id"], "")
+        planning = self.client.get(
+            "/planning/activities?start=2026-07-28&end=2026-07-28"
+        ).get_json()
+        self.assertEqual(len(planning["unplanned_contacts"]), 1)
+
+    def test_ambiguous_direct_contact_does_not_write(self):
+        first = self.append_planning_row(
+            planned_activity_id="ambiguous-first", contact_type="visit"
+        )
+        second = self.append_planning_row(
+            planned_activity_id="ambiguous-second", contact_type="email"
+        )
+        response = self.client.post(
+            "/customers/Butik%20A/contacts",
+            json=self.direct_contact_payload(contact_channel="Telefon"),
+        )
+
+        self.assertEqual(response.status_code, 409, response.get_json())
+        body = response.get_json()
+        self.assertEqual(body["error"], "ambiguous_planned_activity")
+        self.assertEqual(
+            {item["planned_activity_id"] for item in body["candidates"]},
+            {first["planned_activity_id"], second["planned_activity_id"]},
+        )
+        self.assertEqual(self.contact_rows(), [])
+        self.assertTrue(all(row["status"] == "planned" for row in self.planning_rows()))
+
+    def test_direct_contact_uses_unique_matching_contact_type_as_tiebreaker(self):
+        visit = self.append_planning_row(
+            planned_activity_id="type-tiebreak-visit", contact_type="visit"
+        )
+        phone = self.append_planning_row(
+            planned_activity_id="type-tiebreak-phone", contact_type="phone"
+        )
+
+        response = self.client.post(
+            "/customers/Butik%20A/contacts",
+            json=self.direct_contact_payload(contact_channel="Telefon"),
+        )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertEqual(
+            self.contact_rows()[0]["planned_activity_id"],
+            phone["planned_activity_id"],
+        )
+        by_id = {
+            row["planned_activity_id"]: row for row in self.planning_rows()
+        }
+        self.assertEqual(by_id[phone["planned_activity_id"]]["status"], "completed")
+        self.assertEqual(by_id[visit["planned_activity_id"]]["status"], "planned")
+        self.assertEqual(by_id[visit["planned_activity_id"]]["completed_contact_id"], "")
+
+    def test_direct_auto_link_replay_is_idempotent(self):
+        activity = self.append_planning_row(
+            planned_activity_id="direct-auto-replay", contact_type="phone"
+        )
+        payload = self.direct_contact_payload(client_request_id="direct-replay-1")
+        first = self.client.post("/customers/Butik%20A/contacts", json=payload)
+        second = self.client.post("/customers/Butik%20A/contacts", json=payload)
+
+        self.assertEqual(first.status_code, 200, first.get_json())
+        self.assertEqual(second.status_code, 200, second.get_json())
+        self.assertTrue(second.get_json()["duplicate"])
+        self.assertEqual(len(self.contact_rows()), 1)
+        self.assertEqual(
+            self.contact_rows()[0]["planned_activity_id"],
+            activity["planned_activity_id"],
+        )
+
     def test_contact_without_id_rejects_duplicate_customer_names(self):
         customer_sheet = self.spreadsheet.worksheet(
             "customers_enriched"
