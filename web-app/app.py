@@ -3455,6 +3455,96 @@ def planned_contact_id_for_payload(
     )
 
 
+def resolve_contact_planned_activity(
+    spreadsheet,
+    *,
+    customer_id,
+    owner,
+    date_time,
+    contact_channel,
+    client_request_id="",
+):
+    """Read-only, conservative resolver for direct customer-card contacts."""
+    contact_at = parse_planning_datetime(date_time)
+    if not customer_id or contact_at is None:
+        return {"kind": "no_match"}
+    contact_date = contact_at.astimezone(STOCKHOLM_ZONE).date()
+    _sheet, _headers, rows = get_planned_activity_snapshot(spreadsheet)
+    owner_name = normalize_key((owner or {}).get("user_name"))
+
+    def is_same_activity_context(row):
+        scheduled_at = parse_planning_datetime(row.get("scheduled_at"))
+        return (
+            bool(str(row.get("planned_activity_id") or "").strip())
+            and str(row.get("customer_id") or "").strip()
+            == str(customer_id).strip()
+            and normalize_key(row.get("user_name")) == owner_name
+            and scheduled_at is not None
+            and scheduled_at.astimezone(STOCKHOLM_ZONE).date() == contact_date
+        )
+
+    # A completed activity carrying this request's normal completion scope is
+    # the authoritative recovery point for a replay after automatic matching.
+    if client_request_id:
+        replay_matches = [
+            row for _row_index, row in rows
+            if (
+                is_same_activity_context(row)
+                and str(row.get("status") or "").strip().casefold()
+                == "completed"
+                and str(row.get("completed_contact_id") or "").strip()
+                and str(row.get("last_mutation_request_id") or "").strip()
+                == planning_request_scope(
+                    owner,
+                    "complete",
+                    str(row.get("planned_activity_id") or "").strip(),
+                    client_request_id,
+                )
+            )
+        ]
+        if len(replay_matches) == 1:
+            return {"kind": "replay", "activity": replay_matches[0]}
+
+    candidates = [
+        row for _row_index, row in rows
+        if (
+            is_same_activity_context(row)
+            and str(row.get("status") or "planned").strip().casefold()
+            == "planned"
+            and not str(row.get("completed_contact_id") or "").strip()
+        )
+    ]
+    if len(candidates) == 1:
+        return {"kind": "automatic", "activity": candidates[0]}
+    if len(candidates) > 1:
+        channel = normalize_planning_contact_type(contact_channel)
+        typed = [
+            row for row in candidates
+            if normalize_planning_contact_type(row.get("contact_type")) == channel
+        ]
+        if len(typed) == 1:
+            return {"kind": "automatic", "activity": typed[0]}
+        return {
+            "kind": "ambiguous",
+            "candidates": [
+                {
+                    "planned_activity_id": str(
+                        row.get("planned_activity_id") or ""
+                    ).strip(),
+                    "scheduled_at": planning_datetime_text(row.get("scheduled_at")),
+                    "contact_type": normalize_planning_contact_type(
+                        row.get("contact_type")
+                    ),
+                    "customer": str(row.get("customer") or "").strip(),
+                    "note": str(row.get("note") or "").strip(),
+                    "revision": planning_revision(row),
+                }
+                for row in candidates
+            ],
+        }
+    return {"kind": "no_match"}
+
+
 def ensure_followup_source_contact_id(
     spreadsheet,
     *,
@@ -11830,9 +11920,36 @@ def add_contact(customer_name):
     ):
         return jsonify({"ok": False, "error": "customer_not_found"}), 404
     customer_name = str(requested_customer.get("customer") or "").strip()
+    session_caller = current_user()
+    if not planned_activity_id:
+        resolution = resolve_contact_planned_activity(
+            spreadsheet,
+            customer_id=requested_customer.get("customer_id"),
+            owner=session_caller,
+            date_time=data.get("date_time"),
+            contact_channel=data.get("contact_channel"),
+            client_request_id=client_request_id,
+        )
+        if resolution["kind"] == "ambiguous":
+            return planning_error(
+                "ambiguous_planned_activity",
+                "Flera planerade aktiviteter kan motsvara kontakten. Välj aktivitet.",
+                409,
+                candidates=resolution["candidates"],
+            )
+        if resolution["kind"] in {"automatic", "replay"}:
+            planned_activity_id = str(
+                resolution["activity"].get("planned_activity_id") or ""
+            ).strip()
+            if not client_request_id:
+                return planning_error(
+                    "invalid_client_request_id",
+                    "Ett giltigt request-ID krävs för kalenderkopplade kontakter.",
+                    400,
+                    field="client_request_id",
+                )
     sheet = get_worksheet(spreadsheet, "sales_activities")
     headers = ensure_contact_worksheet_schema(sheet)
-    session_caller = current_user()
     calendar_coupled = bool(follow_up_enabled or planned_activity_id)
     caller = session_caller
     if calendar_coupled:

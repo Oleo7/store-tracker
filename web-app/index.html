@@ -7038,6 +7038,8 @@
         }
         loadInsights();
         if (followupInsights) loadFollowupInsights(document.getElementById("insights-responsible").value);
+      } else if (res.status === 409 && result?.error === "ambiguous_planned_activity") {
+        openAmbiguousContactActivityDialog(payload, result.candidates);
       } else if (partial) {
         contactRetryPayload = payload;
         setContactFormRetryMode(true);
@@ -8294,6 +8296,37 @@
     const returnFocus = planningModalReturnFocus;
     planningModalReturnFocus = null;
     if (returnFocus?.isConnected) setTimeout(() => returnFocus.focus(), 0);
+  }
+
+  function openAmbiguousContactActivityDialog(payload, candidates) {
+    const escape = value => String(value || "").replace(/[&<>"']/g, char => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+    })[char]);
+    const items = Array.isArray(candidates) ? candidates : [];
+    openPlanningModal(
+      "Vilken planerad aktivitet genomförde du?",
+      String(currentCustomer?.customer || ""),
+      `<div class="planning-dialog-form">${items.map((activity, index) => `
+        <button class="planning-card-plan-btn" type="button" data-contact-activity-choice="${index}">
+          <strong>${escape(activity.scheduled_at || "Tid saknas")}</strong><br>
+          ${escape(PLANNING_CONTACT_TYPES[activity.contact_type]?.label || activity.contact_type || "Kontakt")}
+          ${activity.note ? `<br><small>${escape(activity.note)}</small>` : ""}
+        </button>`).join("")}</div>`
+    );
+    planningModalContent.querySelectorAll("[data-contact-activity-choice]").forEach(button => {
+      button.addEventListener("click", () => {
+        const activity = items[Number(button.dataset.contactActivityChoice)];
+        if (!activity?.planned_activity_id) return;
+        contactRetryPayload = {
+          ...payload,
+          planned_activity_id: activity.planned_activity_id,
+        };
+        activePlannedActivityId = activity.planned_activity_id;
+        document.getElementById("f-planned-activity-id").value = activePlannedActivityId;
+        closePlanningModal();
+        setTimeout(() => document.getElementById("form-save-btn").click(), 0);
+      });
+    });
   }
 
   function planningSelectableCustomers() {
