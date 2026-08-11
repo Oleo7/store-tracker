@@ -700,6 +700,47 @@ def parse_optimize_tours_response(
                 "transition_count_matches_expected": False,
             },
         )
+    try:
+        vehicle_start = _parse_time(route["vehicleStartTime"])
+        vehicle_end = _parse_time(route["vehicleEndTime"])
+    except (KeyError, TypeError, ValueError):
+        raise RouteOptimizationError(
+            "route_response_invalid",
+            "Google returnerade ogiltiga rutttider.",
+            502,
+            counted_attempt=True,
+            details={"diagnostic_reason": "route_structure_invalid"},
+        )
+    returned_breaks_value = route.get("breaks")
+    if (
+        returned_breaks_value is not None
+        and not isinstance(returned_breaks_value, list)
+    ):
+        raise RouteOptimizationError(
+            "route_response_invalid",
+            "Google returnerade en ogiltig fast aktivitet.",
+            502,
+            counted_attempt=True,
+            details={"diagnostic_reason": "route_structure_invalid"},
+        )
+    returned_breaks = list(returned_breaks_value or [])
+    if any(not isinstance(item, Mapping) for item in returned_breaks):
+        raise RouteOptimizationError(
+            "route_response_invalid",
+            "Google returnerade en ogiltig fast aktivitet.",
+            502,
+            counted_attempt=True,
+            details={"diagnostic_reason": "route_structure_invalid"},
+        )
+    metrics_value = route.get("metrics")
+    if metrics_value is not None and not isinstance(metrics_value, Mapping):
+        raise RouteOptimizationError(
+            "route_response_invalid",
+            "Google returnerade ogiltiga ruttmått.",
+            502,
+            counted_attempt=True,
+            details={"diagnostic_reason": "route_structure_invalid"},
+        )
     if traffic_infeasible:
         raise RouteOptimizationError(
             "route_traffic_infeasible",
@@ -717,11 +758,6 @@ def parse_optimize_tours_response(
             ),
         )
 
-    try:
-        vehicle_start = _parse_time(route["vehicleStartTime"])
-        vehicle_end = _parse_time(route["vehicleEndTime"])
-    except (KeyError, TypeError, ValueError):
-        raise RouteOptimizationError("route_response_invalid", "Google returnerade ogiltiga rutttider.", 502, counted_attempt=True)
     available_seconds = ROUTE_MAX_SECONDS - max(0, int(pre_route_fixed_seconds))
     route_seconds = int((vehicle_end - vehicle_start).total_seconds())
     expected_start = route_start.astimezone(timezone.utc)
@@ -734,7 +770,6 @@ def parse_optimize_tours_response(
         or route_seconds + pre_route_fixed_seconds >= 25200
     ):
         raise RouteOptimizationError("route_response_invalid", "Rutten överskrider sjutimmarsgränsen.", 502, counted_attempt=True)
-    returned_breaks = list(route.get("breaks") or [])
     expected_breaks = sorted(fixed_breaks, key=lambda item: item["scheduled_at"])
     if len(returned_breaks) != len(expected_breaks):
         raise RouteOptimizationError("route_response_invalid", "En fast aktivitet saknas i rutten.", 502, counted_attempt=True)
@@ -746,7 +781,7 @@ def parse_optimize_tours_response(
             raise RouteOptimizationError("route_response_invalid", "Google returnerade en ogiltig fast aktivitet.", 502, counted_attempt=True)
         if actual_start != expected["scheduled_at"].astimezone(timezone.utc) or actual_duration < int(expected["duration_seconds"]):
             raise RouteOptimizationError("route_response_invalid", "Google flyttade en fast aktivitet.", 502, counted_attempt=True)
-    metrics = dict(route.get("metrics") or {})
+    metrics = dict(metrics_value or {})
     travel_seconds = _duration_seconds(metrics.get("travelDuration"))
     wait_seconds = _duration_seconds(metrics.get("waitDuration"))
     break_seconds = _duration_seconds(metrics.get("breakDuration"))

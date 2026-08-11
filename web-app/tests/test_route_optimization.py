@@ -397,10 +397,16 @@ class RouteOptimizationModelTests(TestCase):
         incomplete["routes"][0]["transitions"].pop()
         wrong_vehicle = successful_response(items, selected=(0,))
         wrong_vehicle["routes"][0]["vehicleIndex"] = 1
+        malformed_start = successful_response(items, selected=(0,))
+        malformed_start["routes"][0]["vehicleStartTime"] = 123
+        malformed_breaks = successful_response(items, selected=(0,))
+        malformed_breaks["routes"][0]["breaks"] = 123
         cases = (
             (duplicate, "shipment_identity_invalid"),
             (incomplete, "transition_count_invalid"),
             (wrong_vehicle, "vehicle_index_mismatch"),
+            (malformed_start, "route_structure_invalid"),
+            (malformed_breaks, "route_structure_invalid"),
         )
         for response, reason in cases:
             response["routes"][0]["hasTrafficInfeasibilities"] = True
@@ -888,6 +894,75 @@ class RouteOptimizationIntegrationTests(TestCase):
         self.assertEqual(payload["route_metrics"]["travelDuration"], "1200s")
         self.assertIs(payload["traffic_deficit_calculated"], False)
         self.assertGreaterEqual(payload["solve_duration_ms"], 0)
+
+    def test_t15c_malformed_http_200_response_cannot_break_diagnostics(self):
+        snapshot = self.priority_snapshot()
+        calls = []
+
+        class Provider:
+            def optimize(_self, *, project, body, timeout_seconds):
+                calls.append(body)
+                if len(calls) == 1:
+                    return {"routes": 123}, 200
+                ids = [
+                    item["label"].split(":", 1)[1]
+                    for item in body["model"]["shipments"]
+                ]
+                malformed = successful_response(
+                    [{"customer_id": value} for value in ids],
+                    selected=(0,),
+                    start=app_module.route_start_datetime(NOW.date()),
+                )
+                malformed["routes"][0]["visits"] = 123
+                return malformed, 200
+
+        with patch.object(
+            app_module,
+            "get_authoritative_priority_snapshot",
+            return_value=snapshot,
+        ), patch.object(
+            app_module,
+            "route_optimization_provider",
+            return_value=Provider(),
+        ):
+            responses = [
+                self.client.post("/planning/route-preview", json={
+                    "route_date": NOW.date().isoformat(),
+                    "route_mode": "automatic",
+                    "client_request_id": request_id,
+                    "start": {"latitude": 57.7, "longitude": 11.9},
+                })
+                for request_id in (
+                    "malformed-routes-200",
+                    "malformed-visits-200",
+                )
+            ]
+
+        self.assertEqual(len(calls), 2)
+        for response in responses:
+            self.assertEqual(response.status_code, 502)
+            self.assertEqual(response.get_json()["code"], "route_response_invalid")
+        rows = self.spreadsheet.worksheet(
+            app_module.ROUTE_OPTIMIZATION_RUNS_SHEET
+        ).dict_rows()
+        self.assertEqual(len(rows), 2)
+        for row in rows:
+            self.assertEqual(row["status"], "failed")
+            self.assertEqual(str(row["http_status"]), "200")
+            self.assertEqual(row["error_code"], "route_response_invalid")
+            diagnostic = json.loads(str(row["result_payload_json"] or "{}"))
+            self.assertEqual(diagnostic["error_code"], "route_response_invalid")
+            self.assertEqual(
+                diagnostic["diagnostic_reason"],
+                "route_structure_invalid",
+            )
+        diagnostics = [
+            json.loads(str(row["result_payload_json"] or "{}"))
+            for row in rows
+        ]
+        self.assertEqual(diagnostics[0]["route_count"], 0)
+        self.assertEqual(diagnostics[1]["route_count"], 1)
+        self.assertEqual(diagnostics[1]["visit_count"], 0)
 
     def test_t16_client_request_conflict_and_running_fingerprint_are_409(self):
         snapshot = self.priority_snapshot()

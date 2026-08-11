@@ -9870,17 +9870,23 @@ def execute_route_optimization(*, spreadsheet, owner, inputs, client_request_id)
         )
         diagnostic_json = ""
         if http_status_value == 200 and "response" in locals() and isinstance(response, dict):
-            routes = response.get("routes") if isinstance(response.get("routes"), list) else []
+            def diagnostic_list(value):
+                return value if isinstance(value, list) else []
+
+            routes = diagnostic_list(response.get("routes"))
             route_candidate = routes[0] if routes else {}
             route = route_candidate if isinstance(route_candidate, dict) else {}
+            visits = diagnostic_list(route.get("visits"))
+            skipped_shipments = diagnostic_list(response.get("skippedShipments"))
+            breaks = diagnostic_list(route.get("breaks"))
             diagnostic_payload = {
                 "error_code": error.code,
                 "diagnostic_reason": error.details.get("diagnostic_reason") or error.code,
                 "solve_duration_ms": google_solve_duration_ms if "google_solve_duration_ms" in locals() else None,
-                "route_count": len(response.get("routes") or []),
-                "visit_count": len(route.get("visits") or []),
-                "skipped_count": len(response.get("skippedShipments") or []),
-                "break_count": len(route.get("breaks") or []),
+                "route_count": len(routes),
+                "visit_count": len(visits),
+                "skipped_count": len(skipped_shipments),
+                "break_count": len(breaks),
                 "hasTrafficInfeasibilities": bool(route.get("hasTrafficInfeasibilities")),
                 "vehicle_label_matches": route.get("vehicleLabel") == f"owner:{str(owner_user_name).strip().casefold()}",
             }
