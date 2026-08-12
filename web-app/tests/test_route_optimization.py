@@ -423,6 +423,70 @@ class RouteOptimizationModelTests(TestCase):
         self.assertEqual(error.details["timeout_seconds"], 180)
         self.assertIs(error.details["traffic_deficit_calculated"], False)
 
+    def test_t7c_transition_diagnostics_default_only_omitted_delay_and_break(self):
+        items = [shipment(1)]
+
+        def diagnostic_for(transition):
+            response = successful_response(items)
+            route = response["routes"][0]
+            route["hasTrafficInfeasibilities"] = True
+            route["transitions"][0] = transition
+            with self.assertRaises(RouteOptimizationError) as exc:
+                parse_optimize_tours_response(
+                    response,
+                    shipments=items,
+                    owner_user_name="Olle",
+                    route_start=NOW,
+                )
+            self.assertEqual(exc.exception.code, "route_traffic_infeasible")
+            return exc.exception.details["transition_diagnostics"][0]
+
+        omitted = diagnostic_for({
+            "travelDuration": "891s",
+            "totalDuration": "775s",
+            "waitDuration": "-116s",
+        })
+        self.assertEqual(omitted["delay_duration_seconds"], 0)
+        self.assertEqual(omitted["break_duration_seconds"], 0)
+        self.assertEqual(omitted["transition_residual_seconds"], -116)
+
+        explicit_zero = diagnostic_for({
+            "travelDuration": "891s",
+            "totalDuration": "775s",
+            "waitDuration": "-116s",
+            "delayDuration": "0s",
+            "breakDuration": "0s",
+        })
+        self.assertEqual(explicit_zero["transition_residual_seconds"], -116)
+
+        malformed_delay = diagnostic_for({
+            "travelDuration": "891s",
+            "totalDuration": "775s",
+            "delayDuration": "invalid",
+        })
+        self.assertIsNone(malformed_delay["transition_residual_seconds"])
+
+        malformed_break = diagnostic_for({
+            "travelDuration": "891s",
+            "totalDuration": "775s",
+            "breakDuration": {"seconds": 0},
+        })
+        self.assertIsNone(malformed_break["transition_residual_seconds"])
+
+        missing_travel = diagnostic_for({"totalDuration": "775s"})
+        self.assertIsNone(missing_travel["transition_residual_seconds"])
+
+        missing_total = diagnostic_for({"travelDuration": "891s"})
+        self.assertIsNone(missing_total["transition_residual_seconds"])
+
+        fractional = diagnostic_for({
+            "travelDuration": "891.25s",
+            "totalDuration": "775.125s",
+            "delayDuration": "-0.125s",
+            "breakDuration": "0s",
+        })
+        self.assertEqual(fractional["transition_residual_seconds"], -116)
+
     def test_t7d_structural_error_precedes_traffic_infeasibility(self):
         items = [shipment(1), shipment(2)]
         duplicate = successful_response(items, selected=(0, 0))
@@ -896,23 +960,21 @@ class RouteOptimizationIntegrationTests(TestCase):
                     route_start + timedelta(seconds=25199)
                 ).astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
                 route["metrics"] = {
-                    "travelDuration": "10845s",
+                    "travelDuration": "10915s",
                     "visitDuration": "14400s",
-                    "waitDuration": "-46s",
+                    "waitDuration": "-116s",
                     "delayDuration": "0s",
                     "breakDuration": "0s",
                     "totalDuration": "25199s",
                 }
-                travel_seconds = [834] * 12 + [837]
+                travel_seconds = [835] * 8 + [836] * 4 + [891]
                 route["transitions"] = [{
                     "startTime": (
                         route_start + timedelta(minutes=30 * index)
                     ).astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
                     "travelDuration": f"{travel}s",
-                    "totalDuration": f"{travel - 46 if index == 12 else travel}s",
-                    "waitDuration": "-46s" if index == 12 else "0s",
-                    "delayDuration": "0s",
-                    "breakDuration": "0s",
+                    "totalDuration": f"{775 if index == 12 else travel}s",
+                    "waitDuration": "-116s" if index == 12 else "0s",
                     "trafficInfoUnavailable": False,
                 } for index, travel in enumerate(travel_seconds)]
                 return response, 200
@@ -959,14 +1021,14 @@ class RouteOptimizationIntegrationTests(TestCase):
         self.assertTrue(payload["hasTrafficInfeasibilities"])
         self.assertTrue(payload["vehicle_label_matches"])
         self.assertEqual(payload["traffic_info_unavailable_count"], 0)
-        self.assertEqual(payload["route_metrics"]["travelDuration"], "10845s")
+        self.assertEqual(payload["route_metrics"]["travelDuration"], "10915s")
         self.assertEqual(payload["route_total_duration_seconds"], 25199)
-        self.assertEqual(payload["route_travel_duration_seconds"], 10845)
+        self.assertEqual(payload["route_travel_duration_seconds"], 10915)
         self.assertEqual(payload["route_visit_duration_seconds"], 14400)
-        self.assertEqual(payload["route_wait_duration_seconds"], -46)
+        self.assertEqual(payload["route_wait_duration_seconds"], -116)
         self.assertEqual(payload["route_delay_duration_seconds"], 0)
         self.assertEqual(payload["route_break_duration_seconds"], 0)
-        self.assertEqual(payload["aggregate_timeline_residual_seconds"], -46)
+        self.assertEqual(payload["aggregate_timeline_residual_seconds"], -116)
         self.assertEqual(payload["absolute_route_max_seconds"], 25199)
         self.assertEqual(payload["model_route_max_seconds"], 25199)
         self.assertEqual(payload["route_elapsed_seconds"], 25199)
@@ -975,18 +1037,18 @@ class RouteOptimizationIntegrationTests(TestCase):
         self.assertEqual(payload["negative_residual_transition_count"], 1)
         self.assertEqual(payload["most_negative_transition_index"], 12)
         self.assertEqual(
-            payload["most_negative_transition_residual_seconds"], -46
+            payload["most_negative_transition_residual_seconds"], -116
         )
-        self.assertEqual(payload["transition_residual_min_seconds"], -46)
+        self.assertEqual(payload["transition_residual_min_seconds"], -116)
         self.assertEqual(payload["transition_residual_max_seconds"], 0)
         self.assertEqual(len(payload["transition_diagnostics"]), 13)
         self.assertEqual(
             payload["transition_diagnostics"][12]["wait_duration_seconds"],
-            -46,
+            -116,
         )
         self.assertEqual(
             payload["transition_diagnostics"][12]["transition_residual_seconds"],
-            -46,
+            -116,
         )
         self.assertEqual(payload["required_count"], 0)
         self.assertFalse(payload["has_required_visits"])

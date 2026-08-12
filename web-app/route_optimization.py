@@ -419,6 +419,23 @@ _TRAFFIC_DIAGNOSTIC_METRIC_KEYS = (
 )
 
 
+def _diagnostic_transition_duration(
+    transition: Mapping[str, Any],
+    field: str,
+    *,
+    omitted_is_zero: bool = False,
+) -> Decimal | None:
+    """Parse one transition duration, optionally defaulting omission to zero.
+
+    The default applies only when the field is absent.  An explicitly present
+    malformed value remains invalid so diagnostics never turn bad provider data
+    into a false zero.
+    """
+    if omitted_is_zero and field not in transition:
+        return Decimal(0)
+    return _diagnostic_duration_decimal(transition.get(field))
+
+
 def _traffic_infeasibility_diagnostics(
     response: Mapping[str, Any],
     route: Mapping[str, Any],
@@ -491,20 +508,20 @@ def _traffic_infeasibility_diagnostics(
             if not isinstance(transition, Mapping):
                 continue
             values = {
-                "travel": _diagnostic_duration_decimal(
-                    transition.get("travelDuration")
+                "travel": _diagnostic_transition_duration(
+                    transition, "travelDuration"
                 ),
-                "total": _diagnostic_duration_decimal(
-                    transition.get("totalDuration")
+                "total": _diagnostic_transition_duration(
+                    transition, "totalDuration"
                 ),
-                "wait": _diagnostic_duration_decimal(
-                    transition.get("waitDuration")
+                "wait": _diagnostic_transition_duration(
+                    transition, "waitDuration"
                 ),
-                "delay": _diagnostic_duration_decimal(
-                    transition.get("delayDuration")
+                "delay": _diagnostic_transition_duration(
+                    transition, "delayDuration", omitted_is_zero=True
                 ),
-                "break": _diagnostic_duration_decimal(
-                    transition.get("breakDuration")
+                "break": _diagnostic_transition_duration(
+                    transition, "breakDuration", omitted_is_zero=True
                 ),
             }
             residual = None
