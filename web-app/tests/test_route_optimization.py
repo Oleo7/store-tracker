@@ -15,6 +15,7 @@ sys.path.insert(0, str(WEB_APP_DIR))
 
 import app as app_module
 from route_optimization import (
+    _diagnostic_duration_seconds,
     MAX_VISITS,
     PRIORITY_PENALTY_MULTIPLIER,
     ROUTE_MAX_SECONDS,
@@ -114,6 +115,16 @@ class FakeSession:
 
 
 class RouteOptimizationModelTests(TestCase):
+    def test_signed_diagnostic_duration_parser_is_exact_and_shape_safe(self):
+        self.assertEqual(_diagnostic_duration_seconds("46s"), 46)
+        self.assertEqual(_diagnostic_duration_seconds("-46s"), -46)
+        self.assertEqual(_diagnostic_duration_seconds("0s"), 0)
+        self.assertEqual(_diagnostic_duration_seconds("1.000000001s"), 1.000000001)
+        self.assertEqual(_diagnostic_duration_seconds("-0.250s"), -0.25)
+        for value in (None, "", "46", "1.1234567890s", {}, 46, True):
+            with self.subTest(value=value):
+                self.assertIsNone(_diagnostic_duration_seconds(value))
+
     def test_t1_penalty_proof_and_clamping(self):
         self.assertGreater(PRIORITY_PENALTY_MULTIPLIER, ROUTE_MAX_SECONDS / 3600)
         self.assertEqual(priority_penalty(0), 10.0)
@@ -355,12 +366,20 @@ class RouteOptimizationModelTests(TestCase):
         )
 
     def test_t7c_response_parser_reports_traffic_infeasibility(self):
-        items = [shipment(1), shipment(2)]
+        items = [
+            shipment(1, required=True, fixed_at=NOW + timedelta(minutes=10)),
+            shipment(2),
+        ]
         response = successful_response(items, selected=(0,))
         response["routes"][0]["hasTrafficInfeasibilities"] = True
         response["routes"][0]["transitions"][0]["trafficInfoUnavailable"] = True
-        response["skippedShipments"][0]["reasons"] = [{
-            "code": "CANNOT_BE_PERFORMED_WITHIN_VEHICLE_DURATION_LIMIT",
+        response["skippedShipments"][0]["reasons"] = [
+            {"code": "CANNOT_BE_PERFORMED_WITHIN_VEHICLE_DURATION_LIMIT"},
+            {"code": "CANNOT_BE_PERFORMED_WITHIN_VEHICLE_TIME_WINDOWS"},
+        ]
+        fixed_breaks = [{
+            "scheduled_at": NOW + timedelta(minutes=30),
+            "duration_seconds": 600,
         }]
         with self.assertRaises(RouteOptimizationError) as exc:
             parse_optimize_tours_response(
@@ -368,6 +387,9 @@ class RouteOptimizationModelTests(TestCase):
                 shipments=items,
                 owner_user_name="Olle",
                 route_start=NOW,
+                pre_route_fixed_seconds=600,
+                fixed_breaks=fixed_breaks,
+                timeout_seconds=180,
             )
         error = exc.exception
         self.assertEqual(error.code, "route_traffic_infeasible")
@@ -387,7 +409,18 @@ class RouteOptimizationModelTests(TestCase):
         self.assertEqual(error.details["route_metrics"]["travelDuration"], "1200s")
         self.assertEqual(error.details["skip_reason_counts"], {
             "CANNOT_BE_PERFORMED_WITHIN_VEHICLE_DURATION_LIMIT": 1,
+            "CANNOT_BE_PERFORMED_WITHIN_VEHICLE_TIME_WINDOWS": 1,
         })
+        self.assertEqual(error.details["absolute_route_max_seconds"], 25199)
+        self.assertEqual(error.details["model_route_max_seconds"], 24599)
+        self.assertEqual(error.details["required_count"], 1)
+        self.assertTrue(error.details["has_required_visits"])
+        self.assertEqual(error.details["fixed_visit_count"], 1)
+        self.assertTrue(error.details["has_fixed_visits"])
+        self.assertEqual(error.details["fixed_break_count"], 1)
+        self.assertTrue(error.details["has_fixed_breaks"])
+        self.assertEqual(error.details["pre_route_fixed_seconds"], 600)
+        self.assertEqual(error.details["timeout_seconds"], 180)
         self.assertIs(error.details["traffic_deficit_calculated"], False)
 
     def test_t7d_structural_error_precedes_traffic_infeasibility(self):
@@ -830,26 +863,58 @@ class RouteOptimizationIntegrationTests(TestCase):
         self.assertGreaterEqual(payload["solve_duration_ms"], 0)
 
     def test_t15b_http_200_traffic_failure_records_compact_diagnostics(self):
-        snapshot = self.priority_snapshot()
+        customers = [{
+            "row": index + 2,
+            "customer": f"Butik {index}",
+            "customer_id": f"20000000-0000-4000-8000-{index:012d}",
+            "sales_person": "Olle",
+            "cancelled_flag": "",
+            "latitude_google": 56.0 + index / 100000,
+            "longitude_google": 12.0 + index / 100000,
+            "city_google": f"Ort {index}",
+            "postal_code_google": f"{41000 + index}",
+        } for index in range(12)]
+        snapshot = self.priority_snapshot(customers)
+        calls = []
 
         class Provider:
             def optimize(_self, *, project, body, timeout_seconds):
+                calls.append(body)
                 ids = [
                     item["label"].split(":", 1)[1]
                     for item in body["model"]["shipments"]
                 ]
+                route_start = app_module.route_start_datetime(NOW.date())
                 response = successful_response(
                     [{"customer_id": value} for value in ids],
-                    selected=(0,),
-                    start=app_module.route_start_datetime(NOW.date()),
+                    selected=tuple(range(12)),
+                    start=route_start,
                 )
                 route = response["routes"][0]
                 route["hasTrafficInfeasibilities"] = True
-                route["transitions"][0]["trafficInfoUnavailable"] = True
-                if response["skippedShipments"]:
-                    response["skippedShipments"][0]["reasons"] = [{
-                        "code": "CANNOT_BE_PERFORMED_WITHIN_VEHICLE_DURATION_LIMIT",
-                    }]
+                route["vehicleEndTime"] = (
+                    route_start + timedelta(seconds=25199)
+                ).astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+                route["metrics"] = {
+                    "travelDuration": "10845s",
+                    "visitDuration": "14400s",
+                    "waitDuration": "-46s",
+                    "delayDuration": "0s",
+                    "breakDuration": "0s",
+                    "totalDuration": "25199s",
+                }
+                travel_seconds = [834] * 12 + [837]
+                route["transitions"] = [{
+                    "startTime": (
+                        route_start + timedelta(minutes=30 * index)
+                    ).astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+                    "travelDuration": f"{travel}s",
+                    "totalDuration": f"{travel - 46 if index == 12 else travel}s",
+                    "waitDuration": "-46s" if index == 12 else "0s",
+                    "delayDuration": "0s",
+                    "breakDuration": "0s",
+                    "trafficInfoUnavailable": False,
+                } for index, travel in enumerate(travel_seconds)]
                 return response, 200
 
         with patch.object(
@@ -871,6 +936,7 @@ class RouteOptimizationIntegrationTests(TestCase):
         self.assertEqual(response.status_code, 422)
         self.assertEqual(response.get_json()["code"], "route_traffic_infeasible")
         self.assertIn("Trafiken gör att rutten inte ryms", response.get_json()["message"])
+        self.assertEqual(len(calls), 1)
         rows = self.spreadsheet.worksheet(
             app_module.ROUTE_OPTIMIZATION_RUNS_SHEET
         ).dict_rows()
@@ -883,17 +949,69 @@ class RouteOptimizationIntegrationTests(TestCase):
         payload = json.loads(str(row["result_payload_json"] or "{}"))
         self.assertEqual(payload["diagnostic_reason"], "traffic_infeasibility")
         self.assertEqual(payload["route_count"], 1)
-        self.assertEqual(payload["visit_count"], 1)
-        self.assertEqual(payload["transition_count"], 2)
-        self.assertEqual(payload["expected_transition_count"], 2)
-        self.assertGreaterEqual(payload["skipped_count"], 0)
+        self.assertEqual(payload["visit_count"], 12)
+        self.assertEqual(payload["stop_count"], 12)
+        self.assertEqual(payload["shipment_count"], 12)
+        self.assertEqual(payload["transition_count"], 13)
+        self.assertEqual(payload["expected_transition_count"], 13)
+        self.assertEqual(payload["skipped_count"], 0)
         self.assertEqual(payload["break_count"], 0)
         self.assertTrue(payload["hasTrafficInfeasibilities"])
         self.assertTrue(payload["vehicle_label_matches"])
-        self.assertEqual(payload["traffic_info_unavailable_count"], 1)
-        self.assertEqual(payload["route_metrics"]["travelDuration"], "1200s")
+        self.assertEqual(payload["traffic_info_unavailable_count"], 0)
+        self.assertEqual(payload["route_metrics"]["travelDuration"], "10845s")
+        self.assertEqual(payload["route_total_duration_seconds"], 25199)
+        self.assertEqual(payload["route_travel_duration_seconds"], 10845)
+        self.assertEqual(payload["route_visit_duration_seconds"], 14400)
+        self.assertEqual(payload["route_wait_duration_seconds"], -46)
+        self.assertEqual(payload["route_delay_duration_seconds"], 0)
+        self.assertEqual(payload["route_break_duration_seconds"], 0)
+        self.assertEqual(payload["aggregate_timeline_residual_seconds"], -46)
+        self.assertEqual(payload["absolute_route_max_seconds"], 25199)
+        self.assertEqual(payload["model_route_max_seconds"], 25199)
+        self.assertEqual(payload["route_elapsed_seconds"], 25199)
+        self.assertTrue(payload["route_elapsed_matches_total_duration"])
+        self.assertEqual(payload["negative_wait_transition_count"], 1)
+        self.assertEqual(payload["negative_residual_transition_count"], 1)
+        self.assertEqual(payload["most_negative_transition_index"], 12)
+        self.assertEqual(
+            payload["most_negative_transition_residual_seconds"], -46
+        )
+        self.assertEqual(payload["transition_residual_min_seconds"], -46)
+        self.assertEqual(payload["transition_residual_max_seconds"], 0)
+        self.assertEqual(len(payload["transition_diagnostics"]), 13)
+        self.assertEqual(
+            payload["transition_diagnostics"][12]["wait_duration_seconds"],
+            -46,
+        )
+        self.assertEqual(
+            payload["transition_diagnostics"][12]["transition_residual_seconds"],
+            -46,
+        )
+        self.assertEqual(payload["required_count"], 0)
+        self.assertFalse(payload["has_required_visits"])
+        self.assertEqual(payload["fixed_visit_count"], 0)
+        self.assertFalse(payload["has_fixed_visits"])
+        self.assertEqual(payload["fixed_break_count"], 0)
+        self.assertFalse(payload["has_fixed_breaks"])
+        self.assertEqual(payload["pre_route_fixed_seconds"], 0)
+        self.assertTrue(payload["consider_road_traffic"])
+        self.assertEqual(payload["search_mode"], "CONSUME_ALL_AVAILABLE_TIME")
+        self.assertEqual(payload["solving_mode"], "DEFAULT_SOLVE")
+        self.assertEqual(payload["timeout_seconds"], 90)
+        self.assertEqual(payload["max_visits"], 15)
+        self.assertEqual(payload["service_duration_seconds"], 1200)
         self.assertIs(payload["traffic_deficit_calculated"], False)
         self.assertGreaterEqual(payload["solve_duration_ms"], 0)
+
+        request = calls[0]
+        vehicle = request["model"]["vehicles"][0]
+        self.assertEqual(vehicle["routeDurationLimit"]["maxDuration"], "25199s")
+        self.assertEqual(request["searchMode"], "CONSUME_ALL_AVAILABLE_TIME")
+        self.assertEqual(request["solvingMode"], "DEFAULT_SOLVE")
+        self.assertTrue(request["considerRoadTraffic"])
+        self.assertNotIn("softMaxDuration", json.dumps(request))
+        self.assertNotIn("travelDurationMultiple", json.dumps(request))
 
     def test_t15c_malformed_http_200_response_cannot_break_diagnostics(self):
         snapshot = self.priority_snapshot()
@@ -913,10 +1031,22 @@ class RouteOptimizationIntegrationTests(TestCase):
                     selected=(0,),
                     start=app_module.route_start_datetime(NOW.date()),
                 )
-                malformed["routes"][0]["visits"] = 123
+                route = malformed["routes"][0]
+                if len(calls) == 2:
+                    route["visits"] = 123
+                elif len(calls) == 3:
+                    route["transitions"] = 123
+                else:
+                    route["hasTrafficInfeasibilities"] = True
+                    route["metrics"]["travelDuration"] = {"malformed": True}
+                    route["transitions"][0]["travelDuration"] = "not-a-duration"
+                    route["transitions"][0]["totalDuration"] = "also-invalid"
                 return malformed, 200
 
-        with patch.object(
+        with patch.dict(os.environ, {
+            "ROUTE_OPTIMIZATION_WEEKLY_OWNER_LIMIT": "10",
+            "ROUTE_OPTIMIZATION_WEEKLY_TEAM_LIMIT": "10",
+        }, clear=False), patch.object(
             app_module,
             "get_authoritative_priority_snapshot",
             return_value=snapshot,
@@ -935,18 +1065,24 @@ class RouteOptimizationIntegrationTests(TestCase):
                 for request_id in (
                     "malformed-routes-200",
                     "malformed-visits-200",
+                    "malformed-transitions-200",
+                    "malformed-traffic-metrics-200",
                 )
             ]
 
-        self.assertEqual(len(calls), 2)
-        for response in responses:
+        self.assertEqual(len(calls), 4)
+        for response in responses[:3]:
             self.assertEqual(response.status_code, 502)
             self.assertEqual(response.get_json()["code"], "route_response_invalid")
+        self.assertEqual(responses[3].status_code, 422)
+        self.assertEqual(
+            responses[3].get_json()["code"], "route_traffic_infeasible"
+        )
         rows = self.spreadsheet.worksheet(
             app_module.ROUTE_OPTIMIZATION_RUNS_SHEET
         ).dict_rows()
-        self.assertEqual(len(rows), 2)
-        for row in rows:
+        self.assertEqual(len(rows), 4)
+        for row in rows[:3]:
             self.assertEqual(row["status"], "failed")
             self.assertEqual(str(row["http_status"]), "200")
             self.assertEqual(row["error_code"], "route_response_invalid")
@@ -963,6 +1099,19 @@ class RouteOptimizationIntegrationTests(TestCase):
         self.assertEqual(diagnostics[0]["route_count"], 0)
         self.assertEqual(diagnostics[1]["route_count"], 1)
         self.assertEqual(diagnostics[1]["visit_count"], 0)
+        self.assertEqual(diagnostics[2]["route_count"], 1)
+        self.assertEqual(diagnostics[2]["visit_count"], 1)
+        traffic_row = rows[3]
+        self.assertEqual(traffic_row["status"], "failed")
+        self.assertEqual(str(traffic_row["http_status"]), "200")
+        self.assertEqual(traffic_row["error_code"], "route_traffic_infeasible")
+        self.assertEqual(diagnostics[3]["error_code"], "route_traffic_infeasible")
+        self.assertIsNone(diagnostics[3]["route_travel_duration_seconds"])
+        self.assertIsNone(
+            diagnostics[3]["transition_diagnostics"][0][
+                "travel_duration_seconds"
+            ]
+        )
 
     def test_t16_client_request_conflict_and_running_fingerprint_are_409(self):
         snapshot = self.priority_snapshot()

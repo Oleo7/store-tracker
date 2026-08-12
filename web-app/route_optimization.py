@@ -9,10 +9,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 import hashlib
 import json
 import math
 import os
+import re
 import threading
 import time
 from typing import Any, Iterable, Mapping
@@ -152,6 +154,41 @@ def _duration_seconds(value: Any) -> int:
     if not text.endswith("s"):
         raise ValueError("Invalid duration")
     return max(0, int(round(float(text[:-1] or 0))))
+
+
+_PROTOBUF_DURATION_PATTERN = re.compile(
+    r"^-?(?:0|[1-9]\d*)(?:\.\d{1,9})?s$"
+)
+_PROTOBUF_DURATION_MAX_SECONDS = Decimal("315576000000")
+
+
+def _diagnostic_duration_decimal(value: Any) -> Decimal | None:
+    """Parse generated ProtoJSON Duration text exactly for diagnostics only."""
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not _PROTOBUF_DURATION_PATTERN.fullmatch(text):
+        return None
+    try:
+        seconds = Decimal(text[:-1])
+    except InvalidOperation:
+        return None
+    if not seconds.is_finite() or abs(seconds) > _PROTOBUF_DURATION_MAX_SECONDS:
+        return None
+    return seconds
+
+
+def _diagnostic_decimal_number(value: Decimal | None) -> int | float | None:
+    if value is None:
+        return None
+    if value == value.to_integral_value():
+        return int(value)
+    return float(value)
+
+
+def _diagnostic_duration_seconds(value: Any) -> int | float | None:
+    """Return signed seconds without coercing malformed values or truncating fractions."""
+    return _diagnostic_decimal_number(_diagnostic_duration_decimal(value))
 
 
 def _response_shipment_index(
@@ -388,11 +425,26 @@ def _traffic_infeasibility_diagnostics(
     *,
     visits: list[Mapping[str, Any]],
     transitions: list[Mapping[str, Any]],
+    shipments: list[Mapping[str, Any]],
+    vehicle_start: datetime,
+    vehicle_end: datetime,
+    pre_route_fixed_seconds: Any = 0,
+    fixed_breaks: list[Mapping[str, Any]] | None = None,
+    timeout_seconds: Any = None,
+    solving_mode: str = "DEFAULT_SOLVE",
 ) -> dict[str, Any]:
-    """Return compact, non-sensitive facts without attempting local retiming."""
-    route_metrics = route.get("metrics")
-    compact_metrics: dict[str, Any] = {}
-    if isinstance(route_metrics, Mapping):
+    """Return compact response facts without identities or local retiming.
+
+    ``aggregate_timeline_residual_seconds`` is
+    total - travel - visit - delay - break.  Per-transition residual is
+    total - travel - delay - break.  Neither residual is interpreted as a
+    traffic deficit; wait duration remains a separate observed value.
+    """
+    try:
+        fixed_break_list = fixed_breaks if isinstance(fixed_breaks, list) else []
+        route_metrics = route.get("metrics")
+        route_metrics = route_metrics if isinstance(route_metrics, Mapping) else {}
+        compact_metrics: dict[str, Any] = {}
         for key in _TRAFFIC_DIAGNOSTIC_METRIC_KEYS:
             value = route_metrics.get(key)
             if isinstance(value, bool):
@@ -403,41 +455,264 @@ def _traffic_infeasibility_diagnostics(
             elif isinstance(value, str) and len(value) <= 80:
                 compact_metrics[key] = value
 
-    skip_reason_counts: dict[str, int] = {}
-    skipped_items = response.get("skippedShipments")
-    if isinstance(skipped_items, list):
-        for skipped in skipped_items:
-            if not isinstance(skipped, Mapping):
-                continue
-            reasons = skipped.get("reasons")
-            if not isinstance(reasons, list):
-                continue
-            for reason in reasons:
-                if not isinstance(reason, Mapping):
-                    continue
-                code = str(reason.get("code") or "").strip()
-                if not code or len(code) > 80:
-                    continue
-                if code not in skip_reason_counts and len(skip_reason_counts) >= 32:
-                    continue
-                skip_reason_counts[code] = skip_reason_counts.get(code, 0) + 1
+        metric_keys = {
+            "total": "totalDuration",
+            "travel": "travelDuration",
+            "visit": "visitDuration",
+            "wait": "waitDuration",
+            "delay": "delayDuration",
+            "break": "breakDuration",
+        }
+        metric_values = {
+            name: _diagnostic_duration_decimal(route_metrics.get(api_key))
+            for name, api_key in metric_keys.items()
+        }
+        aggregate_parts = (
+            metric_values["total"],
+            metric_values["travel"],
+            metric_values["visit"],
+            metric_values["delay"],
+            metric_values["break"],
+        )
+        aggregate_residual = None
+        if all(value is not None for value in aggregate_parts):
+            aggregate_residual = (
+                metric_values["total"]
+                - metric_values["travel"]
+                - metric_values["visit"]
+                - metric_values["delay"]
+                - metric_values["break"]
+            )
 
-    expected_transition_count = len(visits) + 1
-    return {
-        "diagnostic_reason": "traffic_infeasibility",
-        "transition_count": len(transitions),
-        "expected_transition_count": expected_transition_count,
-        "transition_count_matches_expected": (
-            len(transitions) == expected_transition_count
-        ),
-        "traffic_info_unavailable_count": sum(
-            transition.get("trafficInfoUnavailable") is True
-            for transition in transitions
-        ),
-        "route_metrics": compact_metrics,
-        "skip_reason_counts": skip_reason_counts,
-        "traffic_deficit_calculated": False,
-    }
+        transition_diagnostics = []
+        residual_values: list[tuple[int, Decimal]] = []
+        negative_wait_count = 0
+        for index, transition in enumerate(transitions):
+            if not isinstance(transition, Mapping):
+                continue
+            values = {
+                "travel": _diagnostic_duration_decimal(
+                    transition.get("travelDuration")
+                ),
+                "total": _diagnostic_duration_decimal(
+                    transition.get("totalDuration")
+                ),
+                "wait": _diagnostic_duration_decimal(
+                    transition.get("waitDuration")
+                ),
+                "delay": _diagnostic_duration_decimal(
+                    transition.get("delayDuration")
+                ),
+                "break": _diagnostic_duration_decimal(
+                    transition.get("breakDuration")
+                ),
+            }
+            residual = None
+            residual_parts = (
+                values["total"],
+                values["travel"],
+                values["delay"],
+                values["break"],
+            )
+            if all(value is not None for value in residual_parts):
+                residual = (
+                    values["total"]
+                    - values["travel"]
+                    - values["delay"]
+                    - values["break"]
+                )
+                residual_values.append((index, residual))
+            if values["wait"] is not None and values["wait"] < 0:
+                negative_wait_count += 1
+            start_at = None
+            try:
+                if isinstance(transition.get("startTime"), str):
+                    start_at = _utc_text(_parse_time(transition.get("startTime")))
+            except (TypeError, ValueError):
+                start_at = None
+            traffic_unavailable = transition.get("trafficInfoUnavailable")
+            if not isinstance(traffic_unavailable, bool):
+                traffic_unavailable = None
+            transition_diagnostics.append({
+                "transition_index": index,
+                "travel_duration_seconds": _diagnostic_decimal_number(
+                    values["travel"]
+                ),
+                "total_duration_seconds": _diagnostic_decimal_number(
+                    values["total"]
+                ),
+                "wait_duration_seconds": _diagnostic_decimal_number(
+                    values["wait"]
+                ),
+                "delay_duration_seconds": _diagnostic_decimal_number(
+                    values["delay"]
+                ),
+                "break_duration_seconds": _diagnostic_decimal_number(
+                    values["break"]
+                ),
+                "transition_residual_seconds": _diagnostic_decimal_number(
+                    residual
+                ),
+                "traffic_info_unavailable": traffic_unavailable,
+                "transition_start_at": start_at,
+            })
+
+        negative_residuals = [
+            (index, value) for index, value in residual_values if value < 0
+        ]
+        most_negative = min(negative_residuals, key=lambda item: item[1]) if negative_residuals else None
+        residual_only = [value for _index, value in residual_values]
+
+        skip_reason_counts: dict[str, int] = {}
+        skipped_items = response.get("skippedShipments")
+        if isinstance(skipped_items, list):
+            for skipped in skipped_items:
+                if not isinstance(skipped, Mapping):
+                    continue
+                reasons = skipped.get("reasons")
+                if not isinstance(reasons, list):
+                    continue
+                for reason in reasons:
+                    if not isinstance(reason, Mapping):
+                        continue
+                    code_value = reason.get("code")
+                    if not isinstance(code_value, str):
+                        continue
+                    code = code_value.strip()
+                    if not code or len(code) > 80:
+                        continue
+                    if code not in skip_reason_counts and len(skip_reason_counts) >= 32:
+                        continue
+                    skip_reason_counts[code] = skip_reason_counts.get(code, 0) + 1
+
+        normalized_pre_route_seconds = None
+        if not isinstance(pre_route_fixed_seconds, bool):
+            try:
+                normalized_pre_route_seconds = max(0, int(pre_route_fixed_seconds))
+            except (TypeError, ValueError, OverflowError):
+                normalized_pre_route_seconds = None
+        model_route_max_seconds = (
+            ROUTE_MAX_SECONDS - normalized_pre_route_seconds
+            if normalized_pre_route_seconds is not None
+            and normalized_pre_route_seconds <= ROUTE_MAX_SECONDS
+            else None
+        )
+        normalized_timeout = None
+        if not isinstance(timeout_seconds, bool):
+            try:
+                normalized_timeout = int(timeout_seconds)
+            except (TypeError, ValueError, OverflowError):
+                normalized_timeout = None
+
+        delta = vehicle_end - vehicle_start
+        elapsed = (
+            Decimal(delta.days * 86400 + delta.seconds)
+            + Decimal(delta.microseconds) / Decimal(1_000_000)
+        )
+        required_count = sum(
+            item.get("required") is True
+            for item in shipments
+            if isinstance(item, Mapping)
+        )
+        fixed_visit_count = sum(
+            item.get("fixed_at") is not None
+            for item in shipments
+            if isinstance(item, Mapping)
+        )
+        expected_transition_count = len(visits) + 1
+        return {
+            "diagnostic_reason": "traffic_infeasibility",
+            "route_engine_version": ROUTE_ENGINE_VERSION,
+            "shipment_count": len(shipments),
+            "stop_count": len(visits),
+            "transition_count": len(transitions),
+            "expected_transition_count": expected_transition_count,
+            "transition_count_matches_expected": (
+                len(transitions) == expected_transition_count
+            ),
+            "traffic_info_unavailable_count": sum(
+                transition.get("trafficInfoUnavailable") is True
+                for transition in transitions
+                if isinstance(transition, Mapping)
+            ),
+            "route_metrics": compact_metrics,
+            "route_total_duration_seconds": _diagnostic_decimal_number(
+                metric_values["total"]
+            ),
+            "route_travel_duration_seconds": _diagnostic_decimal_number(
+                metric_values["travel"]
+            ),
+            "route_visit_duration_seconds": _diagnostic_decimal_number(
+                metric_values["visit"]
+            ),
+            "route_wait_duration_seconds": _diagnostic_decimal_number(
+                metric_values["wait"]
+            ),
+            "route_delay_duration_seconds": _diagnostic_decimal_number(
+                metric_values["delay"]
+            ),
+            "route_break_duration_seconds": _diagnostic_decimal_number(
+                metric_values["break"]
+            ),
+            "aggregate_timeline_residual_seconds": _diagnostic_decimal_number(
+                aggregate_residual
+            ),
+            "transition_diagnostics": transition_diagnostics,
+            "negative_wait_transition_count": negative_wait_count,
+            "negative_residual_transition_count": len(negative_residuals),
+            "most_negative_transition_index": (
+                most_negative[0] if most_negative else None
+            ),
+            "most_negative_transition_residual_seconds": (
+                _diagnostic_decimal_number(most_negative[1])
+                if most_negative else None
+            ),
+            "transition_residual_min_seconds": (
+                _diagnostic_decimal_number(min(residual_only))
+                if residual_only else None
+            ),
+            "transition_residual_max_seconds": (
+                _diagnostic_decimal_number(max(residual_only))
+                if residual_only else None
+            ),
+            "route_start_at": _utc_text(vehicle_start),
+            "route_end_at": _utc_text(vehicle_end),
+            "route_elapsed_seconds": _diagnostic_decimal_number(elapsed),
+            "route_elapsed_matches_total_duration": (
+                elapsed == metric_values["total"]
+                if metric_values["total"] is not None else None
+            ),
+            "required_count": required_count,
+            "has_required_visits": required_count > 0,
+            "fixed_visit_count": fixed_visit_count,
+            "has_fixed_visits": fixed_visit_count > 0,
+            "fixed_break_count": len(fixed_break_list),
+            "has_fixed_breaks": bool(fixed_break_list),
+            "pre_route_fixed_seconds": normalized_pre_route_seconds,
+            "consider_road_traffic": True,
+            "search_mode": "CONSUME_ALL_AVAILABLE_TIME",
+            "solving_mode": str(solving_mode or "DEFAULT_SOLVE"),
+            "timeout_seconds": normalized_timeout,
+            "absolute_route_max_seconds": ROUTE_MAX_SECONDS,
+            "model_route_max_seconds": model_route_max_seconds,
+            "max_visits": MAX_VISITS,
+            "service_duration_seconds": SERVICE_SECONDS,
+            "skip_reason_counts": skip_reason_counts,
+            "traffic_deficit_calculated": False,
+        }
+    except Exception:
+        # Diagnostics must never replace the classified provider error.
+        expected_transition_count = len(visits) + 1
+        return {
+            "diagnostic_reason": "traffic_infeasibility",
+            "transition_count": len(transitions),
+            "expected_transition_count": expected_transition_count,
+            "transition_count_matches_expected": (
+                len(transitions) == expected_transition_count
+            ),
+            "absolute_route_max_seconds": ROUTE_MAX_SECONDS,
+            "traffic_deficit_calculated": False,
+        }
 
 
 def parse_optimize_tours_response(
@@ -448,8 +723,11 @@ def parse_optimize_tours_response(
     route_start: datetime,
     pre_route_fixed_seconds: int = 0,
     fixed_breaks: Iterable[Mapping[str, Any]] = (),
+    timeout_seconds: int | None = None,
+    solving_mode: str = "DEFAULT_SOLVE",
 ) -> dict[str, Any]:
     shipment_list = list(shipments)
+    fixed_break_list = list(fixed_breaks)
     shipment_labels = [f"customer:{str(item.get('customer_id') or '').strip()}" for item in shipment_list]
     if any(label == "customer:" for label in shipment_labels) or len(set(shipment_labels)) != len(shipment_labels):
         raise RouteOptimizationError(
@@ -460,7 +738,19 @@ def parse_optimize_tours_response(
             details={"diagnostic_reason": "shipment_identity_invalid"},
         )
     label_indexes = {label: index for index, label in enumerate(shipment_labels)}
-    validation_errors = list(response.get("validationErrors") or [])
+    validation_errors_value = response.get("validationErrors")
+    if (
+        validation_errors_value is not None
+        and not isinstance(validation_errors_value, list)
+    ):
+        raise RouteOptimizationError(
+            "route_response_invalid",
+            "Google returnerade ett ogiltigt svar.",
+            502,
+            counted_attempt=True,
+            details={"diagnostic_reason": "route_structure_invalid"},
+        )
+    validation_errors = list(validation_errors_value or [])
     if validation_errors:
         raise RouteOptimizationError(
             "route_request_model_invalid",
@@ -755,6 +1045,13 @@ def parse_optimize_tours_response(
                 route,
                 visits=visits,
                 transitions=transitions,
+                shipments=shipment_list,
+                vehicle_start=vehicle_start,
+                vehicle_end=vehicle_end,
+                pre_route_fixed_seconds=pre_route_fixed_seconds,
+                fixed_breaks=fixed_break_list,
+                timeout_seconds=timeout_seconds,
+                solving_mode=solving_mode,
             ),
         )
 
@@ -770,7 +1067,7 @@ def parse_optimize_tours_response(
         or route_seconds + pre_route_fixed_seconds >= 25200
     ):
         raise RouteOptimizationError("route_response_invalid", "Rutten överskrider sjutimmarsgränsen.", 502, counted_attempt=True)
-    expected_breaks = sorted(fixed_breaks, key=lambda item: item["scheduled_at"])
+    expected_breaks = sorted(fixed_break_list, key=lambda item: item["scheduled_at"])
     if len(returned_breaks) != len(expected_breaks):
         raise RouteOptimizationError("route_response_invalid", "En fast aktivitet saknas i rutten.", 502, counted_attempt=True)
     for expected, actual in zip(expected_breaks, returned_breaks):

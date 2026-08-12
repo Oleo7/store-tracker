@@ -9643,6 +9643,112 @@ def route_optimization_recovery_status(
     return result
 
 
+_ROUTE_FAILURE_DIAGNOSTIC_DETAIL_KEYS = frozenset({
+    "absolute_route_max_seconds",
+    "aggregate_timeline_residual_seconds",
+    "consider_road_traffic",
+    "expected_transition_count",
+    "fixed_break_count",
+    "fixed_visit_count",
+    "has_fixed_breaks",
+    "has_fixed_visits",
+    "has_required_visits",
+    "max_visits",
+    "model_route_max_seconds",
+    "most_negative_transition_index",
+    "most_negative_transition_residual_seconds",
+    "negative_residual_transition_count",
+    "negative_wait_transition_count",
+    "pre_route_fixed_seconds",
+    "required_count",
+    "route_break_duration_seconds",
+    "route_delay_duration_seconds",
+    "route_elapsed_matches_total_duration",
+    "route_elapsed_seconds",
+    "route_end_at",
+    "route_engine_version",
+    "route_metrics",
+    "route_start_at",
+    "route_total_duration_seconds",
+    "route_travel_duration_seconds",
+    "route_visit_duration_seconds",
+    "route_wait_duration_seconds",
+    "search_mode",
+    "service_duration_seconds",
+    "shipment_count",
+    "skip_reason_counts",
+    "solving_mode",
+    "stop_count",
+    "timeout_seconds",
+    "traffic_deficit_calculated",
+    "traffic_info_unavailable_count",
+    "transition_count",
+    "transition_count_matches_expected",
+    "transition_diagnostics",
+    "transition_residual_max_seconds",
+    "transition_residual_min_seconds",
+})
+
+
+def _route_failure_diagnostic_json(
+    *, response, error, owner_user_name, solve_duration_ms
+):
+    """Build ledger diagnostics without ever masking the classified error."""
+    reason = error.details.get("diagnostic_reason")
+    if not isinstance(reason, str) or not reason:
+        reason = error.code
+    minimal_payload = {
+        "error_code": error.code,
+        "diagnostic_reason": reason,
+    }
+    try:
+        if not isinstance(response, dict):
+            return ""
+
+        def diagnostic_list(value):
+            return value if isinstance(value, list) else []
+
+        routes = diagnostic_list(response.get("routes"))
+        route_candidate = routes[0] if routes else {}
+        route = route_candidate if isinstance(route_candidate, dict) else {}
+        visits = diagnostic_list(route.get("visits"))
+        skipped_shipments = diagnostic_list(response.get("skippedShipments"))
+        breaks = diagnostic_list(route.get("breaks"))
+        diagnostic_payload = {
+            **minimal_payload,
+            "solve_duration_ms": solve_duration_ms,
+            "route_count": len(routes),
+            "visit_count": len(visits),
+            "skipped_count": len(skipped_shipments),
+            "break_count": len(breaks),
+            "hasTrafficInfeasibilities": (
+                route.get("hasTrafficInfeasibilities") is True
+            ),
+            "vehicle_label_matches": (
+                route.get("vehicleLabel")
+                == f"owner:{str(owner_user_name).strip().casefold()}"
+            ),
+        }
+        for key in _ROUTE_FAILURE_DIAGNOSTIC_DETAIL_KEYS:
+            if key in error.details:
+                diagnostic_payload[key] = error.details[key]
+        return json.dumps(
+            diagnostic_payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+    except Exception:
+        try:
+            return json.dumps(
+                minimal_payload,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        except Exception:
+            return ""
+
+
 def execute_route_optimization(*, spreadsheet, owner, inputs, client_request_id):
     actor = current_user()
     actor_user_name = str(actor.get("user_name") or "").strip()
@@ -9856,6 +9962,7 @@ def execute_route_optimization(*, spreadsheet, owner, inputs, client_request_id)
                 route_start=inputs["route_start_at"],
                 pre_route_fixed_seconds=inputs["pre_route_fixed_seconds"],
                 fixed_breaks=inputs["fixed_breaks"],
+                timeout_seconds=inputs["timeout_seconds"],
             )
         finally:
             record_performance_step(
@@ -9870,41 +9977,14 @@ def execute_route_optimization(*, spreadsheet, owner, inputs, client_request_id)
         )
         diagnostic_json = ""
         if http_status_value == 200 and "response" in locals() and isinstance(response, dict):
-            def diagnostic_list(value):
-                return value if isinstance(value, list) else []
-
-            routes = diagnostic_list(response.get("routes"))
-            route_candidate = routes[0] if routes else {}
-            route = route_candidate if isinstance(route_candidate, dict) else {}
-            visits = diagnostic_list(route.get("visits"))
-            skipped_shipments = diagnostic_list(response.get("skippedShipments"))
-            breaks = diagnostic_list(route.get("breaks"))
-            diagnostic_payload = {
-                "error_code": error.code,
-                "diagnostic_reason": error.details.get("diagnostic_reason") or error.code,
-                "solve_duration_ms": google_solve_duration_ms if "google_solve_duration_ms" in locals() else None,
-                "route_count": len(routes),
-                "visit_count": len(visits),
-                "skipped_count": len(skipped_shipments),
-                "break_count": len(breaks),
-                "hasTrafficInfeasibilities": bool(route.get("hasTrafficInfeasibilities")),
-                "vehicle_label_matches": route.get("vehicleLabel") == f"owner:{str(owner_user_name).strip().casefold()}",
-            }
-            for key in (
-                "transition_count",
-                "expected_transition_count",
-                "transition_count_matches_expected",
-                "traffic_info_unavailable_count",
-                "route_metrics",
-                "skip_reason_counts",
-                "traffic_deficit_calculated",
-            ):
-                if key in error.details:
-                    diagnostic_payload[key] = error.details[key]
-            diagnostic_json = json.dumps(
-                diagnostic_payload,
-                ensure_ascii=False,
-                separators=(",", ":"),
+            diagnostic_json = _route_failure_diagnostic_json(
+                response=response,
+                error=error,
+                owner_user_name=owner_user_name,
+                solve_duration_ms=(
+                    google_solve_duration_ms
+                    if "google_solve_duration_ms" in locals() else None
+                ),
             )
         with _route_optimization_run_lock:
             update_route_optimization_run(
