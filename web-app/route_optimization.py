@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import hashlib
 import json
 import math
@@ -24,12 +24,14 @@ from google.auth.transport.requests import Request as GoogleAuthRequest
 from google.oauth2.service_account import Credentials
 
 
-ROUTE_ENGINE_VERSION = "ro-v1"
+ROUTE_ENGINE_VERSION = "ro-v2"
 ROUTE_COST_PER_HOUR = 1.0
 PRIORITY_PENALTY_MULTIPLIER = 10.0
 ROUTE_MAX_SECONDS = 25199
 SERVICE_SECONDS = 1200
 MAX_VISITS = 15
+QUADRATIC_SOFT_DURATION_BUFFER_SECONDS = 300
+QUADRATIC_SOFT_DURATION_COST_PER_SQUARE_HOUR = 28800
 GOOGLE_OAUTH_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
 GOOGLE_OPTIMIZE_TOURS_URL = (
     "https://routeoptimization.googleapis.com/v1/projects/{project}:optimizeTours"
@@ -141,6 +143,54 @@ def clamp_priority_score(value: Any) -> int:
 
 def priority_penalty(value: Any) -> float:
     return clamp_priority_score(value) * PRIORITY_PENALTY_MULTIPLIER
+
+
+def quadratic_soft_duration_diagnostics(
+    *,
+    model_route_max_seconds: int,
+    route_duration_seconds: int | float | Decimal,
+) -> dict[str, Any]:
+    """Return the configured policy and Store Tracker-derived duration cost.
+
+    Cost is calculated with Decimal and rounded half-up to one decimal for
+    stable diagnostic JSON.  It is derived from the configured model formula,
+    not copied from a Google response cost field.
+    """
+    enabled = model_route_max_seconds > QUADRATIC_SOFT_DURATION_BUFFER_SECONDS
+    result = {
+        "quadratic_soft_duration_enabled": enabled,
+        "quadratic_soft_buffer_seconds": (
+            QUADRATIC_SOFT_DURATION_BUFFER_SECONDS
+        ),
+        "quadratic_soft_max_seconds": (
+            model_route_max_seconds - QUADRATIC_SOFT_DURATION_BUFFER_SECONDS
+            if enabled else None
+        ),
+        "quadratic_soft_cost_per_square_hour": (
+            QUADRATIC_SOFT_DURATION_COST_PER_SQUARE_HOUR
+        ),
+        "quadratic_soft_exceedance_seconds": None,
+        "quadratic_soft_duration_cost": None,
+    }
+    if not enabled:
+        return result
+    try:
+        duration = Decimal(str(route_duration_seconds))
+    except InvalidOperation:
+        return result
+    if not duration.is_finite():
+        return result
+    threshold = Decimal(result["quadratic_soft_max_seconds"])
+    exceedance = max(Decimal(0), duration - threshold)
+    cost = (
+        Decimal(QUADRATIC_SOFT_DURATION_COST_PER_SQUARE_HOUR)
+        * (exceedance / Decimal(3600)) ** 2
+    ).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
+    result["quadratic_soft_exceedance_seconds"] = _diagnostic_decimal_number(
+        exceedance
+    )
+    result["quadratic_soft_duration_cost"] = _diagnostic_decimal_number(cost)
+    return result
 
 
 def _utc_text(value: datetime) -> str:
@@ -292,6 +342,15 @@ def build_optimize_tours_request(
         "routeDurationLimit": {"maxDuration": f"{available_seconds}s"},
         "costPerHour": ROUTE_COST_PER_HOUR,
     }
+    if available_seconds > QUADRATIC_SOFT_DURATION_BUFFER_SECONDS:
+        vehicle["routeDurationLimit"].update({
+            "quadraticSoftMaxDuration": (
+                f"{available_seconds - QUADRATIC_SOFT_DURATION_BUFFER_SECONDS}s"
+            ),
+            "costPerSquareHourAfterQuadraticSoftMax": (
+                QUADRATIC_SOFT_DURATION_COST_PER_SQUARE_HOUR
+            ),
+        })
     if breaks:
         latest_break_end = max(
             item["scheduled_at"] + timedelta(seconds=int(item["duration_seconds"]))
@@ -394,6 +453,12 @@ def build_request_fingerprint(
             "route_max_seconds": ROUTE_MAX_SECONDS,
             "service_seconds": SERVICE_SECONDS,
             "max_visits": MAX_VISITS,
+            "quadratic_soft_duration_buffer_seconds": (
+                QUADRATIC_SOFT_DURATION_BUFFER_SECONDS
+            ),
+            "quadratic_soft_duration_cost_per_square_hour": (
+                QUADRATIC_SOFT_DURATION_COST_PER_SQUARE_HOUR
+            ),
         },
         "shipments": sorted(shipment_values, key=lambda item: item["customer_id"]),
         "fixed_activities": sorted(fixed_values, key=lambda item: item["activity_id"]),
@@ -626,6 +691,14 @@ def _traffic_infeasibility_diagnostics(
             Decimal(delta.days * 86400 + delta.seconds)
             + Decimal(delta.microseconds) / Decimal(1_000_000)
         )
+        quadratic_diagnostics = (
+            quadratic_soft_duration_diagnostics(
+                model_route_max_seconds=model_route_max_seconds,
+                route_duration_seconds=elapsed,
+            )
+            if model_route_max_seconds is not None
+            else {}
+        )
         required_count = sum(
             item.get("required") is True
             for item in shipments
@@ -712,6 +785,7 @@ def _traffic_infeasibility_diagnostics(
             "timeout_seconds": normalized_timeout,
             "absolute_route_max_seconds": ROUTE_MAX_SECONDS,
             "model_route_max_seconds": model_route_max_seconds,
+            **quadratic_diagnostics,
             "max_visits": MAX_VISITS,
             "service_duration_seconds": SERVICE_SECONDS,
             "skip_reason_counts": skip_reason_counts,

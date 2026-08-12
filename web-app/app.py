@@ -73,6 +73,7 @@ from route_optimization import (
     build_request_fingerprint as build_route_optimization_fingerprint,
     coordinate_quality as route_coordinate_quality,
     parse_optimize_tours_response,
+    quadratic_soft_duration_diagnostics,
 )
 from reminder_email import (
     EMAIL_PROPOSAL_PRODUCT_SETTINGS,
@@ -9660,6 +9661,12 @@ _ROUTE_FAILURE_DIAGNOSTIC_DETAIL_KEYS = frozenset({
     "negative_residual_transition_count",
     "negative_wait_transition_count",
     "pre_route_fixed_seconds",
+    "quadratic_soft_buffer_seconds",
+    "quadratic_soft_cost_per_square_hour",
+    "quadratic_soft_duration_cost",
+    "quadratic_soft_duration_enabled",
+    "quadratic_soft_exceedance_seconds",
+    "quadratic_soft_max_seconds",
     "required_count",
     "route_break_duration_seconds",
     "route_delay_duration_seconds",
@@ -10004,12 +10011,25 @@ def execute_route_optimization(*, spreadsheet, owner, inputs, client_request_id)
         return None, route_optimization_error_response(error)
 
     solve_duration_ms = google_solve_duration_ms
+    model_route_max_seconds = (
+        ROUTE_OPTIMIZATION_MAX_SECONDS
+        - max(0, int(inputs["pre_route_fixed_seconds"]))
+    )
+    model_diagnostics = {
+        "route_engine_version": ROUTE_ENGINE_VERSION,
+        "model_route_max_seconds": model_route_max_seconds,
+        **quadratic_soft_duration_diagnostics(
+            model_route_max_seconds=model_route_max_seconds,
+            route_duration_seconds=parsed["summary"]["route_seconds"],
+        ),
+    }
     compact_result = {
         "stops": parsed["stops"],
         "summary": parsed["summary"],
         "performed_count": parsed["performed_count"],
         "skipped_count": parsed["skipped_count"],
         "solve_duration_ms": solve_duration_ms,
+        "model_diagnostics": model_diagnostics,
     }
     compact_json = json.dumps(compact_result, ensure_ascii=False, separators=(",", ":"))
     with _route_optimization_run_lock:

@@ -14,10 +14,14 @@ WEB_APP_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(WEB_APP_DIR))
 
 import app as app_module
+import route_optimization as route_optimization_module
 from route_optimization import (
     _diagnostic_duration_seconds,
     MAX_VISITS,
     PRIORITY_PENALTY_MULTIPLIER,
+    QUADRATIC_SOFT_DURATION_BUFFER_SECONDS,
+    QUADRATIC_SOFT_DURATION_COST_PER_SQUARE_HOUR,
+    ROUTE_ENGINE_VERSION,
     ROUTE_MAX_SECONDS,
     RouteOptimizationError,
     RouteOptimizationProvider,
@@ -29,6 +33,7 @@ from route_optimization import (
     load_service_account_credentials,
     parse_optimize_tours_response,
     priority_penalty,
+    quadratic_soft_duration_diagnostics,
 )
 import scripts.route_optimization_smoke as smoke_module
 from tests.test_planning import FakeWorksheet, default_spreadsheet
@@ -126,9 +131,18 @@ class RouteOptimizationModelTests(TestCase):
                 self.assertIsNone(_diagnostic_duration_seconds(value))
 
     def test_t1_penalty_proof_and_clamping(self):
+        self.assertEqual(ROUTE_ENGINE_VERSION, "ro-v2")
+        self.assertEqual(QUADRATIC_SOFT_DURATION_BUFFER_SECONDS, 300)
+        self.assertEqual(
+            QUADRATIC_SOFT_DURATION_COST_PER_SQUARE_HOUR, 28800
+        )
         self.assertGreater(PRIORITY_PENALTY_MULTIPLIER, ROUTE_MAX_SECONDS / 3600)
         self.assertEqual(priority_penalty(0), 10.0)
+        self.assertEqual(priority_penalty(20), 200.0)
+        self.assertEqual(priority_penalty(40), 400.0)
         self.assertEqual(priority_penalty(60.4), 600.0)
+        self.assertEqual(priority_penalty(80), 800.0)
+        self.assertEqual(priority_penalty(100), 1000.0)
         self.assertEqual(priority_penalty(999), 1000.0)
 
     def test_t2_exact_request_schema_optional_and_mandatory(self):
@@ -152,8 +166,18 @@ class RouteOptimizationModelTests(TestCase):
         self.assertEqual(vehicle["loadLimits"]["visit_slots"]["maxLoad"], "15")
         self.assertEqual(vehicle["loadLimits"]["visit_slots"]["startLoadInterval"], {"min": "0", "max": "0"})
         self.assertEqual(vehicle["startLocation"], vehicle["endLocation"])
+        duration_limit = vehicle["routeDurationLimit"]
+        self.assertEqual(duration_limit, {
+            "maxDuration": "25199s",
+            "quadraticSoftMaxDuration": "24899s",
+            "costPerSquareHourAfterQuadraticSoftMax": 28800,
+        })
         rendered = str(body)
-        for forbidden in ("deliveries", "costPerKilometer", "costPerTraveledHour", "fixedCost"):
+        for forbidden in (
+            "deliveries", "costPerKilometer", "costPerTraveledHour",
+            "fixedCost", "softMaxDuration", "costPerHourAfterSoftMax",
+            "travelDurationMultiple",
+        ):
             self.assertNotIn(forbidden, rendered)
         for private_value in ("Butik A", "customer@example.com", "+46700000000", "ring kunden"):
             self.assertNotIn(private_value, rendered)
@@ -263,6 +287,64 @@ class RouteOptimizationModelTests(TestCase):
         self.assertEqual(request["minDuration"], "600s")
         self.assertGreaterEqual(vehicle["endTimeWindows"][0]["startTime"], request["earliestStartTime"])
 
+    def test_t5a_quadratic_soft_duration_is_dynamic_and_safely_optional(self):
+        reduced = build_optimize_tours_request(
+            run_id="pre-route-fixed",
+            owner_user_name="Olle",
+            route_start=NOW,
+            start=START,
+            shipments=[shipment(1)],
+            pre_route_fixed_seconds=600,
+        )
+        reduced_limit = reduced["model"]["vehicles"][0]["routeDurationLimit"]
+        self.assertEqual(reduced_limit["maxDuration"], "24599s")
+        self.assertEqual(reduced_limit["quadraticSoftMaxDuration"], "24299s")
+        self.assertEqual(
+            reduced_limit["costPerSquareHourAfterQuadraticSoftMax"], 28800
+        )
+
+        small_capacity = build_optimize_tours_request(
+            run_id="small-capacity",
+            owner_user_name="Olle",
+            route_start=NOW,
+            start=START,
+            shipments=[shipment(1)],
+            pre_route_fixed_seconds=ROUTE_MAX_SECONDS - 300,
+        )
+        self.assertEqual(
+            small_capacity["model"]["vehicles"][0]["routeDurationLimit"],
+            {"maxDuration": "300s"},
+        )
+
+    def test_t5b_quadratic_soft_duration_diagnostics_use_stable_decimal_cost(self):
+        at_hard_max = quadratic_soft_duration_diagnostics(
+            model_route_max_seconds=25199,
+            route_duration_seconds=25199,
+        )
+        self.assertEqual(at_hard_max, {
+            "quadratic_soft_duration_enabled": True,
+            "quadratic_soft_buffer_seconds": 300,
+            "quadratic_soft_max_seconds": 24899,
+            "quadratic_soft_cost_per_square_hour": 28800,
+            "quadratic_soft_exceedance_seconds": 300,
+            "quadratic_soft_duration_cost": 200,
+        })
+        sofia_completed = quadratic_soft_duration_diagnostics(
+            model_route_max_seconds=25199,
+            route_duration_seconds=25050,
+        )
+        self.assertEqual(
+            sofia_completed["quadratic_soft_exceedance_seconds"], 151
+        )
+        self.assertEqual(sofia_completed["quadratic_soft_duration_cost"], 50.7)
+        disabled = quadratic_soft_duration_diagnostics(
+            model_route_max_seconds=300,
+            route_duration_seconds=300,
+        )
+        self.assertFalse(disabled["quadratic_soft_duration_enabled"])
+        self.assertIsNone(disabled["quadratic_soft_max_seconds"])
+        self.assertIsNone(disabled["quadratic_soft_duration_cost"])
+
     def test_t6_fingerprint_ignores_names_but_tracks_business_inputs(self):
         base = [shipment(1, score=70)]
         first = build_request_fingerprint(
@@ -279,6 +361,37 @@ class RouteOptimizationModelTests(TestCase):
             owner_user_name="Olle", route_date="2026-08-10", route_start=NOW,
             route_mode="automatic", start=START, shipments=changed, fixed_activities=[],
         ))
+        with patch.object(
+            route_optimization_module, "ROUTE_ENGINE_VERSION", "ro-v1"
+        ):
+            ro_v1 = build_request_fingerprint(
+                owner_user_name="Olle", route_date="2026-08-10",
+                route_start=NOW, route_mode="automatic", start=START,
+                shipments=base, fixed_activities=[],
+            )
+        self.assertNotEqual(first, ro_v1)
+        with patch.object(
+            route_optimization_module,
+            "QUADRATIC_SOFT_DURATION_BUFFER_SECONDS",
+            301,
+        ):
+            changed_policy = build_request_fingerprint(
+                owner_user_name="Olle", route_date="2026-08-10",
+                route_start=NOW, route_mode="automatic", start=START,
+                shipments=base, fixed_activities=[],
+            )
+        self.assertNotEqual(first, changed_policy)
+        with patch.object(
+            route_optimization_module,
+            "QUADRATIC_SOFT_DURATION_COST_PER_SQUARE_HOUR",
+            28799,
+        ):
+            changed_cost_policy = build_request_fingerprint(
+                owner_user_name="Olle", route_date="2026-08-10",
+                route_start=NOW, route_mode="automatic", start=START,
+                shipments=base, fixed_activities=[],
+            )
+        self.assertNotEqual(first, changed_cost_policy)
 
     def test_t7_response_parser_accepts_known_pickups_and_totals(self):
         items = [shipment(1), shipment(2)]
@@ -413,6 +526,14 @@ class RouteOptimizationModelTests(TestCase):
         })
         self.assertEqual(error.details["absolute_route_max_seconds"], 25199)
         self.assertEqual(error.details["model_route_max_seconds"], 24599)
+        self.assertTrue(error.details["quadratic_soft_duration_enabled"])
+        self.assertEqual(error.details["quadratic_soft_buffer_seconds"], 300)
+        self.assertEqual(error.details["quadratic_soft_max_seconds"], 24299)
+        self.assertEqual(
+            error.details["quadratic_soft_cost_per_square_hour"], 28800
+        )
+        self.assertEqual(error.details["quadratic_soft_exceedance_seconds"], 0)
+        self.assertEqual(error.details["quadratic_soft_duration_cost"], 0)
         self.assertEqual(error.details["required_count"], 1)
         self.assertTrue(error.details["has_required_visits"])
         self.assertEqual(error.details["fixed_visit_count"], 1)
@@ -759,7 +880,25 @@ class RouteOptimizationIntegrationTests(TestCase):
                 })
                 self.assertEqual(response.status_code, 200, response.get_json())
         self.assertEqual(len(calls), 1)
-        self.assertEqual(len(self.spreadsheet.worksheet(app_module.ROUTE_OPTIMIZATION_RUNS_SHEET).dict_rows()), 1)
+        rows = self.spreadsheet.worksheet(
+            app_module.ROUTE_OPTIMIZATION_RUNS_SHEET
+        ).dict_rows()
+        self.assertEqual(len(rows), 1)
+        persisted = json.loads(str(rows[0]["result_payload_json"]))
+        self.assertEqual(persisted["model_diagnostics"], {
+            "route_engine_version": "ro-v2",
+            "model_route_max_seconds": 25199,
+            "quadratic_soft_duration_enabled": True,
+            "quadratic_soft_buffer_seconds": 300,
+            "quadratic_soft_max_seconds": 24899,
+            "quadratic_soft_cost_per_square_hour": 28800,
+            "quadratic_soft_exceedance_seconds": 0,
+            "quadratic_soft_duration_cost": 0,
+        })
+        self.assertEqual(persisted["summary"]["stop_count"], 1)
+        self.assertEqual(persisted["summary"]["total_priority_score"], 80)
+        self.assertEqual(persisted["summary"]["route_seconds"], 3600)
+        self.assertGreaterEqual(persisted["solve_duration_ms"], 0)
 
     def test_completed_request_replay_reuses_exact_run_before_quota(self):
         snapshot = self.priority_snapshot()
@@ -1031,6 +1170,14 @@ class RouteOptimizationIntegrationTests(TestCase):
         self.assertEqual(payload["aggregate_timeline_residual_seconds"], -116)
         self.assertEqual(payload["absolute_route_max_seconds"], 25199)
         self.assertEqual(payload["model_route_max_seconds"], 25199)
+        self.assertTrue(payload["quadratic_soft_duration_enabled"])
+        self.assertEqual(payload["quadratic_soft_buffer_seconds"], 300)
+        self.assertEqual(payload["quadratic_soft_max_seconds"], 24899)
+        self.assertEqual(
+            payload["quadratic_soft_cost_per_square_hour"], 28800
+        )
+        self.assertEqual(payload["quadratic_soft_exceedance_seconds"], 300)
+        self.assertEqual(payload["quadratic_soft_duration_cost"], 200)
         self.assertEqual(payload["route_elapsed_seconds"], 25199)
         self.assertTrue(payload["route_elapsed_matches_total_duration"])
         self.assertEqual(payload["negative_wait_transition_count"], 1)
@@ -1068,11 +1215,16 @@ class RouteOptimizationIntegrationTests(TestCase):
 
         request = calls[0]
         vehicle = request["model"]["vehicles"][0]
-        self.assertEqual(vehicle["routeDurationLimit"]["maxDuration"], "25199s")
+        self.assertEqual(vehicle["routeDurationLimit"], {
+            "maxDuration": "25199s",
+            "quadraticSoftMaxDuration": "24899s",
+            "costPerSquareHourAfterQuadraticSoftMax": 28800,
+        })
         self.assertEqual(request["searchMode"], "CONSUME_ALL_AVAILABLE_TIME")
         self.assertEqual(request["solvingMode"], "DEFAULT_SOLVE")
         self.assertTrue(request["considerRoadTraffic"])
         self.assertNotIn("softMaxDuration", json.dumps(request))
+        self.assertNotIn("costPerHourAfterSoftMax", json.dumps(request))
         self.assertNotIn("travelDurationMultiple", json.dumps(request))
 
     def test_t15c_malformed_http_200_response_cannot_break_diagnostics(self):
@@ -1229,7 +1381,7 @@ class RouteOptimizationIntegrationTests(TestCase):
         self.assertIsNone(input_error)
         valid_preview = {
             "route_date": NOW.date().isoformat(), "user_name": "olle",
-            "route_engine_version": "ro-v1",
+            "route_engine_version": ROUTE_ENGINE_VERSION,
             "route_optimization_fingerprint": inputs["fingerprint"],
             "route_start_at": inputs["route_start_at"].isoformat(timespec="minutes"),
             "plan_fingerprint": app_module.planning_state_fingerprint(inputs["date_rows"]),
@@ -1243,7 +1395,10 @@ class RouteOptimizationIntegrationTests(TestCase):
             }],
             "summary": {"route_minutes": 60, "route_end_at": "2026-08-10T10:00:00+02:00"},
             "timeline": {"route_end_at": "2026-08-10T10:00:00+02:00"},
-            "route_payload": {"engine": "route_optimization", "engine_version": "ro-v1"},
+            "route_payload": {
+                "engine": "route_optimization",
+                "engine_version": ROUTE_ENGINE_VERSION,
+            },
         }
         valid_token = app_module.planning_preview_serializer().dumps(valid_preview)
         with patch.object(app_module, "get_authoritative_priority_snapshot", return_value=snapshot), patch.object(app_module, "route_optimization_provider") as provider:
