@@ -69,6 +69,8 @@ from route_optimization import (
     RouteOptimizationError,
     RouteOptimizationProvider,
     TrustedCoordinate,
+    build_input_fingerprint as build_route_optimization_input_fingerprint,
+    build_legacy_ro_v1_request_fingerprint,
     build_optimize_tours_request,
     build_request_fingerprint as build_route_optimization_fingerprint,
     coordinate_quality as route_coordinate_quality,
@@ -524,6 +526,7 @@ ROUTE_OPTIMIZATION_RUN_COLUMNS = [
     "route_date",
     "client_request_id",
     "request_fingerprint",
+    "input_fingerprint",
     "engine_version",
     "status",
     "counted_attempt",
@@ -9556,15 +9559,22 @@ def build_route_optimization_inputs(
         maximum=300,
     )
     trusted_start = TrustedCoordinate(round(start.latitude, 5), round(start.longitude, 5))
-    fingerprint = build_route_optimization_fingerprint(
-        owner_user_name=owner.get("user_name"),
-        route_date=route_date.isoformat(),
-        route_start=route_start_at,
-        route_mode="automatic",
-        start=trusted_start,
-        shipments=shipments,
-        fixed_activities=fixed_activities_for_fingerprint,
+    fingerprint_kwargs = {
+        "owner_user_name": owner.get("user_name"),
+        "route_date": route_date.isoformat(),
+        "route_start": route_start_at,
+        "route_mode": "automatic",
+        "start": trusted_start,
+        "shipments": shipments,
+        "fixed_activities": fixed_activities_for_fingerprint,
+    }
+    fingerprint = build_route_optimization_fingerprint(**fingerprint_kwargs)
+    input_fingerprint = build_route_optimization_input_fingerprint(
+        **fingerprint_kwargs
     )
+    legacy_request_fingerprints = {
+        "ro-v1": build_legacy_ro_v1_request_fingerprint(**fingerprint_kwargs),
+    }
     return {
         "route_start_at": route_start_at,
         "start": trusted_start,
@@ -9574,6 +9584,8 @@ def build_route_optimization_inputs(
         "pre_route_fixed_seconds": pre_route_fixed_seconds,
         "timeout_seconds": timeout_seconds,
         "fingerprint": fingerprint,
+        "input_fingerprint": input_fingerprint,
+        "legacy_request_fingerprints": legacy_request_fingerprints,
         "customers_by_id": customers_by_id,
         "date_rows": date_rows,
         "excluded_untrusted_coordinates": excluded_untrusted,
@@ -9756,6 +9768,44 @@ def _route_failure_diagnostic_json(
             return ""
 
 
+def _route_operation_input_matches(row, inputs):
+    """Match an idempotent operation without conflating input and policy.
+
+    New rows carry a policy-independent input fingerprint.  Rows deployed
+    before that column use their exact policy-bound fingerprint, with a narrow
+    ro-v1 reconstruction for completed-operation recovery across the ro-v2
+    deployment.
+    """
+    current_input_fingerprint = str(
+        inputs.get("input_fingerprint") or ""
+    ).strip()
+    stored_input_fingerprint = str(
+        row.get("input_fingerprint") or ""
+    ).strip()
+    if stored_input_fingerprint:
+        return bool(
+            current_input_fingerprint
+            and stored_input_fingerprint == current_input_fingerprint
+        )
+
+    stored_request_fingerprint = str(
+        row.get("request_fingerprint") or ""
+    ).strip()
+    if stored_request_fingerprint == str(inputs.get("fingerprint") or ""):
+        return True
+    engine_version = str(row.get("engine_version") or "").strip()
+    legacy_fingerprint = str(
+        (inputs.get("legacy_request_fingerprints") or {}).get(
+            engine_version
+        ) or ""
+    ).strip()
+    return bool(
+        stored_request_fingerprint
+        and legacy_fingerprint
+        and stored_request_fingerprint == legacy_fingerprint
+    )
+
+
 def execute_route_optimization(*, spreadsheet, owner, inputs, client_request_id):
     actor = current_user()
     actor_user_name = str(actor.get("user_name") or "").strip()
@@ -9793,7 +9843,7 @@ def execute_route_optimization(*, spreadsheet, owner, inputs, client_request_id)
         ), None)
         if same_request:
             _row_index, row = same_request
-            if str(row.get("request_fingerprint") or "") != fingerprint:
+            if not _route_operation_input_matches(row, inputs):
                 finish_quota_instrumentation()
                 return None, planning_error(
                     "route_request_id_conflict",
@@ -9913,6 +9963,7 @@ def execute_route_optimization(*, spreadsheet, owner, inputs, client_request_id)
             "route_date": inputs["route_start_at"].date().isoformat(),
             "client_request_id": client_request_id,
             "request_fingerprint": fingerprint,
+            "input_fingerprint": inputs["input_fingerprint"],
             "engine_version": ROUTE_ENGINE_VERSION,
             "status": "running",
             "counted_attempt": "Y",

@@ -406,7 +406,7 @@ def request_fingerprint(payload: Mapping[str, Any]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def build_request_fingerprint(
+def _request_input_fingerprint_payload(
     *,
     owner_user_name: str,
     route_date: str,
@@ -415,7 +415,7 @@ def build_request_fingerprint(
     start: TrustedCoordinate,
     shipments: Iterable[Mapping[str, Any]],
     fixed_activities: Iterable[Mapping[str, Any]],
-) -> str:
+) -> dict[str, Any]:
     shipment_values = []
     for item in shipments:
         coordinate = item["coordinate"]
@@ -437,8 +437,7 @@ def build_request_fingerprint(
         "duration_seconds": int(item["duration_seconds"]),
         "status": str(item.get("status") or ""),
     } for item in fixed_activities]
-    return request_fingerprint({
-        "engine_version": ROUTE_ENGINE_VERSION,
+    return {
         "owner_user_name": str(owner_user_name).strip().casefold(),
         "route_date": route_date,
         "route_start": _utc_text(route_start),
@@ -447,21 +446,68 @@ def build_request_fingerprint(
             "latitude": round(start.latitude, 4),
             "longitude": round(start.longitude, 4),
         },
-        "constants": {
-            "route_cost_per_hour": ROUTE_COST_PER_HOUR,
-            "priority_penalty_multiplier": PRIORITY_PENALTY_MULTIPLIER,
-            "route_max_seconds": ROUTE_MAX_SECONDS,
-            "service_seconds": SERVICE_SECONDS,
-            "max_visits": MAX_VISITS,
+        "shipments": sorted(shipment_values, key=lambda item: item["customer_id"]),
+        "fixed_activities": sorted(fixed_values, key=lambda item: item["activity_id"]),
+    }
+
+
+def build_input_fingerprint(**kwargs: Any) -> str:
+    """Fingerprint user/business input independently of solver policy."""
+    return request_fingerprint(_request_input_fingerprint_payload(**kwargs))
+
+
+def _request_fingerprint_for_policy(
+    *,
+    engine_version: str,
+    include_quadratic_policy: bool,
+    **kwargs: Any,
+) -> str:
+    constants = {
+        "route_cost_per_hour": ROUTE_COST_PER_HOUR,
+        "priority_penalty_multiplier": PRIORITY_PENALTY_MULTIPLIER,
+        "route_max_seconds": ROUTE_MAX_SECONDS,
+        "service_seconds": SERVICE_SECONDS,
+        "max_visits": MAX_VISITS,
+    }
+    if include_quadratic_policy:
+        constants.update({
             "quadratic_soft_duration_buffer_seconds": (
                 QUADRATIC_SOFT_DURATION_BUFFER_SECONDS
             ),
             "quadratic_soft_duration_cost_per_square_hour": (
                 QUADRATIC_SOFT_DURATION_COST_PER_SQUARE_HOUR
             ),
+        })
+    input_payload = _request_input_fingerprint_payload(**kwargs)
+    return request_fingerprint({
+        "engine_version": engine_version,
+        **input_payload,
+        "constants": constants,
+    })
+
+
+def build_request_fingerprint(**kwargs: Any) -> str:
+    """Fingerprint input plus the active solver policy for cache isolation."""
+    return _request_fingerprint_for_policy(
+        engine_version=ROUTE_ENGINE_VERSION,
+        include_quadratic_policy=True,
+        **kwargs,
+    )
+
+
+def build_legacy_ro_v1_request_fingerprint(**kwargs: Any) -> str:
+    """Recreate the deployed ro-v1 fingerprint for exact recovery only."""
+    input_payload = _request_input_fingerprint_payload(**kwargs)
+    return request_fingerprint({
+        "engine_version": "ro-v1",
+        **input_payload,
+        "constants": {
+            "route_cost_per_hour": 1.0,
+            "priority_penalty_multiplier": 10.0,
+            "route_max_seconds": 25199,
+            "service_seconds": 1200,
+            "max_visits": 15,
         },
-        "shipments": sorted(shipment_values, key=lambda item: item["customer_id"]),
-        "fixed_activities": sorted(fixed_values, key=lambda item: item["activity_id"]),
     })
 
 

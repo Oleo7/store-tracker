@@ -27,6 +27,8 @@ from route_optimization import (
     RouteOptimizationProvider,
     SERVICE_SECONDS,
     TrustedCoordinate,
+    build_input_fingerprint,
+    build_legacy_ro_v1_request_fingerprint,
     build_optimize_tours_request,
     build_request_fingerprint,
     coordinate_quality,
@@ -347,10 +349,12 @@ class RouteOptimizationModelTests(TestCase):
 
     def test_t6_fingerprint_ignores_names_but_tracks_business_inputs(self):
         base = [shipment(1, score=70)]
-        first = build_request_fingerprint(
+        fingerprint_kwargs = dict(
             owner_user_name="Olle", route_date="2026-08-10", route_start=NOW,
             route_mode="automatic", start=START, shipments=base, fixed_activities=[],
         )
+        first = build_request_fingerprint(**fingerprint_kwargs)
+        input_fingerprint = build_input_fingerprint(**fingerprint_kwargs)
         copied = [{**base[0], "customer": "A name never fingerprinted"}]
         self.assertEqual(first, build_request_fingerprint(
             owner_user_name="Olle", route_date="2026-08-10", route_start=NOW,
@@ -364,12 +368,20 @@ class RouteOptimizationModelTests(TestCase):
         with patch.object(
             route_optimization_module, "ROUTE_ENGINE_VERSION", "ro-v1"
         ):
-            ro_v1 = build_request_fingerprint(
-                owner_user_name="Olle", route_date="2026-08-10",
-                route_start=NOW, route_mode="automatic", start=START,
-                shipments=base, fixed_activities=[],
+            ro_v1 = build_request_fingerprint(**fingerprint_kwargs)
+            self.assertEqual(
+                input_fingerprint,
+                build_input_fingerprint(**fingerprint_kwargs),
             )
         self.assertNotEqual(first, ro_v1)
+        self.assertNotEqual(
+            first,
+            build_legacy_ro_v1_request_fingerprint(**fingerprint_kwargs),
+        )
+        self.assertEqual(
+            build_legacy_ro_v1_request_fingerprint(**fingerprint_kwargs),
+            "25cddb37f7a5570658ce7c9908ded3ddc65e0ed1f6bd69fbcbe4d66bb027d00a",
+        )
         with patch.object(
             route_optimization_module,
             "QUADRATIC_SOFT_DURATION_BUFFER_SECONDS",
@@ -745,6 +757,17 @@ class RouteOptimizationIntegrationTests(TestCase):
             "contact_rows": [],
         }
 
+    def legacy_ro_v1_fingerprint(self, inputs):
+        return build_legacy_ro_v1_request_fingerprint(
+            owner_user_name="olle",
+            route_date=NOW.date().isoformat(),
+            route_start=inputs["route_start_at"],
+            route_mode="automatic",
+            start=inputs["start"],
+            shipments=inputs["shipments"],
+            fixed_activities=inputs["fixed_activities"],
+        )
+
     def test_t12_input_builder_uses_all_577_owner_customers(self):
         customers = [{
             "row": index + 2,
@@ -885,6 +908,7 @@ class RouteOptimizationIntegrationTests(TestCase):
         ).dict_rows()
         self.assertEqual(len(rows), 1)
         persisted = json.loads(str(rows[0]["result_payload_json"]))
+        self.assertRegex(rows[0]["input_fingerprint"], r"^[0-9a-f]{64}$")
         self.assertEqual(persisted["model_diagnostics"], {
             "route_engine_version": "ro-v2",
             "model_route_max_seconds": 25199,
@@ -943,6 +967,95 @@ class RouteOptimizationIntegrationTests(TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["client_request_id"], payload["client_request_id"])
         self.assertEqual(sum(app_module.is_yes(row["counted_attempt"]) for row in rows), 1)
+
+    def test_completed_ro_v1_request_replays_across_policy_deploy_only_for_same_input(self):
+        snapshot = self.priority_snapshot()
+        with patch.object(
+            app_module,
+            "get_authoritative_priority_snapshot",
+            return_value=snapshot,
+        ):
+            inputs, input_error = app_module.build_route_optimization_inputs(
+                spreadsheet=self.spreadsheet,
+                owner={"user_name": "olle", "name": "Olle"},
+                route_date=NOW.date(),
+                start=app_module.Coordinate(57.7, 11.9),
+            )
+        self.assertIsNone(input_error)
+        stored_result = {
+            "stops": [],
+            "summary": {
+                "stop_count": 0,
+                "total_priority_score": 0,
+                "route_seconds": 0,
+                "route_minutes": 0,
+                "route_end_at": inputs["route_start_at"].isoformat(
+                    timespec="minutes"
+                ),
+            },
+            "performed_count": 0,
+            "skipped_count": len(inputs["shipments"]),
+            "solve_duration_ms": 1234,
+        }
+        sheet = app_module.route_optimization_run_sheet(self.spreadsheet)
+        app_module.append_dict_row(
+            sheet,
+            app_module.ROUTE_OPTIMIZATION_RUN_COLUMNS,
+            {
+                "run_id": "completed-before-ro-v2",
+                "actor_user_name": "olle",
+                "user_name": "olle",
+                "usage_iso_week": app_module.route_optimization_usage_week(
+                    NOW.date()
+                ),
+                "route_date": NOW.date().isoformat(),
+                "client_request_id": "completed-before-ro-v2",
+                "request_fingerprint": self.legacy_ro_v1_fingerprint(inputs),
+                "engine_version": "ro-v1",
+                "status": "completed",
+                "counted_attempt": "Y",
+                "started_at": NOW.isoformat(),
+                "completed_at": NOW.isoformat(),
+                "result_payload_json": json.dumps(stored_result),
+            },
+        )
+        original_payload = {
+            "route_date": NOW.date().isoformat(),
+            "route_mode": "automatic",
+            "client_request_id": "completed-before-ro-v2",
+            "start": {"latitude": 57.7, "longitude": 11.9},
+        }
+        with patch.object(
+            app_module,
+            "get_authoritative_priority_snapshot",
+            return_value=snapshot,
+        ), patch.object(app_module, "route_optimization_provider") as provider:
+            status = self.client.get(
+                "/planning/route-preview-status",
+                query_string={
+                    "client_request_id": "completed-before-ro-v2"
+                },
+            )
+            recovered = self.client.post(
+                "/planning/route-preview", json=original_payload
+            )
+            changed = self.client.post(
+                "/planning/route-preview",
+                json={
+                    **original_payload,
+                    "start": {"latitude": 57.8, "longitude": 11.9},
+                },
+            )
+
+        self.assertEqual(status.get_json(), {"ok": True, "state": "completed"})
+        self.assertEqual(recovered.status_code, 200, recovered.get_json())
+        self.assertEqual(
+            recovered.get_json()["route_optimization_run_id"],
+            "completed-before-ro-v2",
+        )
+        self.assertEqual(changed.status_code, 409, changed.get_json())
+        self.assertEqual(changed.get_json()["code"], "route_request_id_conflict")
+        provider.assert_not_called()
 
     def test_recovery_status_is_read_only_actor_scoped_and_maps_run_states(self):
         provider_patch = patch.object(app_module, "route_optimization_provider")
