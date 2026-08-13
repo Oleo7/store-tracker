@@ -5984,6 +5984,96 @@ def build_customer_timeline(
     return timeline
 
 
+def select_next_customer_follow_up(
+    customer,
+    customers,
+    contact_rows,
+    activity_rows,
+    *,
+    now=None,
+    customer_lookup=None,
+):
+    """Select the customer's nearest future follow-up without changing state."""
+    current = now or stockholm_now()
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=STOCKHOLM_ZONE)
+    current = current.astimezone(STOCKHOLM_ZONE)
+    lookup = customer_lookup or CustomerLookup(customers)
+
+    related_contacts = related_rows_for_customer(
+        contact_rows,
+        customers,
+        customer,
+        customer_lookup=lookup,
+    )
+    latest_contact = None
+    latest_contact_marker = None
+    for index, row in enumerate(related_contacts):
+        contacted = parse_planning_datetime(row.get("date_time"))
+        if contacted is None:
+            continue
+        marker = (contacted, index)
+        if latest_contact_marker is None or marker > latest_contact_marker:
+            latest_contact = row
+            latest_contact_marker = marker
+
+    legacy_date = (
+        parse_date_value(latest_contact.get("follow_up_date"))
+        if latest_contact else None
+    )
+    legacy_candidate = None
+    if legacy_date and legacy_date >= current.date():
+        legacy_candidate = {
+            "source": "latest_contact",
+            "date": legacy_date.isoformat(),
+            "time": "",
+            "contact_type": "",
+            "contact_type_label": "",
+            "contact_id": str(latest_contact.get("contact_id") or "").strip(),
+        }
+
+    related_activities = related_rows_for_customer(
+        activity_rows,
+        customers,
+        customer,
+        customer_lookup=lookup,
+    )
+    planned_candidate = None
+    planned_marker = None
+    for row in related_activities:
+        if str(row.get("status") or "planned").strip().casefold() != "planned":
+            continue
+        scheduled = parse_planning_datetime(row.get("scheduled_at"))
+        if scheduled is None or scheduled < current:
+            continue
+        marker = (
+            scheduled,
+            str(row.get("planned_activity_id") or "").strip(),
+        )
+        if planned_marker is not None and marker >= planned_marker:
+            continue
+        contact_type = normalize_planning_contact_type(row.get("contact_type"))
+        planned_marker = marker
+        planned_candidate = {
+            "source": "planned_activity",
+            "date": scheduled.date().isoformat(),
+            "time": scheduled.strftime("%H:%M"),
+            "scheduled_at": scheduled.isoformat(timespec="minutes"),
+            "contact_type": contact_type,
+            "contact_type_label": planning_contact_label(contact_type),
+            "planned_activity_id": str(
+                row.get("planned_activity_id") or ""
+            ).strip(),
+        }
+
+    if planned_candidate and (
+        legacy_candidate is None
+        or planned_candidate["date"] <= legacy_candidate["date"]
+    ):
+        return planned_candidate
+    return legacy_candidate
+
+
 @app.route("/customers/<customer_name>/stats", methods=["GET"])
 def get_customer_stats(customer_name):
     customer_name = unquote(customer_name).strip()
@@ -6031,8 +6121,9 @@ def get_customer_stats(customer_name):
             unique_references.add(o["Reference"].strip())
 
     # Contacts
+    all_contact_rows = get_contact_rows(spreadsheet)
     contact_rows = related_rows_for_customer(
-        get_contact_rows(spreadsheet),
+        all_contact_rows,
         customers,
         customer,
         customer_lookup=customer_lookup,
@@ -6048,6 +6139,18 @@ def get_customer_stats(customer_name):
     contacts.sort(key=lambda x: x["_sort_date"], reverse=True)
     for contact in contacts:
         contact.pop("_sort_date", None)
+
+    _activity_sheet, _activity_headers, indexed_activities = (
+        get_planned_activity_snapshot(spreadsheet)
+    )
+    activity_rows = [row for _row_index, row in indexed_activities]
+    next_follow_up = select_next_customer_follow_up(
+        customer,
+        customers,
+        all_contact_rows,
+        activity_rows,
+        customer_lookup=customer_lookup,
+    )
 
     sheets = ensure_email_worksheets(spreadsheet)
     timeline = build_customer_timeline(
@@ -6068,6 +6171,7 @@ def get_customer_stats(customer_name):
         "order_count": len(unique_references),
         "contacts": contacts,
         "timeline": timeline,
+        "next_follow_up": next_follow_up,
     })
 
 

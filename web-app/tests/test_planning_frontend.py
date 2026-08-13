@@ -21,6 +21,20 @@ class PlanningFrontendContractTests(TestCase):
         options = re.findall(r"<option(?: [^>]*)?>(.*?)</option>", match.group(1))
         self.assertEqual(options, ["Välj...", "Telefon", "Mejl", "Besök"])
 
+    def test_customer_follow_up_uses_the_stats_contract(self):
+        self.assertIn("function formatNextFollowUp(nextFollowUp)", self.html)
+        self.assertIn(
+            "renderContactList(stats.contacts, stats.timeline, stats.next_follow_up)",
+            self.html,
+        )
+        self.assertIn('nextFollowUp.source !== "planned_activity"', self.html)
+        self.assertIn("`${date} · Tid ej satt`", self.html)
+        self.assertIn('[date, time, type].filter(Boolean).join(" · ")', self.html)
+        self.assertNotIn(
+            'd-next-followup").textContent = latestContact.follow_up_date',
+            self.html,
+        )
+
     def test_partial_contact_save_keeps_a_retry_payload(self):
         self.assertIn('result?.status === "partial"', self.html)
         self.assertIn("contactRetryPayload = payload", self.html)

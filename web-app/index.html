@@ -5832,6 +5832,17 @@
     return String(value || "").replace("T", " ").slice(0, 16) || "—";
   }
 
+  function formatNextFollowUp(nextFollowUp) {
+    const date = String(nextFollowUp?.date || "").trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return "—";
+    if (nextFollowUp.source !== "planned_activity") {
+      return `${date} · Tid ej satt`;
+    }
+    const time = String(nextFollowUp.time || "").trim() || "Tid ej satt";
+    const type = String(nextFollowUp.contact_type_label || "").trim();
+    return [date, time, type].filter(Boolean).join(" · ");
+  }
+
   function emailTrackingDateHtml(value) {
     const label = timelineDate(value);
     if (label === "—") return "—";
@@ -5866,7 +5877,7 @@
     section.style.display = "block";
   }
 
-  function renderContactList(contacts, timeline) {
+  function renderContactList(contacts, timeline, nextFollowUp = null) {
     allContacts = contacts || [];
     allTimeline = timeline || allContacts.map(contact => ({
       ...contact,
@@ -5907,13 +5918,12 @@
       document.getElementById("d-last-contact").textContent = latestContact.date_time ? latestContact.date_time.slice(0, 10) : "—";
       document.getElementById("d-last-result").textContent  = latestContact.result || "—";
       document.getElementById("d-freezer-latest").textContent = getFreezerLabels(latestContact).join(", ") || "—";
-      document.getElementById("d-next-followup").textContent = latestContact.follow_up_date || "—";
     } else {
       document.getElementById("d-last-contact").textContent = "—";
       document.getElementById("d-last-result").textContent  = "—";
       document.getElementById("d-freezer-latest").textContent = "—";
-      document.getElementById("d-next-followup").textContent = "—";
     }
+    document.getElementById("d-next-followup").textContent = formatNextFollowUp(nextFollowUp);
     renderDetailTags();
   }
 
@@ -6088,7 +6098,7 @@
       (stats.currency ? " " + stats.currency : "");
     const ins = currentCustomer ? getCustomerInsight(currentCustomer) : null;
     document.getElementById("d-latest-order").textContent = ins?.latest_delivery_date || "—";
-    renderContactList(stats.contacts, stats.timeline);
+    renderContactList(stats.contacts, stats.timeline, stats.next_follow_up);
   }
 
   function getCustomerEmailRecipients(customer) {
