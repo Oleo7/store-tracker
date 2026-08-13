@@ -106,6 +106,9 @@ class PlanningFrontendContractTests(TestCase):
         self.assertNotIn("expected_order_dfp", body)
         self.assertNotIn("Orderpotential", body)
         self.assertNotIn("Visa fler", body)
+        self.assertIn("planning-backlog-overdue", body)
+        self.assertIn("planning-backlog-overdue-actions", body)
+        self.assertIn("@container planning-backlog (max-width: 420px)", self.html)
 
     def test_planning_preview_load_more_is_snapshot_based_and_resets_by_owner(self):
         self.assertIn("let planningRecommendationPreviewLimit = 10", self.html)

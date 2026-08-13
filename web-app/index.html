@@ -2960,6 +2960,10 @@
       min-width: 0;
       padding: 14px;
     }
+    .planning-backlog-card {
+      container-name: planning-backlog;
+      container-type: inline-size;
+    }
     .planning-agenda-heading,
     .planning-backlog-heading {
       align-items: flex-start;
@@ -3220,6 +3224,27 @@
       border-bottom: 1px solid #f3edf1;
     }
     .planning-backlog-item:last-child { border-bottom: none; }
+    .planning-backlog-overdue {
+      grid-template-columns: minmax(0, 1fr);
+      align-items: stretch;
+      gap: 10px;
+    }
+    .planning-backlog-overdue-copy { min-width: 0; }
+    .planning-backlog-overdue .planning-backlog-customer {
+      display: block;
+      width: 100%;
+    }
+    .planning-backlog-overdue-actions {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 6px;
+      margin-top: 0;
+    }
+    .planning-backlog-overdue-actions .planning-compact-btn {
+      width: 100%;
+      min-width: 0;
+      padding-inline: 6px;
+    }
     .planning-backlog-customer {
       padding: 0;
       border: 0;
@@ -3626,6 +3651,9 @@
         display: grid;
         grid-template-columns: repeat(2, minmax(0, 1fr));
       }
+      .planning-backlog-overdue-actions {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }
       .planning-recommendation-actions .planning-compact-btn { width: 100%; }
       .planning-modal-backdrop { align-items: stretch; padding: 0; }
       .planning-modal { min-height: 100%; max-height: 100dvh; border-radius: 0; }
@@ -3639,6 +3667,14 @@
         grid-template-columns: repeat(2, minmax(0, 1fr));
       }
       .planning-dialog-actions .action-btn { width: 100%; min-width: 0; }
+    }
+    @container planning-backlog (max-width: 420px) {
+      .planning-backlog-overdue-actions {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+      .planning-backlog-overdue-actions .planning-compact-btn:last-child {
+        grid-column: 1 / -1;
+      }
     }
     @media (pointer: coarse) {
       .planning-drag-handle {
@@ -8260,13 +8296,13 @@
     );
     target.innerHTML = `<div class="planning-backlog-list">${visible.map((suggestion, index) => {
       if (planningQueueItemIsOverdue(suggestion)) {
-        return `<div class="planning-backlog-item">
-          <div>
+        return `<div class="planning-backlog-item planning-backlog-overdue">
+          <div class="planning-backlog-overdue-copy">
             <div class="planning-backlog-meta"><strong>Missad aktivitet</strong></div>
             <button class="planning-backlog-customer" type="button" data-planning-preview-customer="${index}">${esc(suggestion.customer || "Okänd kund")}</button>
             <div class="planning-backlog-meta">${esc(planningOverdueActivityMeta(suggestion))}</div>
           </div>
-          <div class="planning-recommendation-actions">
+          <div class="planning-recommendation-actions planning-backlog-overdue-actions">
             <button class="planning-compact-btn primary" type="button" data-planning-overdue-action="log" data-planning-overdue-index="${index}">Logga kontakt</button>
             <button class="planning-compact-btn" type="button" data-planning-overdue-action="edit" data-planning-overdue-index="${index}">Planera om</button>
             <button class="planning-compact-btn" type="button" data-planning-overdue-action="skip" data-planning-overdue-index="${index}">Överhoppad</button>
