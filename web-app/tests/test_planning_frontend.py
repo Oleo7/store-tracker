@@ -346,6 +346,7 @@ class PlanningFrontendContractTests(TestCase):
         self.assertIn("sessionStorage.setItem(", self.html)
         self.assertIn("sessionStorage.removeItem(", self.html)
         self.assertIn("PLANNING_ROUTE_RECOVERY_TTL_MS = 30 * 60 * 1000", self.html)
+        self.assertIn("PLANNING_ROUTE_RECOVERY_WINDOW_MS = 20 * 60 * 1000", self.html)
         self.assertIn("PLANNING_ROUTE_RECOVERY_POLL_MS = 15 * 1000", self.html)
         read = self.html.split("function readPlanningRouteRecoveryState", 1)[1].split(
             "function planningRouteRecoveryForCurrentContext", 1
@@ -374,6 +375,7 @@ class PlanningFrontendContractTests(TestCase):
         )[0]
         self.assertIn("planningRoutePreviewStatus(state.payload.client_request_id)", recovery)
         self.assertIn('status.state === "completed"', recovery)
+        self.assertIn('status.state === "fallback_ready"', recovery)
         self.assertIn("completedReplay: true", recovery)
         self.assertNotIn("getCurrentPositionForRoute", recovery)
         self.assertNotIn("planningClientRequestId", recovery)
@@ -391,9 +393,36 @@ class PlanningFrontendContractTests(TestCase):
         self.assertLess(rendered.index("planningRouteApplyRequestId"), rendered.index("clearPlanningRouteRecoveryState()"))
         self.assertIn('kind: "ambiguous_transport_or_body_failure"', recovery)
         self.assertIn('outcome.kind === "in_progress"', recovery)
+        self.assertIn('outcome.kind === "fallback_ready"', recovery)
         self.assertIn('outcome.kind === "terminal_backend_error"', recovery)
         self.assertIn("planningRoutePreviewFetch(state.payload)", recovery)
         self.assertNotIn("/planning/route-apply", recovery)
+
+    def test_route_fallback_ready_is_nonterminal_and_resumes_same_payload(self):
+        fetcher = self.html.split(
+            "async function planningRoutePreviewFetch", 1
+        )[1].split("async function planningRoutePreviewStatus", 1)[0]
+        self.assertIn('result?.state === "fallback_ready"', fetcher)
+        self.assertIn('kind: "fallback_ready"', fetcher)
+
+        recovery = self.html.split(
+            "async function postPendingPlanningRoutePreview", 1
+        )[1].split("async function openPlanningRoutePreview", 1)[0]
+        fallback_branch = recovery.split(
+            'outcome.kind === "fallback_ready"', 1
+        )[1].split('outcome.kind === "in_progress"', 1)[0]
+        self.assertIn("schedulePlanningRouteRecovery(state, deadlineMs)", fallback_branch)
+        self.assertNotIn("clearPlanningRouteRecoveryState", fallback_branch)
+        self.assertNotIn("planningClientRequestId", fallback_branch)
+        self.assertNotIn("getCurrentPositionForRoute", fallback_branch)
+
+        status_branch = recovery.split(
+            'status.state === "fallback_ready"', 1
+        )[1].split('status.state === "completed"', 1)[0]
+        self.assertIn("postPendingPlanningRoutePreview(state", status_branch)
+        self.assertNotIn("clearPlanningRouteRecoveryState", status_branch)
+        self.assertNotIn("planningClientRequestId", status_branch)
+        self.assertNotIn("getCurrentPositionForRoute", status_branch)
 
     def test_route_traffic_infeasible_has_shared_post_and_recovery_message(self):
         expected = (
@@ -413,6 +442,14 @@ class PlanningFrontendContractTests(TestCase):
         self.assertIn("getRouteProposalFailureMessage(error)", recovery)
         self.assertNotIn("getCurrentPositionForRoute", recovery)
         self.assertNotIn("/planning/route-apply", recovery)
+
+        self.assertIn(
+            'normalizedCode === "route_fallback_exhausted"', mapper
+        )
+        self.assertIn(
+            "Ruttoptimeringen hittade ingen verifierat genomförbar rutt inom de automatiska försöken.",
+            mapper,
+        )
 
     def test_route_preview_context_switch_resets_ui_and_does_not_share_single_flight(self):
         recovery = self.html.split("function planningRouteRecoveryForCurrentContext", 1)[1].split(

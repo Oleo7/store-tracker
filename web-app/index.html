@@ -4425,7 +4425,7 @@
   let planningRouteImportRequestId = "";
   const PLANNING_ROUTE_RECOVERY_STORAGE_KEY = "store-tracker:route-preview-recovery:v1";
   const PLANNING_ROUTE_RECOVERY_TTL_MS = 30 * 60 * 1000;
-  const PLANNING_ROUTE_RECOVERY_WINDOW_MS = 5 * 60 * 1000;
+  const PLANNING_ROUTE_RECOVERY_WINDOW_MS = 20 * 60 * 1000;
   const PLANNING_ROUTE_RECOVERY_POLL_MS = 15 * 1000;
   let planningRouteRecoveryPromise = null;
   let planningRouteRecoveryPromiseKey = "";
@@ -5537,6 +5537,9 @@
     }
     if (normalizedCode.includes("no_candidate")) {
       return "Inga butiker matchar de aktiva filtren.";
+    }
+    if (normalizedCode === "route_fallback_exhausted") {
+      return "Ruttoptimeringen hittade ingen verifierat genomförbar rutt inom de automatiska försöken. Justera planeringen och försök igen.";
     }
     if (normalizedCode.includes("no_feasible") || normalizedCode.includes("route_not_found")) {
       return "Ingen genomförbar rutt hittades under sju timmar inklusive retur till start.";
@@ -9036,6 +9039,9 @@
         error,
       };
     }
+    if (result?.ok === true && result?.state === "fallback_ready") {
+      return { kind: "fallback_ready", payload: result };
+    }
     if (!planningRoutePreviewPayloadIsValid(result)) {
       return {
         kind: "ambiguous_transport_or_body_failure",
@@ -9143,6 +9149,13 @@
       );
       return;
     }
+    if (outcome.kind === "fallback_ready") {
+      planningRouteRecoveryMessage(
+        "Ruttförslaget justeras för större tidsmarginal…"
+      );
+      schedulePlanningRouteRecovery(state, deadlineMs);
+      return;
+    }
     if (outcome.kind === "in_progress") {
       planningRouteRecoveryMessage("Rutten optimeras fortfarande – väntar på resultatet…");
       schedulePlanningRouteRecovery(state, deadlineMs);
@@ -9214,6 +9227,14 @@
         });
       } else if (status.state === "running") {
         schedulePlanningRouteRecovery(state, recoveryDeadline);
+      } else if (status.state === "fallback_ready") {
+        planningRouteRecoveryMessage(
+          "Ruttförslaget justeras för större tidsmarginal…"
+        );
+        await postPendingPlanningRoutePreview(state, {
+          deadlineMs: recoveryDeadline,
+          recovered: true,
+        });
       } else if (status.state === "completed") {
         await postPendingPlanningRoutePreview(state, {
           deadlineMs: recoveryDeadline,
@@ -9241,7 +9262,7 @@
     }
     if (readPlanningRouteRecoveryState()) clearPlanningRouteRecoveryState();
     button.disabled = true;
-    button.textContent = "Optimerar rutten – det kan ta upp till 3 minuter.";
+    button.textContent = "Optimerar rutten – det kan ta några minuter.";
     try {
       const position = await getCurrentPositionForRoute();
       planningRoutePreviewRequestId = planningClientRequestId("planning-route-preview");

@@ -24,7 +24,9 @@ from google.auth.transport.requests import Request as GoogleAuthRequest
 from google.oauth2.service_account import Credentials
 
 
-ROUTE_ENGINE_VERSION = "ro-v2"
+ROUTE_ENGINE_VERSION = "ro-v3"
+PRIMARY_MODEL_VERSION = "ro-v2"
+FALLBACK_POLICY_VERSION = "route-fallback-v1"
 ROUTE_COST_PER_HOUR = 1.0
 PRIORITY_PENALTY_MULTIPLIER = 10.0
 ROUTE_MAX_SECONDS = 25199
@@ -32,6 +34,8 @@ SERVICE_SECONDS = 1200
 MAX_VISITS = 15
 QUADRATIC_SOFT_DURATION_BUFFER_SECONDS = 300
 QUADRATIC_SOFT_DURATION_COST_PER_SQUARE_HOUR = 28800
+FALLBACK_SAFER_SOFT_DURATION_BUFFER_SECONDS = 900
+MAX_PROVIDER_ATTEMPTS_PER_OPERATION = 3
 GOOGLE_OAUTH_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
 GOOGLE_OPTIMIZE_TOURS_URL = (
     "https://routeoptimization.googleapis.com/v1/projects/{project}:optimizeTours"
@@ -149,6 +153,10 @@ def quadratic_soft_duration_diagnostics(
     *,
     model_route_max_seconds: int,
     route_duration_seconds: int | float | Decimal,
+    buffer_seconds: int = QUADRATIC_SOFT_DURATION_BUFFER_SECONDS,
+    cost_per_square_hour: int = (
+        QUADRATIC_SOFT_DURATION_COST_PER_SQUARE_HOUR
+    ),
 ) -> dict[str, Any]:
     """Return the configured policy and Store Tracker-derived duration cost.
 
@@ -156,18 +164,18 @@ def quadratic_soft_duration_diagnostics(
     stable diagnostic JSON.  It is derived from the configured model formula,
     not copied from a Google response cost field.
     """
-    enabled = model_route_max_seconds > QUADRATIC_SOFT_DURATION_BUFFER_SECONDS
+    enabled = model_route_max_seconds > buffer_seconds
     result = {
         "quadratic_soft_duration_enabled": enabled,
         "quadratic_soft_buffer_seconds": (
-            QUADRATIC_SOFT_DURATION_BUFFER_SECONDS
+            buffer_seconds
         ),
         "quadratic_soft_max_seconds": (
-            model_route_max_seconds - QUADRATIC_SOFT_DURATION_BUFFER_SECONDS
+            model_route_max_seconds - buffer_seconds
             if enabled else None
         ),
         "quadratic_soft_cost_per_square_hour": (
-            QUADRATIC_SOFT_DURATION_COST_PER_SQUARE_HOUR
+            cost_per_square_hour
         ),
         "quadratic_soft_exceedance_seconds": None,
         "quadratic_soft_duration_cost": None,
@@ -183,7 +191,7 @@ def quadratic_soft_duration_diagnostics(
     threshold = Decimal(result["quadratic_soft_max_seconds"])
     exceedance = max(Decimal(0), duration - threshold)
     cost = (
-        Decimal(QUADRATIC_SOFT_DURATION_COST_PER_SQUARE_HOUR)
+        Decimal(cost_per_square_hour)
         * (exceedance / Decimal(3600)) ** 2
     ).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
     result["quadratic_soft_exceedance_seconds"] = _diagnostic_decimal_number(
@@ -314,8 +322,37 @@ def build_optimize_tours_request(
     pre_route_fixed_seconds: int = 0,
     timeout_seconds: int = 90,
     solving_mode: str = "DEFAULT_SOLVE",
+    search_mode: str = "CONSUME_ALL_AVAILABLE_TIME",
+    max_visits: int = MAX_VISITS,
+    quadratic_soft_buffer_seconds: int = QUADRATIC_SOFT_DURATION_BUFFER_SECONDS,
+    quadratic_soft_cost_per_square_hour: int = (
+        QUADRATIC_SOFT_DURATION_COST_PER_SQUARE_HOUR
+    ),
+    request_label: str | None = None,
 ) -> dict[str, Any]:
     shipment_list = list(shipments)
+    if (
+        isinstance(max_visits, bool)
+        or not isinstance(max_visits, int)
+        or not 1 <= max_visits <= MAX_VISITS
+    ):
+        raise ValueError("max_visits must be between 1 and MAX_VISITS")
+    if search_mode not in {"CONSUME_ALL_AVAILABLE_TIME", "RETURN_FAST"}:
+        raise ValueError("Unsupported Route Optimization search mode")
+    if (
+        isinstance(quadratic_soft_buffer_seconds, bool)
+        or not isinstance(quadratic_soft_buffer_seconds, int)
+        or quadratic_soft_buffer_seconds < 0
+    ):
+        raise ValueError("quadratic_soft_buffer_seconds must be nonnegative")
+    if (
+        isinstance(quadratic_soft_cost_per_square_hour, bool)
+        or not isinstance(quadratic_soft_cost_per_square_hour, int)
+        or quadratic_soft_cost_per_square_hour < 0
+    ):
+        raise ValueError(
+            "quadratic_soft_cost_per_square_hour must be nonnegative"
+        )
     available_seconds = ROUTE_MAX_SECONDS - max(0, int(pre_route_fixed_seconds))
     if available_seconds <= 0:
         raise RouteOptimizationError(
@@ -335,20 +372,20 @@ def build_optimize_tours_request(
         }],
         "loadLimits": {
             "visit_slots": {
-                "maxLoad": str(MAX_VISITS),
+                "maxLoad": str(max_visits),
                 "startLoadInterval": {"min": "0", "max": "0"},
             }
         },
         "routeDurationLimit": {"maxDuration": f"{available_seconds}s"},
         "costPerHour": ROUTE_COST_PER_HOUR,
     }
-    if available_seconds > QUADRATIC_SOFT_DURATION_BUFFER_SECONDS:
+    if available_seconds > quadratic_soft_buffer_seconds:
         vehicle["routeDurationLimit"].update({
             "quadraticSoftMaxDuration": (
-                f"{available_seconds - QUADRATIC_SOFT_DURATION_BUFFER_SECONDS}s"
+                f"{available_seconds - quadratic_soft_buffer_seconds}s"
             ),
             "costPerSquareHourAfterQuadraticSoftMax": (
-                QUADRATIC_SOFT_DURATION_COST_PER_SQUARE_HOUR
+                quadratic_soft_cost_per_square_hour
             ),
         })
     if breaks:
@@ -378,14 +415,16 @@ def build_optimize_tours_request(
             "loadDemands": {"visit_slots": {"amount": "1"}},
         }
         if not shipment.get("required"):
-            item["penaltyCost"] = priority_penalty(shipment.get("priority_score"))
+            item["penaltyCost"] = priority_penalty(
+                shipment.get("priority_score")
+            )
         rendered_shipments.append(item)
 
     return {
         "timeout": f"{int(timeout_seconds)}s",
         "solvingMode": solving_mode,
-        "searchMode": "CONSUME_ALL_AVAILABLE_TIME",
-        "label": f"store-tracker:{run_id}",
+        "searchMode": search_mode,
+        "label": request_label or f"store-tracker:{run_id}",
         "considerRoadTraffic": True,
         "model": {
             "globalStartTime": _utc_text(route_start),
@@ -477,6 +516,14 @@ def _request_fingerprint_for_policy(
             "quadratic_soft_duration_cost_per_square_hour": (
                 QUADRATIC_SOFT_DURATION_COST_PER_SQUARE_HOUR
             ),
+            "primary_model_version": PRIMARY_MODEL_VERSION,
+            "fallback_policy_version": FALLBACK_POLICY_VERSION,
+            "max_provider_attempts_per_operation": (
+                MAX_PROVIDER_ATTEMPTS_PER_OPERATION
+            ),
+            "fallback_safer_soft_duration_buffer_seconds": (
+                FALLBACK_SAFER_SOFT_DURATION_BUFFER_SECONDS
+            ),
         })
     input_payload = _request_input_fingerprint_payload(**kwargs)
     return request_fingerprint({
@@ -560,6 +607,14 @@ def _traffic_infeasibility_diagnostics(
     fixed_breaks: list[Mapping[str, Any]] | None = None,
     timeout_seconds: Any = None,
     solving_mode: str = "DEFAULT_SOLVE",
+    search_mode: str = "CONSUME_ALL_AVAILABLE_TIME",
+    max_visits: int = MAX_VISITS,
+    quadratic_soft_buffer_seconds: int = (
+        QUADRATIC_SOFT_DURATION_BUFFER_SECONDS
+    ),
+    quadratic_soft_cost_per_square_hour: int = (
+        QUADRATIC_SOFT_DURATION_COST_PER_SQUARE_HOUR
+    ),
 ) -> dict[str, Any]:
     """Return compact response facts without identities or local retiming.
 
@@ -741,6 +796,8 @@ def _traffic_infeasibility_diagnostics(
             quadratic_soft_duration_diagnostics(
                 model_route_max_seconds=model_route_max_seconds,
                 route_duration_seconds=elapsed,
+                buffer_seconds=quadratic_soft_buffer_seconds,
+                cost_per_square_hour=quadratic_soft_cost_per_square_hour,
             )
             if model_route_max_seconds is not None
             else {}
@@ -826,13 +883,13 @@ def _traffic_infeasibility_diagnostics(
             "has_fixed_breaks": bool(fixed_break_list),
             "pre_route_fixed_seconds": normalized_pre_route_seconds,
             "consider_road_traffic": True,
-            "search_mode": "CONSUME_ALL_AVAILABLE_TIME",
+            "search_mode": search_mode,
             "solving_mode": str(solving_mode or "DEFAULT_SOLVE"),
             "timeout_seconds": normalized_timeout,
             "absolute_route_max_seconds": ROUTE_MAX_SECONDS,
             "model_route_max_seconds": model_route_max_seconds,
             **quadratic_diagnostics,
-            "max_visits": MAX_VISITS,
+            "max_visits": max_visits,
             "service_duration_seconds": SERVICE_SECONDS,
             "skip_reason_counts": skip_reason_counts,
             "traffic_deficit_calculated": False,
@@ -862,6 +919,14 @@ def parse_optimize_tours_response(
     fixed_breaks: Iterable[Mapping[str, Any]] = (),
     timeout_seconds: int | None = None,
     solving_mode: str = "DEFAULT_SOLVE",
+    search_mode: str = "CONSUME_ALL_AVAILABLE_TIME",
+    max_visits: int = MAX_VISITS,
+    quadratic_soft_buffer_seconds: int = (
+        QUADRATIC_SOFT_DURATION_BUFFER_SECONDS
+    ),
+    quadratic_soft_cost_per_square_hour: int = (
+        QUADRATIC_SOFT_DURATION_COST_PER_SQUARE_HOUR
+    ),
 ) -> dict[str, Any]:
     shipment_list = list(shipments)
     fixed_break_list = list(fixed_breaks)
@@ -1189,6 +1254,14 @@ def parse_optimize_tours_response(
                 fixed_breaks=fixed_break_list,
                 timeout_seconds=timeout_seconds,
                 solving_mode=solving_mode,
+                search_mode=search_mode,
+                max_visits=max_visits,
+                quadratic_soft_buffer_seconds=(
+                    quadratic_soft_buffer_seconds
+                ),
+                quadratic_soft_cost_per_square_hour=(
+                    quadratic_soft_cost_per_square_hour
+                ),
             ),
         )
 
