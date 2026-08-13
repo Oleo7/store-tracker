@@ -2383,13 +2383,25 @@ def public_planned_activity(row, *, now=None):
     }
 
 
-def active_planned_activity_queue_state(activity_rows, owner, *, now=None):
-    """Classify owner activities by exact Stockholm time, independent of source."""
+def active_planned_activity_queue_state(
+    activity_rows, owner, *, contact_rows=(), now=None
+):
+    """Classify unresolved owner activities by exact Stockholm time."""
     current = now or stockholm_now()
     if current.tzinfo is None:
         current = current.replace(tzinfo=STOCKHOLM_ZONE)
     current = current.astimezone(STOCKHOLM_ZONE)
-    active_customer_ids = set()
+    latest_contact_by_customer = {}
+    for row in contact_rows or ():
+        customer_id = str(row.get("customer_id") or "").strip()
+        contacted = parse_planning_datetime(row.get("date_time"))
+        if not customer_id or contacted is None:
+            continue
+        previous = latest_contact_by_customer.get(customer_id)
+        if previous is None or contacted > previous:
+            latest_contact_by_customer[customer_id] = contacted
+
+    future_customer_ids = set()
     overdue_by_customer = defaultdict(list)
     for row in activity_rows or ():
         if not planning_owner_matches(row, owner):
@@ -2400,12 +2412,21 @@ def active_planned_activity_queue_state(activity_rows, owner, *, now=None):
         scheduled = parse_planning_datetime(row.get("scheduled_at"))
         if not customer_id or scheduled is None:
             continue
-        active_customer_ids.add(customer_id)
         if scheduled < current:
             overdue_by_customer[customer_id].append((scheduled, row))
+        else:
+            future_customer_ids.add(customer_id)
 
     overdue_items = []
     for customer_id, matches in overdue_by_customer.items():
+        latest_contact = latest_contact_by_customer.get(customer_id)
+        matches = [
+            match for match in matches
+            if customer_id not in future_customer_ids
+            and not (latest_contact and latest_contact > match[0])
+        ]
+        if not matches:
+            continue
         matches.sort(key=lambda item: (
             item[0], str(item[1].get("planned_activity_id") or "").strip()
         ))
@@ -2419,6 +2440,11 @@ def active_planned_activity_queue_state(activity_rows, owner, *, now=None):
         parse_planning_datetime(item.get("scheduled_at")) or current,
         str(item.get("planned_activity_id") or ""),
     ))
+    active_customer_ids = future_customer_ids | {
+        str(item.get("customer_id") or "").strip()
+        for item in overdue_items
+        if str(item.get("customer_id") or "").strip()
+    }
     return active_customer_ids, overdue_items
 
 
@@ -3098,6 +3124,7 @@ def planning_suggestion_candidates(spreadsheet, owner, activity_rows=()):
             planned_activity_rows=activity_rows,
         )
         customers = snapshot["customers"]
+        contacts = snapshot["contact_rows"]
         with performance_step("suggestions.scoring") as measurement:
             priorities = snapshot["priorities"]
             measurement["row_count"] = len(priorities)
@@ -3191,7 +3218,9 @@ def planning_suggestion_candidates(spreadsheet, owner, activity_rows=()):
                 ),
             })
     externally_planned_customer_ids, _overdue = (
-        active_planned_activity_queue_state(activity_rows, owner)
+        active_planned_activity_queue_state(
+            activity_rows, owner, contact_rows=contacts
+        )
     )
     candidates = [
         {
@@ -6642,8 +6671,11 @@ def suggestion_queue_payload(
         )
         activity_rows = [row for _index, row in indexed_activities]
         measurement["row_count"] = len(activity_rows)
+    with performance_step("suggestions.contact_snapshot") as measurement:
+        contact_rows = get_contact_rows(spreadsheet)
+        measurement["row_count"] = len(contact_rows)
     active_customer_ids, overdue_items = active_planned_activity_queue_state(
-        activity_rows, owner
+        activity_rows, owner, contact_rows=contact_rows
     )
     with performance_step("suggestions.candidates") as measurement:
         candidates = planning_suggestion_candidates(

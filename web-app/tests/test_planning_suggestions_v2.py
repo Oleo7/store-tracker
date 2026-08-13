@@ -286,6 +286,109 @@ class PlanningSuggestionV2IntegrationTests(PlanningApiTestCase):
         )
         self.assertEqual(self.planning_rows()[0]["status"], "planned")
 
+    def test_overdue_activity_is_hidden_after_a_later_logged_contact(self):
+        self.append_repeat_orders()
+        activity = self.append_planning_row(
+            planned_activity_id="overdue-resolved-by-contact",
+            scheduled_at="2026-08-03T09:00:00+02:00",
+            source="manual",
+        )
+        self.append_contact_row(
+            contact_id="later-contact",
+            customer_id=activity["customer_id"],
+            date_time="2026-08-06 13:30",
+            follow_up_date="",
+        )
+        current = datetime(
+            2026, 8, 13, 9, 0, tzinfo=app_module.STOCKHOLM_ZONE
+        )
+
+        with patch.object(app_module, "stockholm_today", return_value=current.date()):
+            with patch.object(app_module, "stockholm_now", return_value=current):
+                payload = self.client.get("/planning/suggestions").get_json()
+
+        queue_items = [payload.get("suggestion")] + payload["queue_preview"]
+        self.assertFalse(any(
+            item
+            and item.get("customer_id") == activity["customer_id"]
+            and item.get("queue_item_type") == "overdue_activity"
+            for item in queue_items
+        ))
+        self.assertEqual(self.planning_rows()[0]["status"], "planned")
+
+    def test_overdue_activity_is_hidden_by_a_future_planned_activity(self):
+        self.append_repeat_orders()
+        overdue = self.append_planning_row(
+            planned_activity_id="overdue-resolved-by-plan",
+            scheduled_at="2026-08-03T09:00:00+02:00",
+            source="manual",
+        )
+        future = self.append_planning_row(
+            planned_activity_id="future-plan-after-overdue",
+            scheduled_at="2026-08-14T09:00:00+02:00",
+            source="manual",
+            client_request_id="future-plan-after-overdue",
+        )
+        current = datetime(
+            2026, 8, 13, 9, 0, tzinfo=app_module.STOCKHOLM_ZONE
+        )
+
+        with patch.object(app_module, "stockholm_today", return_value=current.date()):
+            with patch.object(app_module, "stockholm_now", return_value=current):
+                payload = self.client.get("/planning/suggestions").get_json()
+
+        queue_items = [payload.get("suggestion")] + payload["queue_preview"]
+        self.assertFalse(any(
+            item and item.get("customer_id") == overdue["customer_id"]
+            for item in queue_items
+        ))
+        self.assertEqual(
+            {row["planned_activity_id"]: row["status"] for row in self.planning_rows()},
+            {
+                overdue["planned_activity_id"]: "planned",
+                future["planned_activity_id"]: "planned",
+            },
+        )
+
+    def test_later_contact_only_resolves_older_overdue_activity(self):
+        owner = {"user_name": "olle", "name": "Olle"}
+        customer_id = "11111111-1111-4111-8111-111111111111"
+        activities = [
+            {
+                "planned_activity_id": "older-overdue",
+                "customer_id": customer_id,
+                "user_name": "olle",
+                "sales_person": "Olle",
+                "status": "planned",
+                "scheduled_at": "2026-08-03T09:00:00+02:00",
+            },
+            {
+                "planned_activity_id": "newer-overdue",
+                "customer_id": customer_id,
+                "user_name": "olle",
+                "sales_person": "Olle",
+                "status": "planned",
+                "scheduled_at": "2026-08-08T09:00:00+02:00",
+            },
+        ]
+        contacts = [{
+            "customer_id": customer_id,
+            "date_time": "2026-08-06 13:30",
+        }]
+        current = datetime(
+            2026, 8, 13, 9, 0, tzinfo=app_module.STOCKHOLM_ZONE
+        )
+
+        active_ids, overdue_items = app_module.active_planned_activity_queue_state(
+            activities, owner, contact_rows=contacts, now=current
+        )
+
+        self.assertEqual(active_ids, {customer_id})
+        self.assertEqual(
+            [item["planned_activity_id"] for item in overdue_items],
+            ["newer-overdue"],
+        )
+
     def test_suggestion_planned_activity_uses_same_overdue_semantics(self):
         self.append_repeat_orders()
         before = datetime(2026, 7, 27, 8, 59, tzinfo=app_module.STOCKHOLM_ZONE)
