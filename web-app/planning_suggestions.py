@@ -272,6 +272,7 @@ def public_suggestion(row, live_candidate=None):
     except (TypeError, ValueError):
         priority = 0
     return {
+        "queue_item_type": "suggestion",
         "suggestion_id": _text(row.get("suggestion_id")),
         "customer_id": _text(row.get("customer_id")),
         "customer_row": customer_row,
@@ -479,7 +480,10 @@ class PlanningSuggestionService:
             ),
         }
 
-    def queue(self, owner, candidates, activity_rows=(), preview_limit=10):
+    def queue(
+        self, owner, candidates, activity_rows=(), preview_limit=10,
+        materialize_top=True,
+    ):
         """Reconcile stored state, sparsely materialize only the visible top row."""
         with self.lock:
             sheet, events, headers, stored = self.snapshot()
@@ -644,8 +648,8 @@ class PlanningSuggestionService:
             if not visible:
                 return None, [], 0
             suggestion_id, candidate, row = visible[0]
-            created = row is None
-            if row is None:
+            created = row is None and materialize_top
+            if row is None and materialize_top:
                 row = self._candidate_row(owner, candidate)
                 _append(
                     sheet, SUGGESTION_COLUMNS, row, self.invalidator,
@@ -657,6 +661,12 @@ class PlanningSuggestionService:
                     self._live_event_row(row, candidate),
                     before="", after="pending",
                 )
+            if row is None:
+                row = self._candidate_row(owner, candidate)
+                top = public_suggestion(row, candidate)
+                top.update({"revision": 0, "materialized": False})
+            else:
+                top = public_suggestion(row, candidate)
             preview = []
             for _preview_id, preview_candidate, preview_row in visible[
                 1:1 + max(0, int(preview_limit or 0))
@@ -670,7 +680,7 @@ class PlanningSuggestionService:
                 else:
                     item = public_suggestion(preview_row, preview_candidate)
                 preview.append(item)
-            return public_suggestion(row, candidate), preview, pending_count
+            return top, preview, pending_count
 
     def materialize_candidate(self, owner, candidate):
         """Materialize exactly one recomputed candidate for revision-zero planning."""

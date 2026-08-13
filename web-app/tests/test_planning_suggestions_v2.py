@@ -224,7 +224,7 @@ class PlanningSuggestionV2IntegrationTests(PlanningApiTestCase):
         customer_id = "11111111-1111-4111-8111-111111111111"
         self.append_planning_row(
             customer_row=2,
-            scheduled_at="2026-07-27T09:00:00+02:00",
+            scheduled_at="2026-07-28T09:00:00+02:00",
             source="manual",
             client_request_id="cached-planning-input",
         )
@@ -248,6 +248,110 @@ class PlanningSuggestionV2IntegrationTests(PlanningApiTestCase):
             self.assertNotIn(
                 customer_id,
                 [item["customer_id"] for item in payload["queue_preview"]],
+            )
+        finally:
+            app_module._sheet_read_cache.clear()
+            app_module.invalidate_priority_snapshot()
+
+    def test_future_activity_becomes_one_overdue_queue_item_at_exact_time(self):
+        self.append_repeat_orders()
+        activity = self.append_planning_row(
+            planned_activity_id="manual-same-day-overdue",
+            scheduled_at="2026-07-27T09:00:00+02:00",
+            source="manual",
+        )
+        before = datetime(2026, 7, 27, 8, 59, tzinfo=app_module.STOCKHOLM_ZONE)
+        after = datetime(2026, 7, 27, 9, 1, tzinfo=app_module.STOCKHOLM_ZONE)
+
+        with patch.object(app_module, "stockholm_now", return_value=before):
+            before_payload = self.client.get("/planning/suggestions").get_json()
+        before_items = [before_payload.get("suggestion")] + before_payload["queue_preview"]
+        self.assertFalse(any(
+            item and item.get("customer_id") == activity["customer_id"]
+            for item in before_items
+        ))
+
+        with patch.object(app_module, "stockholm_now", return_value=after):
+            after_payload = self.client.get("/planning/suggestions").get_json()
+        after_items = [after_payload.get("suggestion")] + after_payload["queue_preview"]
+        customer_items = [
+            item for item in after_items
+            if item and item.get("customer_id") == activity["customer_id"]
+        ]
+        self.assertEqual(len(customer_items), 1)
+        self.assertEqual(customer_items[0]["queue_item_type"], "overdue_activity")
+        self.assertEqual(
+            customer_items[0]["planned_activity_id"],
+            activity["planned_activity_id"],
+        )
+        self.assertEqual(self.planning_rows()[0]["status"], "planned")
+
+    def test_suggestion_planned_activity_uses_same_overdue_semantics(self):
+        self.append_repeat_orders()
+        before = datetime(2026, 7, 27, 8, 59, tzinfo=app_module.STOCKHOLM_ZONE)
+        after = datetime(2026, 7, 27, 9, 1, tzinfo=app_module.STOCKHOLM_ZONE)
+        with patch.object(app_module, "stockholm_now", return_value=before):
+            suggestion = self.client.get("/planning/suggestions").get_json()["suggestion"]
+            planned = self.client.post(
+                f"/planning/suggestions/{suggestion['suggestion_id']}/plan",
+                json={
+                    "client_request_id": "system-suggestion-same-day-overdue",
+                    "expected_suggestion_revision": suggestion["revision"],
+                    "customer_id": suggestion["customer_id"],
+                    "contact_type": "phone",
+                    "scheduled_at": "2026-07-27T09:00:00+02:00",
+                    "note": "Ring kunden",
+                },
+            )
+            self.assertEqual(planned.status_code, 201, planned.get_json())
+            activity_id = planned.get_json()["activity"]["planned_activity_id"]
+            hidden = self.client.get("/planning/suggestions").get_json()
+        hidden_items = [hidden.get("suggestion")] + hidden["queue_preview"]
+        self.assertFalse(any(
+            item and item.get("customer_id") == suggestion["customer_id"]
+            for item in hidden_items
+        ))
+
+        with patch.object(app_module, "stockholm_now", return_value=after):
+            overdue = self.client.get("/planning/suggestions").get_json()
+        overdue_items = [overdue.get("suggestion")] + overdue["queue_preview"]
+        customer_items = [
+            item for item in overdue_items
+            if item and item.get("customer_id") == suggestion["customer_id"]
+        ]
+        self.assertEqual(len(customer_items), 1)
+        self.assertEqual(customer_items[0]["queue_item_type"], "overdue_activity")
+        self.assertEqual(customer_items[0]["planned_activity_id"], activity_id)
+        stored = self.spreadsheet.worksheet(SUGGESTIONS_SHEET).dict_rows()[0]
+        self.assertEqual(stored["status"], "planned")
+        self.assertEqual(stored["planned_activity_id"], activity_id)
+
+    def test_priority_cache_identity_changes_at_scheduled_at_transition(self):
+        self.spreadsheet._store_tracker_enable_read_cache = True
+        app_module._sheet_read_cache.clear()
+        app_module.invalidate_priority_snapshot()
+        self.append_repeat_orders()
+        activity = self.append_planning_row(
+            planned_activity_id="cached-same-day-overdue",
+            scheduled_at="2026-07-27T09:00:00+02:00",
+            source="manual",
+        )
+        before = datetime(2026, 7, 27, 8, 59, tzinfo=app_module.STOCKHOLM_ZONE)
+        after = datetime(2026, 7, 27, 9, 1, tzinfo=app_module.STOCKHOLM_ZONE)
+        original = app_module.build_current_priority_snapshot
+        try:
+            with patch.object(
+                app_module, "build_current_priority_snapshot", wraps=original
+            ) as build_snapshot:
+                with patch.object(app_module, "stockholm_now", return_value=before):
+                    self.client.get("/planning/suggestions")
+                with patch.object(app_module, "stockholm_now", return_value=after):
+                    payload = self.client.get("/planning/suggestions").get_json()
+            self.assertEqual(build_snapshot.call_count, 2)
+            self.assertEqual(payload["suggestion"]["queue_item_type"], "overdue_activity")
+            self.assertEqual(
+                payload["suggestion"]["planned_activity_id"],
+                activity["planned_activity_id"],
             )
         finally:
             app_module._sheet_read_cache.clear()

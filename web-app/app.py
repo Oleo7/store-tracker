@@ -2383,6 +2383,45 @@ def public_planned_activity(row, *, now=None):
     }
 
 
+def active_planned_activity_queue_state(activity_rows, owner, *, now=None):
+    """Classify owner activities by exact Stockholm time, independent of source."""
+    current = now or stockholm_now()
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=STOCKHOLM_ZONE)
+    current = current.astimezone(STOCKHOLM_ZONE)
+    active_customer_ids = set()
+    overdue_by_customer = defaultdict(list)
+    for row in activity_rows or ():
+        if not planning_owner_matches(row, owner):
+            continue
+        if str(row.get("status") or "planned").strip().casefold() != "planned":
+            continue
+        customer_id = str(row.get("customer_id") or "").strip()
+        scheduled = parse_planning_datetime(row.get("scheduled_at"))
+        if not customer_id or scheduled is None:
+            continue
+        active_customer_ids.add(customer_id)
+        if scheduled < current:
+            overdue_by_customer[customer_id].append((scheduled, row))
+
+    overdue_items = []
+    for customer_id, matches in overdue_by_customer.items():
+        matches.sort(key=lambda item: (
+            item[0], str(item[1].get("planned_activity_id") or "").strip()
+        ))
+        item = public_planned_activity(matches[0][1], now=current)
+        item.update({
+            "queue_item_type": "overdue_activity",
+            "additional_overdue_count": len(matches) - 1,
+        })
+        overdue_items.append(item)
+    overdue_items.sort(key=lambda item: (
+        parse_planning_datetime(item.get("scheduled_at")) or current,
+        str(item.get("planned_activity_id") or ""),
+    ))
+    return active_customer_ids, overdue_items
+
+
 def find_planned_activity(spreadsheet, activity_id):
     sheet, headers, rows = get_planned_activity_snapshot(spreadsheet)
     requested = str(activity_id or "").strip()
@@ -3151,17 +3190,9 @@ def planning_suggestion_candidates(spreadsheet, owner, activity_rows=()):
                     "latest_human_contact_date"
                 ),
             })
-    now = stockholm_now().astimezone(STOCKHOLM_ZONE)
-    externally_planned_customer_ids = {
-        str(row.get("customer_id") or "").strip()
-        for row in activity_rows
-        if str(row.get("status") or "planned").strip().casefold() == "planned"
-        and not str(row.get("source_suggestion_id") or "").strip()
-        and (
-            parse_planning_datetime(row.get("scheduled_at")) is not None
-            and parse_planning_datetime(row.get("scheduled_at")) >= now
-        )
-    }
+    externally_planned_customer_ids, _overdue = (
+        active_planned_activity_queue_state(activity_rows, owner)
+    )
     candidates = [
         {
             **candidate,
@@ -6073,6 +6104,29 @@ def priority_planned_activity_signature(rows):
     return canonical_payload_fingerprint(relevant_rows)
 
 
+def priority_planned_activity_time_signature(rows, *, now=None):
+    """Change cache identity exactly when a planned activity becomes overdue."""
+    current = now or stockholm_now()
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=STOCKHOLM_ZONE)
+    current = current.astimezone(STOCKHOLM_ZONE)
+    states = []
+    for row in rows or ():
+        if str(row.get("status") or "planned").strip().casefold() != "planned":
+            continue
+        scheduled = parse_planning_datetime(row.get("scheduled_at"))
+        if scheduled is None:
+            continue
+        states.append({
+            "planned_activity_id": str(
+                row.get("planned_activity_id") or ""
+            ).strip(),
+            "time_state": "overdue" if scheduled < current else "future",
+        })
+    states.sort(key=lambda row: (row["planned_activity_id"], row["time_state"]))
+    return canonical_payload_fingerprint(states)
+
+
 def get_authoritative_priority_snapshot(
     spreadsheet, *, today, planned_activity_rows=None
 ):
@@ -6097,7 +6151,13 @@ def get_authoritative_priority_snapshot(
     planning_signature = priority_planned_activity_signature(
         planned_activity_rows
     )
-    key = (id(spreadsheet), date_key, generation, planning_signature)
+    planning_time_signature = priority_planned_activity_time_signature(
+        planned_activity_rows
+    )
+    key = (
+        id(spreadsheet), date_key, generation, planning_signature,
+        planning_time_signature,
+    )
     with _priority_snapshot_condition:
         while True:
             if _priority_snapshot_entry and _priority_snapshot_entry[0] == key:
@@ -6582,18 +6642,33 @@ def suggestion_queue_payload(
         )
         activity_rows = [row for _index, row in indexed_activities]
         measurement["row_count"] = len(activity_rows)
+    active_customer_ids, overdue_items = active_planned_activity_queue_state(
+        activity_rows, owner
+    )
     with performance_step("suggestions.candidates") as measurement:
         candidates = planning_suggestion_candidates(
             spreadsheet, owner, activity_rows
         )
         measurement["row_count"] = len(candidates)
     with performance_step("suggestions.queue") as measurement:
-        suggestion, queue_preview, pending_count = planning_suggestion_service(
+        suggestion, queue_preview, suggestion_count = planning_suggestion_service(
             spreadsheet
         ).queue(
             owner, candidates, activity_rows,
             preview_limit=suggestion_preview_limit(preview_limit),
+            materialize_top=not overdue_items,
         )
+        suggestion_items = [
+            item for item in ([suggestion] + queue_preview)
+            if item and str(item.get("customer_id") or "").strip()
+            not in active_customer_ids
+        ]
+        combined = overdue_items + suggestion_items
+        suggestion = combined[0] if combined else None
+        queue_preview = combined[
+            1:1 + suggestion_preview_limit(preview_limit)
+        ]
+        pending_count = len(overdue_items) + suggestion_count
         measurement["row_count"] = pending_count
     return suggestion, queue_preview, pending_count
 
@@ -9515,14 +9590,18 @@ def build_route_optimization_inputs(
             )
 
     blocked_customer_ids = set()
+    current = stockholm_now().astimezone(STOCKHOLM_ZONE)
     for row in planned_rows:
         if str(row.get("status") or "planned").strip().casefold() != "planned":
-            continue
-        if str(row.get("source") or "").strip().casefold() == "route":
             continue
         scheduled = parse_planning_datetime(row.get("scheduled_at"))
         customer_id = str(row.get("customer_id") or "").strip()
         if not scheduled or not customer_id:
+            continue
+        if scheduled < current:
+            blocked_customer_ids.add(customer_id)
+            continue
+        if str(row.get("source") or "").strip().casefold() == "route":
             continue
         if scheduled.date() > route_date or (
             scheduled.date() == route_date

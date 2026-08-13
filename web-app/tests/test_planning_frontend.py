@@ -78,7 +78,7 @@ class PlanningFrontendContractTests(TestCase):
         )
 
     def test_planning_preview_uses_backend_queue_without_raw_score_backlog(self):
-        self.assertIn("Fler kunder att planera", self.html)
+        self.assertIn("Fler nästa åtgärder", self.html)
         self.assertNotIn("Dagens fokus", self.html)
         self.assertNotIn("Gamla uppföljningar att planera in", self.html)
         self.assertNotIn("Kommande uppföljningar", self.html)

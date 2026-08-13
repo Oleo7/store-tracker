@@ -3958,7 +3958,7 @@
       <aside class="planning-backlog-card" aria-labelledby="planning-backlog-title">
         <div class="planning-backlog-heading">
           <div>
-            <h2 class="planning-section-title" id="planning-backlog-title">Fler kunder att planera</h2>
+            <h2 class="planning-section-title" id="planning-backlog-title">Fler nästa åtgärder</h2>
           </div>
         </div>
         <div id="planning-backlog" aria-live="polite">
@@ -7340,6 +7340,18 @@
     ) || null;
   }
 
+  function planningQueueItemIsOverdue(item) {
+    return String(item?.queue_item_type || "") === "overdue_activity";
+  }
+
+  function planningOverdueActivityMeta(activity) {
+    const type = PLANNING_CONTACT_TYPES[activity?.contact_type]?.label || "Aktivitet";
+    const dateKey = planningDateKeyFromIso(activity?.scheduled_at);
+    const timeValue = planningTimeFromIso(activity?.scheduled_at);
+    const planned = [planningFormatDate(dateKey), timeValue].filter(Boolean).join(" ");
+    return `${type} · planerad ${planned}`;
+  }
+
   function focusAfterRecommendationChange() {
     setTimeout(() => {
       const target = planningRecommendation
@@ -7377,6 +7389,25 @@
     }
     const disabled = planningRecommendationLoading ? "disabled" : "";
     section.hidden = false;
+    if (planningQueueItemIsOverdue(planningRecommendation)) {
+      section.innerHTML = `
+        <div class="planning-recommendation-heading">NÄSTA ÅTGÄRD</div>
+        <div class="planning-recommendation-card">
+          <div class="planning-recommendation-reason"><strong>Missad aktivitet</strong></div>
+          <button class="planning-recommendation-customer" id="planning-recommendation-customer" type="button" ${disabled}>${esc(planningRecommendation.customer || "Okänd kund")}</button>
+          <div class="planning-recommendation-channel">${esc(planningOverdueActivityMeta(planningRecommendation))}</div>
+          <div class="planning-recommendation-actions">
+            <button class="planning-compact-btn primary" id="planning-overdue-contact" type="button" ${disabled}>Logga kontakt</button>
+            <button class="planning-compact-btn" id="planning-overdue-reschedule" type="button" ${disabled}>Planera om</button>
+            <button class="planning-compact-btn" id="planning-overdue-skip" type="button" ${disabled}>Överhoppad</button>
+          </div>
+        </div>`;
+      document.getElementById("planning-recommendation-customer")?.addEventListener("click", openRecommendationCustomer);
+      document.getElementById("planning-overdue-contact")?.addEventListener("click", () => handlePlanningDetailAction("log", planningRecommendation));
+      document.getElementById("planning-overdue-reschedule")?.addEventListener("click", () => handlePlanningDetailAction("edit", planningRecommendation));
+      document.getElementById("planning-overdue-skip")?.addEventListener("click", () => updatePlanningActivityStatus(planningRecommendation, "skipped"));
+      return;
+    }
     section.innerHTML = `
       <div class="planning-recommendation-heading">NÄSTA ÅTGÄRD</div>
       <div class="planning-recommendation-card">
@@ -8228,6 +8259,20 @@
       0, planningRecommendationPendingCount - 1
     );
     target.innerHTML = `<div class="planning-backlog-list">${visible.map((suggestion, index) => {
+      if (planningQueueItemIsOverdue(suggestion)) {
+        return `<div class="planning-backlog-item">
+          <div>
+            <div class="planning-backlog-meta"><strong>Missad aktivitet</strong></div>
+            <button class="planning-backlog-customer" type="button" data-planning-preview-customer="${index}">${esc(suggestion.customer || "Okänd kund")}</button>
+            <div class="planning-backlog-meta">${esc(planningOverdueActivityMeta(suggestion))}</div>
+          </div>
+          <div class="planning-recommendation-actions">
+            <button class="planning-compact-btn primary" type="button" data-planning-overdue-action="log" data-planning-overdue-index="${index}">Logga kontakt</button>
+            <button class="planning-compact-btn" type="button" data-planning-overdue-action="edit" data-planning-overdue-index="${index}">Planera om</button>
+            <button class="planning-compact-btn" type="button" data-planning-overdue-action="skip" data-planning-overdue-index="${index}">Överhoppad</button>
+          </div>
+        </div>`;
+      }
       const channel = PLANNING_CONTACT_TYPES[suggestion.recommended_contact_type]?.label || "Besök";
       return `<div class="planning-backlog-item">
         <div>
@@ -8257,6 +8302,14 @@
       button.addEventListener("click", () => openRecommendationPlanner(
         visible[Number(button.dataset.planningPreviewPlan)]
       ));
+    });
+    target.querySelectorAll("[data-planning-overdue-action]").forEach(button => {
+      button.addEventListener("click", () => {
+        const activity = visible[Number(button.dataset.planningOverdueIndex)];
+        const action = button.dataset.planningOverdueAction;
+        if (action === "skip") updatePlanningActivityStatus(activity, "skipped");
+        else handlePlanningDetailAction(action, activity);
+      });
     });
     document.getElementById("planning-backlog-load-more")?.addEventListener(
       "click", loadMorePlanningRecommendations
