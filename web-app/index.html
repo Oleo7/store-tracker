@@ -2534,19 +2534,35 @@
         grid-template-columns: 0.85fr 1fr 1fr;
       }
       .insights-body {
-        max-width: 1100px;
+        width: 100%;
+        max-width: 1920px;
         margin: 0 auto;
-        padding-top: 16px;
+        padding: 16px clamp(16px, 2vw, 28px) 32px;
       }
       .contact-log-body {
-        max-width: 1380px;
+        width: 100%;
+        max-width: 2200px;
         margin: 0 auto;
-        padding-top: 16px;
+        padding: 16px clamp(16px, 2vw, 28px) 40px;
       }
       .list-body {
-        max-width: 940px;
+        width: 100%;
+        max-width: 2200px;
         margin: 0 auto;
-        padding-top: 16px;
+        padding: 16px clamp(16px, 2vw, 28px) 44px;
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        align-items: start;
+        gap: 12px;
+      }
+      .list-body > .customer-card {
+        min-width: 0;
+        margin-bottom: 0;
+      }
+      .list-body > .state-msg,
+      .list-body > .list-insights-error,
+      .list-body > .load-more-btn {
+        grid-column: 1 / -1;
       }
       .insights-hero {
         min-height: 118px;
@@ -2558,6 +2574,48 @@
       }
       .insights-hero .insights-filter-row label {
         flex-shrink: 0;
+      }
+    }
+
+    @media (min-width: 1180px) {
+      .list-body {
+        grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+      }
+
+      .insights-body {
+        display: grid;
+        grid-template-columns: repeat(12, minmax(0, 1fr));
+        align-items: start;
+      }
+      .insights-body > * {
+        min-width: 0;
+      }
+      .insights-body > .insights-hero,
+      .insights-body > .insights-panel:nth-child(4),
+      .insights-body > .insights-session-footer {
+        grid-column: 1 / -1;
+      }
+      .insights-body > .insights-panel:nth-child(2),
+      .insights-body > .insights-panel:nth-child(5) {
+        grid-column: span 7;
+      }
+      .insights-body > .insights-panel:nth-child(3),
+      .insights-body > .insights-panel:nth-child(6) {
+        grid-column: span 5;
+      }
+
+      #view-detail .detail-body {
+        width: 100%;
+        max-width: 1800px;
+        margin: 0 auto;
+        padding: 20px clamp(20px, 2vw, 32px) 48px;
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        align-items: start;
+        gap: 14px;
+      }
+      #view-detail .detail-action-bar {
+        grid-column: 1 / -1;
       }
     }
     .session-control {
@@ -2665,7 +2723,7 @@
     .email-modal-footer .action-btn { margin: 0; width: auto; }
     .email-modal-loading { padding: 42px 20px; text-align: center; color: var(--pb-muted); }
     .settings-body {
-      max-width: 940px; margin: 0 auto; padding: 18px 14px 110px;
+      width: 100%; max-width: 1600px; margin: 0 auto; padding: 18px clamp(14px, 2vw, 28px) 110px;
     }
     .settings-intro {
       margin-bottom: 16px; padding: 17px 18px; border: 1px solid var(--pb-border);
@@ -2753,9 +2811,9 @@
 
     /* ── Sales planning ── */
     .planning-body {
-      width: min(100%, 1080px);
+      width: min(100%, 1920px);
       margin: 0 auto;
-      padding: 12px 12px 48px;
+      padding: 12px clamp(12px, 2vw, 28px) 48px;
     }
     #view-planning .back-btn,
     #planning-new-btn {
@@ -3598,7 +3656,7 @@
 
     @media (min-width: 820px) {
       .planning-main-grid {
-        grid-template-columns: minmax(0, 1.55fr) minmax(280px, 0.85fr);
+        grid-template-columns: minmax(0, 1.7fr) minmax(320px, 0.8fr);
         align-items: start;
       }
       .planning-backlog-card {
@@ -3639,6 +3697,24 @@
         grid-template-columns: repeat(2, minmax(0, 1fr));
       }
       .planning-dialog-actions .action-btn { width: 100%; min-width: 0; }
+    }
+    @media (min-width: 1180px) {
+      #view-form .detail-body {
+        width: 100%;
+        max-width: 920px;
+        margin: 0 auto;
+        padding: 20px 24px 48px;
+      }
+      .planning-main-grid {
+        grid-template-columns: minmax(0, 2fr) minmax(360px, 0.85fr);
+        gap: 16px;
+      }
+      .planning-controls,
+      .planning-recommendation,
+      .planning-agenda-card,
+      .planning-backlog-card {
+        padding: 16px;
+      }
     }
     @media (pointer: coarse) {
       .planning-drag-handle {
