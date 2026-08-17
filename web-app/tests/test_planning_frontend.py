@@ -21,6 +21,20 @@ class PlanningFrontendContractTests(TestCase):
         options = re.findall(r"<option(?: [^>]*)?>(.*?)</option>", match.group(1))
         self.assertEqual(options, ["Välj...", "Telefon", "Mejl", "Besök"])
 
+    def test_customer_follow_up_uses_the_stats_contract(self):
+        self.assertIn("function formatNextFollowUp(nextFollowUp)", self.html)
+        self.assertIn(
+            "renderContactList(stats.contacts, stats.timeline, stats.next_follow_up)",
+            self.html,
+        )
+        self.assertIn('nextFollowUp.source !== "planned_activity"', self.html)
+        self.assertIn("`${date} · Tid ej satt`", self.html)
+        self.assertIn('[date, time, type].filter(Boolean).join(" · ")', self.html)
+        self.assertNotIn(
+            'd-next-followup").textContent = latestContact.follow_up_date',
+            self.html,
+        )
+
     def test_partial_contact_save_keeps_a_retry_payload(self):
         self.assertIn('result?.status === "partial"', self.html)
         self.assertIn("contactRetryPayload = payload", self.html)
@@ -78,7 +92,7 @@ class PlanningFrontendContractTests(TestCase):
         )
 
     def test_planning_preview_uses_backend_queue_without_raw_score_backlog(self):
-        self.assertIn("Fler kunder att planera", self.html)
+        self.assertIn("Fler nästa åtgärder", self.html)
         self.assertNotIn("Dagens fokus", self.html)
         self.assertNotIn("Gamla uppföljningar att planera in", self.html)
         self.assertNotIn("Kommande uppföljningar", self.html)
@@ -106,6 +120,9 @@ class PlanningFrontendContractTests(TestCase):
         self.assertNotIn("expected_order_dfp", body)
         self.assertNotIn("Orderpotential", body)
         self.assertNotIn("Visa fler", body)
+        self.assertIn("planning-backlog-overdue", body)
+        self.assertIn("planning-backlog-overdue-actions", body)
+        self.assertIn("@container planning-backlog (max-width: 420px)", self.html)
 
     def test_planning_preview_load_more_is_snapshot_based_and_resets_by_owner(self):
         self.assertIn("let planningRecommendationPreviewLimit = 10", self.html)
@@ -336,6 +353,135 @@ class PlanningFrontendContractTests(TestCase):
         self.assertIn(
             "När du sparar blir aktiviteten manuellt planerad och behålls vid nästa automatiska ruttberäkning.",
             self.html,
+        )
+
+    def test_route_preview_persists_and_replays_the_exact_pending_request(self):
+        self.assertIn(
+            '"store-tracker:route-preview-recovery:v1"',
+            self.html,
+        )
+        self.assertIn("sessionStorage.setItem(", self.html)
+        self.assertIn("sessionStorage.removeItem(", self.html)
+        self.assertIn("PLANNING_ROUTE_RECOVERY_TTL_MS = 30 * 60 * 1000", self.html)
+        self.assertIn("PLANNING_ROUTE_RECOVERY_WINDOW_MS = 20 * 60 * 1000", self.html)
+        self.assertIn("PLANNING_ROUTE_RECOVERY_POLL_MS = 15 * 1000", self.html)
+        read = self.html.split("function readPlanningRouteRecoveryState", 1)[1].split(
+            "function planningRouteRecoveryForCurrentContext", 1
+        )[0]
+        self.assertIn("if (!valid)", read)
+        self.assertIn("const actorUserName = String(currentUser?.user_name || \"\").trim()", read)
+        self.assertIn("if (!actorUserName) return null", read)
+        self.assertIn("if (state.actor_user_name !== actorUserName)", read)
+        self.assertEqual(read.count("clearPlanningRouteRecoveryState()"), 3)
+        save = self.html.split("function savePlanningRouteRecoveryState", 1)[1].split(
+            "function planningRouteError", 1
+        )[0]
+        self.assertIn("try {", save)
+        self.assertIn("sessionStorage.setItem(", save)
+        self.assertIn("state.storage_persisted = false", save)
+        self.assertIn("return state", save)
+
+        create = self.html.split("async function openPlanningRoutePreview()", 1)[1].split(
+            "function renderPlanningRoutePreview", 1
+        )[0]
+        self.assertLess(create.index("getCurrentPositionForRoute()"), create.index("savePlanningRouteRecoveryState(payload)"))
+        self.assertLess(create.index("savePlanningRouteRecoveryState(payload)"), create.index("postPendingPlanningRoutePreview(state"))
+
+        recovery = self.html.split("function resumePlanningRoutePreviewRecovery", 1)[1].split(
+            "async function openPlanningRoutePreview", 1
+        )[0]
+        self.assertIn("planningRoutePreviewStatus(state.payload.client_request_id)", recovery)
+        self.assertIn('status.state === "completed"', recovery)
+        self.assertIn('status.state === "fallback_ready"', recovery)
+        self.assertIn("completedReplay: true", recovery)
+        self.assertNotIn("getCurrentPositionForRoute", recovery)
+        self.assertNotIn("planningClientRequestId", recovery)
+        self.assertIn('window.addEventListener("online"', self.html)
+        self.assertIn('document.addEventListener("visibilitychange"', self.html)
+
+    def test_route_preview_recovery_clears_after_render_and_never_applies(self):
+        recovery = self.html.split("function planningRouteCurrentOwnerUserName", 1)[1].split(
+            "function renderPlanningRoutePreview", 1
+        )[0]
+        rendered = recovery.split("function renderRecoveredPlanningRoutePreview", 1)[1].split(
+            "async function postPendingPlanningRoutePreview", 1
+        )[0]
+        self.assertLess(rendered.index("renderPlanningRoutePreview(payload)"), rendered.index("planningRouteApplyRequestId"))
+        self.assertLess(rendered.index("planningRouteApplyRequestId"), rendered.index("clearPlanningRouteRecoveryState()"))
+        self.assertIn('kind: "ambiguous_transport_or_body_failure"', recovery)
+        self.assertIn('outcome.kind === "in_progress"', recovery)
+        self.assertIn('outcome.kind === "fallback_ready"', recovery)
+        self.assertIn('outcome.kind === "terminal_backend_error"', recovery)
+        self.assertIn("planningRoutePreviewFetch(state.payload)", recovery)
+        self.assertNotIn("/planning/route-apply", recovery)
+
+    def test_route_fallback_ready_is_nonterminal_and_resumes_same_payload(self):
+        fetcher = self.html.split(
+            "async function planningRoutePreviewFetch", 1
+        )[1].split("async function planningRoutePreviewStatus", 1)[0]
+        self.assertIn('result?.state === "fallback_ready"', fetcher)
+        self.assertIn('kind: "fallback_ready"', fetcher)
+
+        recovery = self.html.split(
+            "async function postPendingPlanningRoutePreview", 1
+        )[1].split("async function openPlanningRoutePreview", 1)[0]
+        fallback_branch = recovery.split(
+            'outcome.kind === "fallback_ready"', 1
+        )[1].split('outcome.kind === "in_progress"', 1)[0]
+        self.assertIn("schedulePlanningRouteRecovery(state, deadlineMs)", fallback_branch)
+        self.assertNotIn("clearPlanningRouteRecoveryState", fallback_branch)
+        self.assertNotIn("planningClientRequestId", fallback_branch)
+        self.assertNotIn("getCurrentPositionForRoute", fallback_branch)
+
+        status_branch = recovery.split(
+            'status.state === "fallback_ready"', 1
+        )[1].split('status.state === "completed"', 1)[0]
+        self.assertIn("postPendingPlanningRoutePreview(state", status_branch)
+        self.assertNotIn("clearPlanningRouteRecoveryState", status_branch)
+        self.assertNotIn("planningClientRequestId", status_branch)
+        self.assertNotIn("getCurrentPositionForRoute", status_branch)
+
+    def test_route_traffic_infeasible_has_shared_post_and_recovery_message(self):
+        expected = (
+            "Trafiken gör att rutten inte ryms inom dagens fasta tider och "
+            "sjutimmarsgräns. Justera planeringen och försök igen."
+        )
+        mapper = self.html.split(
+            "function getRouteProposalFailureMessage", 1
+        )[1].split("async function proposeRoute", 1)[0]
+        self.assertIn('normalizedCode === "route_traffic_infeasible"', mapper)
+        self.assertIn(expected, mapper)
+
+        recovery = self.html.split(
+            "async function postPendingPlanningRoutePreview", 1
+        )[1].split("async function openPlanningRoutePreview", 1)[0]
+        self.assertIn("getRouteProposalFailureMessage(outcome.error)", recovery)
+        self.assertIn("getRouteProposalFailureMessage(error)", recovery)
+        self.assertNotIn("getCurrentPositionForRoute", recovery)
+        self.assertNotIn("/planning/route-apply", recovery)
+
+        self.assertIn(
+            'normalizedCode === "route_fallback_exhausted"', mapper
+        )
+        self.assertIn(
+            "Ruttoptimeringen hittade ingen verifierat genomförbar rutt inom de automatiska försöken.",
+            mapper,
+        )
+
+    def test_route_preview_context_switch_resets_ui_and_does_not_share_single_flight(self):
+        recovery = self.html.split("function planningRouteRecoveryForCurrentContext", 1)[1].split(
+            "async function openPlanningRoutePreview", 1
+        )[0]
+        resume = recovery.split("function resumePlanningRoutePreviewRecovery", 1)[1]
+        self.assertIn("!planningRouteRecoveryStateMatchesCurrentContext(storedState)", resume)
+        self.assertIn("window.clearTimeout(planningRouteRecoveryTimer)", resume)
+        self.assertIn("planningRouteResetPreviewButton()", resume)
+        self.assertIn("planningRouteRecoveryStateIsActive(state)", recovery)
+        self.assertIn("planningRouteRecoveryPromiseKey === requestKey", recovery)
+        self.assertIn("planningRouteRecoveryPromise === promise", recovery)
+        self.assertIn(
+            "runPlanningRouteRecoverySingleFlight(state.payload.client_request_id",
+            recovery,
         )
 
     def test_legacy_followup_keeps_its_source_link(self):

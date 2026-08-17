@@ -9,10 +9,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import hashlib
 import json
 import math
 import os
+import re
 import threading
 import time
 from typing import Any, Iterable, Mapping
@@ -22,12 +24,18 @@ from google.auth.transport.requests import Request as GoogleAuthRequest
 from google.oauth2.service_account import Credentials
 
 
-ROUTE_ENGINE_VERSION = "ro-v1"
+ROUTE_ENGINE_VERSION = "ro-v3"
+PRIMARY_MODEL_VERSION = "ro-v2"
+FALLBACK_POLICY_VERSION = "route-fallback-v1"
 ROUTE_COST_PER_HOUR = 1.0
 PRIORITY_PENALTY_MULTIPLIER = 10.0
 ROUTE_MAX_SECONDS = 25199
 SERVICE_SECONDS = 1200
 MAX_VISITS = 15
+QUADRATIC_SOFT_DURATION_BUFFER_SECONDS = 300
+QUADRATIC_SOFT_DURATION_COST_PER_SQUARE_HOUR = 28800
+FALLBACK_SAFER_SOFT_DURATION_BUFFER_SECONDS = 900
+MAX_PROVIDER_ATTEMPTS_PER_OPERATION = 3
 GOOGLE_OAUTH_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
 GOOGLE_OPTIMIZE_TOURS_URL = (
     "https://routeoptimization.googleapis.com/v1/projects/{project}:optimizeTours"
@@ -141,6 +149,58 @@ def priority_penalty(value: Any) -> float:
     return clamp_priority_score(value) * PRIORITY_PENALTY_MULTIPLIER
 
 
+def quadratic_soft_duration_diagnostics(
+    *,
+    model_route_max_seconds: int,
+    route_duration_seconds: int | float | Decimal,
+    buffer_seconds: int = QUADRATIC_SOFT_DURATION_BUFFER_SECONDS,
+    cost_per_square_hour: int = (
+        QUADRATIC_SOFT_DURATION_COST_PER_SQUARE_HOUR
+    ),
+) -> dict[str, Any]:
+    """Return the configured policy and Store Tracker-derived duration cost.
+
+    Cost is calculated with Decimal and rounded half-up to one decimal for
+    stable diagnostic JSON.  It is derived from the configured model formula,
+    not copied from a Google response cost field.
+    """
+    enabled = model_route_max_seconds > buffer_seconds
+    result = {
+        "quadratic_soft_duration_enabled": enabled,
+        "quadratic_soft_buffer_seconds": (
+            buffer_seconds
+        ),
+        "quadratic_soft_max_seconds": (
+            model_route_max_seconds - buffer_seconds
+            if enabled else None
+        ),
+        "quadratic_soft_cost_per_square_hour": (
+            cost_per_square_hour
+        ),
+        "quadratic_soft_exceedance_seconds": None,
+        "quadratic_soft_duration_cost": None,
+    }
+    if not enabled:
+        return result
+    try:
+        duration = Decimal(str(route_duration_seconds))
+    except InvalidOperation:
+        return result
+    if not duration.is_finite():
+        return result
+    threshold = Decimal(result["quadratic_soft_max_seconds"])
+    exceedance = max(Decimal(0), duration - threshold)
+    cost = (
+        Decimal(cost_per_square_hour)
+        * (exceedance / Decimal(3600)) ** 2
+    ).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
+    result["quadratic_soft_exceedance_seconds"] = _diagnostic_decimal_number(
+        exceedance
+    )
+    result["quadratic_soft_duration_cost"] = _diagnostic_decimal_number(cost)
+    return result
+
+
 def _utc_text(value: datetime) -> str:
     if value.tzinfo is None:
         raise ValueError("Route timestamps must be timezone-aware")
@@ -152,6 +212,41 @@ def _duration_seconds(value: Any) -> int:
     if not text.endswith("s"):
         raise ValueError("Invalid duration")
     return max(0, int(round(float(text[:-1] or 0))))
+
+
+_PROTOBUF_DURATION_PATTERN = re.compile(
+    r"^-?(?:0|[1-9]\d*)(?:\.\d{1,9})?s$"
+)
+_PROTOBUF_DURATION_MAX_SECONDS = Decimal("315576000000")
+
+
+def _diagnostic_duration_decimal(value: Any) -> Decimal | None:
+    """Parse generated ProtoJSON Duration text exactly for diagnostics only."""
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not _PROTOBUF_DURATION_PATTERN.fullmatch(text):
+        return None
+    try:
+        seconds = Decimal(text[:-1])
+    except InvalidOperation:
+        return None
+    if not seconds.is_finite() or abs(seconds) > _PROTOBUF_DURATION_MAX_SECONDS:
+        return None
+    return seconds
+
+
+def _diagnostic_decimal_number(value: Decimal | None) -> int | float | None:
+    if value is None:
+        return None
+    if value == value.to_integral_value():
+        return int(value)
+    return float(value)
+
+
+def _diagnostic_duration_seconds(value: Any) -> int | float | None:
+    """Return signed seconds without coercing malformed values or truncating fractions."""
+    return _diagnostic_decimal_number(_diagnostic_duration_decimal(value))
 
 
 def _response_shipment_index(
@@ -227,8 +322,37 @@ def build_optimize_tours_request(
     pre_route_fixed_seconds: int = 0,
     timeout_seconds: int = 90,
     solving_mode: str = "DEFAULT_SOLVE",
+    search_mode: str = "CONSUME_ALL_AVAILABLE_TIME",
+    max_visits: int = MAX_VISITS,
+    quadratic_soft_buffer_seconds: int = QUADRATIC_SOFT_DURATION_BUFFER_SECONDS,
+    quadratic_soft_cost_per_square_hour: int = (
+        QUADRATIC_SOFT_DURATION_COST_PER_SQUARE_HOUR
+    ),
+    request_label: str | None = None,
 ) -> dict[str, Any]:
     shipment_list = list(shipments)
+    if (
+        isinstance(max_visits, bool)
+        or not isinstance(max_visits, int)
+        or not 1 <= max_visits <= MAX_VISITS
+    ):
+        raise ValueError("max_visits must be between 1 and MAX_VISITS")
+    if search_mode not in {"CONSUME_ALL_AVAILABLE_TIME", "RETURN_FAST"}:
+        raise ValueError("Unsupported Route Optimization search mode")
+    if (
+        isinstance(quadratic_soft_buffer_seconds, bool)
+        or not isinstance(quadratic_soft_buffer_seconds, int)
+        or quadratic_soft_buffer_seconds < 0
+    ):
+        raise ValueError("quadratic_soft_buffer_seconds must be nonnegative")
+    if (
+        isinstance(quadratic_soft_cost_per_square_hour, bool)
+        or not isinstance(quadratic_soft_cost_per_square_hour, int)
+        or quadratic_soft_cost_per_square_hour < 0
+    ):
+        raise ValueError(
+            "quadratic_soft_cost_per_square_hour must be nonnegative"
+        )
     available_seconds = ROUTE_MAX_SECONDS - max(0, int(pre_route_fixed_seconds))
     if available_seconds <= 0:
         raise RouteOptimizationError(
@@ -248,13 +372,22 @@ def build_optimize_tours_request(
         }],
         "loadLimits": {
             "visit_slots": {
-                "maxLoad": str(MAX_VISITS),
+                "maxLoad": str(max_visits),
                 "startLoadInterval": {"min": "0", "max": "0"},
             }
         },
         "routeDurationLimit": {"maxDuration": f"{available_seconds}s"},
         "costPerHour": ROUTE_COST_PER_HOUR,
     }
+    if available_seconds > quadratic_soft_buffer_seconds:
+        vehicle["routeDurationLimit"].update({
+            "quadraticSoftMaxDuration": (
+                f"{available_seconds - quadratic_soft_buffer_seconds}s"
+            ),
+            "costPerSquareHourAfterQuadraticSoftMax": (
+                quadratic_soft_cost_per_square_hour
+            ),
+        })
     if breaks:
         latest_break_end = max(
             item["scheduled_at"] + timedelta(seconds=int(item["duration_seconds"]))
@@ -282,14 +415,16 @@ def build_optimize_tours_request(
             "loadDemands": {"visit_slots": {"amount": "1"}},
         }
         if not shipment.get("required"):
-            item["penaltyCost"] = priority_penalty(shipment.get("priority_score"))
+            item["penaltyCost"] = priority_penalty(
+                shipment.get("priority_score")
+            )
         rendered_shipments.append(item)
 
     return {
         "timeout": f"{int(timeout_seconds)}s",
         "solvingMode": solving_mode,
-        "searchMode": "CONSUME_ALL_AVAILABLE_TIME",
-        "label": f"store-tracker:{run_id}",
+        "searchMode": search_mode,
+        "label": request_label or f"store-tracker:{run_id}",
         "considerRoadTraffic": True,
         "model": {
             "globalStartTime": _utc_text(route_start),
@@ -310,7 +445,7 @@ def request_fingerprint(payload: Mapping[str, Any]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def build_request_fingerprint(
+def _request_input_fingerprint_payload(
     *,
     owner_user_name: str,
     route_date: str,
@@ -319,7 +454,7 @@ def build_request_fingerprint(
     start: TrustedCoordinate,
     shipments: Iterable[Mapping[str, Any]],
     fixed_activities: Iterable[Mapping[str, Any]],
-) -> str:
+) -> dict[str, Any]:
     shipment_values = []
     for item in shipments:
         coordinate = item["coordinate"]
@@ -341,8 +476,7 @@ def build_request_fingerprint(
         "duration_seconds": int(item["duration_seconds"]),
         "status": str(item.get("status") or ""),
     } for item in fixed_activities]
-    return request_fingerprint({
-        "engine_version": ROUTE_ENGINE_VERSION,
+    return {
         "owner_user_name": str(owner_user_name).strip().casefold(),
         "route_date": route_date,
         "route_start": _utc_text(route_start),
@@ -351,15 +485,76 @@ def build_request_fingerprint(
             "latitude": round(start.latitude, 4),
             "longitude": round(start.longitude, 4),
         },
-        "constants": {
-            "route_cost_per_hour": ROUTE_COST_PER_HOUR,
-            "priority_penalty_multiplier": PRIORITY_PENALTY_MULTIPLIER,
-            "route_max_seconds": ROUTE_MAX_SECONDS,
-            "service_seconds": SERVICE_SECONDS,
-            "max_visits": MAX_VISITS,
-        },
         "shipments": sorted(shipment_values, key=lambda item: item["customer_id"]),
         "fixed_activities": sorted(fixed_values, key=lambda item: item["activity_id"]),
+    }
+
+
+def build_input_fingerprint(**kwargs: Any) -> str:
+    """Fingerprint user/business input independently of solver policy."""
+    return request_fingerprint(_request_input_fingerprint_payload(**kwargs))
+
+
+def _request_fingerprint_for_policy(
+    *,
+    engine_version: str,
+    include_quadratic_policy: bool,
+    **kwargs: Any,
+) -> str:
+    constants = {
+        "route_cost_per_hour": ROUTE_COST_PER_HOUR,
+        "priority_penalty_multiplier": PRIORITY_PENALTY_MULTIPLIER,
+        "route_max_seconds": ROUTE_MAX_SECONDS,
+        "service_seconds": SERVICE_SECONDS,
+        "max_visits": MAX_VISITS,
+    }
+    if include_quadratic_policy:
+        constants.update({
+            "quadratic_soft_duration_buffer_seconds": (
+                QUADRATIC_SOFT_DURATION_BUFFER_SECONDS
+            ),
+            "quadratic_soft_duration_cost_per_square_hour": (
+                QUADRATIC_SOFT_DURATION_COST_PER_SQUARE_HOUR
+            ),
+            "primary_model_version": PRIMARY_MODEL_VERSION,
+            "fallback_policy_version": FALLBACK_POLICY_VERSION,
+            "max_provider_attempts_per_operation": (
+                MAX_PROVIDER_ATTEMPTS_PER_OPERATION
+            ),
+            "fallback_safer_soft_duration_buffer_seconds": (
+                FALLBACK_SAFER_SOFT_DURATION_BUFFER_SECONDS
+            ),
+        })
+    input_payload = _request_input_fingerprint_payload(**kwargs)
+    return request_fingerprint({
+        "engine_version": engine_version,
+        **input_payload,
+        "constants": constants,
+    })
+
+
+def build_request_fingerprint(**kwargs: Any) -> str:
+    """Fingerprint input plus the active solver policy for cache isolation."""
+    return _request_fingerprint_for_policy(
+        engine_version=ROUTE_ENGINE_VERSION,
+        include_quadratic_policy=True,
+        **kwargs,
+    )
+
+
+def build_legacy_ro_v1_request_fingerprint(**kwargs: Any) -> str:
+    """Recreate the deployed ro-v1 fingerprint for exact recovery only."""
+    input_payload = _request_input_fingerprint_payload(**kwargs)
+    return request_fingerprint({
+        "engine_version": "ro-v1",
+        **input_payload,
+        "constants": {
+            "route_cost_per_hour": 1.0,
+            "priority_penalty_multiplier": 10.0,
+            "route_max_seconds": 25199,
+            "service_seconds": 1200,
+            "max_visits": 15,
+        },
     })
 
 
@@ -371,6 +566,349 @@ def _parse_time(value: Any) -> datetime:
     return result.astimezone(timezone.utc)
 
 
+_TRAFFIC_DIAGNOSTIC_METRIC_KEYS = (
+    "travelDuration",
+    "waitDuration",
+    "delayDuration",
+    "breakDuration",
+    "visitDuration",
+    "totalDuration",
+    "travelDistanceMeters",
+)
+
+
+def _diagnostic_transition_duration(
+    transition: Mapping[str, Any],
+    field: str,
+    *,
+    omitted_is_zero: bool = False,
+) -> Decimal | None:
+    """Parse one transition duration, optionally defaulting omission to zero.
+
+    The default applies only when the field is absent.  An explicitly present
+    malformed value remains invalid so diagnostics never turn bad provider data
+    into a false zero.
+    """
+    if omitted_is_zero and field not in transition:
+        return Decimal(0)
+    return _diagnostic_duration_decimal(transition.get(field))
+
+
+def _traffic_infeasibility_diagnostics(
+    response: Mapping[str, Any],
+    route: Mapping[str, Any],
+    *,
+    visits: list[Mapping[str, Any]],
+    transitions: list[Mapping[str, Any]],
+    shipments: list[Mapping[str, Any]],
+    vehicle_start: datetime,
+    vehicle_end: datetime,
+    pre_route_fixed_seconds: Any = 0,
+    fixed_breaks: list[Mapping[str, Any]] | None = None,
+    timeout_seconds: Any = None,
+    solving_mode: str = "DEFAULT_SOLVE",
+    search_mode: str = "CONSUME_ALL_AVAILABLE_TIME",
+    max_visits: int = MAX_VISITS,
+    quadratic_soft_buffer_seconds: int = (
+        QUADRATIC_SOFT_DURATION_BUFFER_SECONDS
+    ),
+    quadratic_soft_cost_per_square_hour: int = (
+        QUADRATIC_SOFT_DURATION_COST_PER_SQUARE_HOUR
+    ),
+) -> dict[str, Any]:
+    """Return compact response facts without identities or local retiming.
+
+    ``aggregate_timeline_residual_seconds`` is
+    total - travel - visit - delay - break.  Per-transition residual is
+    total - travel - delay - break.  Neither residual is interpreted as a
+    traffic deficit; wait duration remains a separate observed value.
+    """
+    try:
+        fixed_break_list = fixed_breaks if isinstance(fixed_breaks, list) else []
+        route_metrics = route.get("metrics")
+        route_metrics = route_metrics if isinstance(route_metrics, Mapping) else {}
+        compact_metrics: dict[str, Any] = {}
+        for key in _TRAFFIC_DIAGNOSTIC_METRIC_KEYS:
+            value = route_metrics.get(key)
+            if isinstance(value, bool):
+                continue
+            if isinstance(value, (int, float)):
+                if math.isfinite(float(value)):
+                    compact_metrics[key] = value
+            elif isinstance(value, str) and len(value) <= 80:
+                compact_metrics[key] = value
+
+        metric_keys = {
+            "total": "totalDuration",
+            "travel": "travelDuration",
+            "visit": "visitDuration",
+            "wait": "waitDuration",
+            "delay": "delayDuration",
+            "break": "breakDuration",
+        }
+        metric_values = {
+            name: _diagnostic_duration_decimal(route_metrics.get(api_key))
+            for name, api_key in metric_keys.items()
+        }
+        aggregate_parts = (
+            metric_values["total"],
+            metric_values["travel"],
+            metric_values["visit"],
+            metric_values["delay"],
+            metric_values["break"],
+        )
+        aggregate_residual = None
+        if all(value is not None for value in aggregate_parts):
+            aggregate_residual = (
+                metric_values["total"]
+                - metric_values["travel"]
+                - metric_values["visit"]
+                - metric_values["delay"]
+                - metric_values["break"]
+            )
+
+        transition_diagnostics = []
+        residual_values: list[tuple[int, Decimal]] = []
+        negative_wait_count = 0
+        for index, transition in enumerate(transitions):
+            if not isinstance(transition, Mapping):
+                continue
+            values = {
+                "travel": _diagnostic_transition_duration(
+                    transition, "travelDuration"
+                ),
+                "total": _diagnostic_transition_duration(
+                    transition, "totalDuration"
+                ),
+                "wait": _diagnostic_transition_duration(
+                    transition, "waitDuration"
+                ),
+                "delay": _diagnostic_transition_duration(
+                    transition, "delayDuration", omitted_is_zero=True
+                ),
+                "break": _diagnostic_transition_duration(
+                    transition, "breakDuration", omitted_is_zero=True
+                ),
+            }
+            residual = None
+            residual_parts = (
+                values["total"],
+                values["travel"],
+                values["delay"],
+                values["break"],
+            )
+            if all(value is not None for value in residual_parts):
+                residual = (
+                    values["total"]
+                    - values["travel"]
+                    - values["delay"]
+                    - values["break"]
+                )
+                residual_values.append((index, residual))
+            if values["wait"] is not None and values["wait"] < 0:
+                negative_wait_count += 1
+            start_at = None
+            try:
+                if isinstance(transition.get("startTime"), str):
+                    start_at = _utc_text(_parse_time(transition.get("startTime")))
+            except (TypeError, ValueError):
+                start_at = None
+            traffic_unavailable = transition.get("trafficInfoUnavailable")
+            if not isinstance(traffic_unavailable, bool):
+                traffic_unavailable = None
+            transition_diagnostics.append({
+                "transition_index": index,
+                "travel_duration_seconds": _diagnostic_decimal_number(
+                    values["travel"]
+                ),
+                "total_duration_seconds": _diagnostic_decimal_number(
+                    values["total"]
+                ),
+                "wait_duration_seconds": _diagnostic_decimal_number(
+                    values["wait"]
+                ),
+                "delay_duration_seconds": _diagnostic_decimal_number(
+                    values["delay"]
+                ),
+                "break_duration_seconds": _diagnostic_decimal_number(
+                    values["break"]
+                ),
+                "transition_residual_seconds": _diagnostic_decimal_number(
+                    residual
+                ),
+                "traffic_info_unavailable": traffic_unavailable,
+                "transition_start_at": start_at,
+            })
+
+        negative_residuals = [
+            (index, value) for index, value in residual_values if value < 0
+        ]
+        most_negative = min(negative_residuals, key=lambda item: item[1]) if negative_residuals else None
+        residual_only = [value for _index, value in residual_values]
+
+        skip_reason_counts: dict[str, int] = {}
+        skipped_items = response.get("skippedShipments")
+        if isinstance(skipped_items, list):
+            for skipped in skipped_items:
+                if not isinstance(skipped, Mapping):
+                    continue
+                reasons = skipped.get("reasons")
+                if not isinstance(reasons, list):
+                    continue
+                for reason in reasons:
+                    if not isinstance(reason, Mapping):
+                        continue
+                    code_value = reason.get("code")
+                    if not isinstance(code_value, str):
+                        continue
+                    code = code_value.strip()
+                    if not code or len(code) > 80:
+                        continue
+                    if code not in skip_reason_counts and len(skip_reason_counts) >= 32:
+                        continue
+                    skip_reason_counts[code] = skip_reason_counts.get(code, 0) + 1
+
+        normalized_pre_route_seconds = None
+        if not isinstance(pre_route_fixed_seconds, bool):
+            try:
+                normalized_pre_route_seconds = max(0, int(pre_route_fixed_seconds))
+            except (TypeError, ValueError, OverflowError):
+                normalized_pre_route_seconds = None
+        model_route_max_seconds = (
+            ROUTE_MAX_SECONDS - normalized_pre_route_seconds
+            if normalized_pre_route_seconds is not None
+            and normalized_pre_route_seconds <= ROUTE_MAX_SECONDS
+            else None
+        )
+        normalized_timeout = None
+        if not isinstance(timeout_seconds, bool):
+            try:
+                normalized_timeout = int(timeout_seconds)
+            except (TypeError, ValueError, OverflowError):
+                normalized_timeout = None
+
+        delta = vehicle_end - vehicle_start
+        elapsed = (
+            Decimal(delta.days * 86400 + delta.seconds)
+            + Decimal(delta.microseconds) / Decimal(1_000_000)
+        )
+        quadratic_diagnostics = (
+            quadratic_soft_duration_diagnostics(
+                model_route_max_seconds=model_route_max_seconds,
+                route_duration_seconds=elapsed,
+                buffer_seconds=quadratic_soft_buffer_seconds,
+                cost_per_square_hour=quadratic_soft_cost_per_square_hour,
+            )
+            if model_route_max_seconds is not None
+            else {}
+        )
+        required_count = sum(
+            item.get("required") is True
+            for item in shipments
+            if isinstance(item, Mapping)
+        )
+        fixed_visit_count = sum(
+            item.get("fixed_at") is not None
+            for item in shipments
+            if isinstance(item, Mapping)
+        )
+        expected_transition_count = len(visits) + 1
+        return {
+            "diagnostic_reason": "traffic_infeasibility",
+            "route_engine_version": ROUTE_ENGINE_VERSION,
+            "shipment_count": len(shipments),
+            "stop_count": len(visits),
+            "transition_count": len(transitions),
+            "expected_transition_count": expected_transition_count,
+            "transition_count_matches_expected": (
+                len(transitions) == expected_transition_count
+            ),
+            "traffic_info_unavailable_count": sum(
+                transition.get("trafficInfoUnavailable") is True
+                for transition in transitions
+                if isinstance(transition, Mapping)
+            ),
+            "route_metrics": compact_metrics,
+            "route_total_duration_seconds": _diagnostic_decimal_number(
+                metric_values["total"]
+            ),
+            "route_travel_duration_seconds": _diagnostic_decimal_number(
+                metric_values["travel"]
+            ),
+            "route_visit_duration_seconds": _diagnostic_decimal_number(
+                metric_values["visit"]
+            ),
+            "route_wait_duration_seconds": _diagnostic_decimal_number(
+                metric_values["wait"]
+            ),
+            "route_delay_duration_seconds": _diagnostic_decimal_number(
+                metric_values["delay"]
+            ),
+            "route_break_duration_seconds": _diagnostic_decimal_number(
+                metric_values["break"]
+            ),
+            "aggregate_timeline_residual_seconds": _diagnostic_decimal_number(
+                aggregate_residual
+            ),
+            "transition_diagnostics": transition_diagnostics,
+            "negative_wait_transition_count": negative_wait_count,
+            "negative_residual_transition_count": len(negative_residuals),
+            "most_negative_transition_index": (
+                most_negative[0] if most_negative else None
+            ),
+            "most_negative_transition_residual_seconds": (
+                _diagnostic_decimal_number(most_negative[1])
+                if most_negative else None
+            ),
+            "transition_residual_min_seconds": (
+                _diagnostic_decimal_number(min(residual_only))
+                if residual_only else None
+            ),
+            "transition_residual_max_seconds": (
+                _diagnostic_decimal_number(max(residual_only))
+                if residual_only else None
+            ),
+            "route_start_at": _utc_text(vehicle_start),
+            "route_end_at": _utc_text(vehicle_end),
+            "route_elapsed_seconds": _diagnostic_decimal_number(elapsed),
+            "route_elapsed_matches_total_duration": (
+                elapsed == metric_values["total"]
+                if metric_values["total"] is not None else None
+            ),
+            "required_count": required_count,
+            "has_required_visits": required_count > 0,
+            "fixed_visit_count": fixed_visit_count,
+            "has_fixed_visits": fixed_visit_count > 0,
+            "fixed_break_count": len(fixed_break_list),
+            "has_fixed_breaks": bool(fixed_break_list),
+            "pre_route_fixed_seconds": normalized_pre_route_seconds,
+            "consider_road_traffic": True,
+            "search_mode": search_mode,
+            "solving_mode": str(solving_mode or "DEFAULT_SOLVE"),
+            "timeout_seconds": normalized_timeout,
+            "absolute_route_max_seconds": ROUTE_MAX_SECONDS,
+            "model_route_max_seconds": model_route_max_seconds,
+            **quadratic_diagnostics,
+            "max_visits": max_visits,
+            "service_duration_seconds": SERVICE_SECONDS,
+            "skip_reason_counts": skip_reason_counts,
+            "traffic_deficit_calculated": False,
+        }
+    except Exception:
+        # Diagnostics must never replace the classified provider error.
+        expected_transition_count = len(visits) + 1
+        return {
+            "diagnostic_reason": "traffic_infeasibility",
+            "transition_count": len(transitions),
+            "expected_transition_count": expected_transition_count,
+            "transition_count_matches_expected": (
+                len(transitions) == expected_transition_count
+            ),
+            "absolute_route_max_seconds": ROUTE_MAX_SECONDS,
+            "traffic_deficit_calculated": False,
+        }
+
+
 def parse_optimize_tours_response(
     response: Mapping[str, Any],
     *,
@@ -379,8 +917,19 @@ def parse_optimize_tours_response(
     route_start: datetime,
     pre_route_fixed_seconds: int = 0,
     fixed_breaks: Iterable[Mapping[str, Any]] = (),
+    timeout_seconds: int | None = None,
+    solving_mode: str = "DEFAULT_SOLVE",
+    search_mode: str = "CONSUME_ALL_AVAILABLE_TIME",
+    max_visits: int = MAX_VISITS,
+    quadratic_soft_buffer_seconds: int = (
+        QUADRATIC_SOFT_DURATION_BUFFER_SECONDS
+    ),
+    quadratic_soft_cost_per_square_hour: int = (
+        QUADRATIC_SOFT_DURATION_COST_PER_SQUARE_HOUR
+    ),
 ) -> dict[str, Any]:
     shipment_list = list(shipments)
+    fixed_break_list = list(fixed_breaks)
     shipment_labels = [f"customer:{str(item.get('customer_id') or '').strip()}" for item in shipment_list]
     if any(label == "customer:" for label in shipment_labels) or len(set(shipment_labels)) != len(shipment_labels):
         raise RouteOptimizationError(
@@ -391,7 +940,19 @@ def parse_optimize_tours_response(
             details={"diagnostic_reason": "shipment_identity_invalid"},
         )
     label_indexes = {label: index for index, label in enumerate(shipment_labels)}
-    validation_errors = list(response.get("validationErrors") or [])
+    validation_errors_value = response.get("validationErrors")
+    if (
+        validation_errors_value is not None
+        and not isinstance(validation_errors_value, list)
+    ):
+        raise RouteOptimizationError(
+            "route_response_invalid",
+            "Google returnerade ett ogiltigt svar.",
+            502,
+            counted_attempt=True,
+            details={"diagnostic_reason": "route_structure_invalid"},
+        )
+    validation_errors = list(validation_errors_value or [])
     if validation_errors:
         raise RouteOptimizationError(
             "route_request_model_invalid",
@@ -399,12 +960,29 @@ def parse_optimize_tours_response(
             502,
             counted_attempt=True,
         )
-    routes = list(response.get("routes") or [])
+    routes_value = response.get("routes")
+    if routes_value is not None and not isinstance(routes_value, list):
+        raise RouteOptimizationError(
+            "route_response_invalid",
+            "Google returnerade en ogiltig rutt.",
+            502,
+            counted_attempt=True,
+            details={"diagnostic_reason": "route_structure_invalid"},
+        )
+    routes = list(routes_value or [])
     mandatory_indexes = {index for index, item in enumerate(shipment_list) if item.get("required")}
     if len(routes) != 1:
         code = "route_no_feasible_solution" if not routes and not mandatory_indexes else "route_response_invalid"
         raise RouteOptimizationError(code, "Google kunde inte skapa en giltig rutt.", 422, counted_attempt=True)
     route = routes[0]
+    if not isinstance(route, Mapping):
+        raise RouteOptimizationError(
+            "route_response_invalid",
+            "Google returnerade en ogiltig rutt.",
+            502,
+            counted_attempt=True,
+            details={"diagnostic_reason": "route_structure_invalid"},
+        )
     expected_vehicle = f"owner:{str(owner_user_name).strip().casefold()}"
     if route.get("vehicleLabel") != expected_vehicle:
         raise RouteOptimizationError(
@@ -414,15 +992,29 @@ def parse_optimize_tours_response(
             counted_attempt=True,
             details={"diagnostic_reason": "vehicle_label_mismatch"},
         )
-    if route.get("hasTrafficInfeasibilities") is True:
+    vehicle_index = route.get("vehicleIndex")
+    if (
+        isinstance(vehicle_index, bool)
+        or vehicle_index not in (None, 0, "0")
+    ):
         raise RouteOptimizationError(
             "route_response_invalid",
             "Google returnerade en ogiltig rutt.",
             502,
             counted_attempt=True,
-            details={"diagnostic_reason": "traffic_infeasibility"},
+            details={"diagnostic_reason": "vehicle_index_mismatch"},
         )
-    visits = list(route.get("visits") or [])
+    traffic_infeasible = route.get("hasTrafficInfeasibilities") is True
+    visits_value = route.get("visits")
+    if visits_value is not None and not isinstance(visits_value, list):
+        raise RouteOptimizationError(
+            "route_response_invalid",
+            "Google returnerade en ogiltig rutt.",
+            502,
+            counted_attempt=True,
+            details={"diagnostic_reason": "route_structure_invalid"},
+        )
+    visits = list(visits_value or [])
     if not visits and not mandatory_indexes:
         raise RouteOptimizationError(
             "route_no_feasible_solution",
@@ -435,6 +1027,14 @@ def parse_optimize_tours_response(
     seen_indexes: set[int] = set()
     stops = []
     for sequence, visit in enumerate(visits, start=1):
+        if not isinstance(visit, Mapping):
+            raise RouteOptimizationError(
+                "route_response_invalid",
+                "Google returnerade ett okänt stopp.",
+                502,
+                counted_attempt=True,
+                details={"diagnostic_reason": "shipment_identity_invalid"},
+            )
         try:
             index = _response_shipment_index(
                 visit,
@@ -484,7 +1084,24 @@ def parse_optimize_tours_response(
             "duration_minutes": SERVICE_SECONDS // 60,
             "priority_score": clamp_priority_score(shipment.get("priority_score")),
         })
-    skipped_items = list(response.get("skippedShipments") or [])
+    skipped_value = response.get("skippedShipments")
+    if skipped_value is not None and not isinstance(skipped_value, list):
+        raise RouteOptimizationError(
+            "route_response_invalid",
+            "Google returnerade en ogiltig skipplista.",
+            502,
+            counted_attempt=True,
+            details={"diagnostic_reason": "shipment_identity_invalid"},
+        )
+    skipped_items = list(skipped_value or [])
+    if any(not isinstance(item, Mapping) for item in skipped_items):
+        raise RouteOptimizationError(
+            "route_response_invalid",
+            "Google returnerade en ogiltig skipplista.",
+            502,
+            counted_attempt=True,
+            details={"diagnostic_reason": "shipment_identity_invalid"},
+        )
     try:
         skipped_indexes = {
             _response_shipment_index(
@@ -531,11 +1148,123 @@ def parse_optimize_tours_response(
             details={"diagnostic_reason": "shipment_identity_invalid"},
         )
 
+    transitions_value = route.get("transitions")
+    if transitions_value is not None and not isinstance(transitions_value, list):
+        raise RouteOptimizationError(
+            "route_response_invalid",
+            "Google returnerade en ofullständig rutt.",
+            502,
+            counted_attempt=True,
+            details={"diagnostic_reason": "route_structure_invalid"},
+        )
+    transitions = list(transitions_value or [])
+    if any(not isinstance(transition, Mapping) for transition in transitions):
+        raise RouteOptimizationError(
+            "route_response_invalid",
+            "Google returnerade en ofullständig rutt.",
+            502,
+            counted_attempt=True,
+            details={"diagnostic_reason": "route_structure_invalid"},
+        )
+    if transitions and len(transitions) != len(visits) + 1:
+        raise RouteOptimizationError(
+            "route_response_invalid",
+            "Google returnerade en ofullständig rutt.",
+            502,
+            counted_attempt=True,
+            details={
+                "diagnostic_reason": "transition_count_invalid",
+                "transition_count": len(transitions),
+                "expected_transition_count": len(visits) + 1,
+                "transition_count_matches_expected": False,
+            },
+        )
+    if traffic_infeasible and len(transitions) != len(visits) + 1:
+        raise RouteOptimizationError(
+            "route_response_invalid",
+            "Google returnerade en ofullständig rutt.",
+            502,
+            counted_attempt=True,
+            details={
+                "diagnostic_reason": "transition_count_invalid",
+                "transition_count": len(transitions),
+                "expected_transition_count": len(visits) + 1,
+                "transition_count_matches_expected": False,
+            },
+        )
     try:
         vehicle_start = _parse_time(route["vehicleStartTime"])
         vehicle_end = _parse_time(route["vehicleEndTime"])
     except (KeyError, TypeError, ValueError):
-        raise RouteOptimizationError("route_response_invalid", "Google returnerade ogiltiga rutttider.", 502, counted_attempt=True)
+        raise RouteOptimizationError(
+            "route_response_invalid",
+            "Google returnerade ogiltiga rutttider.",
+            502,
+            counted_attempt=True,
+            details={"diagnostic_reason": "route_structure_invalid"},
+        )
+    returned_breaks_value = route.get("breaks")
+    if (
+        returned_breaks_value is not None
+        and not isinstance(returned_breaks_value, list)
+    ):
+        raise RouteOptimizationError(
+            "route_response_invalid",
+            "Google returnerade en ogiltig fast aktivitet.",
+            502,
+            counted_attempt=True,
+            details={"diagnostic_reason": "route_structure_invalid"},
+        )
+    returned_breaks = list(returned_breaks_value or [])
+    if any(not isinstance(item, Mapping) for item in returned_breaks):
+        raise RouteOptimizationError(
+            "route_response_invalid",
+            "Google returnerade en ogiltig fast aktivitet.",
+            502,
+            counted_attempt=True,
+            details={"diagnostic_reason": "route_structure_invalid"},
+        )
+    metrics_value = route.get("metrics")
+    if metrics_value is not None and not isinstance(metrics_value, Mapping):
+        raise RouteOptimizationError(
+            "route_response_invalid",
+            "Google returnerade ogiltiga ruttmått.",
+            502,
+            counted_attempt=True,
+            details={"diagnostic_reason": "route_structure_invalid"},
+        )
+    if traffic_infeasible:
+        raise RouteOptimizationError(
+            "route_traffic_infeasible",
+            (
+                "Trafiken gör att rutten inte ryms inom dagens fasta tider "
+                "och sjutimmarsgräns. Justera planeringen och försök igen."
+            ),
+            422,
+            counted_attempt=True,
+            details=_traffic_infeasibility_diagnostics(
+                response,
+                route,
+                visits=visits,
+                transitions=transitions,
+                shipments=shipment_list,
+                vehicle_start=vehicle_start,
+                vehicle_end=vehicle_end,
+                pre_route_fixed_seconds=pre_route_fixed_seconds,
+                fixed_breaks=fixed_break_list,
+                timeout_seconds=timeout_seconds,
+                solving_mode=solving_mode,
+                search_mode=search_mode,
+                max_visits=max_visits,
+                quadratic_soft_buffer_seconds=(
+                    quadratic_soft_buffer_seconds
+                ),
+                quadratic_soft_cost_per_square_hour=(
+                    quadratic_soft_cost_per_square_hour
+                ),
+            ),
+        )
+
     available_seconds = ROUTE_MAX_SECONDS - max(0, int(pre_route_fixed_seconds))
     route_seconds = int((vehicle_end - vehicle_start).total_seconds())
     expected_start = route_start.astimezone(timezone.utc)
@@ -548,11 +1277,7 @@ def parse_optimize_tours_response(
         or route_seconds + pre_route_fixed_seconds >= 25200
     ):
         raise RouteOptimizationError("route_response_invalid", "Rutten överskrider sjutimmarsgränsen.", 502, counted_attempt=True)
-    transitions = list(route.get("transitions") or [])
-    if transitions and len(transitions) != len(visits) + 1:
-        raise RouteOptimizationError("route_response_invalid", "Google returnerade en ofullständig rutt.", 502, counted_attempt=True)
-    returned_breaks = list(route.get("breaks") or [])
-    expected_breaks = sorted(fixed_breaks, key=lambda item: item["scheduled_at"])
+    expected_breaks = sorted(fixed_break_list, key=lambda item: item["scheduled_at"])
     if len(returned_breaks) != len(expected_breaks):
         raise RouteOptimizationError("route_response_invalid", "En fast aktivitet saknas i rutten.", 502, counted_attempt=True)
     for expected, actual in zip(expected_breaks, returned_breaks):
@@ -563,7 +1288,7 @@ def parse_optimize_tours_response(
             raise RouteOptimizationError("route_response_invalid", "Google returnerade en ogiltig fast aktivitet.", 502, counted_attempt=True)
         if actual_start != expected["scheduled_at"].astimezone(timezone.utc) or actual_duration < int(expected["duration_seconds"]):
             raise RouteOptimizationError("route_response_invalid", "Google flyttade en fast aktivitet.", 502, counted_attempt=True)
-    metrics = dict(route.get("metrics") or {})
+    metrics = dict(metrics_value or {})
     travel_seconds = _duration_seconds(metrics.get("travelDuration"))
     wait_seconds = _duration_seconds(metrics.get("waitDuration"))
     break_seconds = _duration_seconds(metrics.get("breakDuration"))

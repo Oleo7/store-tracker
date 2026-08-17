@@ -62,17 +62,26 @@ from route_proposal import (
     seconds_to_minutes,
 )
 from route_optimization import (
+    FALLBACK_POLICY_VERSION,
+    FALLBACK_SAFER_SOFT_DURATION_BUFFER_SECONDS,
     MAX_VISITS as ROUTE_OPTIMIZATION_MAX_VISITS,
+    MAX_PROVIDER_ATTEMPTS_PER_OPERATION,
+    PRIMARY_MODEL_VERSION,
+    QUADRATIC_SOFT_DURATION_BUFFER_SECONDS,
+    QUADRATIC_SOFT_DURATION_COST_PER_SQUARE_HOUR,
     ROUTE_ENGINE_VERSION,
     ROUTE_MAX_SECONDS as ROUTE_OPTIMIZATION_MAX_SECONDS,
     SERVICE_SECONDS as ROUTE_OPTIMIZATION_SERVICE_SECONDS,
     RouteOptimizationError,
     RouteOptimizationProvider,
     TrustedCoordinate,
+    build_input_fingerprint as build_route_optimization_input_fingerprint,
+    build_legacy_ro_v1_request_fingerprint,
     build_optimize_tours_request,
     build_request_fingerprint as build_route_optimization_fingerprint,
     coordinate_quality as route_coordinate_quality,
     parse_optimize_tours_response,
+    quadratic_soft_duration_diagnostics,
 )
 from reminder_email import (
     EMAIL_PROPOSAL_PRODUCT_SETTINGS,
@@ -523,7 +532,9 @@ ROUTE_OPTIMIZATION_RUN_COLUMNS = [
     "route_date",
     "client_request_id",
     "request_fingerprint",
+    "input_fingerprint",
     "engine_version",
+    "fallback_policy_version",
     "status",
     "counted_attempt",
     "started_at",
@@ -535,6 +546,15 @@ ROUTE_OPTIMIZATION_RUN_COLUMNS = [
     "skipped_count",
     "excluded_untrusted_coordinates",
     "google_request_label",
+    "provider_attempt_count",
+    "counted_provider_attempt_count",
+    "current_attempt_number",
+    "current_attempt_started_at",
+    "current_attempt_timeout_seconds",
+    "current_attempt_max_visits",
+    "fallback_strategy",
+    "next_attempt_json",
+    "attempt_history_json",
     "http_status",
     "error_code",
     "result_payload_json",
@@ -2363,6 +2383,71 @@ def public_planned_activity(row, *, now=None):
     }
 
 
+def active_planned_activity_queue_state(
+    activity_rows, owner, *, contact_rows=(), now=None
+):
+    """Classify unresolved owner activities by exact Stockholm time."""
+    current = now or stockholm_now()
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=STOCKHOLM_ZONE)
+    current = current.astimezone(STOCKHOLM_ZONE)
+    latest_contact_by_customer = {}
+    for row in contact_rows or ():
+        customer_id = str(row.get("customer_id") or "").strip()
+        contacted = parse_planning_datetime(row.get("date_time"))
+        if not customer_id or contacted is None:
+            continue
+        previous = latest_contact_by_customer.get(customer_id)
+        if previous is None or contacted > previous:
+            latest_contact_by_customer[customer_id] = contacted
+
+    future_customer_ids = set()
+    overdue_by_customer = defaultdict(list)
+    for row in activity_rows or ():
+        if not planning_owner_matches(row, owner):
+            continue
+        if str(row.get("status") or "planned").strip().casefold() != "planned":
+            continue
+        customer_id = str(row.get("customer_id") or "").strip()
+        scheduled = parse_planning_datetime(row.get("scheduled_at"))
+        if not customer_id or scheduled is None:
+            continue
+        if scheduled < current:
+            overdue_by_customer[customer_id].append((scheduled, row))
+        else:
+            future_customer_ids.add(customer_id)
+
+    overdue_items = []
+    for customer_id, matches in overdue_by_customer.items():
+        latest_contact = latest_contact_by_customer.get(customer_id)
+        matches = [
+            match for match in matches
+            if customer_id not in future_customer_ids
+            and not (latest_contact and latest_contact > match[0])
+        ]
+        if not matches:
+            continue
+        matches.sort(key=lambda item: (
+            item[0], str(item[1].get("planned_activity_id") or "").strip()
+        ))
+        item = public_planned_activity(matches[0][1], now=current)
+        item.update({
+            "queue_item_type": "overdue_activity",
+            "additional_overdue_count": len(matches) - 1,
+        })
+        overdue_items.append(item)
+    overdue_items.sort(key=lambda item: (
+        parse_planning_datetime(item.get("scheduled_at")) or current,
+        str(item.get("planned_activity_id") or ""),
+    ))
+    active_customer_ids = future_customer_ids | {
+        str(item.get("customer_id") or "").strip()
+        for item in overdue_items
+        if str(item.get("customer_id") or "").strip()
+    }
+    return active_customer_ids, overdue_items
+
+
 def find_planned_activity(spreadsheet, activity_id):
     sheet, headers, rows = get_planned_activity_snapshot(spreadsheet)
     requested = str(activity_id or "").strip()
@@ -3039,6 +3124,7 @@ def planning_suggestion_candidates(spreadsheet, owner, activity_rows=()):
             planned_activity_rows=activity_rows,
         )
         customers = snapshot["customers"]
+        contacts = snapshot["contact_rows"]
         with performance_step("suggestions.scoring") as measurement:
             priorities = snapshot["priorities"]
             measurement["row_count"] = len(priorities)
@@ -3131,17 +3217,11 @@ def planning_suggestion_candidates(spreadsheet, owner, activity_rows=()):
                     "latest_human_contact_date"
                 ),
             })
-    now = stockholm_now().astimezone(STOCKHOLM_ZONE)
-    externally_planned_customer_ids = {
-        str(row.get("customer_id") or "").strip()
-        for row in activity_rows
-        if str(row.get("status") or "planned").strip().casefold() == "planned"
-        and not str(row.get("source_suggestion_id") or "").strip()
-        and (
-            parse_planning_datetime(row.get("scheduled_at")) is not None
-            and parse_planning_datetime(row.get("scheduled_at")) >= now
+    externally_planned_customer_ids, _overdue = (
+        active_planned_activity_queue_state(
+            activity_rows, owner, contact_rows=contacts
         )
-    }
+    )
     candidates = [
         {
             **candidate,
@@ -5904,6 +5984,96 @@ def build_customer_timeline(
     return timeline
 
 
+def select_next_customer_follow_up(
+    customer,
+    customers,
+    contact_rows,
+    activity_rows,
+    *,
+    now=None,
+    customer_lookup=None,
+):
+    """Select the customer's nearest future follow-up without changing state."""
+    current = now or stockholm_now()
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=STOCKHOLM_ZONE)
+    current = current.astimezone(STOCKHOLM_ZONE)
+    lookup = customer_lookup or CustomerLookup(customers)
+
+    related_contacts = related_rows_for_customer(
+        contact_rows,
+        customers,
+        customer,
+        customer_lookup=lookup,
+    )
+    latest_contact = None
+    latest_contact_marker = None
+    for index, row in enumerate(related_contacts):
+        contacted = parse_planning_datetime(row.get("date_time"))
+        if contacted is None:
+            continue
+        marker = (contacted, index)
+        if latest_contact_marker is None or marker > latest_contact_marker:
+            latest_contact = row
+            latest_contact_marker = marker
+
+    legacy_date = (
+        parse_date_value(latest_contact.get("follow_up_date"))
+        if latest_contact else None
+    )
+    legacy_candidate = None
+    if legacy_date and legacy_date >= current.date():
+        legacy_candidate = {
+            "source": "latest_contact",
+            "date": legacy_date.isoformat(),
+            "time": "",
+            "contact_type": "",
+            "contact_type_label": "",
+            "contact_id": str(latest_contact.get("contact_id") or "").strip(),
+        }
+
+    related_activities = related_rows_for_customer(
+        activity_rows,
+        customers,
+        customer,
+        customer_lookup=lookup,
+    )
+    planned_candidate = None
+    planned_marker = None
+    for row in related_activities:
+        if str(row.get("status") or "planned").strip().casefold() != "planned":
+            continue
+        scheduled = parse_planning_datetime(row.get("scheduled_at"))
+        if scheduled is None or scheduled < current:
+            continue
+        marker = (
+            scheduled,
+            str(row.get("planned_activity_id") or "").strip(),
+        )
+        if planned_marker is not None and marker >= planned_marker:
+            continue
+        contact_type = normalize_planning_contact_type(row.get("contact_type"))
+        planned_marker = marker
+        planned_candidate = {
+            "source": "planned_activity",
+            "date": scheduled.date().isoformat(),
+            "time": scheduled.strftime("%H:%M"),
+            "scheduled_at": scheduled.isoformat(timespec="minutes"),
+            "contact_type": contact_type,
+            "contact_type_label": planning_contact_label(contact_type),
+            "planned_activity_id": str(
+                row.get("planned_activity_id") or ""
+            ).strip(),
+        }
+
+    if planned_candidate and (
+        legacy_candidate is None
+        or planned_candidate["date"] <= legacy_candidate["date"]
+    ):
+        return planned_candidate
+    return legacy_candidate
+
+
 @app.route("/customers/<customer_name>/stats", methods=["GET"])
 def get_customer_stats(customer_name):
     customer_name = unquote(customer_name).strip()
@@ -5951,8 +6121,9 @@ def get_customer_stats(customer_name):
             unique_references.add(o["Reference"].strip())
 
     # Contacts
+    all_contact_rows = get_contact_rows(spreadsheet)
     contact_rows = related_rows_for_customer(
-        get_contact_rows(spreadsheet),
+        all_contact_rows,
         customers,
         customer,
         customer_lookup=customer_lookup,
@@ -5968,6 +6139,18 @@ def get_customer_stats(customer_name):
     contacts.sort(key=lambda x: x["_sort_date"], reverse=True)
     for contact in contacts:
         contact.pop("_sort_date", None)
+
+    _activity_sheet, _activity_headers, indexed_activities = (
+        get_planned_activity_snapshot(spreadsheet)
+    )
+    activity_rows = [row for _row_index, row in indexed_activities]
+    next_follow_up = select_next_customer_follow_up(
+        customer,
+        customers,
+        all_contact_rows,
+        activity_rows,
+        customer_lookup=customer_lookup,
+    )
 
     sheets = ensure_email_worksheets(spreadsheet)
     timeline = build_customer_timeline(
@@ -5988,6 +6171,7 @@ def get_customer_stats(customer_name):
         "order_count": len(unique_references),
         "contacts": contacts,
         "timeline": timeline,
+        "next_follow_up": next_follow_up,
     })
 
 
@@ -6027,6 +6211,55 @@ def build_current_priority_snapshot(
     return priority_customers, email_engagement_by_customer
 
 
+def priority_planned_activity_signature(rows):
+    """Fingerprint only planning fields that affect priority suppression."""
+    relevant_rows = []
+    for row in rows or ():
+        row = row if isinstance(row, dict) else {}
+        relevant_rows.append({
+            "planned_activity_id": str(
+                row.get("planned_activity_id") or ""
+            ).strip(),
+            "customer_id": str(row.get("customer_id") or "").strip(),
+            "customer": str(row.get("customer") or "").strip(),
+            "status": str(row.get("status") or "").strip().casefold(),
+            "scheduled_at": planning_datetime_text(row.get("scheduled_at")),
+            "source_suggestion_id": str(
+                row.get("source_suggestion_id") or ""
+            ).strip(),
+            "source_contact_id": str(
+                row.get("source_contact_id") or ""
+            ).strip(),
+        })
+    relevant_rows.sort(
+        key=lambda row: canonical_payload_fingerprint(row)
+    )
+    return canonical_payload_fingerprint(relevant_rows)
+
+
+def priority_planned_activity_time_signature(rows, *, now=None):
+    """Change cache identity exactly when a planned activity becomes overdue."""
+    current = now or stockholm_now()
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=STOCKHOLM_ZONE)
+    current = current.astimezone(STOCKHOLM_ZONE)
+    states = []
+    for row in rows or ():
+        if str(row.get("status") or "planned").strip().casefold() != "planned":
+            continue
+        scheduled = parse_planning_datetime(row.get("scheduled_at"))
+        if scheduled is None:
+            continue
+        states.append({
+            "planned_activity_id": str(
+                row.get("planned_activity_id") or ""
+            ).strip(),
+            "time_state": "overdue" if scheduled < current else "future",
+        })
+    states.sort(key=lambda row: (row["planned_activity_id"], row["time_state"]))
+    return canonical_payload_fingerprint(states)
+
+
 def get_authoritative_priority_snapshot(
     spreadsheet, *, today, planned_activity_rows=None
 ):
@@ -6038,7 +6271,26 @@ def get_authoritative_priority_snapshot(
         _sheet_read_cache.generation
         if cache_enabled else time.monotonic_ns()
     )
-    key = (id(spreadsheet), date_key, generation)
+    if planned_activity_rows is None:
+        try:
+            _sheet, _headers, indexed = get_planned_activity_snapshot(
+                spreadsheet
+            )
+            planned_activity_rows = [row for _index, row in indexed]
+        except (WorksheetNotFound, AttributeError):
+            planned_activity_rows = []
+    else:
+        planned_activity_rows = list(planned_activity_rows)
+    planning_signature = priority_planned_activity_signature(
+        planned_activity_rows
+    )
+    planning_time_signature = priority_planned_activity_time_signature(
+        planned_activity_rows
+    )
+    key = (
+        id(spreadsheet), date_key, generation, planning_signature,
+        planning_time_signature,
+    )
     with _priority_snapshot_condition:
         while True:
             if _priority_snapshot_entry and _priority_snapshot_entry[0] == key:
@@ -6054,14 +6306,6 @@ def get_authoritative_priority_snapshot(
         message_rows, recipient_rows, _events = get_email_rows(
             spreadsheet, include_events=False
         )
-        if planned_activity_rows is None:
-            try:
-                _sheet, _headers, indexed = get_planned_activity_snapshot(
-                    spreadsheet
-                )
-                planned_activity_rows = [row for _index, row in indexed]
-            except (WorksheetNotFound, AttributeError):
-                planned_activity_rows = []
         priorities, email_snapshot = build_current_priority_snapshot(
             customers=customers,
             order_rows=order_rows,
@@ -6531,18 +6775,36 @@ def suggestion_queue_payload(
         )
         activity_rows = [row for _index, row in indexed_activities]
         measurement["row_count"] = len(activity_rows)
+    with performance_step("suggestions.contact_snapshot") as measurement:
+        contact_rows = get_contact_rows(spreadsheet)
+        measurement["row_count"] = len(contact_rows)
+    active_customer_ids, overdue_items = active_planned_activity_queue_state(
+        activity_rows, owner, contact_rows=contact_rows
+    )
     with performance_step("suggestions.candidates") as measurement:
         candidates = planning_suggestion_candidates(
             spreadsheet, owner, activity_rows
         )
         measurement["row_count"] = len(candidates)
     with performance_step("suggestions.queue") as measurement:
-        suggestion, queue_preview, pending_count = planning_suggestion_service(
+        suggestion, queue_preview, suggestion_count = planning_suggestion_service(
             spreadsheet
         ).queue(
             owner, candidates, activity_rows,
             preview_limit=suggestion_preview_limit(preview_limit),
+            materialize_top=not overdue_items,
         )
+        suggestion_items = [
+            item for item in ([suggestion] + queue_preview)
+            if item and str(item.get("customer_id") or "").strip()
+            not in active_customer_ids
+        ]
+        combined = overdue_items + suggestion_items
+        suggestion = combined[0] if combined else None
+        queue_preview = combined[
+            1:1 + suggestion_preview_limit(preview_limit)
+        ]
+        pending_count = len(overdue_items) + suggestion_count
         measurement["row_count"] = pending_count
     return suggestion, queue_preview, pending_count
 
@@ -9464,14 +9726,18 @@ def build_route_optimization_inputs(
             )
 
     blocked_customer_ids = set()
+    current = stockholm_now().astimezone(STOCKHOLM_ZONE)
     for row in planned_rows:
         if str(row.get("status") or "planned").strip().casefold() != "planned":
-            continue
-        if str(row.get("source") or "").strip().casefold() == "route":
             continue
         scheduled = parse_planning_datetime(row.get("scheduled_at"))
         customer_id = str(row.get("customer_id") or "").strip()
         if not scheduled or not customer_id:
+            continue
+        if scheduled < current:
+            blocked_customer_ids.add(customer_id)
+            continue
+        if str(row.get("source") or "").strip().casefold() == "route":
             continue
         if scheduled.date() > route_date or (
             scheduled.date() == route_date
@@ -9524,15 +9790,22 @@ def build_route_optimization_inputs(
         maximum=300,
     )
     trusted_start = TrustedCoordinate(round(start.latitude, 5), round(start.longitude, 5))
-    fingerprint = build_route_optimization_fingerprint(
-        owner_user_name=owner.get("user_name"),
-        route_date=route_date.isoformat(),
-        route_start=route_start_at,
-        route_mode="automatic",
-        start=trusted_start,
-        shipments=shipments,
-        fixed_activities=fixed_activities_for_fingerprint,
+    fingerprint_kwargs = {
+        "owner_user_name": owner.get("user_name"),
+        "route_date": route_date.isoformat(),
+        "route_start": route_start_at,
+        "route_mode": "automatic",
+        "start": trusted_start,
+        "shipments": shipments,
+        "fixed_activities": fixed_activities_for_fingerprint,
+    }
+    fingerprint = build_route_optimization_fingerprint(**fingerprint_kwargs)
+    input_fingerprint = build_route_optimization_input_fingerprint(
+        **fingerprint_kwargs
     )
+    legacy_request_fingerprints = {
+        "ro-v1": build_legacy_ro_v1_request_fingerprint(**fingerprint_kwargs),
+    }
     return {
         "route_start_at": route_start_at,
         "start": trusted_start,
@@ -9542,6 +9815,8 @@ def build_route_optimization_inputs(
         "pre_route_fixed_seconds": pre_route_fixed_seconds,
         "timeout_seconds": timeout_seconds,
         "fingerprint": fingerprint,
+        "input_fingerprint": input_fingerprint,
+        "legacy_request_fingerprints": legacy_request_fingerprints,
         "customers_by_id": customers_by_id,
         "date_rows": date_rows,
         "excluded_untrusted_coordinates": excluded_untrusted,
@@ -9559,9 +9834,497 @@ def _parse_run_timestamp(value):
     return parsed.astimezone(STOCKHOLM_ZONE)
 
 
+def route_optimization_recovery_status(
+    spreadsheet, *, actor_user_name, client_request_id, now=None
+):
+    """Read one actor-scoped run status without mutating the audit ledger."""
+    try:
+        sheet = get_worksheet(spreadsheet, ROUTE_OPTIMIZATION_RUNS_SHEET)
+    except WorksheetNotFound:
+        return {"state": "not_found"}
+    _headers, rows = worksheet_snapshot(
+        sheet, expected_columns=ROUTE_OPTIMIZATION_RUN_COLUMNS
+    )
+    matching = [
+        row for _row_index, row in rows
+        if str(row.get("actor_user_name") or "").strip() == actor_user_name
+        and str(row.get("client_request_id") or "").strip() == client_request_id
+    ]
+    if not matching:
+        return {"state": "not_found"}
+
+    row = matching[-1]
+    status = str(row.get("status") or "").strip().casefold()
+    error_code = str(row.get("error_code") or "").strip()
+    if status == "completed":
+        return {"state": "completed"}
+    if status == "failed":
+        result = {"state": "failed"}
+        if error_code:
+            result["error_code"] = error_code
+        return result
+    if status == "fallback_ready":
+        plan = _route_json_object(row.get("next_attempt_json"))
+        result = {
+            "state": "fallback_ready",
+            "next_attempt": _route_nonnegative_int(plan.get("attempt_number")),
+            "strategy": str(plan.get("strategy") or ""),
+        }
+        return result
+    if status == "running":
+        started_at = _parse_run_timestamp(
+            row.get("current_attempt_started_at") or row.get("started_at")
+        )
+        timeout_seconds = _route_nonnegative_int(
+            row.get("current_attempt_timeout_seconds")
+            or row.get("timeout_seconds")
+        )
+        current = now or stockholm_now()
+        if (
+            started_at is not None
+            and timeout_seconds > 0
+            and (current - started_at).total_seconds() <= timeout_seconds + 60
+        ):
+            return {"state": "running"}
+        return {
+            "state": "indeterminate",
+            "error_code": error_code or "route_optimization_stale_running",
+        }
+
+    result = {"state": "indeterminate"}
+    if error_code:
+        result["error_code"] = error_code
+    return result
+
+
+_ROUTE_FAILURE_DIAGNOSTIC_DETAIL_KEYS = frozenset({
+    "absolute_route_max_seconds",
+    "aggregate_timeline_residual_seconds",
+    "consider_road_traffic",
+    "expected_transition_count",
+    "fixed_break_count",
+    "fixed_visit_count",
+    "has_fixed_breaks",
+    "has_fixed_visits",
+    "has_required_visits",
+    "max_visits",
+    "model_route_max_seconds",
+    "most_negative_transition_index",
+    "most_negative_transition_residual_seconds",
+    "negative_residual_transition_count",
+    "negative_wait_transition_count",
+    "pre_route_fixed_seconds",
+    "quadratic_soft_buffer_seconds",
+    "quadratic_soft_cost_per_square_hour",
+    "quadratic_soft_duration_cost",
+    "quadratic_soft_duration_enabled",
+    "quadratic_soft_exceedance_seconds",
+    "quadratic_soft_max_seconds",
+    "required_count",
+    "route_break_duration_seconds",
+    "route_delay_duration_seconds",
+    "route_elapsed_matches_total_duration",
+    "route_elapsed_seconds",
+    "route_end_at",
+    "route_engine_version",
+    "route_metrics",
+    "route_start_at",
+    "route_total_duration_seconds",
+    "route_travel_duration_seconds",
+    "route_visit_duration_seconds",
+    "route_wait_duration_seconds",
+    "search_mode",
+    "service_duration_seconds",
+    "shipment_count",
+    "skip_reason_counts",
+    "solving_mode",
+    "stop_count",
+    "timeout_seconds",
+    "traffic_deficit_calculated",
+    "traffic_info_unavailable_count",
+    "transition_count",
+    "transition_count_matches_expected",
+    "transition_diagnostics",
+    "transition_residual_max_seconds",
+    "transition_residual_min_seconds",
+})
+
+
+def _route_failure_diagnostic_json(
+    *, response, error, owner_user_name, solve_duration_ms
+):
+    """Build ledger diagnostics without ever masking the classified error."""
+    reason = error.details.get("diagnostic_reason")
+    if not isinstance(reason, str) or not reason:
+        reason = error.code
+    minimal_payload = {
+        "error_code": error.code,
+        "diagnostic_reason": reason,
+    }
+    try:
+        if not isinstance(response, dict):
+            return ""
+
+        def diagnostic_list(value):
+            return value if isinstance(value, list) else []
+
+        routes = diagnostic_list(response.get("routes"))
+        route_candidate = routes[0] if routes else {}
+        route = route_candidate if isinstance(route_candidate, dict) else {}
+        visits = diagnostic_list(route.get("visits"))
+        skipped_shipments = diagnostic_list(response.get("skippedShipments"))
+        breaks = diagnostic_list(route.get("breaks"))
+        diagnostic_payload = {
+            **minimal_payload,
+            "solve_duration_ms": solve_duration_ms,
+            "route_count": len(routes),
+            "visit_count": len(visits),
+            "skipped_count": len(skipped_shipments),
+            "break_count": len(breaks),
+            "hasTrafficInfeasibilities": (
+                route.get("hasTrafficInfeasibilities") is True
+            ),
+            "vehicle_label_matches": (
+                route.get("vehicleLabel")
+                == f"owner:{str(owner_user_name).strip().casefold()}"
+            ),
+        }
+        for key in _ROUTE_FAILURE_DIAGNOSTIC_DETAIL_KEYS:
+            if key in error.details:
+                diagnostic_payload[key] = error.details[key]
+        return json.dumps(
+            diagnostic_payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+    except Exception:
+        try:
+            return json.dumps(
+                minimal_payload,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        except Exception:
+            return ""
+
+
+def _route_operation_input_matches(row, inputs):
+    """Match an idempotent operation without conflating input and policy.
+
+    New rows carry a policy-independent input fingerprint.  Rows deployed
+    before that column use their exact policy-bound fingerprint, with a narrow
+    ro-v1 reconstruction for completed-operation recovery across the ro-v2
+    deployment.
+    """
+    current_input_fingerprint = str(
+        inputs.get("input_fingerprint") or ""
+    ).strip()
+    stored_input_fingerprint = str(
+        row.get("input_fingerprint") or ""
+    ).strip()
+    if stored_input_fingerprint:
+        return bool(
+            current_input_fingerprint
+            and stored_input_fingerprint == current_input_fingerprint
+        )
+
+    stored_request_fingerprint = str(
+        row.get("request_fingerprint") or ""
+    ).strip()
+    if stored_request_fingerprint == str(inputs.get("fingerprint") or ""):
+        return True
+    engine_version = str(row.get("engine_version") or "").strip()
+    legacy_fingerprint = str(
+        (inputs.get("legacy_request_fingerprints") or {}).get(
+            engine_version
+        ) or ""
+    ).strip()
+    return bool(
+        stored_request_fingerprint
+        and legacy_fingerprint
+        and stored_request_fingerprint == legacy_fingerprint
+    )
+
+
+_ROUTE_FALLBACK_TRIGGER_CODES = frozenset({"route_traffic_infeasible"})
+_ROUTE_ATTEMPT_STRATEGIES = frozenset({
+    "primary",
+    "alternate_safer",
+    "reduced_cap",
+})
+
+
+def _route_nonnegative_int(value, default=0):
+    if isinstance(value, bool):
+        return default
+    try:
+        return max(0, int(float(value)))
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+
+def _route_json_list(value):
+    try:
+        parsed = json.loads(str(value or "[]"))
+    except (TypeError, ValueError):
+        return []
+    return parsed if isinstance(parsed, list) else []
+
+
+def _route_json_object(value):
+    try:
+        parsed = json.loads(str(value or "{}"))
+    except (TypeError, ValueError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _route_counted_provider_attempts(row):
+    explicit = str(row.get("counted_provider_attempt_count") or "").strip()
+    if explicit:
+        return _route_nonnegative_int(explicit)
+    return 1 if is_yes(row.get("counted_attempt")) else 0
+
+
+def _route_attempt_plan(
+    *,
+    attempt_number,
+    strategy,
+    max_visits,
+):
+    safer = strategy != "primary"
+    return {
+        "fallback_policy_version": FALLBACK_POLICY_VERSION,
+        "primary_model_version": PRIMARY_MODEL_VERSION,
+        "attempt_number": int(attempt_number),
+        "strategy": strategy,
+        "search_mode": (
+            "RETURN_FAST" if strategy == "reduced_cap"
+            else "CONSUME_ALL_AVAILABLE_TIME"
+        ),
+        "max_visits": int(max_visits),
+        "route_max_seconds": ROUTE_OPTIMIZATION_MAX_SECONDS,
+        "service_seconds": ROUTE_OPTIMIZATION_SERVICE_SECONDS,
+        "quadratic_soft_buffer_seconds": (
+            FALLBACK_SAFER_SOFT_DURATION_BUFFER_SECONDS
+            if safer else QUADRATIC_SOFT_DURATION_BUFFER_SECONDS
+        ),
+        "quadratic_soft_cost_per_square_hour": (
+            QUADRATIC_SOFT_DURATION_COST_PER_SQUARE_HOUR
+        ),
+    }
+
+
+def _route_primary_attempt_plan():
+    return _route_attempt_plan(
+        attempt_number=1,
+        strategy="primary",
+        max_visits=ROUTE_OPTIMIZATION_MAX_VISITS,
+    )
+
+
+def _route_attempt_plan_is_supported(plan, inputs):
+    if not isinstance(plan, dict):
+        return False
+    expected_constants = {
+        "fallback_policy_version": FALLBACK_POLICY_VERSION,
+        "primary_model_version": PRIMARY_MODEL_VERSION,
+        "route_max_seconds": ROUTE_OPTIMIZATION_MAX_SECONDS,
+        "service_seconds": ROUTE_OPTIMIZATION_SERVICE_SECONDS,
+        "quadratic_soft_cost_per_square_hour": (
+            QUADRATIC_SOFT_DURATION_COST_PER_SQUARE_HOUR
+        ),
+    }
+    if any(plan.get(key) != value for key, value in expected_constants.items()):
+        return False
+    attempt_number = _route_nonnegative_int(plan.get("attempt_number"))
+    max_visits = _route_nonnegative_int(plan.get("max_visits"))
+    strategy = str(plan.get("strategy") or "")
+    required_count = _route_nonnegative_int(inputs.get("required_count"))
+    if (
+        attempt_number not in range(1, MAX_PROVIDER_ATTEMPTS_PER_OPERATION + 1)
+        or strategy not in _ROUTE_ATTEMPT_STRATEGIES
+        or not max(1, required_count) <= max_visits <= ROUTE_OPTIMIZATION_MAX_VISITS
+    ):
+        return False
+    if (
+        (strategy == "primary" and attempt_number != 1)
+        or (strategy == "alternate_safer" and attempt_number != 2)
+        or (strategy == "reduced_cap" and attempt_number != 3)
+    ):
+        return False
+    expected_search_mode = (
+        "RETURN_FAST" if strategy == "reduced_cap"
+        else "CONSUME_ALL_AVAILABLE_TIME"
+    )
+    expected_soft_buffer = (
+        QUADRATIC_SOFT_DURATION_BUFFER_SECONDS
+        if strategy == "primary"
+        else FALLBACK_SAFER_SOFT_DURATION_BUFFER_SECONDS
+    )
+    if (
+        plan.get("search_mode") != expected_search_mode
+        or plan.get("quadratic_soft_buffer_seconds") != expected_soft_buffer
+    ):
+        return False
+    if strategy in {"primary", "alternate_safer"}:
+        return max_visits == ROUTE_OPTIMIZATION_MAX_VISITS
+    return max(1, required_count) <= max_visits < ROUTE_OPTIMIZATION_MAX_VISITS
+
+
+def _route_attempt_shipments(plan, inputs):
+    del plan
+    return list(inputs["shipments"])
+
+
+def _route_attempt_history_started(plan, *, shipment_count, provider_label, started_at):
+    return {
+        "attempt_number": plan["attempt_number"],
+        "strategy": plan["strategy"],
+        "search_mode": plan["search_mode"],
+        "max_visits": plan["max_visits"],
+        "shipment_count_sent": shipment_count,
+        "quadratic_soft_buffer_seconds": plan[
+            "quadratic_soft_buffer_seconds"
+        ],
+        "quadratic_soft_cost_per_square_hour": plan[
+            "quadratic_soft_cost_per_square_hour"
+        ],
+        "provider_label": provider_label,
+        "started_at": started_at,
+        "completed_at": "",
+        "provider_status": "",
+        "counted_attempt": True,
+        "outcome": "running",
+        "error_code": "",
+        "solve_duration_ms": None,
+        "performed_count": None,
+        "skipped_count": None,
+        "route_duration_seconds": None,
+        "total_priority_score": None,
+        "traffic_flag": False,
+    }
+
+
+_ROUTE_ATTEMPT_TRAFFIC_KEYS = (
+    "aggregate_timeline_residual_seconds",
+    "most_negative_transition_index",
+    "most_negative_transition_residual_seconds",
+    "quadratic_soft_duration_cost",
+    "quadratic_soft_exceedance_seconds",
+    "quadratic_soft_max_seconds",
+    "route_total_duration_seconds",
+    "route_travel_duration_seconds",
+    "route_visit_duration_seconds",
+    "route_wait_duration_seconds",
+    "stop_count",
+    "traffic_info_unavailable_count",
+    "transition_count",
+)
+
+
+def _route_finish_attempt_history(
+    history,
+    *,
+    attempt_number,
+    completed_at,
+    provider_status,
+    counted_attempt,
+    outcome,
+    error=None,
+    solve_duration_ms=None,
+    parsed=None,
+    full_shipment_count=None,
+):
+    result = [dict(item) for item in history if isinstance(item, dict)][
+        :MAX_PROVIDER_ATTEMPTS_PER_OPERATION
+    ]
+    entry = next((
+        item for item in reversed(result)
+        if item.get("attempt_number") == attempt_number
+    ), None)
+    if entry is None:
+        return result
+    entry.update({
+        "completed_at": completed_at,
+        "provider_status": provider_status,
+        "counted_attempt": bool(counted_attempt),
+        "outcome": outcome,
+        "error_code": str(getattr(error, "code", "") or ""),
+        "solve_duration_ms": solve_duration_ms,
+    })
+    if parsed is not None:
+        entry.update({
+            "performed_count": parsed.get("performed_count"),
+            "skipped_count": (
+                max(0, full_shipment_count - parsed.get("performed_count", 0))
+                if full_shipment_count is not None
+                else parsed.get("skipped_count")
+            ),
+            "route_duration_seconds": (
+                (parsed.get("summary") or {}).get("route_seconds")
+            ),
+            "total_priority_score": (
+                (parsed.get("summary") or {}).get("total_priority_score")
+            ),
+        })
+    if error is not None and error.code == "route_traffic_infeasible":
+        entry["traffic_flag"] = True
+        entry["traffic_diagnostics"] = {
+            key: error.details[key]
+            for key in _ROUTE_ATTEMPT_TRAFFIC_KEYS
+            if key in error.details
+        }
+        entry["performed_count"] = error.details.get("stop_count")
+    return result
+
+
+def _route_next_fallback_plan(*, current_plan, error, inputs):
+    if error.code not in _ROUTE_FALLBACK_TRIGGER_CODES:
+        return None
+    attempt_number = _route_nonnegative_int(current_plan.get("attempt_number"))
+    if attempt_number >= MAX_PROVIDER_ATTEMPTS_PER_OPERATION:
+        return None
+    required_count = _route_nonnegative_int(inputs.get("required_count"))
+    next_attempt = attempt_number + 1
+    strategy = current_plan.get("strategy")
+    if strategy == "primary":
+        return _route_attempt_plan(
+            attempt_number=next_attempt,
+            strategy="alternate_safer",
+            max_visits=ROUTE_OPTIMIZATION_MAX_VISITS,
+        )
+    if strategy == "alternate_safer":
+        minimum_visit_cap = required_count if required_count > 0 else 1
+        safer_stop_count = _route_nonnegative_int(error.details.get("stop_count"))
+        if safer_stop_count > minimum_visit_cap:
+            return _route_attempt_plan(
+                attempt_number=next_attempt,
+                strategy="reduced_cap",
+                max_visits=max(minimum_visit_cap, safer_stop_count - 1),
+            )
+    return None
+
+
+def _route_fallback_continuation(run_id, plan):
+    return {
+        "ok": True,
+        "state": "fallback_ready",
+        "run_id": run_id,
+        "next_attempt": plan["attempt_number"],
+        "strategy": plan["strategy"],
+    }
+
+
 def execute_route_optimization(*, spreadsheet, owner, inputs, client_request_id):
-    actor = current_user()
-    actor_user_name = str(actor.get("user_name") or "").strip()
+    """Run or resume one bounded, persisted Route Optimization operation.
+
+    Each invocation reserves and performs at most one provider attempt. A
+    traffic-infeasible HTTP-200 candidate persists the exact next policy and
+    returns ``fallback_ready`` so a later POST can continue safely.
+    """
+    actor_user_name = str(current_user().get("user_name") or "").strip()
     owner_user_name = str(owner.get("user_name") or "").strip()
     fingerprint = inputs["fingerprint"]
     now = stockholm_now()
@@ -9582,8 +10345,7 @@ def execute_route_optimization(*, spreadsheet, owner, inputs, client_request_id)
         nonlocal quota_recorded
         if not quota_recorded:
             record_performance_step(
-                "route_optimization.quota_reservation",
-                quota_started,
+                "route_optimization.quota_reservation", quota_started
             )
             quota_recorded = True
 
@@ -9591,27 +10353,31 @@ def execute_route_optimization(*, spreadsheet, owner, inputs, client_request_id)
         sheet, headers, rows = route_optimization_run_rows(spreadsheet)
         same_request = next((
             (row_index, row) for row_index, row in rows
-            if str(row.get("actor_user_name") or "").strip() == actor_user_name
-            and str(row.get("client_request_id") or "").strip() == client_request_id
+            if str(row.get("actor_user_name") or "").strip()
+            == actor_user_name
+            and str(row.get("client_request_id") or "").strip()
+            == client_request_id
         ), None)
+
         if same_request:
-            _row_index, row = same_request
-            if str(row.get("request_fingerprint") or "") != fingerprint:
+            row_index, row = same_request
+            run_id = str(row.get("run_id") or "").strip()
+            if not _route_operation_input_matches(row, inputs):
                 finish_quota_instrumentation()
                 return None, planning_error(
                     "route_request_id_conflict",
                     "Request-ID:t har redan använts för ett annat ruttunderlag.",
                     409,
                 )
+
             status = str(row.get("status") or "").strip().casefold()
             if status == "completed":
                 try:
-                    finish_quota_instrumentation()
-                    return {
-                        "result": json.loads(row.get("result_payload_json") or "{}"),
-                        "run_id": row.get("run_id"),
-                        "cached": True,
-                    }, None
+                    compact_result = json.loads(
+                        row.get("result_payload_json") or "{}"
+                    )
+                    if not isinstance(compact_result, dict):
+                        raise ValueError("invalid cached result")
                 except (TypeError, ValueError):
                     finish_quota_instrumentation()
                     return None, planning_error(
@@ -9619,57 +10385,29 @@ def execute_route_optimization(*, spreadsheet, owner, inputs, client_request_id)
                         "Det sparade ruttresultatet är ogiltigt.",
                         503,
                     )
-            if status == "running":
-                started_at = _parse_run_timestamp(row.get("started_at"))
-                if started_at and (now - started_at).total_seconds() <= inputs["timeout_seconds"] + 60:
-                    finish_quota_instrumentation()
-                    return None, planning_error(
-                        "route_optimization_in_progress",
-                        "Samma ruttoptimering pågår redan.",
-                        409,
-                    )
-                update_route_optimization_run(
-                    sheet,
-                    same_request[0],
-                    headers,
-                    {
-                        "status": "indeterminate",
-                        "completed_at": planning_timestamp(),
-                        "error_code": "route_optimization_stale_running",
-                    },
-                    str(row.get("run_id") or ""),
-                )
                 finish_quota_instrumentation()
-                return None, planning_error(
-                    "route_request_already_attempted",
-                    "Det tidigare ruttförsöket har okänt utfall. Starta ett nytt försök.",
-                    409,
-                )
-            finish_quota_instrumentation()
-            return None, planning_error(
-                "route_request_already_attempted",
-                "Detta ruttförsök är redan avslutat. Starta ett nytt försök.",
-                409,
-            )
+                return {
+                    "result": compact_result,
+                    "run_id": run_id,
+                    "cached": True,
+                }, None
 
-        for row_index, row in rows:
-            if str(row.get("request_fingerprint") or "") != fingerprint:
-                continue
-            status = str(row.get("status") or "").strip().casefold()
-            completed_at = _parse_run_timestamp(row.get("completed_at"))
-            if status == "completed" and completed_at and (now - completed_at).total_seconds() <= cache_seconds:
-                try:
-                    finish_quota_instrumentation()
-                    return {
-                        "result": json.loads(row.get("result_payload_json") or "{}"),
-                        "run_id": row.get("run_id"),
-                        "cached": True,
-                    }, None
-                except (TypeError, ValueError):
-                    continue
             if status == "running":
-                started_at = _parse_run_timestamp(row.get("started_at"))
-                if started_at and (now - started_at).total_seconds() <= inputs["timeout_seconds"] + 60:
+                started_at = _parse_run_timestamp(
+                    row.get("current_attempt_started_at")
+                    or row.get("started_at")
+                )
+                timeout_seconds = _route_nonnegative_int(
+                    row.get("current_attempt_timeout_seconds")
+                    or row.get("timeout_seconds")
+                    or inputs["timeout_seconds"]
+                )
+                if (
+                    started_at
+                    and timeout_seconds > 0
+                    and (now - started_at).total_seconds()
+                    <= timeout_seconds + 60
+                ):
                     finish_quota_instrumentation()
                     return None, planning_error(
                         "route_optimization_in_progress",
@@ -9685,67 +10423,282 @@ def execute_route_optimization(*, spreadsheet, owner, inputs, client_request_id)
                         "completed_at": planning_timestamp(),
                         "error_code": "route_optimization_stale_running",
                     },
-                    str(row.get("run_id") or ""),
+                    run_id,
+                )
+                finish_quota_instrumentation()
+                return None, planning_error(
+                    "route_request_already_attempted",
+                    "Det tidigare ruttförsöket har okänt utfall. Starta ett nytt försök.",
+                    409,
                 )
 
-        counted = [
-            row for _row_index, row in rows
-            if str(row.get("usage_iso_week") or "") == usage_week
-            and is_yes(row.get("counted_attempt"))
-        ]
-        owner_count = sum(
-            1 for row in counted
-            if normalize_key(row.get("user_name")) == normalize_key(owner_user_name)
-        )
-        if owner_count >= owner_limit or len(counted) >= team_limit:
-            finish_quota_instrumentation()
-            return None, planning_error(
-                "route_optimization_quota_exceeded",
-                "Veckans kvot för automatisk ruttoptimering är slut.",
-                429,
-                reset_at=route_optimization_reset_at(now),
-            )
+            if status != "fallback_ready":
+                finish_quota_instrumentation()
+                return None, planning_error(
+                    "route_request_already_attempted",
+                    "Detta ruttförsök är redan avslutat. Starta ett nytt försök.",
+                    409,
+                )
 
-        run_id = str(uuid.uuid4())
-        request_label = f"store-tracker:{run_id}"
-        run = {
-            "run_id": run_id,
-            "actor_user_name": actor_user_name,
-            "user_name": owner_user_name,
-            "usage_iso_week": usage_week,
-            "route_date": inputs["route_start_at"].date().isoformat(),
-            "client_request_id": client_request_id,
-            "request_fingerprint": fingerprint,
-            "engine_version": ROUTE_ENGINE_VERSION,
-            "status": "running",
-            "counted_attempt": "Y",
-            "started_at": planning_timestamp(),
-            "completed_at": "",
-            "timeout_seconds": inputs["timeout_seconds"],
-            "shipment_count": len(inputs["shipments"]),
-            "required_count": inputs["required_count"],
-            "performed_count": "",
-            "skipped_count": "",
-            "excluded_untrusted_coordinates": inputs["excluded_untrusted_coordinates"],
-            "google_request_label": request_label,
-            "http_status": "",
-            "error_code": "",
-            "result_payload_json": "",
-        }
-        row_index = append_route_optimization_run(sheet, run)
-        finish_quota_instrumentation()
+            attempt_plan = _route_json_object(row.get("next_attempt_json"))
+            attempt_history = _route_json_list(
+                row.get("attempt_history_json")
+            )[:MAX_PROVIDER_ATTEMPTS_PER_OPERATION]
+            provider_attempt_count = _route_nonnegative_int(
+                row.get("provider_attempt_count")
+            )
+            counted_provider_attempt_count = (
+                _route_counted_provider_attempts(row)
+            )
+            expected_attempt = provider_attempt_count + 1
+            if (
+                provider_attempt_count >= MAX_PROVIDER_ATTEMPTS_PER_OPERATION
+                or _route_nonnegative_int(
+                    attempt_plan.get("attempt_number")
+                ) != expected_attempt
+                or not _route_attempt_plan_is_supported(
+                    attempt_plan, inputs
+                )
+            ):
+                update_route_optimization_run(
+                    sheet,
+                    row_index,
+                    headers,
+                    {
+                        "status": "indeterminate",
+                        "completed_at": planning_timestamp(),
+                        "error_code": "route_fallback_state_invalid",
+                    },
+                    run_id,
+                )
+                finish_quota_instrumentation()
+                return None, planning_error(
+                    "route_fallback_state_invalid",
+                    "Det sparade fallback-läget kan inte fortsättas säkert.",
+                    409,
+                )
+
+            attempt_shipments = _route_attempt_shipments(
+                attempt_plan, inputs
+            )
+            attempt_number = attempt_plan["attempt_number"]
+            request_label = f"store-tracker:{run_id}:a{attempt_number}"
+            attempt_started_at = planning_timestamp()
+            attempt_history.append(_route_attempt_history_started(
+                attempt_plan,
+                shipment_count=len(attempt_shipments),
+                provider_label=request_label,
+                started_at=attempt_started_at,
+            ))
+            provider_attempt_count += 1
+            counted_provider_attempt_count += 1
+            update_route_optimization_run(
+                sheet,
+                row_index,
+                headers,
+                {
+                    "status": "running",
+                    "counted_attempt": "Y",
+                    "completed_at": "",
+                    "google_request_label": request_label,
+                    "provider_attempt_count": provider_attempt_count,
+                    "counted_provider_attempt_count": (
+                        counted_provider_attempt_count
+                    ),
+                    "current_attempt_number": attempt_number,
+                    "current_attempt_started_at": attempt_started_at,
+                    "current_attempt_timeout_seconds": inputs[
+                        "timeout_seconds"
+                    ],
+                    "current_attempt_max_visits": attempt_plan[
+                        "max_visits"
+                    ],
+                    "fallback_strategy": attempt_plan["strategy"],
+                    "next_attempt_json": "",
+                    "attempt_history_json": json.dumps(
+                        attempt_history,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ),
+                    "http_status": "",
+                    "error_code": "",
+                },
+                run_id,
+            )
+            finish_quota_instrumentation()
+
+        else:
+            for cached_row_index, row in rows:
+                if str(row.get("request_fingerprint") or "") != fingerprint:
+                    continue
+                status = str(row.get("status") or "").strip().casefold()
+                completed_at = _parse_run_timestamp(row.get("completed_at"))
+                if (
+                    status == "completed"
+                    and completed_at
+                    and (now - completed_at).total_seconds() <= cache_seconds
+                ):
+                    try:
+                        compact_result = json.loads(
+                            row.get("result_payload_json") or "{}"
+                        )
+                        if not isinstance(compact_result, dict):
+                            raise ValueError("invalid cached result")
+                    except (TypeError, ValueError):
+                        continue
+                    finish_quota_instrumentation()
+                    return {
+                        "result": compact_result,
+                        "run_id": row.get("run_id"),
+                        "cached": True,
+                    }, None
+                if status == "running":
+                    started_at = _parse_run_timestamp(
+                        row.get("current_attempt_started_at")
+                        or row.get("started_at")
+                    )
+                    timeout_seconds = _route_nonnegative_int(
+                        row.get("current_attempt_timeout_seconds")
+                        or row.get("timeout_seconds")
+                        or inputs["timeout_seconds"]
+                    )
+                    if (
+                        started_at
+                        and timeout_seconds > 0
+                        and (now - started_at).total_seconds()
+                        <= timeout_seconds + 60
+                    ):
+                        finish_quota_instrumentation()
+                        return None, planning_error(
+                            "route_optimization_in_progress",
+                            "Samma ruttoptimering pågår redan.",
+                            409,
+                        )
+                    update_route_optimization_run(
+                        sheet,
+                        cached_row_index,
+                        headers,
+                        {
+                            "status": "indeterminate",
+                            "completed_at": planning_timestamp(),
+                            "error_code": (
+                                "route_optimization_stale_running"
+                            ),
+                        },
+                        str(row.get("run_id") or ""),
+                    )
+
+            counted_rows = [
+                row for _row_index, row in rows
+                if str(row.get("usage_iso_week") or "") == usage_week
+            ]
+            owner_count = sum(
+                _route_counted_provider_attempts(row)
+                for row in counted_rows
+                if normalize_key(row.get("user_name"))
+                == normalize_key(owner_user_name)
+            )
+            team_count = sum(
+                _route_counted_provider_attempts(row)
+                for row in counted_rows
+            )
+            if owner_count >= owner_limit or team_count >= team_limit:
+                finish_quota_instrumentation()
+                return None, planning_error(
+                    "route_optimization_quota_exceeded",
+                    "Veckans kvot för automatisk ruttoptimering är slut.",
+                    429,
+                    reset_at=route_optimization_reset_at(now),
+                )
+
+            run_id = str(uuid.uuid4())
+            row_index = None
+            attempt_plan = _route_primary_attempt_plan()
+            attempt_shipments = _route_attempt_shipments(
+                attempt_plan, inputs
+            )
+            attempt_number = 1
+            request_label = f"store-tracker:{run_id}"
+            attempt_started_at = planning_timestamp()
+            attempt_history = [_route_attempt_history_started(
+                attempt_plan,
+                shipment_count=len(attempt_shipments),
+                provider_label=request_label,
+                started_at=attempt_started_at,
+            )]
+            provider_attempt_count = 1
+            counted_provider_attempt_count = 1
+            run = {
+                "run_id": run_id,
+                "actor_user_name": actor_user_name,
+                "user_name": owner_user_name,
+                "usage_iso_week": usage_week,
+                "route_date": inputs["route_start_at"].date().isoformat(),
+                "client_request_id": client_request_id,
+                "request_fingerprint": fingerprint,
+                "input_fingerprint": inputs["input_fingerprint"],
+                "engine_version": ROUTE_ENGINE_VERSION,
+                "fallback_policy_version": FALLBACK_POLICY_VERSION,
+                "status": "running",
+                "counted_attempt": "Y",
+                "started_at": attempt_started_at,
+                "completed_at": "",
+                "timeout_seconds": inputs["timeout_seconds"],
+                "shipment_count": len(inputs["shipments"]),
+                "required_count": inputs["required_count"],
+                "performed_count": "",
+                "skipped_count": "",
+                "excluded_untrusted_coordinates": inputs[
+                    "excluded_untrusted_coordinates"
+                ],
+                "google_request_label": request_label,
+                "provider_attempt_count": provider_attempt_count,
+                "counted_provider_attempt_count": (
+                    counted_provider_attempt_count
+                ),
+                "current_attempt_number": attempt_number,
+                "current_attempt_started_at": attempt_started_at,
+                "current_attempt_timeout_seconds": inputs[
+                    "timeout_seconds"
+                ],
+                "current_attempt_max_visits": attempt_plan["max_visits"],
+                "fallback_strategy": attempt_plan["strategy"],
+                "next_attempt_json": "",
+                "attempt_history_json": json.dumps(
+                    attempt_history,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+                "http_status": "",
+                "error_code": "",
+                "result_payload_json": "",
+            }
+            row_index = append_route_optimization_run(sheet, run)
+            finish_quota_instrumentation()
 
     body = build_optimize_tours_request(
         run_id=run_id,
         owner_user_name=owner_user_name,
         route_start=inputs["route_start_at"],
         start=inputs["start"],
-        shipments=inputs["shipments"],
+        shipments=attempt_shipments,
         fixed_breaks=inputs["fixed_breaks"],
         pre_route_fixed_seconds=inputs["pre_route_fixed_seconds"],
         timeout_seconds=inputs["timeout_seconds"],
+        search_mode=attempt_plan["search_mode"],
+        max_visits=attempt_plan["max_visits"],
+        quadratic_soft_buffer_seconds=attempt_plan[
+            "quadratic_soft_buffer_seconds"
+        ],
+        quadratic_soft_cost_per_square_hour=attempt_plan[
+            "quadratic_soft_cost_per_square_hour"
+        ],
+        request_label=request_label,
     )
     project = str(os.environ.get("ROUTE_OPTIMIZATION_PROJECT") or "").strip()
+    response = None
+    http_status = ""
+    google_solve_duration_ms = None
     try:
         solve_started = time.perf_counter()
         try:
@@ -9756,22 +10709,31 @@ def execute_route_optimization(*, spreadsheet, owner, inputs, client_request_id)
             )
         finally:
             google_solve_duration_ms = round(
-                (time.perf_counter() - solve_started) * 1000,
-                1,
+                (time.perf_counter() - solve_started) * 1000, 1
             )
             record_performance_step(
-                "route_optimization.google_solve",
-                solve_started,
+                "route_optimization.google_solve", solve_started
             )
         validation_started = time.perf_counter()
         try:
             parsed = parse_optimize_tours_response(
                 response,
-                shipments=inputs["shipments"],
+                shipments=attempt_shipments,
                 owner_user_name=owner_user_name,
                 route_start=inputs["route_start_at"],
-                pre_route_fixed_seconds=inputs["pre_route_fixed_seconds"],
+                pre_route_fixed_seconds=inputs[
+                    "pre_route_fixed_seconds"
+                ],
                 fixed_breaks=inputs["fixed_breaks"],
+                timeout_seconds=inputs["timeout_seconds"],
+                search_mode=attempt_plan["search_mode"],
+                max_visits=attempt_plan["max_visits"],
+                quadratic_soft_buffer_seconds=attempt_plan[
+                    "quadratic_soft_buffer_seconds"
+                ],
+                quadratic_soft_cost_per_square_hour=attempt_plan[
+                    "quadratic_soft_cost_per_square_hour"
+                ],
             )
         finally:
             record_performance_step(
@@ -9779,30 +10741,101 @@ def execute_route_optimization(*, spreadsheet, owner, inputs, client_request_id)
                 validation_started,
             )
     except RouteOptimizationError as error:
+        completed_at = planning_timestamp()
         http_status_value = (
             error.provider_status
-            if error.provider_status is not None
-            else (http_status if "http_status" in locals() else "")
+            if error.provider_status is not None else http_status
         )
+        counted_attempt = bool(error.counted_attempt)
+        if not counted_attempt:
+            counted_provider_attempt_count = max(
+                0, counted_provider_attempt_count - 1
+            )
         diagnostic_json = ""
-        if http_status_value == 200 and "response" in locals() and isinstance(response, dict):
-            routes = response.get("routes") if isinstance(response.get("routes"), list) else []
-            route = routes[0] if routes else {}
-            diagnostic_payload = {
-                "error_code": error.code,
-                "diagnostic_reason": error.details.get("diagnostic_reason") or error.code,
-                "solve_duration_ms": google_solve_duration_ms if "google_solve_duration_ms" in locals() else None,
-                "route_count": len(response.get("routes") or []),
-                "visit_count": len(route.get("visits") or []),
-                "skipped_count": len(response.get("skippedShipments") or []),
-                "break_count": len(route.get("breaks") or []),
-                "hasTrafficInfeasibilities": bool(route.get("hasTrafficInfeasibilities")),
-                "vehicle_label_matches": route.get("vehicleLabel") == f"owner:{str(owner_user_name).strip().casefold()}",
-            }
-            diagnostic_json = json.dumps(
-                diagnostic_payload,
-                ensure_ascii=False,
-                separators=(",", ":"),
+        if http_status_value == 200 and isinstance(response, dict):
+            diagnostic_json = _route_failure_diagnostic_json(
+                response=response,
+                error=error,
+                owner_user_name=owner_user_name,
+                solve_duration_ms=google_solve_duration_ms,
+            )
+        attempt_history = _route_finish_attempt_history(
+            attempt_history,
+            attempt_number=attempt_number,
+            completed_at=completed_at,
+            provider_status=http_status_value,
+            counted_attempt=counted_attempt,
+            outcome="rejected",
+            error=error,
+            solve_duration_ms=google_solve_duration_ms,
+        )
+        next_plan = (
+            _route_next_fallback_plan(
+                current_plan=attempt_plan,
+                error=error,
+                inputs=inputs,
+            )
+            if http_status_value == 200 else None
+        )
+        history_json = json.dumps(
+            attempt_history,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        if next_plan is not None:
+            with _route_optimization_run_lock:
+                update_route_optimization_run(
+                    sheet,
+                    row_index,
+                    headers,
+                    {
+                        "status": "fallback_ready",
+                        "counted_attempt": (
+                            "Y" if counted_provider_attempt_count else "N"
+                        ),
+                        "completed_at": completed_at,
+                        "provider_attempt_count": provider_attempt_count,
+                        "counted_provider_attempt_count": (
+                            counted_provider_attempt_count
+                        ),
+                        "current_attempt_number": "",
+                        "current_attempt_started_at": "",
+                        "current_attempt_timeout_seconds": "",
+                        "current_attempt_max_visits": "",
+                        "fallback_strategy": next_plan["strategy"],
+                        "next_attempt_json": json.dumps(
+                            next_plan,
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        ),
+                        "attempt_history_json": history_json,
+                        "http_status": http_status_value,
+                        "error_code": error.code,
+                        "result_payload_json": diagnostic_json,
+                    },
+                    run_id,
+                )
+            return _route_fallback_continuation(run_id, next_plan), None
+
+        terminal_error = error
+        if (
+            attempt_plan.get("strategy") != "primary"
+            and error.code in _ROUTE_FALLBACK_TRIGGER_CODES
+        ):
+            terminal_error = RouteOptimizationError(
+                "route_fallback_exhausted",
+                (
+                    "Ruttoptimeringen hittade ingen verifierat genomförbar "
+                    "rutt inom de automatiska försöken. Justera planeringen "
+                    "och försök igen."
+                ),
+                422,
+                provider_status=(
+                    http_status_value
+                    if isinstance(http_status_value, int) else None
+                ),
+                counted_attempt=counted_attempt,
+                details={"attempt_count": provider_attempt_count},
             )
         with _route_optimization_run_lock:
             update_route_optimization_run(
@@ -9811,25 +10844,90 @@ def execute_route_optimization(*, spreadsheet, owner, inputs, client_request_id)
                 headers,
                 {
                     "status": "failed",
-                    "counted_attempt": "Y" if error.counted_attempt else "N",
-                    "completed_at": planning_timestamp(),
+                    "counted_attempt": (
+                        "Y" if counted_provider_attempt_count else "N"
+                    ),
+                    "completed_at": completed_at,
+                    "provider_attempt_count": provider_attempt_count,
+                    "counted_provider_attempt_count": (
+                        counted_provider_attempt_count
+                    ),
+                    "current_attempt_number": "",
+                    "current_attempt_started_at": "",
+                    "current_attempt_timeout_seconds": "",
+                    "current_attempt_max_visits": "",
+                    "next_attempt_json": "",
+                    "attempt_history_json": history_json,
                     "http_status": http_status_value,
-                    "error_code": error.code,
+                    "error_code": terminal_error.code,
                     "result_payload_json": diagnostic_json,
                 },
                 run_id,
             )
-        return None, route_optimization_error_response(error)
+        return None, route_optimization_error_response(terminal_error)
 
-    solve_duration_ms = google_solve_duration_ms
+    completed_at = planning_timestamp()
+    attempt_history = _route_finish_attempt_history(
+        attempt_history,
+        attempt_number=attempt_number,
+        completed_at=completed_at,
+        provider_status=http_status,
+        counted_attempt=True,
+        outcome="accepted",
+        solve_duration_ms=google_solve_duration_ms,
+        parsed=parsed,
+        full_shipment_count=len(inputs["shipments"]),
+    )
+    model_route_max_seconds = (
+        ROUTE_OPTIMIZATION_MAX_SECONDS
+        - max(0, int(inputs["pre_route_fixed_seconds"]))
+    )
+    model_diagnostics = {
+        "route_engine_version": ROUTE_ENGINE_VERSION,
+        "primary_model_version": PRIMARY_MODEL_VERSION,
+        "fallback_policy_version": FALLBACK_POLICY_VERSION,
+        "attempt_number": attempt_number,
+        "fallback_strategy": attempt_plan["strategy"],
+        "model_route_max_seconds": model_route_max_seconds,
+        **quadratic_soft_duration_diagnostics(
+            model_route_max_seconds=model_route_max_seconds,
+            route_duration_seconds=parsed["summary"]["route_seconds"],
+            buffer_seconds=attempt_plan[
+                "quadratic_soft_buffer_seconds"
+            ],
+            cost_per_square_hour=attempt_plan[
+                "quadratic_soft_cost_per_square_hour"
+            ],
+        ),
+    }
     compact_result = {
         "stops": parsed["stops"],
         "summary": parsed["summary"],
         "performed_count": parsed["performed_count"],
-        "skipped_count": parsed["skipped_count"],
-        "solve_duration_ms": solve_duration_ms,
+        "skipped_count": max(
+            0, len(inputs["shipments"]) - parsed["performed_count"]
+        ),
+        "solve_duration_ms": google_solve_duration_ms,
+        "model_diagnostics": model_diagnostics,
+        "fallback": {
+            "used": attempt_number > 1,
+            "attempt_count": provider_attempt_count,
+            "final_strategy": attempt_plan["strategy"],
+            "primary_stop_count": (
+                attempt_history[0].get("performed_count")
+                if attempt_history else None
+            ),
+            "final_stop_count": parsed["performed_count"],
+            "total_solve_duration_ms": round(sum(
+                float(entry.get("solve_duration_ms") or 0)
+                for entry in attempt_history
+                if isinstance(entry, dict)
+            ), 1),
+        },
     }
-    compact_json = json.dumps(compact_result, ensure_ascii=False, separators=(",", ":"))
+    compact_json = json.dumps(
+        compact_result, ensure_ascii=False, separators=(",", ":")
+    )
     with _route_optimization_run_lock:
         update_route_optimization_run(
             sheet,
@@ -9837,15 +10935,34 @@ def execute_route_optimization(*, spreadsheet, owner, inputs, client_request_id)
             headers,
             {
                 "status": "completed",
-                "completed_at": planning_timestamp(),
+                "completed_at": completed_at,
+                "provider_attempt_count": provider_attempt_count,
+                "counted_provider_attempt_count": (
+                    counted_provider_attempt_count
+                ),
+                "current_attempt_number": "",
+                "current_attempt_started_at": "",
+                "current_attempt_timeout_seconds": "",
+                "current_attempt_max_visits": "",
+                "next_attempt_json": "",
+                "attempt_history_json": json.dumps(
+                    attempt_history,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
                 "http_status": http_status,
+                "error_code": "",
                 "performed_count": parsed["performed_count"],
-                "skipped_count": parsed["skipped_count"],
+                "skipped_count": compact_result["skipped_count"],
                 "result_payload_json": compact_json,
             },
             run_id,
         )
-    return {"result": compact_result, "run_id": run_id, "cached": False}, None
+    return {
+        "result": compact_result,
+        "run_id": run_id,
+        "cached": False,
+    }, None
 
 
 def build_route_optimization_preview(
@@ -9870,6 +10987,14 @@ def build_route_optimization_preview(
     )
     if solve_error is not None:
         return None, solve_error
+    if solved.get("state") == "fallback_ready":
+        return {
+            **solved,
+            "message": (
+                "Första ruttförslaget behöver större tidsmarginal. "
+                "Ett säkrare alternativ förbereds automatiskt."
+            ),
+        }, None
     compact = solved["result"]
     stops = []
     for stop in compact.get("stops") or []:
@@ -11405,6 +12530,36 @@ def planning_route_apply():
     return jsonify(result)
 
 
+@app.route("/planning/route-preview-status", methods=["GET"])
+def planning_route_preview_status():
+    client_request_id = normalize_client_request_id(
+        request.args.get("client_request_id")
+    )
+    if not client_request_id:
+        return planning_error(
+            "invalid_client_request_id",
+            "Ett giltigt request-ID krävs för statuskontrollen.",
+            400,
+            field="client_request_id",
+        )
+    actor_user_name = str(current_user().get("user_name") or "").strip()
+    try:
+        spreadsheet = get_spreadsheet_with_retry()
+        status = route_optimization_recovery_status(
+            spreadsheet,
+            actor_user_name=actor_user_name,
+            client_request_id=client_request_id,
+        )
+    except Exception:
+        app.logger.exception("Could not read route optimization recovery status")
+        return planning_error(
+            "route_store_unavailable",
+            "Ruttförslagets status kunde inte laddas. Försök igen.",
+            503,
+        )
+    return jsonify({"ok": True, **status})
+
+
 @app.route("/planning/route-preview", methods=["POST"])
 def planning_route_preview():
     data = request.get_json(silent=True)
@@ -11527,6 +12682,8 @@ def planning_route_preview():
         )
     if preview_error is not None:
         return preview_error
+    if preview.get("state") == "fallback_ready":
+        return jsonify(preview), 202
     return jsonify(preview)
 
 
