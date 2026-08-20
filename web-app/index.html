@@ -3778,6 +3778,7 @@
       }
     }
   </style>
+  <link rel="stylesheet" href="/static/sales_coaching.css" />
 </head>
 <body>
 
@@ -3865,7 +3866,12 @@
     </div>
   </div>
 
-  <div class="insights-body">
+  <div class="sales-coaching-admin insights-view-toggle" id="insights-view-toggle" role="tablist" aria-label="Välj insiktsvy">
+    <button type="button" id="business-overview-tab" role="tab" aria-selected="true" aria-controls="business-overview-content">Affärsöversikt</button>
+    <button type="button" id="sales-coaching-tab" role="tab" aria-selected="false" aria-controls="sales-coaching-dashboard">Säljcoachning</button>
+  </div>
+
+  <div class="insights-body" id="business-overview-content" role="tabpanel" aria-labelledby="business-overview-tab">
     <div class="insights-panel insights-hero">
       <div class="insights-hero-content">
         <h2>Uppföljning &amp; Insikter</h2>
@@ -3963,6 +3969,7 @@
       <button id="logout-btn" type="button">Logga ut</button>
     </div>
   </div>
+  <main class="sales-coaching-admin sales-coaching-dashboard" id="sales-coaching-dashboard" role="tabpanel" aria-labelledby="sales-coaching-tab" hidden></main>
 </div>
 
 <!-- ═══════════════ CONTACT LOG VIEW ═══════════════ -->
@@ -10281,6 +10288,19 @@
   document.getElementById("insights-responsible").addEventListener("change", e => {
     loadFollowupInsights(e.target.value);
   });
+  window.addEventListener("sales-coaching:open-customer", event => {
+    const customerId = String(event.detail?.customerId || "");
+    const customer = customers.find(item => String(item.customer_id || "") === customerId);
+    if (!customer) {
+      showToast("Kunden kunde inte öppnas från analysunderlaget.");
+      return;
+    }
+    detailReturnView = "insights";
+    openDetail(Number(customer.row));
+  });
+  window.addEventListener("sales-coaching:open-view", () => {
+    if (userIsAdmin()) showView("insights");
+  });
 
   // ══════════════════════════════════════
   // ROUTE PLANNER
@@ -10748,6 +10768,7 @@
     control.classList.toggle("visible", Boolean(currentUser) && userIsAdmin());
     document.getElementById("planning-mode-btn").style.display =
       currentUserCanPlan() ? "" : "none";
+    window.salesCoachingDashboard?.setAdmin(userIsAdmin());
   }
 
   async function checkLogin() {
@@ -10816,5 +10837,6 @@
 
   checkLogin();
 </script>
+<script src="/static/sales_coaching.js"></script>
 </body>
 </html>

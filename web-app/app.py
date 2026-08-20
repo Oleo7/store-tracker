@@ -4435,7 +4435,7 @@ def build_sales_activity_for_email(spreadsheet, *, email_id, email_type,
 @app.before_request
 def require_authenticated_session():
     public_endpoints = {
-        "index", "images", "login", "get_session", "health",
+        "index", "images", "static", "login", "get_session", "health",
         "brevo_webhook", "brevo_reconcile"
     }
     if request.method == "OPTIONS" or request.endpoint in public_endpoints:

@@ -273,6 +273,74 @@ class SnapshotAndAggregateTests(TestCase):
         self.assertEqual(current_segment["kpis"]["human_activities"]["value"], 0)
         self.assertEqual(missing_segment["kpis"]["human_activities"]["value"], 1)
 
+    def test_matrix_uses_percentile_coverage_not_approximate_snapshot_coverage(self):
+        rows = []
+        planned = []
+        suggestions = []
+        for index in range(10):
+            if index < 6:
+                rows.append(activity(
+                    f"exact-{index}", f"2026-08-{index + 1:02d} 10:00",
+                    priority_snapshot_quality="exact",
+                    priority_percentile_at_contact="80",
+                ))
+            else:
+                planned_id = f"planned-{index}"
+                suggestion_id = f"suggestion-{index}"
+                rows.append(activity(
+                    f"approx-{index}", f"2026-08-{index + 1:02d} 10:00",
+                    planned_activity_id=planned_id,
+                ))
+                planned.append({"planned_activity_id": planned_id, "source_suggestion_id": suggestion_id})
+                suggestions.append({"suggestion_id": suggestion_id, "priority_score_at_creation": "70"})
+
+        summary = build_sales_coaching_summary(
+            activities=rows,
+            customers=CUSTOMERS,
+            users=USERS,
+            order_rows=[],
+            planned_activities=planned,
+            planning_suggestions=suggestions,
+            start="2026-08-01",
+            end="2026-08-20",
+            generated_at="2026-08-20 12:00",
+        )
+
+        self.assertEqual(summary["seller_comparison"][0]["snapshot_coverage"]["value"], 1)
+        self.assertEqual(summary["seller_comparison"][0]["priority_percentile_coverage"]["value"], 0.6)
+        self.assertEqual(summary["coaching_matrix"]["sellers"], [])
+        self.assertIn(
+            "priority_percentile_coverage_below_70",
+            summary["coaching_matrix"]["insufficient_sample"][0]["reasons"],
+        )
+
+    def test_api_model_exposes_definitions_and_deterministic_coaching_cards(self):
+        rows = [
+            activity("a-1", "2026-08-01 10:00", channel="Besök", result="Ej anträffbar", customer_id="customer-1"),
+            activity("a-2", "2026-08-02 10:00", channel="Besök", result="Ej anträffbar", customer_id="customer-1"),
+            activity("b-1", "2026-08-03 10:00", channel="Besök", result="Ej anträffbar", customer_id="customer-2", customer="Andra butiken"),
+            activity("b-2", "2026-08-04 10:00", channel="Besök", result="Ej anträffbar", customer_id="customer-2", customer="Andra butiken"),
+        ]
+
+        first = self.summary(rows)
+        second = self.summary(rows)
+
+        self.assertEqual(first["coaching_cards"], second["coaching_cards"])
+        self.assertLessEqual(len(first["coaching_cards"]), 4)
+        self.assertEqual(first["coaching_cards"][0]["code"], "repeat_boms")
+        self.assertEqual(
+            set(first["coaching_cards"][0]),
+            {"code", "severity", "title", "diagnosis", "evidence", "comparison", "recommendation", "drilldown_metric", "drilldown_filters"},
+        )
+        for key, kpi in first["kpis"].items():
+            with self.subTest(kpi=key):
+                self.assertTrue(kpi["definition"])
+                self.assertTrue(kpi["drilldown_metric"])
+        self.assertEqual(
+            [step["drilldown_metric"] for step in first["funnel"]["steps"]],
+            ["attempts", "reach", "positive_sync", "order_10d_sync"],
+        )
+
     def test_snapshot_quality_exact_approximate_and_missing(self):
         rows = [
             activity(

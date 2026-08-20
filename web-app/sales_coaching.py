@@ -19,6 +19,46 @@ ANALYTICS_SNAPSHOT_VERSION = "sales_coaching_v1"
 ATTRIBUTION_WINDOW_DAYS = 10
 MIN_RATE_SAMPLE = 10
 MIN_PRIORITY_COVERAGE = 0.70
+MAX_COACHING_CARDS = 4
+COACHING_RATE_GAP = 0.10
+COACHING_CHANNEL_GAP = 0.15
+COACHING_CHANNEL_USAGE_SHARE = 0.25
+COACHING_ACTIVITY_SHARE = 0.75
+COACHING_FOLLOW_UP_GAP = 0.30
+
+KPI_DEFINITIONS = {
+    "human_activities": {
+        "label": "Mänskliga aktiviteter",
+        "definition": "Unika manuella eller planerade Besök, Telefon och manuella Mejl; automatiserade CRM-mejl exkluderas.",
+        "drilldown_metric": "human_activities",
+    },
+    "reach": {
+        "label": "Träffgrad",
+        "definition": "Nådda synkrona kontakter dividerat med analyserbara kontaktförsök via Besök eller Telefon.",
+        "drilldown_metric": "reach",
+        "denominator_drilldown_metric": "attempts",
+    },
+    "positive_dialogue": {
+        "label": "Positiv dialog",
+        "definition": "Nådda mänskliga kontakter med positivt resultat eller order dividerat med alla nådda mänskliga kontakter.",
+        "drilldown_metric": "positive_dialogue",
+    },
+    "order_10d": {
+        "label": "Order inom 10 dagar",
+        "definition": "Mogna nådda kontakter med minst en exklusivt attribuerad order inom 0–10 dagar dividerat med mogna nådda kontakter.",
+        "drilldown_metric": "order_10d",
+    },
+    "priority_focus": {
+        "label": "Prioritetsfokus",
+        "definition": "Kontakter i säljarens historiska översta prioritetskvartil dividerat med aktiviteter där historisk prioritetpercentil finns.",
+        "drilldown_metric": "priority_focus",
+    },
+    "bom_ratio": {
+        "label": "Bom-ratio för besök",
+        "definition": "Besök med Ej anträffbar dividerat med alla besök med analyserbart resultat.",
+        "drilldown_metric": "bom_ratio",
+    },
+}
 
 CONTACT_ANALYTICS_COLUMNS = [
     "sales_user_name",
@@ -46,13 +86,16 @@ DRILLDOWN_METRICS = frozenset({
     "human_activities",
     "attempts",
     "reach",
+    "positive_sync",
     "positive_dialogue",
     "order_10d",
+    "order_10d_sync",
     "waiting_outcome",
     "priority_focus",
     "bom_ratio",
     "repeat_boms",
     "high_priority_boms",
+    "followup_gap",
     "data_quality",
 })
 
@@ -568,6 +611,8 @@ def _aggregate_period(rows, attribution):
     reached = [row for row in human if row.get("result_class") in QUALIFIED_DIALOGUE_RESULTS and (row.get("contact_type_key") in SYNCHRONOUS_CHANNELS or row.get("contact_type_key") == "email")]
     positive = [row for row in reached if row.get("result_class") in {"positive", "order"}]
     mature = [row for row in reached if attribution["maturity"].get(row["contact_id"]) == "mature"]
+    mature_positive = [row for row in positive if attribution["maturity"].get(row["contact_id"]) == "mature"]
+    converted_positive = [row for row in mature_positive if attribution["contact_to_orders"].get(row["contact_id"])]
     waiting = [row for row in reached if attribution["maturity"].get(row["contact_id"]) == "waiting_outcome"]
     ordered_contacts = [row for row in mature if attribution["contact_to_orders"].get(row["contact_id"])]
     visits = [row for row in human if row.get("contact_type_key") == "visit" and row.get("result_class") in ANALYSABLE_RESULTS]
@@ -591,6 +636,8 @@ def _aggregate_period(rows, attribution):
         "reached": reached,
         "positive": positive,
         "mature": mature,
+        "mature_positive": mature_positive,
+        "converted_positive": converted_positive,
         "waiting": waiting,
         "ordered_contacts": ordered_contacts,
         "visits": visits,
@@ -605,6 +652,7 @@ def _aggregate_period(rows, attribution):
                 len(sync),
             ),
             "positive_dialogue": _rate(len(positive), len(reached)),
+            "positive_to_order_10d": _rate(len(converted_positive), len(mature_positive)),
             "order_10d": _rate(len(ordered_contacts), len(mature)),
             "priority_focus": _rate(len(top_priority), len(percentile_rows)),
             "bom_ratio": _rate(len(boms), len(visits)),
@@ -672,6 +720,169 @@ def _data_quality(rows, canonical_result, order_result, attribution):
     }
 
 
+def _coaching_cards(*, seller, current, seller_comparison, visit_efficiency,
+                    priority_allocation, follow_up_discipline,
+                    channel_effectiveness):
+    """Return explainable coaching signals in a stable priority order."""
+    cards = []
+
+    def add(code, severity, title, diagnosis, evidence, comparison,
+            recommendation, drilldown_metric, drilldown_filters=None):
+        cards.append({
+            "code": code,
+            "severity": severity,
+            "title": title,
+            "diagnosis": diagnosis,
+            "evidence": evidence,
+            "comparison": comparison,
+            "recommendation": recommendation,
+            "drilldown_metric": drilldown_metric,
+            "drilldown_filters": drilldown_filters or {},
+        })
+
+    active_sellers = [row for row in seller_comparison if row["human_activities"] > 0]
+    activity_median = (
+        statistics.median(row["human_activities"] for row in active_sellers)
+        if active_sellers else None
+    )
+    if (
+        seller and len(active_sellers) >= 2 and activity_median >= MIN_RATE_SAMPLE
+        and len(current["human"]) < activity_median * COACHING_ACTIVITY_SHARE
+    ):
+        add(
+            "activity_low", "attention", "Aktivitetsnivån är låg",
+            "Den valda säljaren har tydligt färre mänskliga aktiviteter än teamets median.",
+            {"value": len(current["human"]), "status": "sufficient"},
+            {"team_median": activity_median},
+            "Utforska vad som begränsar planerad kontakttid och välj ett realistiskt nästa aktivitetssteg.",
+            "human_activities",
+        )
+
+    reach = current["rates"]["reach"]
+    reach_median = reach["comparisons"].get("team_median")
+    if reach["status"] == "sufficient" and reach_median is not None and reach["value"] <= reach_median - COACHING_RATE_GAP:
+        add(
+            "reach_low", "attention", "Träffgraden kan förbättras",
+            "Andelen nådda Besök och Telefonsamtal ligger tydligt under teammedianen.",
+            reach, {"team_median": reach_median},
+            "Granska tidpunkt, kontaktperson och förberedelse för de missade försöken.",
+            "reach",
+        )
+
+    positive = current["rates"]["positive_dialogue"]
+    positive_median = positive["comparisons"].get("team_median")
+    if positive["status"] == "sufficient" and positive_median is not None and positive["value"] <= positive_median - COACHING_RATE_GAP:
+        add(
+            "positive_rate_low", "attention", "Färre dialoger blir positiva",
+            "Positiv andel bland nådda mänskliga kontakter ligger tydligt under teammedianen.",
+            positive, {"team_median": positive_median},
+            "Lyssna på hur behov, invändningar och nästa steg hanteras i nådda dialoger.",
+            "positive_dialogue",
+        )
+
+    order_rate = current["rates"]["order_10d"]
+    order_median = order_rate["comparisons"].get("team_median")
+    if (
+        positive["status"] == "sufficient" and order_rate["status"] == "sufficient"
+        and positive_median is not None and order_median is not None
+        and positive["value"] >= positive_median
+        and order_rate["value"] <= order_median - COACHING_RATE_GAP
+    ):
+        add(
+            "closing_gap", "attention", "Positiv dialog blir mer sällan order",
+            "Dialogerna klassas positivt men färre mogna kontakter konverterar inom tio dagar.",
+            order_rate, {"team_median": order_median, "positive_team_median": positive_median},
+            "Granska överenskommet nästa steg, erbjudande och uppföljning efter positiva dialoger.",
+            "order_10d",
+        )
+
+    bom = visit_efficiency["bom_ratio"]
+    bom_median = bom["comparisons"].get("team_median")
+    if bom["status"] == "sufficient" and bom_median is not None and bom["value"] >= bom_median + COACHING_RATE_GAP:
+        add(
+            "bom_ratio_high", "attention", "Många besök blir bom",
+            "Bom-ration ligger tydligt över teammedianen med tillräckligt besöksunderlag.",
+            bom, {"team_median": bom_median},
+            "Se över besökstid, bokning och rätt kontaktperson före nästa besöksrunda.",
+            "bom_ratio",
+        )
+
+    repeat = visit_efficiency["repeat_boms"]
+    if repeat["customers"] >= 2:
+        add(
+            "repeat_boms", "attention", "Återkommande bommar kräver nytt arbetssätt",
+            "Minst två kunder har bommats vid upprepade besök under perioden.",
+            {"numerator": repeat["customers"], "denominator": repeat["visits"], "status": "sufficient"},
+            {}, "Byt tidpunkt eller kanal och bekräfta kontaktperson innan nästa besök.",
+            "repeat_boms",
+        )
+
+    focus = priority_allocation["priority_focus"]
+    coverage = priority_allocation["priority_percentile_coverage"]
+    focus_median = focus["comparisons"].get("team_median")
+    if (
+        coverage["value"] is not None and coverage["value"] >= MIN_PRIORITY_COVERAGE
+        and focus["status"] == "sufficient" and focus_median is not None
+        and focus["value"] <= focus_median - COACHING_RATE_GAP
+        and priority_allocation["priority_gap"]["count"] > 0
+    ):
+        add(
+            "priority_focus_low", "attention", "Mer tid kan läggas på högprioriterade kunder",
+            "Historiskt prioritetsfokus ligger under teammedianen samtidigt som aktuella högprioriterade kunder saknar kontakt.",
+            focus, {"team_median": focus_median, "percentile_coverage": coverage["value"]},
+            "Välj nästa kontakt från prioritetsgapet och diskutera vad som styr dagens kundval.",
+            "priority_focus",
+        )
+
+    next_step = follow_up_discipline["positive_next_step_coverage"]
+    if next_step["status"] == "sufficient" and 1 - next_step["value"] >= COACHING_FOLLOW_UP_GAP:
+        add(
+            "followup_gap", "attention", "Positiva dialoger saknar nästa steg",
+            "En betydande andel positiva kontakter har varken uppföljning eller attribuerad order inom tre dagar.",
+            {"value": 1 - next_step["value"], "numerator": follow_up_discipline["positive_without_next_step"], "denominator": next_step["denominator"], "status": next_step["status"]},
+            {}, "Bestäm datum, ansvar och syfte för nästa steg redan i den positiva dialogen.",
+            "followup_gap",
+        )
+
+    channel_candidates = [
+        (key, value["order_10d"])
+        for key, value in channel_effectiveness.items()
+        if value["order_10d"]["status"] == "sufficient"
+    ]
+    if len(channel_candidates) >= 2:
+        strongest_key, strongest_rate = max(channel_candidates, key=lambda item: (item[1]["value"], item[0]))
+        weakest_key, weakest_rate = min(channel_candidates, key=lambda item: (item[1]["value"], item[0]))
+        if strongest_rate["value"] >= weakest_rate["value"] + COACHING_CHANNEL_GAP:
+            add(
+                "channel_strength", "strength", "En kanal visar starkare mogen konvertering",
+                "En kanal har meningsfullt högre kontaktkonvertering än säljarens övriga analyserbara kanaler.",
+                strongest_rate, {"comparison_channel": weakest_key, "comparison_value": weakest_rate["value"]},
+                "Identifiera vilka kundsituationer och arbetssätt från den starka kanalen som går att återanvända.",
+                "order_10d", {"channel": strongest_key},
+            )
+            high_priority_rows = current["top_priority"]
+            strongest_high_priority = [
+                row for row in high_priority_rows
+                if row.get("contact_type_key") == strongest_key
+            ]
+            if (
+                len(high_priority_rows) >= MIN_RATE_SAMPLE
+                and len(strongest_high_priority) / len(high_priority_rows) < COACHING_CHANNEL_USAGE_SHARE
+            ):
+                add(
+                    "channel_opportunity", "strength", "Stark kanal används lite på högprioriterade kunder",
+                    "Kanalen med starkast mogen konvertering står för en liten del av kontakterna i den historiska toppkvartilen.",
+                    {"value": len(strongest_high_priority) / len(high_priority_rows), "numerator": len(strongest_high_priority), "denominator": len(high_priority_rows), "status": "sufficient"},
+                    {"strong_channel": strongest_key, "mature_conversion": strongest_rate["value"]},
+                    "Pröva den starka kanalen på fler högprioriterade kunder där kundsituationen passar.",
+                    "priority_focus", {"channel": strongest_key},
+                )
+
+    severity_order = {"attention": 0, "strength": 1}
+    cards.sort(key=lambda row: (severity_order.get(row["severity"], 9), row["code"]))
+    return cards[:MAX_COACHING_CARDS]
+
+
 def build_sales_coaching_summary(*, activities, customers, users, order_rows, planned_activities=(), planning_suggestions=(), score_events=(), current_priorities=(), start, end, generated_at, seller="", channel="all", segment="all", lifecycle="all", score_version="", on_step=None):
     start, end = _date(start), _date(end)
     generated = _datetime(generated_at) or datetime.now()
@@ -709,7 +920,7 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
     seller_comparison = _seller_comparison(team_rows, attribution, seller_options)
     team_rates = defaultdict(list)
     for item in seller_comparison:
-        for key in ("reach", "positive_dialogue", "order_10d", "priority_focus", "bom_ratio"):
+        for key in ("reach", "positive_dialogue", "positive_to_order_10d", "order_10d", "priority_focus", "bom_ratio"):
             if item[key]["value"] is not None:
                 team_rates[key].append(item[key]["value"])
     for key, rate in current["rates"].items():
@@ -833,8 +1044,15 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
     weekly_trend = []
     for week, week_rows in sorted(weeks.items()):
         agg = _aggregate_period(week_rows, attribution)
+        iso_year, iso_week = (int(value) for value in week.replace("W", "").split("-"))
+        week_start = date.fromisocalendar(iso_year, iso_week, 1)
+        week_end = week_start + timedelta(days=6)
         weekly_trend.append({
             "week": week,
+            "period": {
+                "start": max(start, week_start).isoformat(),
+                "end": min(end, week_end).isoformat(),
+            },
             "human_activities": len(agg["human"]),
             "reached": len(agg["sync_reached"]),
             "positive": len(agg["sync_positive"]),
@@ -860,10 +1078,114 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
             "median_days_to_order": statistics.median(days) if len(days) >= 5 else None,
         }
 
+    weekday_names = ("Måndag", "Tisdag", "Onsdag", "Torsdag", "Fredag", "Lördag", "Söndag")
+    time_bands = (
+        ("Före 10", lambda hour: hour < 10),
+        ("10–13", lambda hour: 10 <= hour < 13),
+        ("13–16", lambda hour: 13 <= hour < 16),
+        ("Efter 16", lambda hour: hour >= 16),
+    )
+
+    def visit_pattern(groups):
+        patterns = []
+        for label, visits in groups:
+            rate = _rate(
+                sum(row.get("result_class") == "unreachable" for row in visits),
+                len(visits),
+            )
+            if rate["denominator"] >= MIN_RATE_SAMPLE:
+                patterns.append({"label": label, "bom_ratio": rate})
+        return patterns
+
+    visit_efficiency = {
+        "bom_ratio": current["rates"]["bom_ratio"],
+        "reach": channel_effectiveness["visit"]["reach"],
+        "repeat_boms": {"customers": len(repeated), "visits": sum(len(value) for value in repeated.values())},
+        "high_priority_boms": len(high_priority_boms),
+        "high_priority_score_fallback": len(high_priority_score_fallback),
+        "planned": _rate(len([row for row in current["boms"] if row.get("planned_activity_id")]), len([row for row in current["visits"] if row.get("planned_activity_id")])),
+        "unplanned": _rate(len([row for row in current["boms"] if not row.get("planned_activity_id")]), len([row for row in current["visits"] if not row.get("planned_activity_id")])),
+        "weekday_patterns": visit_pattern([
+            (weekday_names[index], [row for row in current["visits"] if row.get("contact_datetime") and row["contact_datetime"].weekday() == index])
+            for index in range(7)
+        ]),
+        "time_band_patterns": visit_pattern([
+            (label, [row for row in current["visits"] if row.get("contact_datetime") and predicate(row["contact_datetime"].hour)])
+            for label, predicate in time_bands
+        ]),
+    }
+
+    priority_allocation = {
+        "priority_focus": current["rates"]["priority_focus"],
+        "snapshot_coverage": _rate(len(current["snapshots"]), len(current["human"]), minimum=1),
+        "priority_percentile_coverage": _rate(len(current["percentile_rows"]), len(current["human"]), minimum=1),
+        "strategic_coverage": _rate(
+            len(strategic_contacted), len(strategic_portfolio), minimum=MIN_RATE_SAMPLE
+        ),
+        "priority_gap": {
+            "count": len(priority_gap),
+            "customers": [
+                {
+                    "customer_id": _text(row.get("customer_id")),
+                    "customer": _text(row.get("customer")),
+                    "sales_user_name": row.get("sales_user_name", ""),
+                    "priority_score": _number(row.get("priority_score")),
+                    "priority_percentile": row.get("priority_percentile"),
+                    "value_index": _number(row.get("value_index")),
+                    "segment": row.get("segment", "missing"),
+                }
+                for row in sorted(
+                    priority_gap,
+                    key=lambda item: (
+                        -(_number(item.get("priority_score"), 0) or 0),
+                        _text(item.get("customer")),
+                    ),
+                )[:200]
+            ],
+        },
+    }
+
+    follow_up_discipline = {
+        "positive_next_step_coverage": _rate(
+            len(positive_with_next_step), len(positive_three_days_old)
+        ),
+        "positive_without_next_step": (
+            len(positive_three_days_old) - len(positive_with_next_step)
+        ),
+        "planned_completed_in_time": _rate(
+            len(completed_in_time), len(accountable_planned)
+        ),
+        "overdue_planned": len(overdue_planned),
+        "skipped": len(skipped_planned),
+        "cancelled_excluded": len([
+            row for row in planned_period
+            if normalize_key(row.get("status")) == "cancelled"
+        ]),
+        "positive_without_order_or_follow_up_10d": len(
+            mature_positive_without_order_or_followup
+        ),
+    }
+
+    active_activity_counts = [row["human_activities"] for row in seller_comparison if row["human_activities"] > 0]
     kpis = {
-        "human_activities": {"value": len(current["human"]), "comparison": len(previous["human"])},
+        "human_activities": {
+            "value": len(current["human"]),
+            "status": "small_sample" if len(current["human"]) < MIN_RATE_SAMPLE else "sufficient",
+            "unique_customers": len({row.get("customer_identity_key") for row in current["human"] if row.get("customer_identity_key")}),
+            "channel_mix": {
+                key: sum(row.get("contact_type_key") == key for row in current["human"])
+                for key in ("visit", "phone", "email")
+            },
+            "comparisons": {
+                "previous_period": {"value": len(previous["human"])},
+                "team_median": statistics.median(active_activity_counts) if active_activity_counts else None,
+            },
+        },
         "reach": current["rates"]["reach"],
-        "positive_dialogue": current["rates"]["positive_dialogue"],
+        "positive_dialogue": {
+            **current["rates"]["positive_dialogue"],
+            "positive_to_order_10d": current["rates"]["positive_to_order_10d"],
+        },
         "order_10d": {
             **current["rates"]["order_10d"],
             "attributed_orders": len(current["attributed"]),
@@ -878,13 +1200,47 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
         "priority_focus": current["rates"]["priority_focus"],
         "bom_ratio": current["rates"]["bom_ratio"],
     }
+    for key, definition in KPI_DEFINITIONS.items():
+        kpis[key].update(definition)
     data_quality = _data_quality(rows, canonical_result, order_result, attribution)
-    coaching_matrix = [
+    comparable_sellers = [
         item for item in seller_comparison
         if item["order_10d"]["denominator"] >= MIN_RATE_SAMPLE
         and item["priority_percentile_coverage"]["value"] is not None
         and item["priority_percentile_coverage"]["value"] >= MIN_PRIORITY_COVERAGE
     ]
+    comparable_names = {item["seller"] for item in comparable_sellers}
+    coaching_matrix = {
+        "sellers": comparable_sellers,
+        "medians": {
+            "priority_focus": statistics.median(item["priority_focus"]["value"] for item in comparable_sellers) if comparable_sellers else None,
+            "order_10d": statistics.median(item["order_10d"]["value"] for item in comparable_sellers) if comparable_sellers else None,
+        },
+        "insufficient_sample": [
+            {
+                "seller": item["seller"],
+                "human_activities": item["human_activities"],
+                "order_denominator": item["order_10d"]["denominator"],
+                "priority_percentile_coverage": item["priority_percentile_coverage"],
+                "reasons": [
+                    reason for reason, applies in (
+                        ("order_sample_below_10", item["order_10d"]["denominator"] < MIN_RATE_SAMPLE),
+                        ("priority_percentile_coverage_below_70", item["priority_percentile_coverage"]["value"] is None or item["priority_percentile_coverage"]["value"] < MIN_PRIORITY_COVERAGE),
+                    ) if applies
+                ],
+            }
+            for item in seller_comparison if item["seller"] not in comparable_names
+        ],
+    }
+    coaching_cards = _coaching_cards(
+        seller=seller,
+        current=current,
+        seller_comparison=seller_comparison,
+        visit_efficiency=visit_efficiency,
+        priority_allocation=priority_allocation,
+        follow_up_discipline=follow_up_discipline,
+        channel_effectiveness=channel_effectiveness,
+    )
     result = {
         "meta": {
             "generated_at": generated.isoformat(timespec="seconds"),
@@ -911,70 +1267,31 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
             "positive": len(current["sync_positive"]),
             "mature_converted_contacts": len(current["sync_converted"]),
             "reach_rate": current["rates"]["reach"],
-            "positive_rate": current["rates"]["positive_dialogue"],
-            "order_rate": current["rates"]["order_10d"],
+            "positive_rate": _rate(len(current["sync_positive"]), len(current["sync_reached"])),
+            "order_rate": _rate(len(current["sync_converted"]), len(current["sync_mature"])),
+            "steps": [
+                {"key": "attempts", "label": "Synkrona kontaktförsök", "count": len(current["sync"]), "rate": None, "drilldown_metric": "attempts"},
+                {"key": "reached", "label": "Nådda synkrona kontakter", "count": len(current["sync_reached"]), "rate": current["rates"]["reach"], "drilldown_metric": "reach"},
+                {"key": "positive", "label": "Positiva synkrona dialoger", "count": len(current["sync_positive"]), "rate": _rate(len(current["sync_positive"]), len(current["sync_reached"])), "drilldown_metric": "positive_sync"},
+                {"key": "mature_converted_contacts", "label": "Mogna kontakter med order inom 10 dagar", "count": len(current["sync_converted"]), "rate": _rate(len(current["sync_converted"]), len(current["sync_mature"])), "drilldown_metric": "order_10d_sync"},
+            ],
         },
         "weekly_trend": weekly_trend,
-        "visit_efficiency": {
-            "bom_ratio": current["rates"]["bom_ratio"],
-            "repeat_boms": {"customers": len(repeated), "visits": sum(len(value) for value in repeated.values())},
-            "high_priority_boms": len(high_priority_boms),
-            "high_priority_score_fallback": len(high_priority_score_fallback),
-            "planned": _rate(len([row for row in current["boms"] if row.get("planned_activity_id")]), len([row for row in current["visits"] if row.get("planned_activity_id")])),
-            "unplanned": _rate(len([row for row in current["boms"] if not row.get("planned_activity_id")]), len([row for row in current["visits"] if not row.get("planned_activity_id")])),
-        },
+        "visit_efficiency": visit_efficiency,
         "channel_effectiveness": channel_effectiveness,
-        "priority_allocation": {
-            "priority_focus": current["rates"]["priority_focus"],
-            "snapshot_coverage": _rate(len(current["snapshots"]), len(current["human"]), minimum=1),
-            "priority_percentile_coverage": _rate(len(current["percentile_rows"]), len(current["human"]), minimum=1),
-            "strategic_coverage": _rate(
-                len(strategic_contacted), len(strategic_portfolio), minimum=MIN_RATE_SAMPLE
-            ),
-            "priority_gap": {
-                "count": len(priority_gap),
-                "customers": [
-                    {
-                        "customer_id": _text(row.get("customer_id")),
-                        "customer": _text(row.get("customer")),
-                        "sales_user_name": row.get("sales_user_name", ""),
-                        "priority_score": _number(row.get("priority_score")),
-                        "priority_percentile": row.get("priority_percentile"),
-                        "value_index": _number(row.get("value_index")),
-                        "segment": row.get("segment", "missing"),
-                    }
-                    for row in sorted(
-                        priority_gap,
-                        key=lambda item: (
-                            -(_number(item.get("priority_score"), 0) or 0),
-                            _text(item.get("customer")),
-                        ),
-                    )[:200]
-                ],
+        "priority_allocation": priority_allocation,
+        "follow_up_discipline": follow_up_discipline,
+        "coaching_cards": coaching_cards,
+        "_analysis": {
+            "rows": rows,
+            "attribution": attribution,
+            "drilldown_contact_ids": {
+                "followup_gap": {
+                    row.get("contact_id") for row in positive_three_days_old
+                    if row not in positive_with_next_step
+                },
             },
         },
-        "follow_up_discipline": {
-            "positive_next_step_coverage": _rate(
-                len(positive_with_next_step), len(positive_three_days_old)
-            ),
-            "positive_without_next_step": (
-                len(positive_three_days_old) - len(positive_with_next_step)
-            ),
-            "planned_completed_in_time": _rate(
-                len(completed_in_time), len(accountable_planned)
-            ),
-            "overdue_planned": len(overdue_planned),
-            "skipped": len(skipped_planned),
-            "cancelled_excluded": len([
-                row for row in planned_period
-                if normalize_key(row.get("status")) == "cancelled"
-            ]),
-            "positive_without_order_or_follow_up_10d": len(
-                mature_positive_without_order_or_followup
-            ),
-        },
-        "coaching_cards": [],
-        "_analysis": {"rows": rows, "attribution": attribution},
     }
     if on_step:
         on_step("calculation.sales_coaching.aggregation", aggregation_started, len(rows))
@@ -987,6 +1304,7 @@ def build_drilldown(summary, metric, *, limit=100):
     limit = max(1, min(int(limit), 200))
     analysis = summary.get("_analysis", {})
     attribution = analysis.get("attribution", {})
+    drilldown_contact_ids = analysis.get("drilldown_contact_ids", {})
     selected = []
     repeated_keys = defaultdict(int)
     for row in analysis.get("rows", ()):
@@ -998,13 +1316,16 @@ def build_drilldown(summary, metric, *, limit=100):
             "human_activities": row.get("is_human"),
             "attempts": row.get("is_human") and row.get("contact_type_key") in SYNCHRONOUS_CHANNELS and row.get("result_class") in ANALYSABLE_RESULTS,
             "reach": row.get("is_human") and row.get("contact_type_key") in SYNCHRONOUS_CHANNELS and row.get("result_class") in QUALIFIED_DIALOGUE_RESULTS,
+            "positive_sync": row.get("is_human") and row.get("contact_type_key") in SYNCHRONOUS_CHANNELS and row.get("result_class") in {"positive", "order"},
             "positive_dialogue": row.get("is_human") and row.get("result_class") in {"positive", "order"},
             "order_10d": bool(orders),
+            "order_10d_sync": bool(orders) and row.get("contact_type_key") in SYNCHRONOUS_CHANNELS,
             "waiting_outcome": attribution.get("maturity", {}).get(row.get("contact_id")) == "waiting_outcome",
             "priority_focus": row.get("priority_percentile_at_contact") is not None and row.get("priority_percentile_at_contact") >= 75,
             "bom_ratio": row.get("contact_type_key") == "visit" and row.get("result_class") in ANALYSABLE_RESULTS,
             "repeat_boms": row.get("result_class") == "unreachable" and repeated_keys[row.get("customer_identity_key")] >= 2,
             "high_priority_boms": row.get("result_class") == "unreachable" and (row.get("priority_percentile_at_contact") or -1) >= 75,
+            "followup_gap": row.get("contact_id") in drilldown_contact_ids.get("followup_gap", set()),
             "data_quality": bool(row.get("analysis_exclusions")) or row.get("contact_type_key") == "unknown" or row.get("result_class") == "unknown",
         }[metric]
         if not include:
