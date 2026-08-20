@@ -44,6 +44,7 @@ CONTACT_ANALYTICS_COLUMNS = [
 
 DRILLDOWN_METRICS = frozenset({
     "human_activities",
+    "attempts",
     "reach",
     "positive_dialogue",
     "order_10d",
@@ -546,7 +547,8 @@ def _filter_activities(activities, *, start, end, seller="", channel="all", segm
             continue
         if channel != "all" and row.get("contact_type_key") != channel:
             continue
-        row_segment = _text(row.get("customer_segment_at_contact") or (row.get("customer_record") or {}).get("customer_segment")).upper() or "missing"
+        # Historical activity filters must never borrow today's customer segment.
+        row_segment = _text(row.get("customer_segment_at_contact")).upper() or "missing"
         if segment != "all" and row_segment != segment:
             continue
         row_lifecycle = normalize_key(row.get("lifecycle_at_contact")) or "missing"
@@ -559,6 +561,10 @@ def _filter_activities(activities, *, start, end, seller="", channel="all", segm
 def _aggregate_period(rows, attribution):
     human = [row for row in rows if row.get("is_human")]
     sync = [row for row in human if row.get("contact_type_key") in SYNCHRONOUS_CHANNELS and row.get("result_class") in ANALYSABLE_RESULTS]
+    sync_reached = [row for row in sync if row.get("result_class") in QUALIFIED_DIALOGUE_RESULTS]
+    sync_positive = [row for row in sync_reached if row.get("result_class") in {"positive", "order"}]
+    sync_mature = [row for row in sync_reached if attribution["maturity"].get(row["contact_id"]) == "mature"]
+    sync_converted = [row for row in sync_mature if attribution["contact_to_orders"].get(row["contact_id"])]
     reached = [row for row in human if row.get("result_class") in QUALIFIED_DIALOGUE_RESULTS and (row.get("contact_type_key") in SYNCHRONOUS_CHANNELS or row.get("contact_type_key") == "email")]
     positive = [row for row in reached if row.get("result_class") in {"positive", "order"}]
     mature = [row for row in reached if attribution["maturity"].get(row["contact_id"]) == "mature"]
@@ -567,7 +573,8 @@ def _aggregate_period(rows, attribution):
     visits = [row for row in human if row.get("contact_type_key") == "visit" and row.get("result_class") in ANALYSABLE_RESULTS]
     boms = [row for row in visits if row.get("result_class") == "unreachable"]
     snapshots = [row for row in human if row.get("priority_snapshot_quality") in {"exact", "approximate"}]
-    top_priority = [row for row in snapshots if row.get("priority_percentile_at_contact") is not None and row["priority_percentile_at_contact"] >= 75]
+    percentile_rows = [row for row in human if row.get("priority_percentile_at_contact") is not None]
+    top_priority = [row for row in percentile_rows if row["priority_percentile_at_contact"] >= 75]
     attributed = [item for row in ordered_contacts for item in attribution["contact_to_orders"].get(row["contact_id"], ())]
     totals_by_currency = defaultdict(float)
     for item in attributed:
@@ -577,6 +584,10 @@ def _aggregate_period(rows, attribution):
         "rows": rows,
         "human": human,
         "sync": sync,
+        "sync_reached": sync_reached,
+        "sync_positive": sync_positive,
+        "sync_mature": sync_mature,
+        "sync_converted": sync_converted,
         "reached": reached,
         "positive": positive,
         "mature": mature,
@@ -585,16 +596,17 @@ def _aggregate_period(rows, attribution):
         "visits": visits,
         "boms": boms,
         "snapshots": snapshots,
+        "percentile_rows": percentile_rows,
         "top_priority": top_priority,
         "attributed": attributed,
         "rates": {
             "reach": _rate(
-                len([row for row in sync if row.get("result_class") in QUALIFIED_DIALOGUE_RESULTS]),
+                len(sync_reached),
                 len(sync),
             ),
             "positive_dialogue": _rate(len(positive), len(reached)),
-            "order_10d": _rate(len(attributed), len(mature)),
-            "priority_focus": _rate(len(top_priority), len(snapshots)),
+            "order_10d": _rate(len(ordered_contacts), len(mature)),
+            "priority_focus": _rate(len(top_priority), len(percentile_rows)),
             "bom_ratio": _rate(len(boms), len(visits)),
         },
         "dfp": round(sum(item["order"].get("dfp", 0) for item in attributed), 3),
@@ -616,6 +628,7 @@ def _seller_comparison(rows, attribution, sellers):
             "human_activities": len(aggregate["human"]),
             **aggregate["rates"],
             "snapshot_coverage": _rate(len(aggregate["snapshots"]), len(aggregate["human"]), minimum=1),
+            "priority_percentile_coverage": _rate(len(aggregate["percentile_rows"]), len(aggregate["human"]), minimum=1),
         })
     return result
 
@@ -626,6 +639,7 @@ def _data_quality(rows, canonical_result, order_result, attribution):
     historical_seller = [row for row in human if row.get("sales_user_name")]
     standardized = [row for row in human if row.get("contact_type_key") != "unknown" and row.get("result_class") != "unknown"]
     snapshot = [row for row in human if row.get("priority_snapshot_quality") in {"exact", "approximate"}]
+    percentile = [row for row in human if row.get("priority_percentile_at_contact") is not None]
     reasons = defaultdict(int)
     for row in human:
         for reason in row.get("analysis_exclusions", ()):
@@ -649,6 +663,7 @@ def _data_quality(rows, canonical_result, order_result, attribution):
         "historical_seller_identity": _rate(len(historical_seller), len(human), minimum=1),
         "standardized_activity": _rate(len(standardized), len(human), minimum=1),
         "priority_snapshot_coverage": _rate(len(snapshot), len(human), minimum=1),
+        "priority_percentile_coverage": _rate(len(percentile), len(human), minimum=1),
         "waiting_outcome_count": sum(1 for row in human if attribution["maturity"].get(row["contact_id"]) == "waiting_outcome" and row.get("result_class") in QUALIFIED_DIALOGUE_RESULTS),
         "excluded_legacy_rows": sum(reasons.values()),
         "exclusion_reasons": dict(sorted(reasons.items())),
@@ -821,9 +836,10 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
         weekly_trend.append({
             "week": week,
             "human_activities": len(agg["human"]),
-            "reached": len(agg["reached"]),
-            "positive": len(agg["positive"]),
-            "mature_attributed_orders": len(agg["attributed"]),
+            "reached": len(agg["sync_reached"]),
+            "positive": len(agg["sync_positive"]),
+            "mature_converted_contacts": len(agg["sync_converted"]),
+            "attributed_orders": len(agg["attributed"]),
             "bom_ratio": agg["rates"]["bom_ratio"],
             "incomplete": week == _iso_week(generated.date()),
         })
@@ -866,8 +882,8 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
     coaching_matrix = [
         item for item in seller_comparison
         if item["order_10d"]["denominator"] >= MIN_RATE_SAMPLE
-        and item["snapshot_coverage"]["value"] is not None
-        and item["snapshot_coverage"]["value"] >= MIN_PRIORITY_COVERAGE
+        and item["priority_percentile_coverage"]["value"] is not None
+        and item["priority_percentile_coverage"]["value"] >= MIN_PRIORITY_COVERAGE
     ]
     result = {
         "meta": {
@@ -891,9 +907,9 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
         "coaching_matrix": coaching_matrix,
         "funnel": {
             "attempts": len(current["sync"]),
-            "reached": len([row for row in current["sync"] if row.get("result_class") in QUALIFIED_DIALOGUE_RESULTS]),
-            "positive": len(current["positive"]),
-            "mature_attributed_orders": len(current["attributed"]),
+            "reached": len(current["sync_reached"]),
+            "positive": len(current["sync_positive"]),
+            "mature_converted_contacts": len(current["sync_converted"]),
             "reach_rate": current["rates"]["reach"],
             "positive_rate": current["rates"]["positive_dialogue"],
             "order_rate": current["rates"]["order_10d"],
@@ -911,6 +927,7 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
         "priority_allocation": {
             "priority_focus": current["rates"]["priority_focus"],
             "snapshot_coverage": _rate(len(current["snapshots"]), len(current["human"]), minimum=1),
+            "priority_percentile_coverage": _rate(len(current["percentile_rows"]), len(current["human"]), minimum=1),
             "strategic_coverage": _rate(
                 len(strategic_contacted), len(strategic_portfolio), minimum=MIN_RATE_SAMPLE
             ),
@@ -979,7 +996,8 @@ def build_drilldown(summary, metric, *, limit=100):
         orders = attribution.get("contact_to_orders", {}).get(row.get("contact_id"), ())
         include = {
             "human_activities": row.get("is_human"),
-            "reach": row.get("is_human") and row.get("contact_type_key") in SYNCHRONOUS_CHANNELS and row.get("result_class") in ANALYSABLE_RESULTS,
+            "attempts": row.get("is_human") and row.get("contact_type_key") in SYNCHRONOUS_CHANNELS and row.get("result_class") in ANALYSABLE_RESULTS,
+            "reach": row.get("is_human") and row.get("contact_type_key") in SYNCHRONOUS_CHANNELS and row.get("result_class") in QUALIFIED_DIALOGUE_RESULTS,
             "positive_dialogue": row.get("is_human") and row.get("result_class") in {"positive", "order"},
             "order_10d": bool(orders),
             "waiting_outcome": attribution.get("maturity", {}).get(row.get("contact_id")) == "waiting_outcome",

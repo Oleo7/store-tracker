@@ -10,6 +10,7 @@ sys.path.insert(0, str(WEB_APP_DIR))
 from sales_coaching import (  # noqa: E402
     CustomerIdentityIndex,
     attribute_orders_to_contacts,
+    build_drilldown,
     build_pre_contact_snapshot,
     build_sales_coaching_summary,
     canonicalize_activities,
@@ -197,6 +198,81 @@ class AttributionTests(TestCase):
 
 
 class SnapshotAndAggregateTests(TestCase):
+    def summary(self, rows, orders=(), **kwargs):
+        return build_sales_coaching_summary(
+            activities=rows,
+            customers=CUSTOMERS,
+            users=USERS,
+            order_rows=orders,
+            start="2026-08-01",
+            end="2026-08-20",
+            generated_at="2026-08-20 12:00",
+            score_version="v2.1",
+            **kwargs,
+        )
+
+    def test_two_orders_from_one_contact_count_as_one_conversion(self):
+        summary = self.summary(
+            [activity("converted", "2026-08-01 10:00")],
+            [order("ORDER-1", "2026-08-02"), order("ORDER-2", "2026-08-03")],
+        )
+
+        order_kpi = summary["kpis"]["order_10d"]
+        self.assertEqual((order_kpi["numerator"], order_kpi["denominator"]), (1, 1))
+        self.assertEqual(order_kpi["value"], 1)
+        self.assertEqual(order_kpi["attributed_orders"], 2)
+
+    def test_positive_manual_email_does_not_enter_synchronous_funnel(self):
+        summary = self.summary([
+            activity("phone", "2026-08-01 10:00", channel="Telefon", result="Neutral"),
+            activity("manual-email", "2026-08-02 10:00", channel="Mejl", result="Positiv"),
+        ])
+
+        self.assertEqual(summary["funnel"]["attempts"], 1)
+        self.assertEqual(summary["funnel"]["reached"], 1)
+        self.assertEqual(summary["funnel"]["positive"], 0)
+        self.assertEqual(summary["channel_effectiveness"]["email"]["positive_dialogue"]["numerator"], 1)
+
+    def test_approximate_snapshot_without_percentile_is_not_priority_focus_denominator(self):
+        summary = build_sales_coaching_summary(
+            activities=[
+                activity("exact", "2026-08-01 10:00", priority_snapshot_quality="exact", priority_percentile_at_contact="80"),
+                activity("approx", "2026-08-02 10:00", planned_activity_id="planned-1"),
+            ],
+            customers=CUSTOMERS,
+            users=USERS,
+            order_rows=[],
+            planned_activities=[{"planned_activity_id": "planned-1", "source_suggestion_id": "suggestion-1"}],
+            planning_suggestions=[{"suggestion_id": "suggestion-1", "priority_score_at_creation": "71"}],
+            start="2026-08-01",
+            end="2026-08-20",
+            generated_at="2026-08-20 12:00",
+        )
+
+        focus = summary["kpis"]["priority_focus"]
+        coverage = summary["priority_allocation"]["priority_percentile_coverage"]
+        self.assertEqual((focus["numerator"], focus["denominator"]), (1, 1))
+        self.assertEqual((coverage["numerator"], coverage["denominator"]), (1, 2))
+        self.assertEqual(summary["priority_allocation"]["snapshot_coverage"]["numerator"], 2)
+
+    def test_reach_drilldown_contains_only_reached_contacts(self):
+        summary = self.summary([
+            activity("reached", "2026-08-01 10:00", result="Neutral"),
+            activity("unreachable", "2026-08-02 10:00", result="Ej anträffbar"),
+        ])
+
+        self.assertEqual([row["contact_id"] for row in build_drilldown(summary, "reach")["rows"]], ["reached"])
+        self.assertEqual({row["contact_id"] for row in build_drilldown(summary, "attempts")["rows"]}, {"reached", "unreachable"})
+
+    def test_missing_historical_segment_does_not_fall_back_to_current_segment(self):
+        rows = [activity("legacy", "2026-08-01 10:00")]
+
+        current_segment = self.summary(rows, segment="A")
+        missing_segment = self.summary(rows, segment="missing")
+
+        self.assertEqual(current_segment["kpis"]["human_activities"]["value"], 0)
+        self.assertEqual(missing_segment["kpis"]["human_activities"]["value"], 1)
+
     def test_snapshot_quality_exact_approximate_and_missing(self):
         rows = [
             activity(
