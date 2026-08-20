@@ -47,6 +47,17 @@ from priority import (
     build_priority_customers,
     normalize_customer_key,
 )
+from sales_coaching import (
+    CONTACT_ANALYTICS_COLUMNS,
+    DRILLDOWN_METRICS,
+    build_drilldown as build_sales_coaching_drilldown,
+    build_pre_contact_snapshot,
+    build_sales_coaching_summary,
+    canonical_activity_source,
+    normalize_contact_type as normalize_coaching_contact_type,
+    normalize_result_class,
+    strip_internal_analysis,
+)
 from contact_channel import recommend_contact_channel
 from route_proposal import (
     Coordinate,
@@ -124,6 +135,7 @@ from planning_suggestions import (
     PlanningSuggestionService,
     SCORE_EVENT_COLUMNS,
     SCORE_EVENTS_SHEET,
+    SUGGESTION_COLUMNS,
     SuggestionError,
     build_phase1_stub_candidates,
     decision_context_hash,
@@ -328,6 +340,8 @@ PERFORMANCE_ENDPOINTS = {
     "/customers",
     "/customer-insights",
     "/followup-insights",
+    "/sales-coaching-insights",
+    "/sales-coaching-insights/drilldown",
     "/planning/activities",
     "/planning/suggestions",
     "/planning/route-preview",
@@ -504,7 +518,8 @@ CONTACT_LOG_COLUMNS = [
 
 CONTACT_COLUMNS = ["date_time", "sales_person", "customer", "customer_id", "contact_channel", "result",
                    "comment", "customer_contact_person", "follow_up_date",
-                   *FREEZER_COLUMNS, "email_id", "contact_id", "planned_activity_id"]
+                   *FREEZER_COLUMNS, "email_id", "contact_id", "planned_activity_id",
+                   *CONTACT_ANALYTICS_COLUMNS]
 CONTACT_REQUIRED_COLUMNS = ["date_time", "sales_person", "customer", "contact_channel",
                             "result", "comment", "customer_contact_person", "follow_up_date"]
 
@@ -4383,7 +4398,7 @@ def send_brevo_transactional_email(*, sender, recipient_email, recipient_name, r
 
 
 def build_sales_activity_for_email(spreadsheet, *, email_id, email_type,
-                                   customer_name, customer_id="", user,
+                                   customer_name, customer_id="", customer_number="", user,
                                    recipients, partial):
     sheet = get_worksheet(spreadsheet, "sales_activities")
     headers = ensure_contact_worksheet_schema(sheet)
@@ -4392,10 +4407,17 @@ def build_sales_activity_for_email(spreadsheet, *, email_id, email_type,
     row_data = {
         "date_time": now_text(),
         "sales_person": user.get("name") or user.get("user_name", ""),
+        "sales_user_name": str(user.get("user_name") or "").strip(),
         "customer": customer_name,
         "customer_id": str(customer_id or "").strip(),
+        "customer_number": str(customer_number or "").strip(),
         "contact_channel": "Mejl",
+        "contact_type_key": "email",
         "result": result,
+        "result_class": "system_email",
+        "activity_source": "crm_email",
+        "analytics_snapshot_version": "sales_coaching_v1",
+        "priority_snapshot_quality": "missing",
         "comment": f"Mottagare: {', '.join(recipients)}",
         "customer_contact_person": "",
         "follow_up_date": "",
@@ -4814,6 +4836,7 @@ def send_email_proposal(row):
                 email_type=email_type,
                 customer_name=current_draft["customer"]["customer"],
                 customer_id=current_draft["customer"].get("customer_id", ""),
+                customer_number=current_draft["customer"].get("customer_number", ""),
                 user=user,
                 recipients=successes,
                 partial=bool(failures),
@@ -12687,6 +12710,176 @@ def planning_route_preview():
     return jsonify(preview)
 
 
+SALES_COACHING_FILTER_PARAMS = frozenset({
+    "start", "end", "seller", "channel", "segment", "lifecycle",
+})
+
+
+def sales_coaching_error(code, message, status=400, **extra):
+    return jsonify({
+        "ok": False,
+        "error": code,
+        "code": code,
+        "message": message,
+        **extra,
+    }), status
+
+
+def parse_sales_coaching_filters(*, drilldown=False):
+    allowed = set(SALES_COACHING_FILTER_PARAMS)
+    if drilldown:
+        allowed.update({"metric", "limit"})
+    unexpected = sorted(set(request.args) - allowed)
+    if unexpected:
+        raise ValueError("invalid_query_parameter")
+    today = stockholm_today()
+    raw_start = str(request.args.get("start") or "").strip()
+    raw_end = str(request.args.get("end") or "").strip()
+    try:
+        start = date.fromisoformat(raw_start) if raw_start else today - timedelta(days=27)
+        end = date.fromisoformat(raw_end) if raw_end else today
+    except ValueError as exc:
+        raise ValueError("invalid_date") from exc
+    if start > end:
+        raise ValueError("invalid_period")
+    if (end - start).days + 1 > 365:
+        raise ValueError("period_too_long")
+    channel = str(request.args.get("channel") or "all").strip().casefold()
+    segment_raw = str(request.args.get("segment") or "all").strip()
+    segment = segment_raw.upper() if segment_raw.casefold() not in {"all", "missing"} else segment_raw.casefold()
+    lifecycle = str(request.args.get("lifecycle") or "all").strip().casefold()
+    if channel not in {"all", "visit", "phone", "email"}:
+        raise ValueError("invalid_channel")
+    if segment not in {"all", "A", "B", "C", "missing"}:
+        raise ValueError("invalid_segment")
+    if lifecycle not in {"all", "prospect", "first_order", "established", "reactivation"}:
+        raise ValueError("invalid_lifecycle")
+    return {
+        "start": start,
+        "end": end,
+        "seller": str(request.args.get("seller") or "").strip(),
+        "channel": channel,
+        "segment": segment,
+        "lifecycle": lifecycle,
+    }
+
+
+def optional_sales_coaching_rows(spreadsheet, title, columns):
+    """Read optional analytics sources without creating or modifying sheets."""
+    try:
+        sheet = get_worksheet(spreadsheet, title)
+    except (WorksheetNotFound, AttributeError):
+        return []
+    return worksheet_to_dicts(sheet, expected_columns=columns)
+
+
+def load_sales_coaching_summary(spreadsheet, filters):
+    read_started = time.perf_counter()
+    customers = get_customer_rows(spreadsheet)
+    activities = get_contact_rows(spreadsheet)
+    order_rows = get_order_rows(spreadsheet)
+    users = get_user_rows(spreadsheet)
+    planned_activities = optional_sales_coaching_rows(
+        spreadsheet, PLANNED_ACTIVITIES_SHEET, PLANNED_ACTIVITY_COLUMNS
+    )
+    message_rows = optional_sales_coaching_rows(
+        spreadsheet, EMAIL_MESSAGES_SHEET, EMAIL_MESSAGES_COLUMNS
+    )
+    recipient_rows = optional_sales_coaching_rows(
+        spreadsheet, EMAIL_RECIPIENTS_SHEET, EMAIL_RECIPIENTS_COLUMNS
+    )
+    planning_suggestion_rows = optional_sales_coaching_rows(
+        spreadsheet, "planning_suggestions", SUGGESTION_COLUMNS
+    )
+    score_event_rows = optional_sales_coaching_rows(
+        spreadsheet, SCORE_EVENTS_SHEET, SCORE_EVENT_COLUMNS
+    )
+    record_performance_step(
+        "calculation.sales_coaching.read",
+        read_started,
+        len(activities),
+    )
+    current_priorities, _email_snapshot = build_current_priority_snapshot(
+        customers=customers,
+        order_rows=order_rows,
+        contact_rows=activities,
+        message_rows=message_rows,
+        recipient_rows=recipient_rows,
+        today=stockholm_today(),
+        planned_activity_rows=planned_activities,
+    )
+    return build_sales_coaching_summary(
+        activities=activities,
+        customers=customers,
+        users=users,
+        order_rows=order_rows,
+        planned_activities=planned_activities,
+        planning_suggestions=planning_suggestion_rows,
+        score_events=score_event_rows,
+        current_priorities=current_priorities,
+        generated_at=stockholm_now(),
+        score_version=SCORE_VERSION,
+        on_step=record_performance_step,
+        **filters,
+    )
+
+
+def validate_sales_coaching_seller(summary, seller):
+    if not seller:
+        return True
+    return normalize_key(seller) in {
+        normalize_key(option) for option in summary.get("options", {}).get("sellers", ())
+    }
+
+
+@app.route("/sales-coaching-insights", methods=["GET"])
+def get_sales_coaching_insights():
+    if not user_is_admin(current_user()):
+        return sales_coaching_error(
+            "admin_required", "Administratörsbehörighet krävs.", 403
+        )
+    try:
+        filters = parse_sales_coaching_filters()
+    except ValueError as exc:
+        return sales_coaching_error(str(exc), "Ogiltiga analysfilter.", 400)
+    spreadsheet = get_spreadsheet_with_retry()
+    summary = load_sales_coaching_summary(spreadsheet, filters)
+    if not validate_sales_coaching_seller(summary, filters["seller"]):
+        return sales_coaching_error(
+            "invalid_seller", "Den valda säljaren finns inte i analysunderlaget.", 400
+        )
+    return jsonify(strip_internal_analysis(summary))
+
+
+@app.route("/sales-coaching-insights/drilldown", methods=["GET"])
+def get_sales_coaching_drilldown():
+    if not user_is_admin(current_user()):
+        return sales_coaching_error(
+            "admin_required", "Administratörsbehörighet krävs.", 403
+        )
+    try:
+        filters = parse_sales_coaching_filters(drilldown=True)
+        metric = str(request.args.get("metric") or "").strip()
+        if metric not in DRILLDOWN_METRICS:
+            raise ValueError("invalid_metric")
+        raw_limit = str(request.args.get("limit") or "100").strip()
+        limit = int(raw_limit)
+        if limit < 1 or limit > 200:
+            raise ValueError("invalid_limit")
+    except (TypeError, ValueError) as exc:
+        code = str(exc)
+        if not code.startswith("invalid_"):
+            code = "invalid_limit"
+        return sales_coaching_error(code, "Ogiltiga drilldown-parametrar.", 400)
+    spreadsheet = get_spreadsheet_with_retry()
+    summary = load_sales_coaching_summary(spreadsheet, filters)
+    if not validate_sales_coaching_seller(summary, filters["seller"]):
+        return sales_coaching_error(
+            "invalid_seller", "Den valda säljaren finns inte i analysunderlaget.", 400
+        )
+    return jsonify(build_sales_coaching_drilldown(summary, metric, limit=limit))
+
+
 @app.route("/followup-insights", methods=["GET"])
 def get_followup_insights():
     spreadsheet = get_spreadsheet_with_retry()
@@ -12978,16 +13171,39 @@ def add_contact(customer_name):
             400,
         )
 
-    contact_type = normalize_planning_contact_type(data.get("contact_channel"))
-    physical_contact = contact_type == "visit" or not str(
-        data.get("contact_channel") or ""
-    ).strip()
+    raw_contact_channel = str(data.get("contact_channel") or "").strip()
+    # Legacy customer-card clients omitted the channel to mean a physical visit.
+    # Preserve that payload contract while persisting the canonical visit key.
+    contact_type = (
+        normalize_coaching_contact_type(raw_contact_channel)
+        if raw_contact_channel else "visit"
+    )
+    if contact_type == "unknown":
+        return planning_error(
+            "invalid_contact_channel",
+            "Välj Besök, Telefon eller Mejl.",
+            400,
+            field="contact_channel",
+        )
+    result_class = normalize_result_class(data.get("result"))
+    physical_contact = contact_type == "visit"
     freezer_values = {
         field: checkbox_to_sheet_value(data.get(field, ""))
         for field in FREEZER_COLUMNS
     }
-    if physical_contact and not any(freezer_values.values()):
+    if (
+        physical_contact
+        and result_class != "unreachable"
+        and not any(freezer_values.values())
+    ):
         return jsonify({"ok": False, "error": "freezer_selection_required"}), 400
+    if result_class == "unknown":
+        return planning_error(
+            "invalid_contact_result",
+            "Välj ett giltigt kontaktresultat.",
+            400,
+            field="result",
+        )
     if not str(data.get("comment") or "").strip():
         return planning_error(
             "comment_required",
@@ -13529,6 +13745,47 @@ def add_contact(customer_name):
             contact_saved = True
             duplicate_contact = True
         else:
+            analytics_enrichment = {
+                "sales_user_name": str(owner.get("user_name") or "").strip(),
+                "customer_number": str(
+                    (customer or {}).get("customer_number")
+                    or planned_row.get("customer_number")
+                    or ""
+                ).strip(),
+                "contact_type_key": contact_type,
+                "result_class": result_class,
+                "activity_source": canonical_activity_source(
+                    "", planned_row=planned_row
+                ),
+                "source_suggestion_id": str(
+                    planned_row.get("source_suggestion_id") or ""
+                ).strip(),
+                "source_trigger_key": str(
+                    planned_row.get("source_trigger_key") or ""
+                ).strip(),
+                "analytics_snapshot_version": "sales_coaching_v1",
+                "priority_snapshot_quality": "missing",
+                "priority_score_version": SCORE_VERSION,
+            }
+            try:
+                pre_contact_snapshot = get_authoritative_priority_snapshot(
+                    spreadsheet,
+                    today=stockholm_today(),
+                )
+                analytics_enrichment.update(build_pre_contact_snapshot(
+                    customer=customer,
+                    owner=owner,
+                    priorities=pre_contact_snapshot["priorities"],
+                    planned_row=planned_row,
+                    score_version=SCORE_VERSION,
+                ))
+            except Exception:
+                # Analytics enrichment must never block the operational contact,
+                # planning completion, or follow-up flow.
+                app.logger.warning(
+                    "Could not build pre-contact sales coaching snapshot",
+                    exc_info=True,
+                )
             row_data = {
                 "date_time": data.get(
                     "date_time",
@@ -13550,6 +13807,7 @@ def add_contact(customer_name):
                 "follow_up_date": mirrored_follow_up_date,
                 "contact_id": contact_id,
                 "planned_activity_id": planned_activity_id,
+                **analytics_enrichment,
                 **freezer_values,
             }
             try:
