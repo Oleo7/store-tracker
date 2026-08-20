@@ -222,6 +222,38 @@ class SnapshotAndAggregateTests(TestCase):
         self.assertEqual(order_kpi["value"], 1)
         self.assertEqual(order_kpi["attributed_orders"], 2)
 
+    def test_unresolved_identity_does_not_lower_mature_order_conversion(self):
+        summary = self.summary(
+            [
+                activity("converted", "2026-08-01 10:00"),
+                activity(
+                    "unresolved", "2026-08-02 10:00",
+                    customer_id="", customer="Okänd butik",
+                ),
+            ],
+            [order("ORDER-1", "2026-08-03")],
+        )
+
+        order_kpi = summary["kpis"]["order_10d"]
+        identity_coverage = summary["data_quality"]["order_attribution_identity_coverage"]
+        self.assertEqual((order_kpi["numerator"], order_kpi["denominator"]), (1, 1))
+        self.assertEqual((identity_coverage["numerator"], identity_coverage["denominator"]), (1, 2))
+        self.assertEqual(summary["kpis"]["positive_dialogue"]["denominator"], 2)
+        self.assertEqual(
+            [row["contact_id"] for row in build_drilldown(summary, "order_10d")["rows"]],
+            ["converted"],
+        )
+
+    def test_fresh_converted_contact_is_not_in_mature_order_drilldown(self):
+        summary = self.summary(
+            [activity("fresh", "2026-08-15 10:00")],
+            [order("FRESH", "2026-08-16")],
+        )
+
+        self.assertEqual(summary["kpis"]["order_10d"]["denominator"], 0)
+        self.assertEqual(build_drilldown(summary, "order_10d")["total_count"], 0)
+        self.assertEqual(build_drilldown(summary, "order_10d_sync")["total_count"], 0)
+
     def test_positive_manual_email_does_not_enter_synchronous_funnel(self):
         summary = self.summary([
             activity("phone", "2026-08-01 10:00", channel="Telefon", result="Neutral"),
@@ -232,6 +264,23 @@ class SnapshotAndAggregateTests(TestCase):
         self.assertEqual(summary["funnel"]["reached"], 1)
         self.assertEqual(summary["funnel"]["positive"], 0)
         self.assertEqual(summary["channel_effectiveness"]["email"]["positive_dialogue"]["numerator"], 1)
+
+    def test_positive_drilldowns_match_kpi_and_synchronous_populations(self):
+        summary = self.summary([
+            activity("manual-email", "2026-08-01 10:00", channel="Mejl", result="Positiv"),
+            activity("sync-positive", "2026-08-02 10:00", channel="Telefon", result="Positiv"),
+            activity("unknown-channel", "2026-08-03 10:00", channel="SMS", result="Positiv"),
+        ])
+
+        self.assertEqual(summary["kpis"]["positive_dialogue"]["numerator"], 2)
+        self.assertEqual(
+            {row["contact_id"] for row in build_drilldown(summary, "positive_dialogue")["rows"]},
+            {"manual-email", "sync-positive"},
+        )
+        self.assertEqual(
+            [row["contact_id"] for row in build_drilldown(summary, "positive_sync")["rows"]],
+            ["sync-positive"],
+        )
 
     def test_approximate_snapshot_without_percentile_is_not_priority_focus_denominator(self):
         summary = build_sales_coaching_summary(
@@ -255,6 +304,38 @@ class SnapshotAndAggregateTests(TestCase):
         self.assertEqual((coverage["numerator"], coverage["denominator"]), (1, 2))
         self.assertEqual(summary["priority_allocation"]["snapshot_coverage"]["numerator"], 2)
 
+    def test_small_sample_seller_does_not_affect_team_rate_median(self):
+        rows = []
+        for seller, reached, attempts in (("alice", 5, 10), ("bob", 7, 10), ("tiny", 1, 1)):
+            for index in range(attempts):
+                rows.append(activity(
+                    f"{seller}-{index}",
+                    f"2026-08-{index + 1:02d} 10:00",
+                    seller=seller,
+                    result="Neutral" if index < reached else "Ej anträffbar",
+                ))
+
+        summary = self.summary(rows, seller="alice")
+        comparisons = {item["seller"]: item for item in summary["seller_comparison"]}
+
+        self.assertEqual(comparisons["tiny"]["reach"]["value"], 1)
+        self.assertEqual(comparisons["tiny"]["reach"]["status"], "small_sample")
+        self.assertEqual(summary["kpis"]["reach"]["comparisons"]["team_median"], 0.6)
+
+    def test_team_rate_median_requires_two_sufficient_sellers(self):
+        rows = [
+            activity(
+                f"alice-{index}", f"2026-08-{index + 1:02d} 10:00",
+                seller="alice", result="Ej anträffbar",
+            )
+            for index in range(10)
+        ] + [activity("tiny", "2026-08-11 10:00", seller="tiny", result="Neutral")]
+
+        summary = self.summary(rows, seller="alice")
+
+        self.assertIsNone(summary["kpis"]["reach"]["comparisons"]["team_median"])
+        self.assertNotIn("reach_low", {card["code"] for card in summary["coaching_cards"]})
+
     def test_reach_drilldown_contains_only_reached_contacts(self):
         summary = self.summary([
             activity("reached", "2026-08-01 10:00", result="Neutral"),
@@ -272,6 +353,20 @@ class SnapshotAndAggregateTests(TestCase):
 
         self.assertEqual(current_segment["kpis"]["human_activities"]["value"], 0)
         self.assertEqual(missing_segment["kpis"]["human_activities"]["value"], 1)
+
+    def test_data_quality_counts_flagged_rows_separately_from_issue_count(self):
+        summary = self.summary([
+            activity(
+                "multi-issue", "2026-08-01 10:00",
+                customer_id="", customer="Okänd butik",
+                channel="SMS", result="Oklassificerat",
+            ),
+        ])
+
+        quality = summary["data_quality"]
+        self.assertEqual(quality["flagged_activity_rows"], 1)
+        self.assertGreaterEqual(quality["quality_issue_count"], 3)
+        self.assertEqual(quality["excluded_legacy_rows"], 0)
 
     def test_matrix_uses_percentile_coverage_not_approximate_snapshot_coverage(self):
         rows = []
@@ -373,12 +468,13 @@ class SnapshotAndAggregateTests(TestCase):
 
         self.assertEqual([row["priority_snapshot_quality"] for row in result], ["exact", "approximate", "missing"])
         self.assertEqual(result[1]["priority_score_at_contact"], 71)
+        self.assertIsNone(result[1]["recommendation_eligible_at_contact"])
 
     def test_pre_contact_snapshot_is_deterministic_and_uses_owner_portfolio(self):
         priorities = [
-            {"customer_id": "customer-1", "sales_person": "Olle", "priority_score": 80, "score_version": "v2.1", "intent_timing": 90, "value_index": 50, "strategic_index": 100, "expected_order_dfp": 12, "lifecycle": "established", "segment": "A"},
-            {"customer_id": "customer-2", "sales_person": "Olle", "priority_score": 20},
-            {"customer_id": "other", "sales_person": "Sofia", "priority_score": 100},
+            {"customer_id": "customer-1", "sales_person": "Olle", "priority_score": 80, "score_version": "v2.1", "intent_timing": 90, "value_index": 50, "strategic_index": 100, "expected_order_dfp": 12, "lifecycle": "established", "segment": "A", "recommendation_eligible": True},
+            {"customer_id": "customer-2", "sales_person": "Olle", "priority_score": 20, "recommendation_eligible": True},
+            {"customer_id": "other", "sales_person": "Sofia", "priority_score": 100, "recommendation_eligible": True},
         ]
         args = dict(customer=CUSTOMERS[0], owner=USERS[0], priorities=priorities, score_version="v2.1")
 
@@ -389,10 +485,71 @@ class SnapshotAndAggregateTests(TestCase):
         self.assertEqual(first["priority_snapshot_quality"], "exact")
         self.assertEqual(first["seller_portfolio_size_at_contact"], 2)
         self.assertEqual(first["priority_percentile_at_contact"], 100)
+        self.assertIs(first["recommendation_eligible_at_contact"], True)
+
+    def test_suppressed_customer_snapshot_has_no_priority_percentile(self):
+        priorities = [
+            {"customer_id": "customer-1", "sales_person": "Olle", "priority_score": 99, "recommendation_eligible": False, "recommendation_suppression_reason": "recent_contact"},
+            {"customer_id": "customer-2", "sales_person": "Olle", "priority_score": 20, "recommendation_eligible": True},
+        ]
+
+        snapshot = build_pre_contact_snapshot(
+            customer=CUSTOMERS[0], owner=USERS[0], priorities=priorities,
+            score_version="v2.1",
+        )
+
+        self.assertIs(snapshot["recommendation_eligible_at_contact"], False)
+        self.assertEqual(snapshot["suppression_reason_at_contact"], "recent_contact")
+        self.assertEqual(snapshot["priority_percentile_at_contact"], "")
+        self.assertEqual(snapshot["seller_portfolio_size_at_contact"], 1)
+
+    def test_priority_gap_contains_only_recommendation_eligible_customers(self):
+        summary = build_sales_coaching_summary(
+            activities=[], customers=CUSTOMERS, users=USERS, order_rows=[],
+            current_priorities=[
+                {"customer_id": "customer-1", "customer": "Nytt namn", "sales_person": "Olle", "priority_score": 100, "value_index": 80, "segment": "A", "recommendation_eligible": False, "recommendation_suppression_reason": "recent_contact"},
+                {"customer_id": "customer-2", "customer": "Andra butiken", "sales_person": "Olle", "priority_score": 80, "value_index": 60, "segment": "B", "recommendation_eligible": True},
+            ],
+            start="2026-08-01", end="2026-08-20",
+            generated_at="2026-08-20 12:00",
+        )
+
+        gap = summary["priority_allocation"]["priority_gap"]
+        self.assertEqual(gap["count"], 1)
+        self.assertEqual(gap["customers"][0]["customer_id"], "customer-2")
+
+    def test_followup_and_planning_drilldowns_match_each_card(self):
+        rows = [
+            activity("success", "2026-08-01 10:00", follow_up_date="2026-08-05"),
+            activity("gap", "2026-08-02 10:00"),
+        ]
+        planned = [
+            {"planned_activity_id": "on-time", "scheduled_at": "2026-08-03T10:00:00", "status": "completed", "completed_contact_id": "success", "user_name": "olle", "customer": "Nytt namn", "customer_id": "customer-1", "contact_type": "phone"},
+            {"planned_activity_id": "overdue", "scheduled_at": "2026-08-04T10:00:00", "status": "planned", "user_name": "olle", "customer": "Nytt namn", "customer_id": "customer-1", "contact_type": "visit"},
+            {"planned_activity_id": "skipped", "scheduled_at": "2026-08-05T10:00:00", "status": "skipped", "user_name": "olle", "customer": "Nytt namn", "customer_id": "customer-1", "contact_type": "email"},
+        ]
+        summary = build_sales_coaching_summary(
+            activities=rows, customers=CUSTOMERS, users=USERS, order_rows=[],
+            planned_activities=planned,
+            start="2026-08-01", end="2026-08-20",
+            generated_at="2026-08-20 12:00",
+        )
+
+        expected = {
+            "followup_success": 1,
+            "followup_gap": 1,
+            "followup_gap_10d": 1,
+            "planned_on_time": 1,
+            "planned_overdue": 1,
+            "planned_skipped": 1,
+        }
+        for metric, count in expected.items():
+            with self.subTest(metric=metric):
+                self.assertEqual(build_drilldown(summary, metric)["total_count"], count)
 
     def test_bom_ratio_repeat_high_priority_and_small_sample(self):
         rows = [
-            activity("bom-1", "2026-08-01 10:00", channel="Besök", result="Ej anträffbar", priority_snapshot_quality="exact", analytics_snapshot_version="sales_coaching_v1", priority_score_at_contact="80", priority_percentile_at_contact="90"),
+            activity("bom-1", "2026-08-01 10:00", channel="Besök", result="Ej anträffbar", planned_activity_id="planned-bom", priority_snapshot_quality="exact", analytics_snapshot_version="sales_coaching_v1", priority_score_at_contact="80", priority_percentile_at_contact="90"),
             activity("bom-2", "2026-08-02 10:00", channel="Besök", result="Ej anträffbar", priority_snapshot_quality="exact", analytics_snapshot_version="sales_coaching_v1", priority_score_at_contact="75", priority_percentile_at_contact="80"),
             activity("visit", "2026-08-03 10:00", channel="Besök", result="Neutral"),
             activity("auto-email", "2026-08-04 10:00", channel="Mejl", result="Positiv", email_id="mail", activity_source="crm_email"),
@@ -415,6 +572,9 @@ class SnapshotAndAggregateTests(TestCase):
         self.assertEqual(summary["visit_efficiency"]["repeat_boms"], {"customers": 1, "visits": 2})
         self.assertEqual(summary["visit_efficiency"]["high_priority_boms"], 2)
         self.assertEqual(summary["kpis"]["human_activities"]["value"], 3)
+        self.assertEqual(build_drilldown(summary, "bom_ratio")["total_count"], 2)
+        self.assertEqual(build_drilldown(summary, "planned_boms")["total_count"], 1)
+        self.assertEqual(build_drilldown(summary, "unplanned_boms")["total_count"], 1)
 
 
 if __name__ == "__main__":

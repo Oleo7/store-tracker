@@ -111,6 +111,9 @@ class SalesCoachingAccessTests(TestCase):
             },
         )
         self.assertIn("secure_customer_identity", payload["data_quality"])
+        self.assertIn("order_attribution_identity_coverage", payload["data_quality"])
+        self.assertIn("flagged_activity_rows", payload["data_quality"])
+        self.assertIn("quality_issue_count", payload["data_quality"])
         self.assertEqual(self.spreadsheet.added_sheets, added_before)
         self.assertEqual(
             {title: sheet.values for title, sheet in self.spreadsheet.sheets.items()},
@@ -237,6 +240,8 @@ class ContactAnalyticsWriteTests(TestCase):
             "expected_order_dfp": 20,
             "lifecycle": "prospect",
             "segment": "A",
+            "recommendation_eligible": True,
+            "recommendation_suppression_reason": "",
         }]
         with patch.object(
             app_module,
@@ -256,6 +261,8 @@ class ContactAnalyticsWriteTests(TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["priority_snapshot_quality"], "exact")
         self.assertEqual(rows[0]["priority_score_at_contact"], 88)
+        self.assertIs(rows[0]["recommendation_eligible_at_contact"], True)
+        self.assertEqual(rows[0]["suppression_reason_at_contact"], "")
         self.assertEqual(rows[0], first_row)
         snapshot_mock.assert_called_once()
 

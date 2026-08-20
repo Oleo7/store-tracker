@@ -314,7 +314,7 @@
     return `
       <button type="button" class="sc-quality-banner" data-status="${escapeHtml(quality.status)}" data-drilldown="data_quality">
         <span class="sc-quality-title">${statusLabel(quality.status)}</span>
-        <span class="sc-quality-summary">Säker identitet ${percent(quality.secure_customer_identity?.value)} · Standardiserat ${percent(quality.standardized_activity?.value)} · Snapshot ${percent(quality.priority_snapshot_coverage?.value)} · Historisk percentil ${percent(coverage?.value)} · Väntar på 10 dagar ${number(quality.waiting_outcome_count)} · Exkluderade legacy-rader ${number(quality.excluded_legacy_rows)}</span>
+        <span class="sc-quality-summary">Säker identitet ${percent(quality.secure_customer_identity?.value)} · Identitet för orderattribution ${percent(quality.order_attribution_identity_coverage?.value)} · Standardiserat ${percent(quality.standardized_activity?.value)} · Snapshot ${percent(quality.priority_snapshot_coverage?.value)} · Historisk percentil ${percent(coverage?.value)} · Väntar på 10 dagar ${number(quality.waiting_outcome_count)} · Flaggade rader ${number(quality.flagged_activity_rows)} · Kvalitetsproblem ${number(quality.quality_issue_count)} · Exkluderade rader ${number(quality.excluded_legacy_rows)}</span>
         <span class="sc-quality-arrow" aria-hidden="true">›</span>
       </button>`;
   }
@@ -349,8 +349,19 @@
   }
 
   function matrixMarkup(matrix) {
-    const medianX = Number(matrix.medians?.priority_focus ?? 0.5) * 100;
-    const medianY = Number(matrix.medians?.order_10d ?? 0.5) * 100;
+    const priorityMedian = matrix.medians?.priority_focus;
+    const orderMedian = matrix.medians?.order_10d;
+    const reasonLabel = reason => ({
+      order_sample_below_10: "färre än 10 mogna kontakter",
+      priority_sample_below_10: "färre än 10 kontakter med historisk percentil",
+      priority_percentile_coverage_below_70: "percentiltäckning under 70 %",
+    }[reason] || reason);
+    const insufficient = (matrix.insufficient_sample || []).map(item => `${escapeHtml(item.seller)} (${item.reasons.map(reasonLabel).join(", ")})`).join(" · ");
+    if (priorityMedian === null || priorityMedian === undefined || orderMedian === null || orderMedian === undefined) {
+      return `<section class="sc-section" aria-labelledby="sc-matrix-title"><div class="sc-section-heading"><div><h2 id="sc-matrix-title">Teamets coachningsmatris</h2><p>Prioritetsfokus mot mogen kontaktkonvertering.</p></div></div><div class="sc-empty">Otillräckligt jämförbart underlag. Minst två säljare behöver sufficient underlag för båda axlarna.</div>${insufficient ? `<div class="sc-insufficient"><strong>Litet underlag:</strong> ${insufficient}</div>` : ""}</section>`;
+    }
+    const medianX = Number(priorityMedian) * 100;
+    const medianY = Number(orderMedian) * 100;
     const bubbles = (matrix.sellers || []).map(item => {
       const x = Math.max(3, Math.min(97, Number(item.priority_focus.value) * 100));
       const y = Math.max(3, Math.min(97, Number(item.order_10d.value) * 100));
@@ -358,7 +369,6 @@
       const title = `${item.seller}: prioritetsfokus ${percent(item.priority_focus.value)}, order ${percent(item.order_10d.value)}, ${item.human_activities} aktiviteter, percentiltäckning ${percent(item.priority_percentile_coverage.value)}`;
       return `<button type="button" class="sc-bubble" style="left:${x}%;bottom:${y}%;width:${size}px;height:${size}px" data-seller="${escapeHtml(item.seller)}" title="${escapeHtml(title)}" aria-label="${escapeHtml(title)}">${escapeHtml(String(item.seller).slice(0, 2).toUpperCase())}</button>`;
     }).join("");
-    const insufficient = (matrix.insufficient_sample || []).map(item => `${escapeHtml(item.seller)} (${item.reasons.map(reason => reason === "order_sample_below_10" ? "färre än 10 mogna kontakter" : "percentiltäckning under 70 %").join(", ")})`).join(" · ");
     return `<section class="sc-section" aria-labelledby="sc-matrix-title"><div class="sc-section-heading"><div><h2 id="sc-matrix-title">Teamets coachningsmatris</h2><p>Prioritetsfokus mot mogen kontaktkonvertering. Bubbelstorlek visar mänskliga aktiviteter.</p></div></div><div class="sc-matrix-wrap"><div class="sc-matrix" role="img" aria-label="Coachningsmatris med teammedianer"><span class="sc-matrix-median-x" style="left:${medianX}%"></span><span class="sc-matrix-median-y" style="bottom:${medianY}%"></span>${bubbles}</div><div class="sc-axis-label">Prioritetsfokus →</div></div>${insufficient ? `<div class="sc-insufficient"><strong>Litet underlag:</strong> ${insufficient}</div>` : ""}</section>`;
   }
 
@@ -395,8 +405,8 @@
       ["Träffgrad för besök", percent(data.reach.value), rateEvidence(data.reach), "reach", "visit"],
       ["Återkommande bommar", number(data.repeat_boms.customers), `${number(data.repeat_boms.visits)} besök`, "repeat_boms"],
       ["Högprioriterade bommar", number(data.high_priority_boms), `${number(data.high_priority_score_fallback)} score-fallback`, "high_priority_boms"],
-      ["Planerade besök", percent(data.planned.value), rateEvidence(data.planned), "bom_ratio"],
-      ["Oplanerade besök", percent(data.unplanned.value), rateEvidence(data.unplanned), "bom_ratio"],
+      ["Planerade besök", percent(data.planned.value), rateEvidence(data.planned), "planned_boms"],
+      ["Oplanerade besök", percent(data.unplanned.value), rateEvidence(data.unplanned), "unplanned_boms"],
     ];
     const patterns = [...(data.weekday_patterns || []), ...(data.time_band_patterns || [])];
     return `<section class="sc-section" aria-labelledby="sc-visit-title"><div class="sc-section-heading"><div><h2 id="sc-visit-title">Besökseffektivitet</h2><p>Bom-ratio visas som procent och x av y. Mönster kräver minst tio besök.</p></div></div><div class="sc-card-grid">${cards.map(([label, value, evidence, metric, channel]) => `<button type="button" class="sc-mini-card" data-drilldown="${metric}"${channel ? ` data-channel="${channel}"` : ""} style="text-align:left;color:inherit;font:inherit;cursor:pointer"><div class="sc-mini-label">${label}</div><div class="sc-mini-value">${value}</div><div class="sc-mini-evidence">${evidence}</div></button>`).join("")}</div>${patterns.length ? `<div class="sc-table-wrap"><table class="sc-table"><thead><tr><th>Mönster</th><th>Bom-ratio</th><th>Underlag</th></tr></thead><tbody>${patterns.map(item => `<tr><td>${escapeHtml(item.label)}</td><td>${percent(item.bom_ratio.value)}</td><td>${rateEvidence(item.bom_ratio)}</td></tr>`).join("")}</tbody></table></div>` : `<div class="sc-insufficient">Inga veckodags- eller tidsgrupper har minst tio besök.</div>`}</section>`;
@@ -414,12 +424,12 @@
 
   function followupMarkup(data) {
     const cards = [
-      ["Positiv kontakt med nästa steg/order", percent(data.positive_next_step_coverage.value), rateEvidence(data.positive_next_step_coverage), "followup_gap"],
+      ["Positiv kontakt med nästa steg/order", percent(data.positive_next_step_coverage.value), rateEvidence(data.positive_next_step_coverage), "followup_success"],
       ["Positiva utan nästa steg", number(data.positive_without_next_step), "minst tre dagar gamla", "followup_gap"],
-      ["Planerade genomförda i tid", percent(data.planned_completed_in_time.value), rateEvidence(data.planned_completed_in_time), "human_activities"],
-      ["Försenade planerade", number(data.overdue_planned), "fortfarande öppna", "human_activities"],
-      ["Skipped", number(data.skipped), `${number(data.cancelled_excluded)} cancelled exkluderade`, "human_activities"],
-      ["Positiv utan order/uppföljning 10 dagar", number(data.positive_without_order_or_follow_up_10d), "mogen kontaktkohort", "followup_gap"],
+      ["Planerade genomförda i tid", percent(data.planned_completed_in_time.value), rateEvidence(data.planned_completed_in_time), "planned_on_time"],
+      ["Försenade planerade", number(data.overdue_planned), "fortfarande öppna", "planned_overdue"],
+      ["Skipped", number(data.skipped), `${number(data.cancelled_excluded)} cancelled exkluderade`, "planned_skipped"],
+      ["Positiv utan order/uppföljning 10 dagar", number(data.positive_without_order_or_follow_up_10d), "mogen kontaktkohort", "followup_gap_10d"],
     ];
     return `<section class="sc-section" aria-labelledby="sc-followup-title"><div class="sc-section-heading"><div><h2 id="sc-followup-title">Uppföljningsdisciplin</h2><p>Cancelled räknas inte som misslyckat genomförande.</p></div></div><div class="sc-card-grid">${cards.map(([label, value, evidence, metric]) => `<button type="button" class="sc-mini-card" data-drilldown="${metric}" style="text-align:left;color:inherit;font:inherit;cursor:pointer"><div class="sc-mini-label">${label}</div><div class="sc-mini-value">${value}</div><div class="sc-mini-evidence">${evidence}</div></button>`).join("")}</div></section>`;
   }

@@ -45,7 +45,7 @@ KPI_DEFINITIONS = {
     },
     "order_10d": {
         "label": "Order inom 10 dagar",
-        "definition": "Mogna nådda kontakter med minst en exklusivt attribuerad order inom 0–10 dagar dividerat med mogna nådda kontakter.",
+        "definition": "Mogna nådda kontakter med säker kundidentitet och minst en exklusivt attribuerad order inom 0–10 dagar dividerat med mogna nådda kontakter med säker kundidentitet.",
         "drilldown_metric": "order_10d",
     },
     "priority_focus": {
@@ -80,6 +80,8 @@ CONTACT_ANALYTICS_COLUMNS = [
     "expected_order_dfp_at_contact",
     "lifecycle_at_contact",
     "customer_segment_at_contact",
+    "recommendation_eligible_at_contact",
+    "suppression_reason_at_contact",
 ]
 
 DRILLDOWN_METRICS = frozenset({
@@ -93,9 +95,16 @@ DRILLDOWN_METRICS = frozenset({
     "waiting_outcome",
     "priority_focus",
     "bom_ratio",
+    "planned_boms",
+    "unplanned_boms",
     "repeat_boms",
     "high_priority_boms",
+    "followup_success",
     "followup_gap",
+    "followup_gap_10d",
+    "planned_on_time",
+    "planned_overdue",
+    "planned_skipped",
     "data_quality",
 })
 
@@ -135,6 +144,17 @@ def _number(value, default=None):
     except (TypeError, ValueError):
         return default
     return parsed if math.isfinite(parsed) else default
+
+
+def _optional_bool(value):
+    if isinstance(value, bool):
+        return value
+    normalized = normalize_key(value)
+    if normalized in {"true", "1", "yes", "y", "ja"}:
+        return True
+    if normalized in {"false", "0", "no", "n", "nej"}:
+        return False
+    return None
 
 
 def _date(value):
@@ -368,6 +388,13 @@ def resolve_priority_snapshot(activity, *, planned_by_id=None, suggestion_by_id=
             "expected_order_dfp_at_contact": value("expected_order_dfp"),
             "lifecycle_at_contact": value("lifecycle"),
             "customer_segment_at_contact": "",
+            "recommendation_eligible_at_contact": _optional_bool(
+                value("recommendation_eligible")
+            ),
+            "suppression_reason_at_contact": _text(
+                value("recommendation_suppression_reason")
+                or value("suppression_reason")
+            ),
             "score_version": _text(source.get("score_version")),
             "portfolio_size": "",
         }
@@ -437,6 +464,12 @@ def canonicalize_activities(activities, customers, users=(), *, planned_activiti
             "seller_portfolio_size_at_contact": _number(snapshot.get("portfolio_size")),
             "lifecycle_at_contact": _text(snapshot.get("lifecycle_at_contact")),
             "customer_segment_at_contact": _text(snapshot.get("customer_segment_at_contact")),
+            "recommendation_eligible_at_contact": _optional_bool(
+                snapshot.get("recommendation_eligible_at_contact")
+            ),
+            "suppression_reason_at_contact": _text(
+                snapshot.get("suppression_reason_at_contact")
+            ),
             "analysis_exclusions": reasons,
         })
     return {"activities": canonical, "excluded": excluded}
@@ -601,19 +634,41 @@ def _filter_activities(activities, *, start, end, seller="", channel="all", segm
     return selected
 
 
+def _is_reached_human(row):
+    return (
+        row.get("is_human")
+        and row.get("contact_type_key") in (SYNCHRONOUS_CHANNELS | {"email"})
+        and row.get("result_class") in QUALIFIED_DIALOGUE_RESULTS
+    )
+
+
+def _is_sync_reached(row):
+    return (
+        row.get("is_human")
+        and row.get("contact_type_key") in SYNCHRONOUS_CHANNELS
+        and row.get("result_class") in QUALIFIED_DIALOGUE_RESULTS
+    )
+
+
+def _is_attribution_eligible(row):
+    return _is_reached_human(row) and bool(row.get("customer_identity_key"))
+
+
 def _aggregate_period(rows, attribution):
     human = [row for row in rows if row.get("is_human")]
     sync = [row for row in human if row.get("contact_type_key") in SYNCHRONOUS_CHANNELS and row.get("result_class") in ANALYSABLE_RESULTS]
-    sync_reached = [row for row in sync if row.get("result_class") in QUALIFIED_DIALOGUE_RESULTS]
+    sync_reached = [row for row in sync if _is_sync_reached(row)]
     sync_positive = [row for row in sync_reached if row.get("result_class") in {"positive", "order"}]
-    sync_mature = [row for row in sync_reached if attribution["maturity"].get(row["contact_id"]) == "mature"]
+    sync_attribution_eligible = [row for row in sync_reached if row.get("customer_identity_key")]
+    sync_mature = [row for row in sync_attribution_eligible if attribution["maturity"].get(row["contact_id"]) == "mature"]
     sync_converted = [row for row in sync_mature if attribution["contact_to_orders"].get(row["contact_id"])]
-    reached = [row for row in human if row.get("result_class") in QUALIFIED_DIALOGUE_RESULTS and (row.get("contact_type_key") in SYNCHRONOUS_CHANNELS or row.get("contact_type_key") == "email")]
+    reached = [row for row in human if _is_reached_human(row)]
+    attribution_eligible = [row for row in reached if row.get("customer_identity_key")]
     positive = [row for row in reached if row.get("result_class") in {"positive", "order"}]
-    mature = [row for row in reached if attribution["maturity"].get(row["contact_id"]) == "mature"]
-    mature_positive = [row for row in positive if attribution["maturity"].get(row["contact_id"]) == "mature"]
+    mature = [row for row in attribution_eligible if attribution["maturity"].get(row["contact_id"]) == "mature"]
+    mature_positive = [row for row in positive if row.get("customer_identity_key") and attribution["maturity"].get(row["contact_id"]) == "mature"]
     converted_positive = [row for row in mature_positive if attribution["contact_to_orders"].get(row["contact_id"])]
-    waiting = [row for row in reached if attribution["maturity"].get(row["contact_id"]) == "waiting_outcome"]
+    waiting = [row for row in attribution_eligible if attribution["maturity"].get(row["contact_id"]) == "waiting_outcome"]
     ordered_contacts = [row for row in mature if attribution["contact_to_orders"].get(row["contact_id"])]
     visits = [row for row in human if row.get("contact_type_key") == "visit" and row.get("result_class") in ANALYSABLE_RESULTS]
     boms = [row for row in visits if row.get("result_class") == "unreachable"]
@@ -631,9 +686,11 @@ def _aggregate_period(rows, attribution):
         "sync": sync,
         "sync_reached": sync_reached,
         "sync_positive": sync_positive,
+        "sync_attribution_eligible": sync_attribution_eligible,
         "sync_mature": sync_mature,
         "sync_converted": sync_converted,
         "reached": reached,
+        "attribution_eligible": attribution_eligible,
         "positive": positive,
         "mature": mature,
         "mature_positive": mature_positive,
@@ -688,15 +745,26 @@ def _data_quality(rows, canonical_result, order_result, attribution):
     standardized = [row for row in human if row.get("contact_type_key") != "unknown" and row.get("result_class") != "unknown"]
     snapshot = [row for row in human if row.get("priority_snapshot_quality") in {"exact", "approximate"}]
     percentile = [row for row in human if row.get("priority_percentile_at_contact") is not None]
+    reached = [row for row in human if _is_reached_human(row)]
+    attributable_reached = [row for row in reached if row.get("customer_identity_key")]
     reasons = defaultdict(int)
+    flagged_activity_rows = 0
     for row in human:
-        for reason in row.get("analysis_exclusions", ()):
-            reasons[reason] += 1
+        row_reasons = set(row.get("analysis_exclusions", ()))
         if row.get("contact_type_key") == "unknown":
-            reasons["unknown_contact_type"] += 1
+            row_reasons.add("unknown_contact_type")
         if row.get("result_class") == "unknown":
-            reasons["unknown_result"] += 1
-    for row in canonical_result.get("excluded", ()):
+            row_reasons.add("unknown_result")
+        if row.get("priority_snapshot_quality") == "missing":
+            row_reasons.add("missing_priority_snapshot")
+        if row.get("priority_percentile_at_contact") is None:
+            row_reasons.add("missing_priority_percentile")
+        if row_reasons:
+            flagged_activity_rows += 1
+        for reason in row_reasons:
+            reasons[reason] += 1
+    excluded_rows = list(canonical_result.get("excluded", ()))
+    for row in excluded_rows:
         reasons[row.get("reason") or "excluded_activity"] += 1
     status = "sufficient"
     identity_rate = len(secure) / len(human) if human else 0
@@ -710,10 +778,18 @@ def _data_quality(rows, canonical_result, order_result, attribution):
         "secure_customer_identity": _rate(len(secure), len(human), minimum=1),
         "historical_seller_identity": _rate(len(historical_seller), len(human), minimum=1),
         "standardized_activity": _rate(len(standardized), len(human), minimum=1),
+        "order_attribution_identity_coverage": _rate(
+            len(attributable_reached), len(reached), minimum=1
+        ),
         "priority_snapshot_coverage": _rate(len(snapshot), len(human), minimum=1),
         "priority_percentile_coverage": _rate(len(percentile), len(human), minimum=1),
-        "waiting_outcome_count": sum(1 for row in human if attribution["maturity"].get(row["contact_id"]) == "waiting_outcome" and row.get("result_class") in QUALIFIED_DIALOGUE_RESULTS),
-        "excluded_legacy_rows": sum(reasons.values()),
+        "waiting_outcome_count": sum(
+            attribution["maturity"].get(row["contact_id"]) == "waiting_outcome"
+            for row in attributable_reached
+        ),
+        "flagged_activity_rows": flagged_activity_rows,
+        "quality_issue_count": sum(reasons.values()),
+        "excluded_legacy_rows": len(excluded_rows),
         "exclusion_reasons": dict(sorted(reasons.items())),
         "unresolved_order_rows": len(order_result.get("excluded", ())),
         "unattributed_orders": len(attribution.get("unattributed_orders", ())),
@@ -921,11 +997,13 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
     team_rates = defaultdict(list)
     for item in seller_comparison:
         for key in ("reach", "positive_dialogue", "positive_to_order_10d", "order_10d", "priority_focus", "bom_ratio"):
-            if item[key]["value"] is not None:
+            if item[key]["status"] == "sufficient":
                 team_rates[key].append(item[key]["value"])
     for key, rate in current["rates"].items():
-        if team_rates[key]:
-            rate["comparisons"]["team_median"] = statistics.median(team_rates[key])
+        values = team_rates[key]
+        rate["comparisons"]["team_median"] = (
+            statistics.median(values) if len(values) >= 2 else None
+        )
 
     repeat_customers = defaultdict(list)
     for row in current["boms"]:
@@ -952,18 +1030,29 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
         priority["sales_user_name"] = owner
         priority["segment"] = priority_segment
         priority["lifecycle"] = priority_lifecycle
+        priority["recommendation_eligible"] = (
+            _optional_bool(priority.get("recommendation_eligible")) is True
+        )
         portfolio.append(priority)
     by_owner = defaultdict(list)
+    eligible_by_owner = defaultdict(list)
     for priority in portfolio:
         by_owner[priority.get("sales_user_name")].append(priority)
+        if priority.get("recommendation_eligible"):
+            eligible_by_owner[priority.get("sales_user_name")].append(priority)
     for owner_rows in by_owner.values():
-        scores = sorted((_number(row.get("priority_score"), 0) or 0 for row in owner_rows))
         values = sorted((_number(row.get("value_index"), 0) or 0 for row in owner_rows))
         for priority in owner_rows:
-            score = _number(priority.get("priority_score"), 0) or 0
             value = _number(priority.get("value_index"), 0) or 0
-            priority["priority_percentile"] = round(100 * sum(item <= score for item in scores) / len(scores), 2) if scores else None
             priority["value_percentile"] = round(100 * sum(item <= value for item in values) / len(values), 2) if values else None
+            priority["priority_percentile"] = None
+    for owner_rows in eligible_by_owner.values():
+        scores = sorted((_number(row.get("priority_score"), 0) or 0 for row in owner_rows))
+        for priority in owner_rows:
+            score = _number(priority.get("priority_score"), 0) or 0
+            priority["priority_percentile"] = round(
+                100 * sum(item <= score for item in scores) / len(scores), 2
+            ) if scores else None
     contacted_ids = {
         _text((row.get("customer_record") or {}).get("customer_id"))
         for row in current["human"]
@@ -979,7 +1068,8 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
     ]
     priority_gap = [
         row for row in portfolio
-        if (row.get("priority_percentile") or 0) >= 75
+        if row.get("recommendation_eligible")
+        and (row.get("priority_percentile") or 0) >= 75
         and _text(row.get("customer_id")) not in contacted_ids
     ]
 
@@ -1133,6 +1223,7 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
                     "priority_percentile": row.get("priority_percentile"),
                     "value_index": _number(row.get("value_index")),
                     "segment": row.get("segment", "missing"),
+                    "recommendation_eligible": row.get("recommendation_eligible", False),
                 }
                 for row in sorted(
                     priority_gap,
@@ -1205,7 +1296,8 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
     data_quality = _data_quality(rows, canonical_result, order_result, attribution)
     comparable_sellers = [
         item for item in seller_comparison
-        if item["order_10d"]["denominator"] >= MIN_RATE_SAMPLE
+        if item["order_10d"]["status"] == "sufficient"
+        and item["priority_focus"]["status"] == "sufficient"
         and item["priority_percentile_coverage"]["value"] is not None
         and item["priority_percentile_coverage"]["value"] >= MIN_PRIORITY_COVERAGE
     ]
@@ -1213,8 +1305,8 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
     coaching_matrix = {
         "sellers": comparable_sellers,
         "medians": {
-            "priority_focus": statistics.median(item["priority_focus"]["value"] for item in comparable_sellers) if comparable_sellers else None,
-            "order_10d": statistics.median(item["order_10d"]["value"] for item in comparable_sellers) if comparable_sellers else None,
+            "priority_focus": statistics.median(item["priority_focus"]["value"] for item in comparable_sellers) if len(comparable_sellers) >= 2 else None,
+            "order_10d": statistics.median(item["order_10d"]["value"] for item in comparable_sellers) if len(comparable_sellers) >= 2 else None,
         },
         "insufficient_sample": [
             {
@@ -1225,6 +1317,7 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
                 "reasons": [
                     reason for reason, applies in (
                         ("order_sample_below_10", item["order_10d"]["denominator"] < MIN_RATE_SAMPLE),
+                        ("priority_sample_below_10", item["priority_focus"]["denominator"] < MIN_RATE_SAMPLE),
                         ("priority_percentile_coverage_below_70", item["priority_percentile_coverage"]["value"] is None or item["priority_percentile_coverage"]["value"] < MIN_PRIORITY_COVERAGE),
                     ) if applies
                 ],
@@ -1286,10 +1379,45 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
             "rows": rows,
             "attribution": attribution,
             "drilldown_contact_ids": {
+                "followup_success": {
+                    row.get("contact_id") for row in positive_with_next_step
+                },
                 "followup_gap": {
                     row.get("contact_id") for row in positive_three_days_old
                     if row not in positive_with_next_step
                 },
+                "followup_gap_10d": {
+                    row.get("contact_id")
+                    for row in mature_positive_without_order_or_followup
+                },
+            },
+            "planned_drilldown_rows": {
+                metric: [
+                    {
+                        "contact_id": _text(planned.get("completed_contact_id")),
+                        "date_time": _text(planned.get("scheduled_at")),
+                        "sales_user_name": _text(planned.get("user_name")),
+                        "customer": _text(planned.get("customer")),
+                        "customer_id": _text(planned.get("customer_id")),
+                        "channel": normalize_contact_type(
+                            planned.get("contact_type")
+                        ),
+                        "result_class": normalize_key(planned.get("status")),
+                        "snapshot_quality": "",
+                        "priority_at_contact": None,
+                        "priority_percentile_at_contact": None,
+                        "order_reference": "",
+                        "days_to_order": None,
+                        "dfp": 0,
+                        "data_quality_flags": [],
+                    }
+                    for planned in planned_rows
+                ]
+                for metric, planned_rows in {
+                    "planned_on_time": completed_in_time,
+                    "planned_overdue": overdue_planned,
+                    "planned_skipped": skipped_planned,
+                }.items()
             },
         },
     }
@@ -1305,28 +1433,49 @@ def build_drilldown(summary, metric, *, limit=100):
     analysis = summary.get("_analysis", {})
     attribution = analysis.get("attribution", {})
     drilldown_contact_ids = analysis.get("drilldown_contact_ids", {})
+    planned_rows = analysis.get("planned_drilldown_rows", {}).get(metric)
+    if planned_rows is not None:
+        selected = list(planned_rows)
+        selected.sort(
+            key=lambda row: (
+                _datetime(row.get("date_time")) or datetime.min,
+                row.get("contact_id") or "",
+            ),
+            reverse=True,
+        )
+        return {
+            "metric": metric,
+            "limit": limit,
+            "rows": selected[:limit],
+            "total_count": len(selected),
+        }
     selected = []
     repeated_keys = defaultdict(int)
     for row in analysis.get("rows", ()):
-        if row.get("is_human") and row.get("contact_type_key") == "visit" and row.get("result_class") == "unreachable":
+        if row.get("is_human") and row.get("customer_identity_key") and row.get("contact_type_key") == "visit" and row.get("result_class") == "unreachable":
             repeated_keys[row.get("customer_identity_key")] += 1
     for row in analysis.get("rows", ()):
         orders = attribution.get("contact_to_orders", {}).get(row.get("contact_id"), ())
+        maturity = attribution.get("maturity", {}).get(row.get("contact_id"))
         include = {
             "human_activities": row.get("is_human"),
             "attempts": row.get("is_human") and row.get("contact_type_key") in SYNCHRONOUS_CHANNELS and row.get("result_class") in ANALYSABLE_RESULTS,
-            "reach": row.get("is_human") and row.get("contact_type_key") in SYNCHRONOUS_CHANNELS and row.get("result_class") in QUALIFIED_DIALOGUE_RESULTS,
-            "positive_sync": row.get("is_human") and row.get("contact_type_key") in SYNCHRONOUS_CHANNELS and row.get("result_class") in {"positive", "order"},
-            "positive_dialogue": row.get("is_human") and row.get("result_class") in {"positive", "order"},
-            "order_10d": bool(orders),
-            "order_10d_sync": bool(orders) and row.get("contact_type_key") in SYNCHRONOUS_CHANNELS,
-            "waiting_outcome": attribution.get("maturity", {}).get(row.get("contact_id")) == "waiting_outcome",
-            "priority_focus": row.get("priority_percentile_at_contact") is not None and row.get("priority_percentile_at_contact") >= 75,
-            "bom_ratio": row.get("contact_type_key") == "visit" and row.get("result_class") in ANALYSABLE_RESULTS,
-            "repeat_boms": row.get("result_class") == "unreachable" and repeated_keys[row.get("customer_identity_key")] >= 2,
-            "high_priority_boms": row.get("result_class") == "unreachable" and (row.get("priority_percentile_at_contact") or -1) >= 75,
+            "reach": _is_sync_reached(row),
+            "positive_sync": _is_sync_reached(row) and row.get("result_class") in {"positive", "order"},
+            "positive_dialogue": _is_reached_human(row) and row.get("result_class") in {"positive", "order"},
+            "order_10d": _is_attribution_eligible(row) and maturity == "mature" and bool(orders),
+            "order_10d_sync": _is_sync_reached(row) and bool(row.get("customer_identity_key")) and maturity == "mature" and bool(orders),
+            "waiting_outcome": _is_attribution_eligible(row) and maturity == "waiting_outcome",
+            "priority_focus": row.get("is_human") and row.get("priority_percentile_at_contact") is not None and row.get("priority_percentile_at_contact") >= 75,
+            "bom_ratio": row.get("is_human") and row.get("contact_type_key") == "visit" and row.get("result_class") == "unreachable",
+            "planned_boms": row.get("is_human") and row.get("planned_activity_id") and row.get("contact_type_key") == "visit" and row.get("result_class") == "unreachable",
+            "unplanned_boms": row.get("is_human") and not row.get("planned_activity_id") and row.get("contact_type_key") == "visit" and row.get("result_class") == "unreachable",
+            "repeat_boms": row.get("is_human") and row.get("contact_type_key") == "visit" and row.get("result_class") == "unreachable" and repeated_keys[row.get("customer_identity_key")] >= 2,
+            "high_priority_boms": row.get("is_human") and row.get("contact_type_key") == "visit" and row.get("result_class") == "unreachable" and (row.get("priority_percentile_at_contact") or -1) >= 75,
+            "followup_success": row.get("contact_id") in drilldown_contact_ids.get("followup_success", set()),
             "followup_gap": row.get("contact_id") in drilldown_contact_ids.get("followup_gap", set()),
-            "data_quality": bool(row.get("analysis_exclusions")) or row.get("contact_type_key") == "unknown" or row.get("result_class") == "unknown",
+            "followup_gap_10d": row.get("contact_id") in drilldown_contact_ids.get("followup_gap_10d", set()),
+            "data_quality": bool(row.get("analysis_exclusions")) or row.get("contact_type_key") == "unknown" or row.get("result_class") == "unknown" or row.get("priority_snapshot_quality") == "missing" or row.get("priority_percentile_at_contact") is None,
         }[metric]
         if not include:
             continue
@@ -1359,11 +1508,15 @@ def strip_internal_analysis(summary):
 def build_pre_contact_snapshot(*, customer, owner, priorities, planned_row=None, score_version=""):
     """Build an exact snapshot from the authoritative pre-append priority universe."""
     owner_keys = {normalize_key((owner or {}).get("user_name")), normalize_key((owner or {}).get("name"))}
-    portfolio = [row for row in priorities or () if normalize_key(row.get("sales_person")) in owner_keys and not row.get("cancelled_flag")]
+    owner_portfolio = [row for row in priorities or () if normalize_key(row.get("sales_person")) in owner_keys and not row.get("cancelled_flag")]
+    eligible_portfolio = [
+        row for row in owner_portfolio
+        if _optional_bool(row.get("recommendation_eligible")) is True
+    ]
     customer_id = _text((customer or {}).get("customer_id"))
     customer_number = normalize_key((customer or {}).get("customer_number"))
     customer_name = normalize_key((customer or {}).get("customer"))
-    target = next((row for row in portfolio if (
+    target = next((row for row in owner_portfolio if (
         (customer_id and _text(row.get("customer_id")) == customer_id)
         or (not customer_id and customer_number and normalize_key(row.get("customer_number")) == customer_number)
         or (not customer_id and not customer_number and normalize_key(row.get("customer")) == customer_name)
@@ -1374,9 +1527,13 @@ def build_pre_contact_snapshot(*, customer, owner, priorities, planned_row=None,
             "priority_snapshot_quality": "missing",
             "priority_score_version": score_version,
         }
-    scores = sorted((_number(row.get("priority_score"), 0) or 0 for row in portfolio))
+    target_eligible = _optional_bool(target.get("recommendation_eligible"))
+    scores = sorted((_number(row.get("priority_score"), 0) or 0 for row in eligible_portfolio))
     score = _number(target.get("priority_score"), 0) or 0
-    percentile = round(100 * sum(value <= score for value in scores) / len(scores), 2) if scores else None
+    percentile = (
+        round(100 * sum(value <= score for value in scores) / len(scores), 2)
+        if target_eligible is True and scores else None
+    )
     source = normalize_key((planned_row or {}).get("source"))
     activity_source = source if source in {"follow_up", "route", "system_suggestion"} else ("planned" if planned_row else "manual")
     return {
@@ -1390,11 +1547,18 @@ def build_pre_contact_snapshot(*, customer, owner, priorities, planned_row=None,
         "priority_score_version": _text(target.get("score_version") or score_version),
         "priority_score_at_contact": score,
         "priority_percentile_at_contact": percentile if percentile is not None else "",
-        "seller_portfolio_size_at_contact": len(portfolio),
+        "seller_portfolio_size_at_contact": len(eligible_portfolio),
         "intent_timing_at_contact": target.get("intent_timing", ""),
         "value_index_at_contact": target.get("value_index", ""),
         "strategic_index_at_contact": target.get("strategic_index", ""),
         "expected_order_dfp_at_contact": target.get("expected_order_dfp", ""),
         "lifecycle_at_contact": target.get("lifecycle", ""),
         "customer_segment_at_contact": _text(target.get("segment") or (customer or {}).get("customer_segment")),
+        "recommendation_eligible_at_contact": (
+            target_eligible if target_eligible is not None else ""
+        ),
+        "suppression_reason_at_contact": _text(
+            target.get("recommendation_suppression_reason")
+            or target.get("suppression_reason")
+        ),
     }

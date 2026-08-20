@@ -43,6 +43,22 @@ class SalesCoachingFrontendTests(TestCase):
         self.assertNotIn("attributed_orders /", self.javascript)
         self.assertNotIn("priority_percentile_at_contact >=", self.javascript)
 
+    def test_matrix_does_not_invent_medians_and_followup_cards_use_exact_metrics(self):
+        self.assertIn("Otillräckligt jämförbart underlag", self.javascript)
+        self.assertNotIn("matrix.medians?.priority_focus ?? 0.5", self.javascript)
+        self.assertNotIn("matrix.medians?.order_10d ?? 0.5", self.javascript)
+        for metric in (
+            "followup_success", "followup_gap", "followup_gap_10d",
+            "planned_on_time", "planned_overdue", "planned_skipped",
+        ):
+            with self.subTest(metric=metric):
+                self.assertIn(f'"{metric}"', self.javascript)
+
+    def test_data_quality_banner_distinguishes_rows_from_issue_count(self):
+        self.assertIn("order_attribution_identity_coverage", self.javascript)
+        self.assertIn("flagged_activity_rows", self.javascript)
+        self.assertIn("quality_issue_count", self.javascript)
+
     def test_stale_response_and_transient_error_handling_are_explicit(self):
         self.assertIn("requestSerial", self.javascript)
         self.assertIn("new AbortController()", self.javascript)
