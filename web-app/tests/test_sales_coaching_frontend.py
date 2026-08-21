@@ -64,12 +64,33 @@ class SalesCoachingFrontendTests(TestCase):
     def test_team_comparison_uses_backend_counts_and_high_touch_grouped_bars(self):
         for expected in (
             "teamComparisonMarkup", "sc-team-charts", "human_activities_total",
-            "channel_mix?.visit", "channel_mix?.phone", "positive_dialogues_count",
-            "order_10d_converted_contacts", "waiting_outcome_count",
+            "visit_breakdown?.analysable", "visit_breakdown?.reached",
+            "visit_breakdown?.boms", "channel_mix?.phone", "positive_dialogues_count",
+            "mature_positive_dialogues_count", "converted_positive_contacts_count",
+            "waiting_positive_dialogues_count", "positive_to_order_10d",
+            "is-visit-stack", "is-visit-reached", "is-visit-bom",
         ):
             with self.subTest(expected=expected):
                 self.assertIn(expected, self.javascript)
         self.assertNotIn("item.attributed_orders /", self.javascript)
+        self.assertNotIn("Sufficient", self.javascript)
+        self.assertNotIn("· ${number(item.attributed_orders)} order", self.javascript)
+        self.assertIn("statusLabel(sampleStatus)", self.javascript)
+
+    def test_matrix_uses_radius_safe_inner_plot_ticks_and_separate_axes(self):
+        for expected in (
+            "MATRIX_TICKS = [0, 25, 50, 75, 100]",
+            "MATRIX_MAX_BUBBLE_SIZE = 78",
+            "sc-matrix-inner", "sc-matrix-gridline",
+            "sc-matrix-x-axis-label", "sc-matrix-y-axis-label",
+            "Math.max(0, Math.min(100",
+        ):
+            with self.subTest(expected=expected):
+                self.assertIn(expected, self.javascript)
+        self.assertNotIn("Math.max(3, Math.min(97", self.javascript)
+        self.assertIn("inset: 48px 48px 56px 62px", self.css)
+        self.assertIn(".sc-matrix { position: relative; height: 410px; overflow: hidden", self.css)
+        self.assertIn("writing-mode: vertical-rl", self.css)
 
     def test_both_matrix_views_small_samples_and_seller_highlight_are_present(self):
         self.assertIn('data-matrix-view="sales"', self.javascript)

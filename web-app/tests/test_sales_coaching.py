@@ -384,7 +384,8 @@ class SnapshotAndAggregateTests(TestCase):
             activity("alice-visit", "2026-08-01 10:00", seller="alice", channel="Besök", result="Positiv"),
             activity("alice-phone", "2026-08-02 10:00", seller="alice", channel="Telefon", result="Neutral"),
             activity("alice-email", "2026-08-03 10:00", seller="alice", channel="Mejl", result="Positiv"),
-            activity("bob-waiting", "2026-08-15 10:00", seller="bob", channel="Telefon", result="Neutral"),
+            activity("alice-bom", "2026-08-04 10:00", seller="alice", channel="Besök", result="Ej anträffbar"),
+            activity("bob-waiting", "2026-08-15 10:00", seller="bob", channel="Telefon", result="Positiv"),
         ]
 
         summary = self.summary(
@@ -396,12 +397,34 @@ class SnapshotAndAggregateTests(TestCase):
         )
         team = {item["seller"]: item for item in summary["team_comparison"]["sellers"]}
 
-        self.assertEqual(team["alice"]["human_activities_total"], 3)
-        self.assertEqual(team["alice"]["channel_mix"], {"visit": 1, "phone": 1, "email": 1})
+        self.assertEqual(team["alice"]["human_activities_total"], 4)
+        self.assertEqual(team["alice"]["channel_mix"], {"visit": 2, "phone": 1, "email": 1})
+        self.assertEqual(
+            team["alice"]["visit_breakdown"],
+            {"analysable": 2, "reached": 1, "boms": 1},
+        )
+        self.assertEqual(
+            team["alice"]["visit_breakdown"]["reached"]
+            + team["alice"]["visit_breakdown"]["boms"],
+            team["alice"]["visit_breakdown"]["analysable"],
+        )
         self.assertEqual(team["alice"]["positive_dialogues_count"], 2)
+        self.assertEqual(team["alice"]["mature_positive_dialogues_count"], 2)
+        self.assertEqual(team["alice"]["converted_positive_contacts_count"], 1)
+        self.assertEqual(team["alice"]["waiting_positive_dialogues_count"], 0)
         self.assertEqual(team["alice"]["order_10d_converted_contacts"], 1)
         self.assertEqual(team["alice"]["attributed_orders"], 2)
         self.assertEqual(team["bob"]["waiting_outcome_count"], 1)
+        self.assertEqual(team["bob"]["positive_dialogues_count"], 1)
+        self.assertEqual(team["bob"]["mature_positive_dialogues_count"], 0)
+        self.assertEqual(team["bob"]["converted_positive_contacts_count"], 0)
+        self.assertEqual(team["bob"]["waiting_positive_dialogues_count"], 1)
+        self.assertEqual(team["bob"]["positive_to_order_10d"]["denominator"], 0)
+        self.assertEqual(team["bob"]["positive_to_order_10d"]["status"], "not_computable")
+        self.assertLessEqual(
+            team["alice"]["converted_positive_contacts_count"],
+            team["alice"]["mature_positive_dialogues_count"],
+        )
         self.assertEqual(team["zero"]["human_activities_total"], 0)
 
     def test_sales_matrix_keeps_small_samples_but_excludes_them_from_medians(self):

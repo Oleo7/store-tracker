@@ -759,7 +759,17 @@ def _seller_comparison(rows, attribution, sellers):
                 key: sum(row.get("contact_type_key") == key for row in aggregate["human"])
                 for key in ("visit", "phone", "email")
             },
+            "visit_breakdown": {
+                "analysable": len(aggregate["visits"]),
+                "reached": len(aggregate["visits"]) - len(aggregate["boms"]),
+                "boms": len(aggregate["boms"]),
+            },
             "positive_dialogues_count": len(aggregate["positive"]),
+            "mature_positive_dialogues_count": len(aggregate["mature_positive"]),
+            "converted_positive_contacts_count": len(aggregate["converted_positive"]),
+            "waiting_positive_dialogues_count": (
+                len(aggregate["positive"]) - len(aggregate["mature_positive"])
+            ),
             "order_10d_converted_contacts": len(aggregate["ordered_contacts"]),
             "attributed_orders": len(aggregate["attributed"]),
             "waiting_outcome_count": len(aggregate["waiting"]),

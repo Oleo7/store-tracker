@@ -14,6 +14,8 @@
     pendingInitialMode: "business",
     filters: defaultFilters(),
   };
+  const MATRIX_TICKS = [0, 25, 50, 75, 100];
+  const MATRIX_MAX_BUBBLE_SIZE = 78;
 
   const root = document.getElementById("sales-coaching-dashboard");
   const businessPanel = document.getElementById("business-overview-content");
@@ -360,19 +362,28 @@
 
   function teamComparisonMarkup(team) {
     const sellers = team.sellers || [];
-    const activityMax = Math.max(1, ...sellers.flatMap(item => [item.channel_mix?.visit || 0, item.channel_mix?.phone || 0]));
-    const outcomeMax = Math.max(1, ...sellers.flatMap(item => [item.positive_dialogues_count || 0, item.order_10d_converted_contacts || 0]));
+    const activityMax = Math.max(1, ...sellers.flatMap(item => [item.visit_breakdown?.analysable || 0, item.channel_mix?.phone || 0]));
+    const outcomeMax = Math.max(1, ...sellers.flatMap(item => [
+      item.positive_dialogues_count || 0,
+      item.mature_positive_dialogues_count || 0,
+      item.converted_positive_contacts_count || 0,
+    ]));
     const activityGroups = sellers.map(item => {
-      const title = `${item.seller}: totalt ${number(item.human_activities_total)}, Besök ${number(item.channel_mix?.visit)}, Telefon ${number(item.channel_mix?.phone)}, manuellt mejl ${number(item.channel_mix?.email)}`;
-      return `<button type="button" class="sc-team-group${sellerSelected(item.seller) ? " is-selected" : ""}" data-seller="${escapeHtml(item.seller)}" aria-label="${escapeHtml(title)}" title="${escapeHtml(title)}"><span class="sc-team-total">Totalt ${number(item.human_activities_total)}</span><span class="sc-team-bars"><i class="sc-team-bar is-visit" style="height:${Number(item.channel_mix?.visit || 0) / activityMax * 100}%"><b>${number(item.channel_mix?.visit)}</b></i><i class="sc-team-bar is-phone" style="height:${Number(item.channel_mix?.phone || 0) / activityMax * 100}%"><b>${number(item.channel_mix?.phone)}</b></i></span><span class="sc-team-seller">${escapeHtml(item.seller)}</span><span class="sc-team-secondary">Mejl ${number(item.channel_mix?.email)}</span></button>`;
+      const visits = Number(item.visit_breakdown?.analysable || 0);
+      const reachedVisits = Number(item.visit_breakdown?.reached || 0);
+      const boms = Number(item.visit_breakdown?.boms || 0);
+      const title = `${item.seller}: totalt ${number(item.human_activities_total)}, Besök ${number(visits)} · varav ${number(boms)} bom, nådda besök ${number(reachedVisits)}, Telefon ${number(item.channel_mix?.phone)}, manuellt mejl ${number(item.channel_mix?.email)}`;
+      return `<button type="button" class="sc-team-group${sellerSelected(item.seller) ? " is-selected" : ""}" data-seller="${escapeHtml(item.seller)}" aria-label="${escapeHtml(title)}" title="${escapeHtml(title)}"><span class="sc-team-total">Totalt ${number(item.human_activities_total)}</span><span class="sc-team-bars"><i class="sc-team-bar is-visit-stack" style="height:${visits / activityMax * 100}%"><b>${number(visits)}</b><span class="sc-team-bar-segment is-visit-reached" style="flex:${reachedVisits}" aria-hidden="true"></span><span class="sc-team-bar-segment is-visit-bom" style="flex:${boms}" aria-hidden="true"></span></i><i class="sc-team-bar is-phone" style="height:${Number(item.channel_mix?.phone || 0) / activityMax * 100}%"><b>${number(item.channel_mix?.phone)}</b></i></span><span class="sc-team-seller">${escapeHtml(item.seller)}</span><span class="sc-team-secondary">Besök ${number(visits)} · varav ${number(boms)} bom<br>Mejl ${number(item.channel_mix?.email)}</span></button>`;
     }).join("");
     const outcomeGroups = sellers.map(item => {
-      const title = `${item.seller}: positiva dialoger ${number(item.positive_dialogues_count)} (${percent(item.positive_dialogue?.value)}, ${rateEvidence(item.positive_dialogue)}), konverterade kontakter ${number(item.order_10d_converted_contacts)} (${percent(item.order_10d?.value)}, ${rateEvidence(item.order_10d)}), attribuerade order ${number(item.attributed_orders)}, väntar på 10 dagar ${number(item.waiting_outcome_count)}`;
-      const small = item.positive_dialogue?.status !== "sufficient" || item.order_10d?.status !== "sufficient";
-      const sampleLabel = item.positive_dialogue?.status === "not_computable" || item.order_10d?.status === "not_computable" ? "Kan inte beräknas" : small ? "Litet underlag" : "Sufficient";
-      return `<button type="button" class="sc-team-group${sellerSelected(item.seller) ? " is-selected" : ""}${small ? " is-small-sample" : ""}" data-seller="${escapeHtml(item.seller)}" aria-label="${escapeHtml(title)}" title="${escapeHtml(title)}"><span class="sc-team-total">${sampleLabel}</span><span class="sc-team-bars"><i class="sc-team-bar is-positive" style="height:${Number(item.positive_dialogues_count || 0) / outcomeMax * 100}%"><b>${number(item.positive_dialogues_count)}</b></i><i class="sc-team-bar is-order" style="height:${Number(item.order_10d_converted_contacts || 0) / outcomeMax * 100}%"><b>${number(item.order_10d_converted_contacts)}</b></i></span><span class="sc-team-seller">${escapeHtml(item.seller)}</span><span class="sc-team-secondary">Väntar ${number(item.waiting_outcome_count)} · ${number(item.attributed_orders)} order</span></button>`;
+      const positiveRate = item.positive_dialogue;
+      const conversionRate = item.positive_to_order_10d;
+      const title = `${item.seller}: positiva dialoger ${number(item.positive_dialogues_count)} (${percent(positiveRate?.value)}, ${rateEvidence(positiveRate)}, ${statusLabel(positiveRate?.status)}), mogna positiva dialoger ${number(item.mature_positive_dialogues_count)}, mogna positiva dialoger som gav order ${number(item.converted_positive_contacts_count)} (${percent(conversionRate?.value)}, ${rateEvidence(conversionRate)}, ${statusLabel(conversionRate?.status)}), väntar på 10 dagar ${number(item.waiting_positive_dialogues_count)}, attribuerade order ${number(item.attributed_orders)}`;
+      const small = positiveRate?.status !== "sufficient" || conversionRate?.status !== "sufficient";
+      const sampleStatus = positiveRate?.status === "not_computable" || conversionRate?.status === "not_computable" ? "not_computable" : small ? "small_sample" : "sufficient";
+      return `<button type="button" class="sc-team-group${sellerSelected(item.seller) ? " is-selected" : ""}${small ? " is-small-sample" : ""}" data-seller="${escapeHtml(item.seller)}" aria-label="${escapeHtml(title)}" title="${escapeHtml(title)}"><span class="sc-team-total">${statusLabel(sampleStatus)}</span><span class="sc-team-bars"><i class="sc-team-bar is-positive" style="height:${Number(item.positive_dialogues_count || 0) / outcomeMax * 100}%"><b>${number(item.positive_dialogues_count)}</b></i><i class="sc-team-bar is-mature-positive" style="height:${Number(item.mature_positive_dialogues_count || 0) / outcomeMax * 100}%"><b>${number(item.mature_positive_dialogues_count)}</b></i><i class="sc-team-bar is-converted-positive" style="height:${Number(item.converted_positive_contacts_count || 0) / outcomeMax * 100}%"><b>${number(item.converted_positive_contacts_count)}</b></i></span><span class="sc-team-seller">${escapeHtml(item.seller)}</span><span class="sc-team-secondary">Väntar på 10 dagar: ${number(item.waiting_positive_dialogues_count)}</span></button>`;
     }).join("");
-    return `<section class="sc-section" aria-labelledby="sc-team-title"><div class="sc-section-heading"><div><h2 id="sc-team-title">Teamjämförelse</h2><p>Alla coached sellers visas för vald period, lifecycle och segment. Kanal- och seller-filter påverkar inte teamblocken.</p></div></div><div class="sc-team-charts"><article class="sc-team-chart"><h3>Mänskliga aktiviteter</h3><p>Grupperade staplar: <span class="sc-legend-key is-visit">Besök</span> <span class="sc-legend-key is-phone">Telefon</span>. Total mänsklig aktivitet visas separat.</p><div class="sc-team-plot">${activityGroups}</div></article><article class="sc-team-chart"><h3>Positiva dialoger → Order inom 10 dagar</h3><p>Råa antal kontakter: <span class="sc-legend-key is-positive">Positiva dialoger</span> <span class="sc-legend-key is-order">Konverterade mogna kontakter</span>.</p><div class="sc-team-plot">${outcomeGroups}</div></article></div></section>`;
+    return `<section class="sc-section" aria-labelledby="sc-team-title"><div class="sc-section-heading"><div><h2 id="sc-team-title">Teamjämförelse</h2><p>Alla coached sellers visas för vald period, lifecycle och segment. Kanal- och seller-filter påverkar inte teamblocken.</p></div></div><div class="sc-team-charts"><article class="sc-team-chart"><h3>Mänskliga aktiviteter</h3><p>Besök är stackade: <span class="sc-legend-key is-visit">nådda besök</span> + <span class="sc-legend-key is-bom">bom</span>. <span class="sc-legend-key is-phone">Telefon</span> visas separat.</p><div class="sc-team-plot">${activityGroups}</div></article><article class="sc-team-chart"><h3>Positiva dialoger → Order inom 10 dagar</h3><p>Råa kontaktantal: <span class="sc-legend-key is-positive">positiva</span> → <span class="sc-legend-key is-mature-positive">mogna positiva</span> → <span class="sc-legend-key is-converted-positive">gav order</span>.</p><div class="sc-team-plot">${outcomeGroups}</div></article></div></section>`;
   }
 
   function matrixReasonLabel(reason) {
@@ -394,12 +405,13 @@
     const yMedian = matrix.medians?.order_10d;
     const insufficient = (matrix.insufficient_sample || []).map(item => `${escapeHtml(item.seller)} (${(item.reasons || []).map(matrixReasonLabel).join(", ")})`).join(" · ");
     const medianLines = `${xMedian === null || xMedian === undefined ? "" : `<span class="sc-matrix-median-x" style="left:${Number(xMedian) * 100}%" aria-hidden="true"></span>`}${yMedian === null || yMedian === undefined ? "" : `<span class="sc-matrix-median-y" style="bottom:${Number(yMedian) * 100}%" aria-hidden="true"></span>`}`;
+    const gridLines = MATRIX_TICKS.map(tick => `<span class="sc-matrix-gridline is-vertical" style="left:${tick}%" aria-hidden="true"><span class="sc-matrix-x-tick">${tick} %</span></span><span class="sc-matrix-gridline is-horizontal" style="bottom:${tick}%" aria-hidden="true"><span class="sc-matrix-y-tick">${tick} %</span></span>`).join("");
     const bubbles = (matrix.sellers || []).map(item => {
       const xRate = item[xKey];
       const yRate = item.order_10d;
-      const x = Math.max(3, Math.min(97, Number(xRate.value) * 100));
-      const y = Math.max(3, Math.min(97, Number(yRate.value) * 100));
-      const size = Math.max(38, Math.min(78, 30 + Math.sqrt(Number(item.human_activities || 0)) * 5));
+      const x = Math.max(0, Math.min(100, Number(xRate.value) * 100));
+      const y = Math.max(0, Math.min(100, Number(yRate.value) * 100));
+      const size = Math.max(38, Math.min(MATRIX_MAX_BUBBLE_SIZE, 30 + Math.sqrt(Number(item.human_activities || 0)) * 5));
       const coverage = sales ? "" : `, percentiltäckning ${percent(item.priority_percentile_coverage?.value)}`;
       const title = `${item.seller}: ${xLabel} ${percent(xRate.value)} (${rateEvidence(xRate)}, ${statusLabel(xRate.status)}), Order inom 10 dagar ${percent(yRate.value)} (${rateEvidence(yRate)}, ${statusLabel(yRate.status)}), ${item.human_activities} mänskliga aktiviteter${coverage}`;
       return `<button type="button" class="sc-bubble${item.sample_status === "small_sample" ? " is-small-sample" : ""}${sellerSelected(item.seller) ? " is-selected" : ""}" style="left:${x}%;bottom:${y}%;width:${size}px;height:${size}px" data-seller="${escapeHtml(item.seller)}" title="${escapeHtml(title)}" aria-label="${escapeHtml(title)}">${escapeHtml(String(item.seller).slice(0, 2).toUpperCase())}</button>`;
@@ -411,13 +423,13 @@
       ? `<div class="sc-priority-build-up"><strong>Historisk prioriteringsdata byggs upp.</strong> ${rateEvidence(matrix.build_up.coverage)} aktiviteter har sparad percentil. Minst ${percent(matrix.build_up.minimum_coverage)} täckning krävs för jämförbar position.</div>`
       : "";
     const interpretation = sales ? `<div class="sc-matrix-help">Övre höger: stark dialog och konvertering · Nedre höger: dialog fungerar, closing/uppföljning behöver granskas · Övre vänster: färre positiva dialoger men god konvertering · Nedre vänster: coachingbehov i båda stegen.</div>` : "";
-    return `<div class="sc-matrix-panel" id="sc-matrix-${type}" role="tabpanel" aria-labelledby="sc-matrix-tab-${type}">${buildUp}<div class="sc-matrix-wrap"><div class="sc-matrix" role="img" aria-label="${escapeHtml(xLabel)} mot Order inom 10 dagar. Bubbelstorlek visar mänskliga aktiviteter.">${medianLines}${bubbles}</div><div class="sc-axis-label">${escapeHtml(xLabel)} → · Order inom 10 dagar ↑</div></div>${interpretation}${medianNotice}${insufficient ? `<div class="sc-insufficient"><strong>Ej jämförbart underlag:</strong> ${insufficient}</div>` : ""}</div>`;
+    return `<div class="sc-matrix-panel" id="sc-matrix-${type}" role="tabpanel" aria-labelledby="sc-matrix-tab-${type}">${buildUp}<div class="sc-matrix-wrap"><div class="sc-matrix-layout"><div class="sc-matrix-y-axis-label">Order inom 10 dagar</div><div class="sc-matrix" role="img" aria-label="${escapeHtml(xLabel)} mot Order inom 10 dagar, skala 0 till 100 procent. Bubbelstorlek visar mänskliga aktiviteter."><div class="sc-matrix-inner">${gridLines}${medianLines}${bubbles}</div></div><span aria-hidden="true"></span><div class="sc-matrix-x-axis-label">${escapeHtml(xLabel)}</div></div></div>${interpretation}${medianNotice}${insufficient ? `<div class="sc-insufficient"><strong>Ej jämförbart underlag:</strong> ${insufficient}</div>` : ""}</div>`;
   }
 
   function matricesMarkup(matrices) {
     const type = state.matrixView === "priority" ? "priority" : "sales";
     const matrix = matrices?.[type] || { sellers: [], medians: {}, insufficient_sample: [] };
-    return `<section class="sc-section" aria-labelledby="sc-matrix-title"><div class="sc-section-heading"><div><h2 id="sc-matrix-title">Teamets coachningsmatriser</h2><p>Small-sample-säljare visas neutralt men påverkar inte sufficient-medianer.</p></div></div><div class="sc-matrix-tabs" role="tablist" aria-label="Välj coachningsmatris"><button id="sc-matrix-tab-sales" type="button" role="tab" data-matrix-view="sales" aria-controls="sc-matrix-sales" aria-selected="${type === "sales"}">Försäljning</button><button id="sc-matrix-tab-priority" type="button" role="tab" data-matrix-view="priority" aria-controls="sc-matrix-priority" aria-selected="${type === "priority"}">Prioritering</button></div>${matrixPanelMarkup(matrix, type)}</section>`;
+    return `<section class="sc-section" aria-labelledby="sc-matrix-title"><div class="sc-section-heading"><div><h2 id="sc-matrix-title">Teamets coachningsmatriser</h2><p>Säljare med litet underlag visas neutralt men påverkar inte medianer som kräver tillräckligt underlag.</p></div></div><div class="sc-matrix-tabs" role="tablist" aria-label="Välj coachningsmatris"><button id="sc-matrix-tab-sales" type="button" role="tab" data-matrix-view="sales" aria-controls="sc-matrix-sales" aria-selected="${type === "sales"}">Försäljning</button><button id="sc-matrix-tab-priority" type="button" role="tab" data-matrix-view="priority" aria-controls="sc-matrix-priority" aria-selected="${type === "priority"}">Prioritering</button></div>${matrixPanelMarkup(matrix, type)}</section>`;
   }
 
   function funnelMarkup(funnel) {
