@@ -15,6 +15,7 @@ from sales_coaching import (  # noqa: E402
     build_sales_coaching_summary,
     canonicalize_activities,
     group_logical_orders,
+    normalize_contact_type,
     normalize_result_class,
 )
 
@@ -198,11 +199,11 @@ class AttributionTests(TestCase):
 
 
 class SnapshotAndAggregateTests(TestCase):
-    def summary(self, rows, orders=(), **kwargs):
+    def summary(self, rows, orders=(), users=None, customers=None, **kwargs):
         return build_sales_coaching_summary(
             activities=rows,
-            customers=CUSTOMERS,
-            users=USERS,
+            customers=customers or CUSTOMERS,
+            users=users or USERS,
             order_rows=orders,
             start="2026-08-01",
             end="2026-08-20",
@@ -262,7 +263,7 @@ class SnapshotAndAggregateTests(TestCase):
 
         self.assertEqual(summary["funnel"]["attempts"], 1)
         self.assertEqual(summary["funnel"]["reached"], 1)
-        self.assertEqual(summary["funnel"]["positive"], 0)
+        self.assertNotIn("positive", summary["funnel"])
         self.assertEqual(summary["channel_effectiveness"]["email"]["positive_dialogue"]["numerator"], 1)
 
     def test_positive_drilldowns_match_kpi_and_synchronous_populations(self):
@@ -315,7 +316,11 @@ class SnapshotAndAggregateTests(TestCase):
                     result="Neutral" if index < reached else "Ej anträffbar",
                 ))
 
-        summary = self.summary(rows, seller="alice")
+        users = [
+            {"user_name": name, "active": "Y", "admin": "N"}
+            for name in ("alice", "bob", "tiny")
+        ]
+        summary = self.summary(rows, seller="alice", users=users)
         comparisons = {item["seller"]: item for item in summary["seller_comparison"]}
 
         self.assertEqual(comparisons["tiny"]["reach"]["value"], 1)
@@ -331,10 +336,183 @@ class SnapshotAndAggregateTests(TestCase):
             for index in range(10)
         ] + [activity("tiny", "2026-08-11 10:00", seller="tiny", result="Neutral")]
 
-        summary = self.summary(rows, seller="alice")
+        users = [
+            {"user_name": name, "active": "Y", "admin": "N"}
+            for name in ("alice", "tiny")
+        ]
+        summary = self.summary(rows, seller="alice", users=users)
 
         self.assertIsNone(summary["kpis"]["reach"]["comparisons"]["team_median"])
         self.assertNotIn("reach_low", {card["code"] for card in summary["coaching_cards"]})
+
+    def test_coached_team_is_only_active_non_admin_users_and_includes_zero_activity(self):
+        users = [
+            {"user_name": "alice", "active": "Y", "admin": "N"},
+            {"user_name": "zero", "active": "Y", "admin": ""},
+            {"user_name": "admin", "active": "Y", "admin": "Y"},
+            {"user_name": "inactive", "active": "N", "admin": "N"},
+        ]
+        rows = [
+            activity("alice", "2026-08-01 10:00", seller="alice", result="Neutral"),
+            activity("admin", "2026-08-02 10:00", seller="admin", result="Neutral"),
+            activity("inactive", "2026-08-02 11:00", seller="inactive", result="Neutral"),
+            activity("legacy", "2026-08-02 12:00", seller="legacy", result="Neutral"),
+        ]
+
+        summary = self.summary(
+            rows, [order("ORDER", "2026-08-03")], users=users,
+        )
+
+        self.assertEqual(summary["options"]["sellers"], ["alice", "zero"])
+        self.assertEqual(
+            [item["seller"] for item in summary["team_comparison"]["sellers"]],
+            ["alice", "zero"],
+        )
+        self.assertEqual(summary["kpis"]["human_activities"]["value"], 1)
+        self.assertEqual(summary["kpis"]["order_10d"]["numerator"], 1)
+        self.assertEqual(
+            summary["team_comparison"]["benchmarks"]["human_activities_median"],
+            0.5,
+        )
+
+    def test_team_comparison_uses_contact_level_outcomes_and_channel_counts(self):
+        users = [
+            {"user_name": name, "active": "Y", "admin": "N"}
+            for name in ("alice", "bob", "zero")
+        ]
+        rows = [
+            activity("alice-visit", "2026-08-01 10:00", seller="alice", channel="Besök", result="Positiv"),
+            activity("alice-phone", "2026-08-02 10:00", seller="alice", channel="Telefon", result="Neutral"),
+            activity("alice-email", "2026-08-03 10:00", seller="alice", channel="Mejl", result="Positiv"),
+            activity("bob-waiting", "2026-08-15 10:00", seller="bob", channel="Telefon", result="Neutral"),
+        ]
+
+        summary = self.summary(
+            rows,
+            [order("ORDER-1", "2026-08-04"), order("ORDER-2", "2026-08-05")],
+            users=users,
+            seller="alice",
+            channel="visit",
+        )
+        team = {item["seller"]: item for item in summary["team_comparison"]["sellers"]}
+
+        self.assertEqual(team["alice"]["human_activities_total"], 3)
+        self.assertEqual(team["alice"]["channel_mix"], {"visit": 1, "phone": 1, "email": 1})
+        self.assertEqual(team["alice"]["positive_dialogues_count"], 2)
+        self.assertEqual(team["alice"]["order_10d_converted_contacts"], 1)
+        self.assertEqual(team["alice"]["attributed_orders"], 2)
+        self.assertEqual(team["bob"]["waiting_outcome_count"], 1)
+        self.assertEqual(team["zero"]["human_activities_total"], 0)
+
+    def test_sales_matrix_keeps_small_samples_but_excludes_them_from_medians(self):
+        users = [
+            {"user_name": name, "active": "Y", "admin": "N"}
+            for name in ("alice", "bob", "tiny", "zero")
+        ]
+        rows = []
+        for seller, positives, total in (("alice", 5, 10), ("bob", 7, 10), ("tiny", 1, 1)):
+            for index in range(total):
+                rows.append(activity(
+                    f"{seller}-{index}", f"2026-08-{index + 1:02d} 10:00",
+                    seller=seller,
+                    result="Positiv" if index < positives else "Neutral",
+                ))
+
+        matrix = self.summary(rows, users=users)["coaching_matrices"]["sales"]
+        sellers = {item["seller"]: item for item in matrix["sellers"]}
+
+        self.assertEqual(set(sellers), {"alice", "bob", "tiny"})
+        self.assertEqual(sellers["tiny"]["sample_status"], "small_sample")
+        self.assertEqual(matrix["medians"]["positive_dialogue"], 0.6)
+        self.assertEqual(matrix["medians"]["order_10d"], 0)
+        self.assertEqual(matrix["insufficient_sample"][0]["seller"], "zero")
+        self.assertIn("positive_denominator_zero", matrix["insufficient_sample"][0]["reasons"])
+
+    def test_tie_aware_value_percentile_does_not_make_zero_values_strategic(self):
+        priorities = [
+            {
+                "customer_id": f"customer-{index}",
+                "customer": f"Kund {index}",
+                "sales_person": "Olle",
+                "segment": "B",
+                "value_index": 0,
+                "priority_score": index,
+                "recommendation_eligible": True,
+            }
+            for index in range(1, 9)
+        ]
+
+        summary = self.summary([], current_priorities=priorities)
+
+        self.assertEqual(summary["priority_allocation"]["strategic_coverage"]["denominator"], 0)
+
+    def test_legacy_meeting_is_analysed_as_visit(self):
+        summary = self.summary([
+            activity("meeting", "2026-08-01 10:00", channel="Möte", result="Neutral"),
+        ])
+
+        self.assertEqual(normalize_contact_type("meeting"), "visit")
+        self.assertEqual(summary["kpis"]["human_activities"]["channel_mix"]["visit"], 1)
+        self.assertEqual(summary["funnel"]["attempts"], 1)
+        self.assertEqual(summary["funnel"]["reached"], 1)
+
+    def test_funnel_is_a_sequential_denominator_chain(self):
+        rows = [
+            activity("mature", "2026-08-01 10:00", result="Neutral"),
+            activity("fresh", "2026-08-15 10:00", customer_id="customer-2", customer="Andra butiken", result="Neutral"),
+            activity("unresolved", "2026-08-02 10:00", customer_id="", customer="Okänd butik", result="Neutral"),
+            activity("missed", "2026-08-03 10:00", result="Ej anträffbar"),
+        ]
+        summary = self.summary(rows, [order("ORDER", "2026-08-04")])
+        funnel = summary["funnel"]
+
+        self.assertEqual([step["count"] for step in funnel["steps"]], [4, 3, 1, 1])
+        self.assertEqual(funnel["steps"][1]["rate"]["denominator"], 4)
+        self.assertEqual(funnel["steps"][2]["rate"]["denominator"], 3)
+        self.assertEqual(funnel["steps"][3]["rate"]["denominator"], 1)
+        self.assertEqual(
+            [row["contact_id"] for row in build_drilldown(summary, "mature_reached_sync")["rows"]],
+            ["mature"],
+        )
+
+    def test_high_priority_boms_are_unknown_without_historical_coverage(self):
+        summary = self.summary([
+            activity("bom", "2026-08-01 10:00", channel="Besök", result="Ej anträffbar"),
+        ])
+
+        metric = summary["visit_efficiency"]["high_priority_boms_metric"]
+        self.assertIsNone(metric["value"])
+        self.assertEqual(metric["status"], "limited_coverage")
+
+    def test_overdue_planning_generates_deterministic_coaching_card(self):
+        planned = [
+            {
+                "planned_activity_id": f"planned-{index}",
+                "scheduled_at": f"2026-08-{index + 1:02d}T10:00:00",
+                "status": "planned" if index < 2 else "completed",
+                "user_name": "olle",
+                "customer": "Nytt namn",
+                "customer_id": "customer-1",
+                "contact_type": "Telefon",
+            }
+            for index in range(10)
+        ]
+
+        summary = self.summary([], planned_activities=planned)
+        card = next(card for card in summary["coaching_cards"] if card["code"] == "planning_discipline")
+
+        self.assertEqual(summary["follow_up_discipline"]["accountable_planned"], 10)
+        self.assertEqual((card["evidence"]["numerator"], card["evidence"]["denominator"]), (2, 10))
+        self.assertEqual(card["drilldown_metric"], "planned_overdue")
+
+    def test_data_quality_separates_core_from_historical_priority(self):
+        quality = self.summary([
+            activity("legacy", "2026-08-01 10:00", result="Neutral"),
+        ])["data_quality"]
+
+        self.assertEqual(quality["core_analytics"]["status"], "small_sample")
+        self.assertEqual(quality["historical_priority"]["status"], "building")
+        self.assertEqual(quality["core_analytics"]["secure_customer_identity"]["value"], 1)
 
     def test_reach_drilldown_contains_only_reached_contacts(self):
         summary = self.summary([
@@ -404,6 +582,14 @@ class SnapshotAndAggregateTests(TestCase):
         self.assertEqual(summary["seller_comparison"][0]["snapshot_coverage"]["value"], 1)
         self.assertEqual(summary["seller_comparison"][0]["priority_percentile_coverage"]["value"], 0.6)
         self.assertEqual(summary["coaching_matrix"]["sellers"], [])
+        self.assertEqual(
+            summary["coaching_matrices"]["priority"]["build_up"]["coverage"]["value"],
+            0.6,
+        )
+        self.assertEqual(
+            summary["coaching_matrices"]["priority"]["build_up"]["minimum_coverage"],
+            0.7,
+        )
         self.assertIn(
             "priority_percentile_coverage_below_70",
             summary["coaching_matrix"]["insufficient_sample"][0]["reasons"],
@@ -433,7 +619,7 @@ class SnapshotAndAggregateTests(TestCase):
                 self.assertTrue(kpi["drilldown_metric"])
         self.assertEqual(
             [step["drilldown_metric"] for step in first["funnel"]["steps"]],
-            ["attempts", "reach", "positive_sync", "order_10d_sync"],
+            ["attempts", "reach", "mature_reached_sync", "order_10d_sync"],
         )
 
     def test_snapshot_quality_exact_approximate_and_missing(self):

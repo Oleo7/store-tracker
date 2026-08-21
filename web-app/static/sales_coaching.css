@@ -114,7 +114,8 @@ body.user-admin .sales-coaching-dashboard:not([hidden]) { display: block; }
 }
 
 .sc-quality-title { font-weight: 850; }
-.sc-quality-summary { color: inherit; font-size: 0.9rem; }
+.sc-quality-summary { color: inherit; font-size: 0.9rem; line-height: 1.55; }
+.sc-quality-debug { opacity: 0.78; font-size: 0.78rem; }
 .sc-quality-arrow { font-size: 1.25rem; }
 
 .sc-section {
@@ -183,8 +184,33 @@ button.sc-kpi-card {
 .sc-tone-negative .sc-kpi-value, .sc-delta-negative { color: var(--sc-negative); }
 
 .sc-two-column { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.sc-team-charts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.sc-team-chart { min-width: 0; padding: 16px; border: 1px solid var(--sc-border); border-radius: 15px; background: var(--sc-soft); }
+.sc-team-chart h3 { margin: 0; font-size: 0.98rem; }
+.sc-team-chart > p { min-height: 42px; margin: 5px 0 12px; color: var(--sc-muted); font-size: 0.78rem; line-height: 1.4; }
+.sc-legend-key { font-weight: 800; }
+.sc-legend-key.is-visit { color: #8d3157; }
+.sc-legend-key.is-phone { color: #2b6f8c; }
+.sc-legend-key.is-positive { color: var(--sc-positive); }
+.sc-legend-key.is-order { color: #a46b11; }
+.sc-team-plot { display: grid; grid-template-columns: repeat(auto-fit, minmax(92px, 1fr)); align-items: end; gap: 8px; min-height: 250px; }
+.sc-team-group { display: grid; grid-template-rows: 30px 150px auto auto; min-width: 0; min-height: 238px; padding: 8px; border: 1px solid transparent; border-radius: 12px; background: transparent; color: inherit; font: inherit; cursor: pointer; }
+.sc-team-group:hover { background: #fff; }
+.sc-team-group.is-selected { border-color: var(--sc-brand); background: #fff; box-shadow: 0 0 0 2px rgba(148, 42, 82, 0.12); }
+.sc-team-group.is-small-sample { border-style: dashed; }
+.sc-team-total { align-self: center; color: var(--sc-muted); font-size: 0.7rem; font-weight: 800; }
+.sc-team-bars { display: flex; align-items: end; justify-content: center; gap: 8px; min-height: 150px; border-bottom: 1px solid #cfbec6; }
+.sc-team-bar { position: relative; display: block; width: min(30px, 34%); min-height: 2px; border-radius: 7px 7px 0 0; }
+.sc-team-bar b { position: absolute; left: 50%; top: -20px; transform: translateX(-50%); color: var(--sc-ink); font-size: 0.7rem; }
+.sc-team-bar.is-visit { background: #9d3560; }
+.sc-team-bar.is-phone { background: #2b6f8c; }
+.sc-team-bar.is-positive { background: var(--sc-positive); }
+.sc-team-bar.is-order { background: #b7791f; }
+.sc-team-seller { overflow-wrap: anywhere; margin-top: 8px; font-size: 0.78rem; font-weight: 850; }
+.sc-team-secondary { margin-top: 3px; color: var(--sc-muted); font-size: 0.68rem; line-height: 1.35; }
 .sc-card-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
 .sc-mini-card { padding: 14px; border: 1px solid var(--sc-border); border-radius: 13px; background: var(--sc-soft); }
+button.sc-mini-card { color: inherit; font: inherit; text-align: left; cursor: pointer; }
 .sc-mini-label { color: var(--sc-muted); font-size: 0.78rem; font-weight: 750; }
 .sc-mini-value { margin-top: 7px; font-size: 1.28rem; font-weight: 850; }
 .sc-mini-evidence { margin-top: 4px; color: var(--sc-muted); font-size: 0.76rem; }
@@ -217,11 +243,18 @@ button.sc-kpi-card {
 .sc-legend-dot { display: inline-block; width: 9px; height: 9px; margin-right: 5px; border-radius: 50%; }
 
 .sc-matrix { position: relative; min-width: 620px; height: 360px; border-left: 1px solid #cdbbc3; border-bottom: 1px solid #cdbbc3; background: linear-gradient(90deg, #fcf9fa 50%, #f6fbf8 50%); }
+.sc-matrix-tabs { display: inline-flex; gap: 4px; margin-bottom: 14px; padding: 4px; border: 1px solid var(--sc-border); border-radius: 12px; background: var(--sc-soft); }
+.sc-matrix-tabs button { min-height: 40px; padding: 8px 18px; border: 0; border-radius: 9px; background: transparent; color: var(--sc-muted); font: inherit; font-weight: 800; cursor: pointer; }
+.sc-matrix-tabs button[aria-selected="true"] { background: #fff; color: var(--sc-brand); box-shadow: 0 3px 10px rgba(65, 33, 46, 0.12); }
+.sc-priority-build-up { margin-bottom: 14px; padding: 12px; border: 1px solid #ead8ae; border-radius: 12px; background: #fff9ea; color: #5e4a20; font-size: 0.84rem; }
 .sc-matrix-median-x, .sc-matrix-median-y { position: absolute; background: #967b87; opacity: 0.65; pointer-events: none; }
 .sc-matrix-median-x { top: 0; bottom: 0; width: 1px; }
 .sc-matrix-median-y { left: 0; right: 0; height: 1px; }
 .sc-bubble { position: absolute; display: grid; place-items: center; transform: translate(-50%, 50%); border: 2px solid #fff; border-radius: 50%; background: #9d3560; color: #fff; box-shadow: 0 4px 14px rgba(67, 32, 47, 0.2); font-size: 0.72rem; font-weight: 800; cursor: pointer; }
+.sc-bubble.is-small-sample { border: 2px dashed #7f7379; background: #fff; color: #665961; box-shadow: none; }
+.sc-bubble.is-selected { outline: 4px solid rgba(148, 42, 82, 0.3); outline-offset: 3px; }
 .sc-axis-label { margin-top: 8px; color: var(--sc-muted); font-size: 0.78rem; text-align: center; }
+.sc-matrix-help { margin-top: 10px; color: var(--sc-muted); font-size: 0.78rem; line-height: 1.5; }
 .sc-insufficient { margin-top: 14px; padding: 12px; border-radius: 12px; background: #f5f1f3; color: var(--sc-muted); font-size: 0.82rem; }
 
 .sc-table-wrap { overflow-x: auto; }
@@ -264,6 +297,7 @@ button.sc-kpi-card {
   .sc-kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .sc-card-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .sc-two-column { grid-template-columns: 1fr; }
+  .sc-team-charts { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 620px) {
@@ -279,6 +313,10 @@ button.sc-kpi-card {
   .sc-quality-banner { grid-template-columns: 1fr auto; }
   .sc-quality-summary { grid-column: 1 / -1; }
   .sc-drawer { width: 100vw; }
+  .sc-team-plot { grid-template-columns: repeat(auto-fit, minmax(82px, 1fr)); }
+  .sc-team-group { min-height: 230px; padding-inline: 4px; }
+  .sc-matrix-tabs { display: flex; width: 100%; }
+  .sc-matrix-tabs button { flex: 1; }
 }
 
 @media (prefers-reduced-motion: reduce) {

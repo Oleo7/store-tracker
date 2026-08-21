@@ -14,7 +14,7 @@ import time as clock
 import unicodedata
 
 
-DEFINITIONS_VERSION = "sales_coaching_v1"
+DEFINITIONS_VERSION = "sales_coaching_v2"
 ANALYTICS_SNAPSHOT_VERSION = "sales_coaching_v1"
 ATTRIBUTION_WINDOW_DAYS = 10
 MIN_RATE_SAMPLE = 10
@@ -25,6 +25,8 @@ COACHING_CHANNEL_GAP = 0.15
 COACHING_CHANNEL_USAGE_SHARE = 0.25
 COACHING_ACTIVITY_SHARE = 0.75
 COACHING_FOLLOW_UP_GAP = 0.30
+COACHING_PLANNING_OVERDUE_RATE = 0.20
+COACHING_PLANNING_ON_TIME_RATE = 0.70
 
 KPI_DEFINITIONS = {
     "human_activities": {
@@ -90,6 +92,7 @@ DRILLDOWN_METRICS = frozenset({
     "reach",
     "positive_sync",
     "positive_dialogue",
+    "mature_reached_sync",
     "order_10d",
     "order_10d_sync",
     "waiting_outcome",
@@ -197,6 +200,7 @@ def normalize_contact_type(value):
     key = normalize_key(value)
     mapping = {
         "visit": "visit", "besok": "visit", "fysiskt besok": "visit",
+        "mote": "visit", "meeting": "visit",
         "phone": "phone", "telefon": "phone", "samtal": "phone",
         "email": "email", "e-mail": "email", "mejl": "email", "mail": "email",
     }
@@ -322,6 +326,25 @@ def _seller_aliases(users):
             if key:
                 aliases[key].add(user_name)
     return aliases, canonical
+
+
+def _coached_sellers(users):
+    """Return the stable seller identities allowed to affect coaching views."""
+    sellers = []
+    seen = set()
+    for user in users or ():
+        user_name = _text(user.get("user_name"))
+        key = normalize_key(user_name)
+        if (
+            not key
+            or _optional_bool(user.get("active")) is not True
+            or _optional_bool(user.get("admin")) is True
+            or key in seen
+        ):
+            continue
+        seen.add(key)
+        sellers.append(user_name)
+    return sellers
 
 
 def resolve_historical_seller(activity, users):
@@ -731,11 +754,28 @@ def _seller_comparison(rows, attribution, sellers):
         result.append({
             "seller": seller,
             "human_activities": len(aggregate["human"]),
+            "human_activities_total": len(aggregate["human"]),
+            "channel_mix": {
+                key: sum(row.get("contact_type_key") == key for row in aggregate["human"])
+                for key in ("visit", "phone", "email")
+            },
+            "positive_dialogues_count": len(aggregate["positive"]),
+            "order_10d_converted_contacts": len(aggregate["ordered_contacts"]),
+            "attributed_orders": len(aggregate["attributed"]),
+            "waiting_outcome_count": len(aggregate["waiting"]),
             **aggregate["rates"],
             "snapshot_coverage": _rate(len(aggregate["snapshots"]), len(aggregate["human"]), minimum=1),
             "priority_percentile_coverage": _rate(len(aggregate["percentile_rows"]), len(aggregate["human"]), minimum=1),
         })
     return result
+
+
+def _sufficient_median(sellers, metric):
+    values = [
+        item[metric]["value"] for item in sellers
+        if item[metric]["status"] == "sufficient"
+    ]
+    return statistics.median(values) if len(values) >= 2 else None
 
 
 def _data_quality(rows, canonical_result, order_result, attribution):
@@ -773,16 +813,40 @@ def _data_quality(rows, canonical_result, order_result, attribution):
         status = "limited_data_quality"
     elif len(human) < MIN_RATE_SAMPLE:
         status = "small_sample"
+    secure_identity = _rate(len(secure), len(human), minimum=1)
+    attribution_identity = _rate(
+        len(attributable_reached), len(reached), minimum=1
+    )
+    standardized_activity = _rate(len(standardized), len(human), minimum=1)
+    snapshot_coverage = _rate(len(snapshot), len(human), minimum=1)
+    percentile_coverage = _rate(len(percentile), len(human), minimum=1)
+    historical_status = (
+        "not_computable" if not human
+        else "sufficient"
+        if percentile_coverage["value"] is not None
+        and percentile_coverage["value"] >= MIN_PRIORITY_COVERAGE
+        else "building"
+    )
     return {
         "status": status,
-        "secure_customer_identity": _rate(len(secure), len(human), minimum=1),
+        "core_analytics": {
+            "status": status,
+            "secure_customer_identity": secure_identity,
+            "order_attribution_identity_coverage": attribution_identity,
+            "standardized_activity": standardized_activity,
+        },
+        "historical_priority": {
+            "status": historical_status,
+            "snapshot_coverage": snapshot_coverage,
+            "priority_percentile_coverage": percentile_coverage,
+            "message": "Historisk prioriteringsdata byggs upp från lanseringen och påverkar inte kärnanalysen av aktivitet och order.",
+        },
+        "secure_customer_identity": secure_identity,
         "historical_seller_identity": _rate(len(historical_seller), len(human), minimum=1),
-        "standardized_activity": _rate(len(standardized), len(human), minimum=1),
-        "order_attribution_identity_coverage": _rate(
-            len(attributable_reached), len(reached), minimum=1
-        ),
-        "priority_snapshot_coverage": _rate(len(snapshot), len(human), minimum=1),
-        "priority_percentile_coverage": _rate(len(percentile), len(human), minimum=1),
+        "standardized_activity": standardized_activity,
+        "order_attribution_identity_coverage": attribution_identity,
+        "priority_snapshot_coverage": snapshot_coverage,
+        "priority_percentile_coverage": percentile_coverage,
         "waiting_outcome_count": sum(
             attribution["maturity"].get(row["contact_id"]) == "waiting_outcome"
             for row in attributable_reached
@@ -816,7 +880,7 @@ def _coaching_cards(*, seller, current, seller_comparison, visit_efficiency,
             "drilldown_filters": drilldown_filters or {},
         })
 
-    active_sellers = [row for row in seller_comparison if row["human_activities"] > 0]
+    active_sellers = list(seller_comparison)
     activity_median = (
         statistics.median(row["human_activities"] for row in active_sellers)
         if active_sellers else None
@@ -920,6 +984,29 @@ def _coaching_cards(*, seller, current, seller_comparison, visit_efficiency,
             "followup_gap",
         )
 
+    accountable_planned = follow_up_discipline["accountable_planned"]
+    overdue_rate = follow_up_discipline["overdue_rate"]
+    on_time_rate = follow_up_discipline["planned_completed_in_time"]
+    if (
+        accountable_planned >= MIN_RATE_SAMPLE
+        and (
+            (overdue_rate["value"] or 0) >= COACHING_PLANNING_OVERDUE_RATE
+            or (on_time_rate["value"] or 0) < COACHING_PLANNING_ON_TIME_RATE
+        )
+    ):
+        add(
+            "planning_discipline", "attention", "Planerade aktiviteter släpar efter",
+            "En tydlig andel ansvariga planeringar är försenade eller har inte genomförts i tid.",
+            {
+                **overdue_rate,
+                "on_time_rate": on_time_rate["value"],
+                "on_time_numerator": on_time_rate["numerator"],
+            },
+            {"on_time_threshold": COACHING_PLANNING_ON_TIME_RATE},
+            "Gå igenom gamla planeringar, stäng irrelevanta och omplanera verkliga nästa steg.",
+            "planned_overdue",
+        )
+
     channel_candidates = [
         (key, value["order_10d"])
         for key, value in channel_effectiveness.items()
@@ -969,31 +1056,32 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
         planning_suggestions=planning_suggestions,
         score_events=score_events,
     )
+    coached_sellers = _coached_sellers(users)
+    coached_keys = {normalize_key(value) for value in coached_sellers}
+    coached_activities = [
+        row for row in canonical_result["activities"]
+        if normalize_key(row.get("sales_user_name")) in coached_keys
+    ]
     order_result = group_logical_orders(order_rows, customers)
     if on_step:
         on_step("calculation.sales_coaching.normalization", normalization_started, len(canonical_result["activities"]))
     attribution_started = clock.perf_counter()
-    attribution = attribute_orders_to_contacts(canonical_result["activities"], order_result["orders"], generated_at=generated)
+    attribution = attribute_orders_to_contacts(
+        coached_activities, order_result["orders"], generated_at=generated
+    )
     if on_step:
         on_step("calculation.sales_coaching.attribution", attribution_started, len(order_result["orders"]))
     aggregation_started = clock.perf_counter()
-    rows = _filter_activities(canonical_result["activities"], start=start, end=end, seller=seller, channel=channel, segment=segment, lifecycle=lifecycle)
-    team_rows = _filter_activities(canonical_result["activities"], start=start, end=end, seller="", channel=channel, segment=segment, lifecycle=lifecycle)
+    rows = _filter_activities(coached_activities, start=start, end=end, seller=seller, channel=channel, segment=segment, lifecycle=lifecycle)
+    team_rows = _filter_activities(coached_activities, start=start, end=end, seller="", channel="all", segment=segment, lifecycle=lifecycle)
     comparison_start, comparison_end = _comparison_dates(start, end)
-    comparison_rows = _filter_activities(canonical_result["activities"], start=comparison_start, end=comparison_end, seller=seller, channel=channel, segment=segment, lifecycle=lifecycle)
+    comparison_rows = _filter_activities(coached_activities, start=comparison_start, end=comparison_end, seller=seller, channel=channel, segment=segment, lifecycle=lifecycle)
     current, previous = _aggregate_period(rows, attribution), _aggregate_period(comparison_rows, attribution)
     for key, rate in current["rates"].items():
         rate["comparisons"]["previous_period"] = previous["rates"][key]
 
-    seller_roles = {"saljare", "account manager", "accountmanager"}
-    seller_options = sorted(
-        {row.get("sales_user_name") for row in canonical_result["activities"] if row.get("sales_user_name")}
-        | {
-            _text(user.get("user_name")) for user in users
-            if _text(user.get("user_name")) and normalize_key(user.get("role")) in seller_roles
-        }
-    )
-    seller_comparison = _seller_comparison(team_rows, attribution, seller_options)
+    seller_options = coached_sellers
+    seller_comparison = _seller_comparison(team_rows, attribution, coached_sellers)
     team_rates = defaultdict(list)
     for item in seller_comparison:
         for key in ("reach", "positive_dialogue", "positive_to_order_10d", "order_10d", "priority_focus", "bom_ratio"):
@@ -1001,9 +1089,7 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
                 team_rates[key].append(item[key]["value"])
     for key, rate in current["rates"].items():
         values = team_rates[key]
-        rate["comparisons"]["team_median"] = (
-            statistics.median(values) if len(values) >= 2 else None
-        )
+        rate["comparisons"]["team_median"] = statistics.median(values) if len(values) >= 2 else None
 
     repeat_customers = defaultdict(list)
     for row in current["boms"]:
@@ -1012,6 +1098,30 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
     repeated = {key: value for key, value in repeat_customers.items() if len(value) >= 2}
     high_priority_boms = [row for row in current["boms"] if row.get("priority_percentile_at_contact") is not None and row["priority_percentile_at_contact"] >= 75]
     high_priority_score_fallback = [row for row in current["boms"] if row.get("priority_percentile_at_contact") is None and row.get("priority_snapshot_quality") == "exact" and (row.get("priority_score_at_contact") or 0) >= 70]
+    boms_with_percentile = [
+        row for row in current["boms"]
+        if row.get("priority_percentile_at_contact") is not None
+    ]
+    bom_priority_coverage = _rate(
+        len(boms_with_percentile), len(current["boms"]), minimum=1
+    )
+    if not current["boms"]:
+        high_priority_boms_metric = {
+            "value": 0, "status": "sufficient", "coverage": bom_priority_coverage,
+        }
+    elif (
+        bom_priority_coverage["value"] is None
+        or bom_priority_coverage["value"] < MIN_PRIORITY_COVERAGE
+    ):
+        high_priority_boms_metric = {
+            "value": None, "status": "limited_coverage", "coverage": bom_priority_coverage,
+        }
+    else:
+        high_priority_boms_metric = {
+            "value": len(high_priority_boms),
+            "status": "sufficient",
+            "coverage": bom_priority_coverage,
+        }
 
     aliases, _canonical_sellers = _seller_aliases(users)
     portfolio = []
@@ -1019,6 +1129,8 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
         priority = dict(raw_priority)
         owner_matches = aliases.get(normalize_key(priority.get("sales_person")), set())
         owner = next(iter(owner_matches)) if len(owner_matches) == 1 else ""
+        if normalize_key(owner) not in coached_keys:
+            continue
         if seller and normalize_key(owner) != normalize_key(seller):
             continue
         priority_segment = _text(priority.get("segment")).upper() or "missing"
@@ -1044,7 +1156,11 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
         values = sorted((_number(row.get("value_index"), 0) or 0 for row in owner_rows))
         for priority in owner_rows:
             value = _number(priority.get("value_index"), 0) or 0
-            priority["value_percentile"] = round(100 * sum(item <= value for item in values) / len(values), 2) if values else None
+            below = sum(item < value for item in values)
+            tied = sum(item == value for item in values)
+            priority["value_percentile"] = round(
+                100 * (below + 0.5 * tied) / len(values), 2
+            ) if values else None
             priority["priority_percentile"] = None
     for owner_rows in eligible_by_owner.values():
         scores = sorted((_number(row.get("priority_score"), 0) or 0 for row in owner_rows))
@@ -1080,8 +1196,18 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
         scheduled = _datetime(planned.get("scheduled_at"))
         if not scheduled or not (start <= scheduled.date() <= end):
             continue
-        if seller and normalize_key(planned.get("user_name")) != normalize_key(seller):
+        planned_owner_matches = aliases.get(
+            normalize_key(planned.get("user_name")), set()
+        )
+        planned_owner = (
+            next(iter(planned_owner_matches))
+            if len(planned_owner_matches) == 1 else ""
+        )
+        if normalize_key(planned_owner) not in coached_keys:
             continue
+        if seller and normalize_key(planned_owner) != normalize_key(seller):
+            continue
+        planned["user_name"] = planned_owner
         planned["scheduled_datetime"] = scheduled
         planned_period.append(planned)
     accountable_planned = [
@@ -1192,6 +1318,7 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
         "reach": channel_effectiveness["visit"]["reach"],
         "repeat_boms": {"customers": len(repeated), "visits": sum(len(value) for value in repeated.values())},
         "high_priority_boms": len(high_priority_boms),
+        "high_priority_boms_metric": high_priority_boms_metric,
         "high_priority_score_fallback": len(high_priority_score_fallback),
         "planned": _rate(len([row for row in current["boms"] if row.get("planned_activity_id")]), len([row for row in current["visits"] if row.get("planned_activity_id")])),
         "unplanned": _rate(len([row for row in current["boms"] if not row.get("planned_activity_id")]), len([row for row in current["visits"] if not row.get("planned_activity_id")])),
@@ -1246,6 +1373,10 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
         "planned_completed_in_time": _rate(
             len(completed_in_time), len(accountable_planned)
         ),
+        "accountable_planned": len(accountable_planned),
+        "overdue_rate": _rate(
+            len(overdue_planned), len(accountable_planned)
+        ),
         "overdue_planned": len(overdue_planned),
         "skipped": len(skipped_planned),
         "cancelled_excluded": len([
@@ -1257,7 +1388,7 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
         ),
     }
 
-    active_activity_counts = [row["human_activities"] for row in seller_comparison if row["human_activities"] > 0]
+    active_activity_counts = [row["human_activities"] for row in seller_comparison]
     kpis = {
         "human_activities": {
             "value": len(current["human"]),
@@ -1294,6 +1425,45 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
     for key, definition in KPI_DEFINITIONS.items():
         kpis[key].update(definition)
     data_quality = _data_quality(rows, canonical_result, order_result, attribution)
+    sales_matrix_sellers = [
+        {
+            **item,
+            "sample_status": (
+                "sufficient"
+                if item["positive_dialogue"]["status"] == "sufficient"
+                and item["order_10d"]["status"] == "sufficient"
+                else "small_sample"
+            ),
+        }
+        for item in seller_comparison
+        if item["positive_dialogue"]["value"] is not None
+        and item["order_10d"]["value"] is not None
+    ]
+    sales_positioned_names = {item["seller"] for item in sales_matrix_sellers}
+    sales_matrix = {
+        "type": "sales",
+        "axes": {"x": "positive_dialogue", "y": "order_10d", "size": "human_activities"},
+        "sellers": sales_matrix_sellers,
+        "medians": {
+            "positive_dialogue": _sufficient_median(seller_comparison, "positive_dialogue"),
+            "order_10d": _sufficient_median(seller_comparison, "order_10d"),
+        },
+        "insufficient_sample": [
+            {
+                "seller": item["seller"],
+                "human_activities": item["human_activities"],
+                "reasons": [
+                    reason for reason, applies in (
+                        ("positive_denominator_zero", item["positive_dialogue"]["denominator"] == 0),
+                        ("order_denominator_zero", item["order_10d"]["denominator"] == 0),
+                    ) if applies
+                ],
+            }
+            for item in seller_comparison
+            if item["seller"] not in sales_positioned_names
+        ],
+    }
+
     comparable_sellers = [
         item for item in seller_comparison
         if item["order_10d"]["status"] == "sufficient"
@@ -1302,11 +1472,41 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
         and item["priority_percentile_coverage"]["value"] >= MIN_PRIORITY_COVERAGE
     ]
     comparable_names = {item["seller"] for item in comparable_sellers}
-    coaching_matrix = {
-        "sellers": comparable_sellers,
+    priority_matrix_sellers = [
+        {
+            **item,
+            "sample_status": (
+                "sufficient" if item["seller"] in comparable_names
+                else "small_sample"
+            ),
+        }
+        for item in seller_comparison
+        if item["order_10d"]["value"] is not None
+        and item["priority_focus"]["value"] is not None
+        and item["priority_percentile_coverage"]["value"] is not None
+        and item["priority_percentile_coverage"]["value"] >= MIN_PRIORITY_COVERAGE
+    ]
+    team_priority_numerator = sum(
+        item["priority_percentile_coverage"]["numerator"]
+        for item in seller_comparison
+    )
+    team_priority_denominator = sum(
+        item["priority_percentile_coverage"]["denominator"]
+        for item in seller_comparison
+    )
+    priority_matrix = {
+        "type": "priority",
+        "axes": {"x": "priority_focus", "y": "order_10d", "size": "human_activities"},
+        "sellers": priority_matrix_sellers,
         "medians": {
             "priority_focus": statistics.median(item["priority_focus"]["value"] for item in comparable_sellers) if len(comparable_sellers) >= 2 else None,
             "order_10d": statistics.median(item["order_10d"]["value"] for item in comparable_sellers) if len(comparable_sellers) >= 2 else None,
+        },
+        "build_up": {
+            "coverage": _rate(
+                team_priority_numerator, team_priority_denominator, minimum=1
+            ),
+            "minimum_coverage": MIN_PRIORITY_COVERAGE,
         },
         "insufficient_sample": [
             {
@@ -1316,8 +1516,10 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
                 "priority_percentile_coverage": item["priority_percentile_coverage"],
                 "reasons": [
                     reason for reason, applies in (
-                        ("order_sample_below_10", item["order_10d"]["denominator"] < MIN_RATE_SAMPLE),
-                        ("priority_sample_below_10", item["priority_focus"]["denominator"] < MIN_RATE_SAMPLE),
+                        ("order_denominator_zero", item["order_10d"]["denominator"] == 0),
+                        ("order_sample_below_10", 0 < item["order_10d"]["denominator"] < MIN_RATE_SAMPLE),
+                        ("priority_denominator_zero", item["priority_focus"]["denominator"] == 0),
+                        ("priority_sample_below_10", 0 < item["priority_focus"]["denominator"] < MIN_RATE_SAMPLE),
                         ("priority_percentile_coverage_below_70", item["priority_percentile_coverage"]["value"] is None or item["priority_percentile_coverage"]["value"] < MIN_PRIORITY_COVERAGE),
                     ) if applies
                 ],
@@ -1325,6 +1527,7 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
             for item in seller_comparison if item["seller"] not in comparable_names
         ],
     }
+    coaching_matrix = priority_matrix
     coaching_cards = _coaching_cards(
         seller=seller,
         current=current,
@@ -1353,20 +1556,30 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
         "data_quality": data_quality,
         "kpis": kpis,
         "seller_comparison": seller_comparison,
+        "team_comparison": {
+            "selected_seller": seller,
+            "sellers": seller_comparison,
+            "benchmarks": {
+                "human_activities_median": statistics.median(active_activity_counts) if active_activity_counts else None,
+                "positive_dialogue_median": _sufficient_median(seller_comparison, "positive_dialogue"),
+                "order_10d_median": _sufficient_median(seller_comparison, "order_10d"),
+            },
+        },
+        "coaching_matrices": {"sales": sales_matrix, "priority": priority_matrix},
         "coaching_matrix": coaching_matrix,
         "funnel": {
             "attempts": len(current["sync"]),
             "reached": len(current["sync_reached"]),
-            "positive": len(current["sync_positive"]),
+            "mature_reached": len(current["sync_mature"]),
             "mature_converted_contacts": len(current["sync_converted"]),
             "reach_rate": current["rates"]["reach"],
-            "positive_rate": _rate(len(current["sync_positive"]), len(current["sync_reached"])),
+            "maturity_rate": _rate(len(current["sync_mature"]), len(current["sync_reached"])),
             "order_rate": _rate(len(current["sync_converted"]), len(current["sync_mature"])),
             "steps": [
                 {"key": "attempts", "label": "Synkrona kontaktförsök", "count": len(current["sync"]), "rate": None, "drilldown_metric": "attempts"},
                 {"key": "reached", "label": "Nådda synkrona kontakter", "count": len(current["sync_reached"]), "rate": current["rates"]["reach"], "drilldown_metric": "reach"},
-                {"key": "positive", "label": "Positiva synkrona dialoger", "count": len(current["sync_positive"]), "rate": _rate(len(current["sync_positive"]), len(current["sync_reached"])), "drilldown_metric": "positive_sync"},
-                {"key": "mature_converted_contacts", "label": "Mogna kontakter med order inom 10 dagar", "count": len(current["sync_converted"]), "rate": _rate(len(current["sync_converted"]), len(current["sync_mature"])), "drilldown_metric": "order_10d_sync"},
+                {"key": "mature_reached", "label": "Mogna nådda kontakter", "count": len(current["sync_mature"]), "rate": _rate(len(current["sync_mature"]), len(current["sync_reached"])), "drilldown_metric": "mature_reached_sync"},
+                {"key": "mature_converted_contacts", "label": "Order inom 10 dagar", "count": len(current["sync_converted"]), "rate": _rate(len(current["sync_converted"]), len(current["sync_mature"])), "drilldown_metric": "order_10d_sync"},
             ],
         },
         "weekly_trend": weekly_trend,
@@ -1463,6 +1676,7 @@ def build_drilldown(summary, metric, *, limit=100):
             "reach": _is_sync_reached(row),
             "positive_sync": _is_sync_reached(row) and row.get("result_class") in {"positive", "order"},
             "positive_dialogue": _is_reached_human(row) and row.get("result_class") in {"positive", "order"},
+            "mature_reached_sync": _is_sync_reached(row) and bool(row.get("customer_identity_key")) and maturity == "mature",
             "order_10d": _is_attribution_eligible(row) and maturity == "mature" and bool(orders),
             "order_10d_sync": _is_sync_reached(row) and bool(row.get("customer_identity_key")) and maturity == "mature" and bool(orders),
             "waiting_outcome": _is_attribution_eligible(row) and maturity == "waiting_outcome",

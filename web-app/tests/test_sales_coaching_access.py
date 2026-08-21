@@ -105,7 +105,8 @@ class SalesCoachingAccessTests(TestCase):
             set(payload),
             {
                 "meta", "options", "data_quality", "kpis",
-                "seller_comparison", "coaching_matrix", "funnel",
+                "seller_comparison", "team_comparison", "coaching_matrix",
+                "coaching_matrices", "funnel",
                 "weekly_trend", "visit_efficiency", "channel_effectiveness",
                 "priority_allocation", "follow_up_discipline", "coaching_cards",
             },
@@ -114,6 +115,13 @@ class SalesCoachingAccessTests(TestCase):
         self.assertIn("order_attribution_identity_coverage", payload["data_quality"])
         self.assertIn("flagged_activity_rows", payload["data_quality"])
         self.assertIn("quality_issue_count", payload["data_quality"])
+        self.assertIn("core_analytics", payload["data_quality"])
+        self.assertIn("historical_priority", payload["data_quality"])
+        self.assertNotIn("admin", payload["options"]["sellers"])
+        self.assertEqual(
+            payload["team_comparison"]["sellers"],
+            payload["seller_comparison"],
+        )
         self.assertEqual(self.spreadsheet.added_sheets, added_before)
         self.assertEqual(
             {title: sheet.values for title, sheet in self.spreadsheet.sheets.items()},

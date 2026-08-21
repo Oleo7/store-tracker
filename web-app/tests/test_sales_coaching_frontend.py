@@ -58,6 +58,34 @@ class SalesCoachingFrontendTests(TestCase):
         self.assertIn("order_attribution_identity_coverage", self.javascript)
         self.assertIn("flagged_activity_rows", self.javascript)
         self.assertIn("quality_issue_count", self.javascript)
+        self.assertIn("Kärndata för säljanalys", self.javascript)
+        self.assertIn("Historisk prioriteringsdata", self.javascript)
+
+    def test_team_comparison_uses_backend_counts_and_high_touch_grouped_bars(self):
+        for expected in (
+            "teamComparisonMarkup", "sc-team-charts", "human_activities_total",
+            "channel_mix?.visit", "channel_mix?.phone", "positive_dialogues_count",
+            "order_10d_converted_contacts", "waiting_outcome_count",
+        ):
+            with self.subTest(expected=expected):
+                self.assertIn(expected, self.javascript)
+        self.assertNotIn("item.attributed_orders /", self.javascript)
+
+    def test_both_matrix_views_small_samples_and_seller_highlight_are_present(self):
+        self.assertIn('data-matrix-view="sales"', self.javascript)
+        self.assertIn('data-matrix-view="priority"', self.javascript)
+        self.assertIn('state.matrixView === "priority"', self.javascript)
+        self.assertIn('item.sample_status === "small_sample"', self.javascript)
+        self.assertIn("sellerSelected(item.seller)", self.javascript)
+        self.assertIn("is-small-sample", self.css)
+        self.assertIn("is-selected", self.css)
+
+    def test_qa_labels_and_sequential_funnel_contract_are_rendered(self):
+        self.assertIn("Bom-ratio – planerade besök", self.javascript)
+        self.assertIn("Bom-ratio – oplanerade besök", self.javascript)
+        self.assertIn("Aktuella högprioriterade kunder att bearbeta", self.javascript)
+        self.assertIn("funnel.steps", self.javascript)
+        self.assertIn("Kan inte beräknas · historisk prioritet saknas", self.javascript)
 
     def test_stale_response_and_transient_error_handling_are_explicit(self):
         self.assertIn("requestSerial", self.javascript)
@@ -81,6 +109,7 @@ class SalesCoachingFrontendTests(TestCase):
         self.assertIn(".sc-trend-wrap,", self.css)
         self.assertIn("width: calc(100% - 20px)", self.css)
         self.assertIn(".sc-drawer { width: 100vw; }", self.css)
+        self.assertIn(".sc-team-charts { grid-template-columns: 1fr; }", self.css)
 
     def test_static_assets_are_served_by_flask(self):
         app_module.app.config.update(TESTING=True)
