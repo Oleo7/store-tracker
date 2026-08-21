@@ -1,7 +1,9 @@
+from io import BytesIO
 from pathlib import Path
 import sys
 from unittest import TestCase, main
 from unittest.mock import patch
+from zipfile import ZipFile
 
 
 WEB_APP_DIR = Path(__file__).resolve().parents[1]
@@ -328,7 +330,7 @@ class Ownership1BTests(TestCase):
         self.assertIsNone(payload)
         self.assertEqual(error[1], 404)
 
-    def test_contact_log_is_current_owner_only_for_seller_and_global_for_admin(self):
+    def test_contact_log_is_global_for_account_manager_and_admin(self):
         contacts = [
             {
                 "customer": "Own Store",
@@ -343,9 +345,9 @@ class Ownership1BTests(TestCase):
                 "customer": "Other Store",
                 "customer_id": "other-id",
                 "date_time": "2026-08-01 11:00",
-                "sales_person": "Olle",
+                "sales_person": "Sofia",
                 "contact_channel": "Telefon",
-                "result": "Positiv",
+                "result": "Neutral",
                 "comment": "Historisk",
             },
         ]
@@ -356,17 +358,91 @@ class Ownership1BTests(TestCase):
                 return_value=object(),
             ),
             patch.object(app_module, "get_contact_rows", return_value=contacts),
-            patch.object(
-                app_module, "get_customer_rows", return_value=self.customers
-            ),
         ):
             self.login()
             seller_response = self.client.get("/contact-log")
+            seller_filtered_response = self.client.get(
+                "/contact-log?responsible=Sofia"
+            )
+            seller_export = self.client.get("/contact-log/export")
+            seller_filtered_export = self.client.get(
+                "/contact-log/export?responsible=Sofia"
+            )
             self.login(admin_value="Y")
             admin_response = self.client.get("/contact-log")
 
-        self.assertEqual(seller_response.get_json()["total_count"], 1)
+        seller_payload = seller_response.get_json()
+        admin_payload = admin_response.get_json()
+        self.assertEqual(seller_response.status_code, 200)
+        self.assertEqual(seller_payload["total_count"], 2)
         self.assertEqual(admin_response.get_json()["total_count"], 2)
+        self.assertEqual(seller_payload["rows"], admin_payload["rows"])
+        self.assertEqual(
+            seller_payload["filters"]["responsible"],
+            [
+                {"value": "Olle", "label": "Olle"},
+                {"value": "Sofia", "label": "Sofia"},
+            ],
+        )
+        filtered_payload = seller_filtered_response.get_json()
+        self.assertEqual(filtered_payload["filtered_count"], 1)
+        self.assertEqual(filtered_payload["rows"][0]["Kund"], "Other Store")
+
+        self.assertEqual(seller_export.status_code, 200)
+        self.assertEqual(seller_filtered_export.status_code, 200)
+        with ZipFile(BytesIO(seller_export.data)) as workbook:
+            worksheet = workbook.read("xl/worksheets/sheet1.xml").decode("utf-8")
+        self.assertIn("Own Store", worksheet)
+        self.assertIn("Other Store", worksheet)
+        with ZipFile(BytesIO(seller_filtered_export.data)) as workbook:
+            filtered_worksheet = workbook.read(
+                "xl/worksheets/sheet1.xml"
+            ).decode("utf-8")
+        self.assertNotIn("Own Store", filtered_worksheet)
+        self.assertIn("Other Store", filtered_worksheet)
+
+    def test_contact_log_and_export_still_require_authentication(self):
+        for path in ("/contact-log", "/contact-log/export"):
+            with self.subTest(path=path):
+                response = self.client.get(path)
+                self.assertEqual(response.status_code, 401)
+                self.assertEqual(
+                    response.get_json()["error"], "authentication_required"
+                )
+
+    def test_general_contact_and_customer_access_remains_owner_filtered(self):
+        contacts = [
+            {
+                "customer": "Own Store",
+                "customer_id": "own-id",
+                "date_time": "2026-08-01 10:00",
+            },
+            {
+                "customer": "Other Store",
+                "customer_id": "other-id",
+                "date_time": "2026-08-01 11:00",
+            },
+        ]
+        seller = app_module.public_user({
+            "user_name": "olle",
+            "name": "Olle",
+            "role": "Säljare",
+            "admin": "N",
+        })
+
+        visible_contacts = app_module.accessible_contact_rows(
+            contacts, self.customers, seller,
+        )
+        visible_customers = app_module.filter_accessible_customers(
+            self.customers, seller,
+        )
+
+        self.assertEqual(
+            [row["customer"] for row in visible_contacts], ["Own Store"]
+        )
+        self.assertEqual(
+            [row["customer"] for row in visible_customers], ["Own Store"]
+        )
 
 
 if __name__ == "__main__":

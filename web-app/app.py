@@ -5239,17 +5239,8 @@ def get_customers():
 @app.route("/contact-log", methods=["GET"])
 def get_contact_log():
     spreadsheet = get_spreadsheet_with_retry()
-    customers = get_customer_rows(spreadsheet)
-    user = current_user()
-    customer_lookup = (
-        None if user_is_admin(user) else CustomerLookup(customers)
-    )
-    contact_rows = accessible_contact_rows(
-        get_contact_rows(spreadsheet),
-        customers,
-        user,
-        customer_lookup=customer_lookup,
-    )
+    # Contact-log is an authenticated, read-only cross-team view by design.
+    contact_rows = get_contact_rows(spreadsheet)
     filters = get_contact_log_filter_values(request.args)
     return jsonify(build_contact_log_payload(contact_rows, filters))
 
@@ -5257,17 +5248,8 @@ def get_contact_log():
 @app.route("/contact-log/export", methods=["GET"])
 def export_contact_log():
     spreadsheet = get_spreadsheet_with_retry()
-    customers = get_customer_rows(spreadsheet)
-    user = current_user()
-    customer_lookup = (
-        None if user_is_admin(user) else CustomerLookup(customers)
-    )
-    contact_rows = accessible_contact_rows(
-        get_contact_rows(spreadsheet),
-        customers,
-        user,
-        customer_lookup=customer_lookup,
-    )
+    # Keep export aligned with the authenticated cross-team Contact-log view.
+    contact_rows = get_contact_rows(spreadsheet)
     filters = get_contact_log_filter_values(request.args)
     payload = build_contact_log_payload(contact_rows, filters)
     workbook = build_xlsx(payload["columns"], payload["rows"])
