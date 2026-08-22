@@ -132,13 +132,13 @@ def _benchmark(metric):
     count_metric = metric.get("metric_type") == "count"
     if peer is not None:
         labels.append((
-            f"Peer median {peer:g} · {comparisons.get('delta_peer', 0):+g}"
+            f"Peer median {peer:g} aktiviteter · {comparisons.get('delta_peer', 0):+g} aktiviteter"
             if count_metric else
             f"Peer median {peer:.1%} · {comparisons.get('delta_peer', 0) * 100:+.1f} pp"
         ))
     if previous is not None:
         labels.append((
-            f"Föregående period {previous:g} · {comparisons.get('delta_previous', 0):+g}"
+            f"Föregående period {previous:g} aktiviteter · {comparisons.get('delta_previous', 0):+g} aktiviteter"
             if count_metric else
             f"Föregående period {previous:.1%} · {comparisons.get('delta_previous', 0) * 100:+.1f} pp"
         ))
@@ -230,8 +230,6 @@ def build_seller_signals(*, seller, metrics, repeat_boms, channel_effectiveness)
         ("reach", "reach", False, "Träffgraden kan förbättras", "Hög träffgrad", "Granska tidpunkt, kontaktperson och förberedelse för missade försök.", "Identifiera och återanvänd förberedelserna bakom den höga träffgraden.", "Behåll minst 10 analyserbara försök.", "reach"),
         ("positive_dialogue", "positive_dialogue", False, "Färre dialoger blir positiva", "Hög andel positiva dialoger", "Granska behovsfrågor, invändningar och hur nästa steg förankras.", "Identifiera vilka frågor och kundsituationer som driver de starka dialogerna.", "Behåll nivån med minst 30 analyserbara kontakter.", "positive_dialogue"),
         ("bom_ratio", "bom", True, "Många besök blir bom", "Låg bom-ratio", "Se över besökstid, bokning och rätt kontaktperson.", "Förstå och återanvänd bokningsarbetet bakom den låga bom-ration.", "Behåll minst 10 analyserbara besök.", "bom_ratio"),
-        ("positive_next_step_coverage", "follow_up", False, "Låg nästa-steg-täckning", "Hög nästa-steg-täckning", "Bestäm datum, ansvar och syfte redan i dialogen.", "Återanvänd rutinen som säkrar tydliga nästa steg.", "Behåll minst 70 % täckning.", "followup_success"),
-        ("planned_completed_in_time", "planning", False, "Låg planeringsdisciplin", "Hög planeringsdisciplin", "Rensa gamla planeringar och omplanera verkliga nästa steg.", "Förstå och återanvänd arbetssättet som håller planeringarna i tid.", "Behåll minst 70 % genomförda i tid.", "planned_on_time"),
     )
     for key, dimension, lower, attention_title, strength_title, attention_action, strength_action, target, drilldown in definitions:
         signals.extend(_peer_signal(
@@ -312,37 +310,92 @@ def build_seller_signals(*, seller, metrics, repeat_boms, channel_effectiveness)
         ))
 
     follow_up = metrics.get("positive_next_step_coverage", {})
-    if _is_sufficient(follow_up) and 1 - follow_up["value"] >= FOLLOW_UP_GAP:
-        missing = follow_up["denominator"] - follow_up["numerator"]
-        evidence = {"value": 1 - follow_up["value"], "numerator": missing,
-                    "denominator": follow_up["denominator"], "status": "sufficient"}
-        signals.append(_signal(
-            code="followup_gap", dimension="follow_up", polarity="attention",
-            metric_key="positive_next_step_coverage", title="Positiva dialoger saknar nästa steg",
-            observation="Minst 30 procent av bedömningsbara positiva kontakter saknar order, uppföljningsdatum eller länkad aktivitet efter tre dagar.",
-            evidence=evidence, benchmark=_benchmark(follow_up),
-            next_action="Bestäm datum, ansvar och syfte för nästa steg redan i dialogen.",
-            target="Minst 70 % nästa-steg-täckning.", drilldown_metric="followup_gap",
-            ranking_score=_absolute_rank("follow_up", evidence["denominator"], evidence["value"] - FOLLOW_UP_GAP),
-        ))
+    if _is_sufficient(follow_up):
+        missing_rate = 1 - follow_up["value"]
+        if follow_up["value"] < 1 - FOLLOW_UP_GAP:
+            missing = follow_up["denominator"] - follow_up["numerator"]
+            evidence = {"value": missing_rate, "numerator": missing,
+                        "denominator": follow_up["denominator"], "status": "sufficient"}
+            signals.append(_signal(
+                code="followup_gap", dimension="follow_up", polarity="attention",
+                metric_key="positive_next_step_coverage", title="Positiva dialoger saknar nästa steg",
+                observation="Minst 30 procent av bedömningsbara positiva kontakter saknar order, uppföljningsdatum eller länkad aktivitet efter tre dagar.",
+                evidence=evidence, benchmark=_benchmark(follow_up),
+                next_action="Bestäm datum, ansvar och syfte för nästa steg redan i dialogen.",
+                target="Minst 70 % nästa-steg-täckning.", drilldown_metric="followup_gap",
+                ranking_score=_absolute_rank("follow_up", evidence["denominator"], missing_rate - FOLLOW_UP_GAP),
+            ))
+        else:
+            comparison = follow_up.get("comparisons") or {}
+            peer = comparison.get("peer_median")
+            if (
+                follow_up["value"] >= 1 - FOLLOW_UP_GAP
+                and peer is not None
+                and comparison.get("peer_count", 0) >= MIN_PEERS
+                and follow_up["value"] >= peer + RATE_GAP
+            ):
+                gap = follow_up["value"] - peer
+                signals.append(_signal(
+                    code="positive_next_step_coverage_strength",
+                    dimension="follow_up", polarity="strength",
+                    metric_key="positive_next_step_coverage",
+                    title="Hög nästa-steg-täckning",
+                    observation=f"{seller} uppfyller processstandarden och ligger tydligt över peergruppen i nästa-steg-täckning.",
+                    evidence=follow_up, benchmark=_benchmark(follow_up),
+                    next_action="Återanvänd rutinen som säkrar tydliga nästa steg.",
+                    target="Behåll minst 70 % nästa-steg-täckning.",
+                    drilldown_metric="followup_success",
+                    ranking_score=_rank("follow_up", follow_up, gap, RATE_GAP),
+                ))
 
     planned = metrics.get("planned_completed_in_time", {})
     overdue = metrics.get("overdue_rate", {})
-    if (
-        _is_sufficient(planned)
-        and (planned["value"] < PLANNING_ON_TIME_RATE or (overdue.get("value") or 0) >= PLANNING_OVERDUE_RATE)
-    ):
-        excess = max(PLANNING_ON_TIME_RATE - planned["value"], (overdue.get("value") or 0) - PLANNING_OVERDUE_RATE)
-        signals.append(_signal(
-            code="planning_discipline", dimension="planning", polarity="attention",
-            metric_key="planned_completed_in_time", title="Planerade aktiviteter släpar efter",
-            observation="Minst tio ansvariga planeringar visar försenade eller sena utfall.",
-            evidence=planned, benchmark=_benchmark(planned),
-            next_action="Gå igenom gamla planeringar, stäng irrelevanta och omplanera verkliga nästa steg.",
-            target="Minst 70 % genomförda i tid och under 20 % försenade.",
-            drilldown_metric="planned_overdue",
-            ranking_score=_absolute_rank("planning", planned["denominator"], excess),
-        ))
+    if _is_sufficient(planned):
+        overdue_value = overdue.get("value")
+        planning_attention = (
+            planned["value"] < PLANNING_ON_TIME_RATE
+            or overdue_value is not None
+            and overdue_value >= PLANNING_OVERDUE_RATE
+        )
+        if planning_attention:
+            excess = max(
+                PLANNING_ON_TIME_RATE - planned["value"],
+                (overdue_value or 0) - PLANNING_OVERDUE_RATE,
+            )
+            signals.append(_signal(
+                code="planning_discipline", dimension="planning", polarity="attention",
+                metric_key="planned_completed_in_time", title="Planerade aktiviteter släpar efter",
+                observation="Minst tio ansvariga planeringar visar försenade eller sena utfall.",
+                evidence=planned, benchmark=_benchmark(planned),
+                next_action="Gå igenom gamla planeringar, stäng irrelevanta och omplanera verkliga nästa steg.",
+                target="Minst 70 % genomförda i tid och under 20 % försenade.",
+                drilldown_metric="planned_overdue",
+                ranking_score=_absolute_rank("planning", planned["denominator"], excess),
+            ))
+        else:
+            comparison = planned.get("comparisons") or {}
+            peer = comparison.get("peer_median")
+            if (
+                planned["value"] >= PLANNING_ON_TIME_RATE
+                and overdue_value is not None
+                and overdue_value < PLANNING_OVERDUE_RATE
+                and peer is not None
+                and comparison.get("peer_count", 0) >= MIN_PEERS
+                and planned["value"] >= peer + RATE_GAP
+            ):
+                gap = planned["value"] - peer
+                signals.append(_signal(
+                    code="planned_completed_in_time_strength",
+                    dimension="planning", polarity="strength",
+                    metric_key="planned_completed_in_time",
+                    title="Hög planeringsdisciplin",
+                    observation=f"{seller} uppfyller processstandarden och ligger tydligt över peergruppen i planeringar genomförda i tid.",
+                    evidence=planned, benchmark=_benchmark(planned),
+                    next_action="Förstå och återanvänd arbetssättet som håller planeringarna i tid.",
+                    target="Behåll minst 70 % genomförda i tid och under 20 % försenade.",
+                    drilldown_metric="planned_on_time",
+                    ranking_score=_rank("planning", planned, gap, RATE_GAP),
+                ))
 
     if (repeat_boms or {}).get("customers", 0) >= 2:
         evidence = {"value": repeat_boms["customers"], "numerator": repeat_boms["customers"],
@@ -357,12 +410,18 @@ def build_seller_signals(*, seller, metrics, repeat_boms, channel_effectiveness)
             ranking_score=_absolute_rank("bom", evidence["denominator"], repeat_boms["customers"] / 2 - 1),
         ))
 
+    channel_metric_key = None
     channel_candidates = []
-    for channel, values in (channel_effectiveness or {}).items():
-        candidates = [values.get("positive_to_order_10d"), values.get("order_10d")]
-        metric = next((item for item in candidates if _is_sufficient(item)), None)
-        if metric:
-            channel_candidates.append((channel, metric))
+    for candidate_key in ("positive_to_order_10d", "order_10d"):
+        candidates = [
+            (channel, values.get(candidate_key))
+            for channel, values in (channel_effectiveness or {}).items()
+            if _is_sufficient(values.get(candidate_key))
+        ]
+        if len(candidates) >= 2:
+            channel_metric_key = candidate_key
+            channel_candidates = candidates
+            break
     if len(channel_candidates) >= 2:
         strongest = max(channel_candidates, key=lambda item: (item[1]["value"], item[0]))
         weakest = min(channel_candidates, key=lambda item: (item[1]["value"], item[0]))
@@ -370,12 +429,12 @@ def build_seller_signals(*, seller, metrics, repeat_boms, channel_effectiveness)
         if gap >= CHANNEL_GAP:
             signals.append(_signal(
                 code="channel_strength", dimension="channel", polarity="strength",
-                metric_key="channel_conversion", title="En kanal visar ett starkare historiskt mönster",
+                metric_key=channel_metric_key, title="En kanal visar ett starkare historiskt mönster",
                 observation=f"{strongest[0]} ligger {gap:.1%} högre än {weakest[0]} i analyserbar historisk konvertering; mönstret visar inte kausalitet.",
                 evidence=strongest[1], benchmark={"comparison_channel": weakest[0], "comparison_value": weakest[1]["value"]},
                 next_action="Identifiera vilka kundsituationer och arbetssätt från den starka kanalen som går att återanvända.",
                 target="Bekräfta mönstret över fler analyserbara kontakter.",
-                drilldown_metric="positive_to_order_10d",
+                drilldown_metric=channel_metric_key,
                 drilldown_filters={"channel": strongest[0]},
                 ranking_score=_rank("channel", strongest[1], gap, CHANNEL_GAP),
             ))
@@ -388,7 +447,7 @@ def build_team_signals(*, metrics, previous_metrics, repeat_boms):
     previous_metrics = deepcopy(previous_metrics or {})
     signals = []
     follow_up = metrics.get("positive_next_step_coverage", {})
-    if _is_sufficient(follow_up) and 1 - follow_up["value"] >= FOLLOW_UP_GAP:
+    if _is_sufficient(follow_up) and follow_up["value"] < 1 - FOLLOW_UP_GAP:
         previous = previous_metrics.get("positive_next_step_coverage", {})
         benchmark = {"previous_period": _metric_value(previous) if _is_sufficient(previous) else None}
         missing = follow_up["denominator"] - follow_up["numerator"]

@@ -135,6 +135,115 @@ class SignalRuleTests(TestCase):
         ))
         self.assertIn("followup_gap", {item["code"] for item in signals})
 
+    def test_follow_up_below_absolute_standard_cannot_be_peer_strength(self):
+        signals = self.signals(seller_metrics(
+            positive_next_step_coverage=rate(.55, peer=.40),
+        ))
+        follow_up = [item for item in signals if item["dimension"] == "follow_up"]
+
+        self.assertEqual([item["code"] for item in follow_up], ["followup_gap"])
+        self.assertTrue(all(item["polarity"] != "strength" for item in follow_up))
+
+    def test_follow_up_strength_requires_absolute_standard(self):
+        signals = self.signals(seller_metrics(
+            positive_next_step_coverage=rate(.80, peer=.60),
+        ))
+        self.assertIn(
+            "positive_next_step_coverage_strength",
+            {item["code"] for item in signals},
+        )
+
+    def test_follow_up_at_absolute_boundary_is_not_attention(self):
+        signals = self.signals(seller_metrics(
+            positive_next_step_coverage=rate(.70, peer=.55),
+        ))
+        follow_up = [item for item in signals if item["dimension"] == "follow_up"]
+
+        self.assertEqual(
+            [item["code"] for item in follow_up],
+            ["positive_next_step_coverage_strength"],
+        )
+
+    def test_activity_benchmark_labels_counts_as_activities(self):
+        metric = rate(5, denominator=20, peer=10, previous=7)
+        metric["metric_type"] = "count"
+        signals = self.signals(seller_metrics(human_activities_metric=metric))
+        activity = next(item for item in signals if item["code"] == "activity_low")
+
+        self.assertIn("10 aktiviteter", activity["benchmark"]["label"])
+        self.assertIn("-", activity["benchmark"]["label"])
+        self.assertNotIn("%", activity["benchmark"]["label"])
+        self.assertNotIn("pp", activity["benchmark"]["label"])
+
+    def test_planning_below_absolute_standard_cannot_be_peer_strength(self):
+        signals = self.signals(seller_metrics(
+            planned_completed_in_time=rate(.55, peer=.40),
+            overdue_rate=rate(.10, peer=.20),
+        ))
+        planning = [item for item in signals if item["dimension"] == "planning"]
+
+        self.assertEqual([item["code"] for item in planning], ["planning_discipline"])
+        self.assertTrue(all(item["polarity"] != "strength" for item in planning))
+
+    def test_planning_strength_requires_both_absolute_standards(self):
+        signals = self.signals(seller_metrics(
+            planned_completed_in_time=rate(.80, peer=.60),
+            overdue_rate=rate(.10, peer=.20),
+        ))
+        self.assertIn(
+            "planned_completed_in_time_strength",
+            {item["code"] for item in signals},
+        )
+
+    def test_channel_comparison_uses_one_metric_for_every_channel(self):
+        metrics = seller_metrics()
+        channels = {
+            "visit": {
+                "positive_to_order_10d": rate(.80),
+                "order_10d": rate(.20),
+            },
+            "phone": {
+                "positive_to_order_10d": rate(.10, 5, status="small_sample"),
+                "order_10d": rate(.10),
+            },
+            "email": {
+                "positive_to_order_10d": rate(.50),
+                "order_10d": rate(.90),
+            },
+        }
+
+        cards = build_seller_signals(
+            seller="Sofia", metrics=metrics, repeat_boms={},
+            channel_effectiveness=channels,
+        )
+        channel = next(item for item in cards if item["code"] == "channel_strength")
+
+        self.assertEqual(channel["metric_key"], "positive_to_order_10d")
+        self.assertEqual(channel["drilldown_metric"], "positive_to_order_10d")
+        self.assertEqual(channel["drilldown_filters"], {"channel": "visit"})
+
+    def test_channel_comparison_falls_back_to_order_metric_as_a_whole(self):
+        metrics = seller_metrics()
+        channels = {
+            "visit": {
+                "positive_to_order_10d": rate(.80, 5, status="small_sample"),
+                "order_10d": rate(.80),
+            },
+            "phone": {
+                "positive_to_order_10d": rate(.10, 5, status="small_sample"),
+                "order_10d": rate(.40),
+            },
+        }
+
+        cards = build_seller_signals(
+            seller="Sofia", metrics=metrics, repeat_boms={},
+            channel_effectiveness=channels,
+        )
+        channel = next(item for item in cards if item["code"] == "channel_strength")
+
+        self.assertEqual(channel["metric_key"], "order_10d")
+        self.assertEqual(channel["drilldown_metric"], "order_10d")
+
     def test_small_samples_create_no_positive_or_negative_signal(self):
         metrics = seller_metrics(
             reach=rate(.01, 5, peer=.9, status="small_sample"),

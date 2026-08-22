@@ -235,6 +235,39 @@ class ContactAnalyticsWriteTests(TestCase):
         self.assertEqual(saved["result_class"], "unreachable")
         self.assertEqual(saved["analytics_snapshot_version"], "sales_coaching_v2")
 
+    def test_inaccessible_strong_id_is_rejected_before_malformed_payload(self):
+        response = self.client.post(
+            "/customers/Butik%20B/contacts",
+            json={"customer_id": "22222222-2222-4222-8222-222222222222"},
+        )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.get_json()["error"], "customer_not_found")
+
+    def test_accessible_strong_id_reaches_payload_validation(self):
+        response = self.client.post(
+            "/customers/Butik%20A/contacts",
+            json={"customer_id": "11111111-1111-4111-8111-111111111111"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()["error"], "freezer_selection_required")
+
+    def test_strong_id_and_route_name_mismatch_is_hidden(self):
+        response = self.client.post(
+            "/customers/Butik%20A/contacts",
+            json={"customer_id": "33333333-3333-4333-8333-333333333333"},
+        )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.get_json()["error"], "customer_not_found")
+
+    def test_legacy_name_only_request_keeps_payload_validation_order(self):
+        response = self.client.post("/customers/Butik%20B/contacts", json={})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()["error"], "freezer_selection_required")
+
     def test_pre_contact_snapshot_is_written_once_and_replay_preserves_it(self):
         priorities = [{
             "customer_id": "11111111-1111-4111-8111-111111111111",

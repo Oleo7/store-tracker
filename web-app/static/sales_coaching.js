@@ -91,16 +91,21 @@
 
   function comparisonText(metric) {
     const comparisons = metric?.comparisons || {};
+    const countMetric = metric?.metric_type === "count";
     const previous = comparisons.previous_period;
     const previousValue = previous && typeof previous === "object" ? previous.value : previous?.value ?? previous;
+    const formatValue = value => countMetric ? `${number(value, 1)} aktiviteter` : percent(value);
+    const formatDelta = value => countMetric
+      ? `${value >= 0 ? "+" : ""}${number(value, 1)} aktiviteter`
+      : `${value >= 0 ? "+" : ""}${number(value * 100, 1)} pp`;
     const parts = [];
     if (comparisons.peer_median !== null && comparisons.peer_median !== undefined) {
       const delta = comparisons.delta_peer;
-      parts.push(`Peer median ${percent(comparisons.peer_median)}${delta === null || delta === undefined ? "" : ` · ${delta >= 0 ? "+" : ""}${number(delta * 100, 1)} pp`}`);
+      parts.push(`Peer median ${formatValue(comparisons.peer_median)}${delta === null || delta === undefined ? "" : ` · ${formatDelta(delta)}`}`);
     }
     if (previousValue !== null && previousValue !== undefined) {
       const delta = comparisons.delta_previous;
-      parts.push(`Föregående period ${metric.denominator === undefined ? number(previousValue) : percent(previousValue)}${delta === null || delta === undefined ? "" : ` · ${delta >= 0 ? "+" : ""}${number(delta * 100, 1)} pp`}`);
+      parts.push(`Föregående period ${formatValue(previousValue)}${delta === null || delta === undefined ? "" : ` · ${formatDelta(delta)}`}`);
     } else if (comparisons.previous_period_status && comparisons.previous_period_status !== "sufficient") {
       parts.push(`Föregående period: ${statusLabel(comparisons.previous_period_status)}`);
     }
@@ -400,6 +405,7 @@
   function matrixReasonLabel(reason) {
     return ({
       positive_denominator_zero: "inga nådda kontakter för positiv dialog",
+      positive_order_denominator_zero: "inga mogna positiva kontakter för positiv-till-order-måttet",
       order_denominator_zero: "inga mogna kontakter för ordermåttet",
       priority_denominator_zero: "ingen sparad historisk percentil",
       order_sample_below_10: "färre än 10 mogna kontakter",
@@ -431,8 +437,11 @@
       const coordinate = `${x.toFixed(2)}:${y.toFixed(2)}`;
       const overlap = occupied.get(coordinate) || 0;
       occupied.set(coordinate, overlap + 1);
-      const offsetX = (overlap % 3 - 1) * 8;
-      const offsetY = Math.floor(overlap / 3) * -8;
+      const collisionOffsets = [[0, 0], [-8, -8], [8, -8], [-8, 8], [8, 8], [0, -12], [0, 12], [-12, 0], [12, 0]];
+      const collisionOffset = collisionOffsets[overlap % collisionOffsets.length];
+      const collisionRing = Math.floor(overlap / collisionOffsets.length);
+      const offsetX = collisionOffset[0] * (collisionRing + 1);
+      const offsetY = collisionOffset[1] * (collisionRing + 1);
       const coverage = sales ? "" : `, percentiltäckning ${percent(item.priority_percentile_coverage?.value)}`;
       const title = `${item.seller}: ${xLabel} ${percent(xRate.value)} (${rateEvidence(xRate)}, ${statusLabel(xRate.status)}), ${yLabel} ${percent(yRate.value)} (${rateEvidence(yRate)}, ${statusLabel(yRate.status)}), ${item.human_activities} mänskliga aktiviteter${coverage}`;
       return `<button type="button" class="sc-bubble${item.sample_status === "small_sample" ? " is-small-sample" : ""}${sellerSelected(item.seller) ? " is-selected" : ""}" style="left:${x}%;bottom:${y}%;--offset-x:${offsetX}px;--offset-y:${offsetY}px" data-seller="${escapeHtml(item.seller)}" title="${escapeHtml(title)}" aria-label="${escapeHtml(title)}">${escapeHtml(String(item.seller).slice(0, 2).toUpperCase())}</button>`;
@@ -460,23 +469,25 @@
     if (!rows?.length) return `<div><div class="sc-section-heading"><h2>Veckotrend</h2></div><div class="sc-empty">Ingen veckodata.</div></div>`;
     const width = 620, height = 250, pad = 32;
     const series = [
-      ["human_activities", "Aktiviteter", "#942a52", "human_activities"],
-      ["reached", "Nådda", "#2b6f8c", "reach"],
-      ["positive", "Positiva", "#19704b", "positive_sync"],
-      ["mature_converted_contacts", "Konverterade", "#b7791f", "order_10d_sync"],
+      ["human_activities", "Aktiviteter", "#942a52", "human_activities", false],
+      ["reached", "Nådda", "#2b6f8c", "reach", false],
+      ["positive", "Positiva", "#19704b", "positive_sync", false],
+      ["mature_converted_contacts", "Konverterade", "#b7791f", "order_10d_sync", true],
     ];
     const max = Math.max(1, ...rows.flatMap(row => series.map(([key]) => Number(row[key] || 0))));
     const x = index => pad + (rows.length === 1 ? (width - pad * 2) / 2 : index * (width - pad * 2) / (rows.length - 1));
     const y = value => height - pad - Number(value || 0) / max * (height - pad * 2);
-    const lines = series.map(([key, label, color]) => {
+    const lines = series.map(([key, label, color, metric, isOutcome]) => {
       const points = rows.map((row, index) => `${x(index)},${y(row[key])}`).join(" ");
-      const metric = series.find(item => item[0] === key)[3];
-      const circles = rows.map((row, index) => `<circle class="sc-trend-point${row.outcome_complete === false ? " is-preliminary" : ""}" cx="${x(index)}" cy="${y(row[key])}" r="5" fill="${color}" tabindex="0" role="button" data-drilldown="${metric}" data-start="${escapeHtml(row.period?.start || "")}" data-end="${escapeHtml(row.period?.end || "")}"><title>${escapeHtml(row.week)} ${label}: ${number(row[key])}${row.outcome_complete === false ? ` (preliminär, ${number(row.waiting_outcome_count)} väntar)` : ""}</title></circle>`).join("");
+      const circles = rows.map((row, index) => {
+        const preliminary = isOutcome && row.outcome_complete === false;
+        return `<circle class="sc-trend-point${preliminary ? " is-preliminary" : ""}" cx="${x(index)}" cy="${y(row[key])}" r="5" fill="${color}" tabindex="0" role="button" data-drilldown="${metric}" data-start="${escapeHtml(row.period?.start || "")}" data-end="${escapeHtml(row.period?.end || "")}"><title>${escapeHtml(row.week)} ${label}: ${number(row[key])}${preliminary ? ` (preliminär, ${number(row.waiting_outcome_count)} väntar)` : ""}</title></circle>`;
+      }).join("");
       return `<polyline class="sc-trend-line" stroke="${color}" points="${points}"></polyline>${circles}`;
     }).join("");
     const grid = [0, .25, .5, .75, 1].map(part => `<line class="sc-trend-grid" x1="${pad}" x2="${width - pad}" y1="${y(max * part)}" y2="${y(max * part)}"></line>`).join("");
-    const labels = rows.map((row, index) => `<text x="${x(index)}" y="${height - 8}" text-anchor="middle" font-size="11" fill="#746772">${escapeHtml(row.week.replace(/^\d{4}-/, ""))}${row.outcome_complete === false ? "*" : ""}</text>`).join("");
-    return `<div><div class="sc-section-heading"><div><h2>Veckotrend</h2><p>* Preliminär 10-dagarskohort; detta kan även gälla tidigare veckor.</p></div></div><div class="sc-trend-wrap"><svg class="sc-trend" viewBox="0 0 ${width} ${height}" role="img" aria-label="Veckotrend för aktiviteter, nådda, positiva och konverterade kontakter">${grid}${lines}${labels}</svg></div><div class="sc-trend-legend">${series.map(([, label, color]) => `<span><i class="sc-legend-dot" style="background:${color}"></i>${label}</span>`).join("")}</div></div>`;
+    const labels = rows.map((row, index) => `<text x="${x(index)}" y="${height - 8}" text-anchor="middle" font-size="11" fill="#746772">${escapeHtml(row.week.replace(/^\d{4}-/, ""))}</text>`).join("");
+    return `<div><div class="sc-section-heading"><div><h2>Veckotrend</h2><p>* Endast order-/utfallsserien är preliminär medan 10-dagarskohorten byggs upp; aktivitet, nådda och positiva är slutliga.</p></div></div><div class="sc-trend-wrap"><svg class="sc-trend" viewBox="0 0 ${width} ${height}" role="img" aria-label="Veckotrend för aktiviteter, nådda, positiva och konverterade kontakter">${grid}${lines}${labels}</svg></div><div class="sc-trend-legend">${series.map(([, label, color, , isOutcome]) => `<span><i class="sc-legend-dot" style="background:${color}"></i>${label}${isOutcome ? "*" : ""}</span>`).join("")}</div></div>`;
   }
 
   function visitMarkup(data) {
@@ -485,7 +496,7 @@
       ["Bom-ratio", percent(data.bom_ratio.value), rateEvidence(data.bom_ratio), "bom_ratio"],
       ["Träffgrad för besök", percent(data.reach.value), rateEvidence(data.reach), "reach", "visit"],
       ["Återkommande bommar", number(data.repeat_boms.customers), `${number(data.repeat_boms.visits)} besök`, "repeat_boms"],
-      ["Högprioriterade bommar", highPriority.value === null ? "—" : number(highPriority.value), highPriority.value === null ? "Kan inte beräknas · historisk prioritet saknas" : `${number(data.high_priority_score_fallback)} score-fallback`, highPriority.value === null ? "" : "high_priority_boms"],
+      ["Högprioriterade bommar", highPriority.value === null ? "—" : number(highPriority.value), highPriority.value === null ? "Kan inte beräknas · jämförbar historisk v2-percentil saknas" : `${rateEvidence(highPriority.coverage)} med jämförbar v2-percentil`, highPriority.value === null ? "" : "high_priority_boms"],
       ["Bom-ratio – planerade besök", percent(data.planned.value), rateEvidence(data.planned), "planned_boms"],
       ["Bom-ratio – oplanerade besök", percent(data.unplanned.value), rateEvidence(data.unplanned), "unplanned_boms"],
     ];

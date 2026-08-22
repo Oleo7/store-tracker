@@ -1057,7 +1057,6 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
         if _is_comparable_priority_percentile(row)
         and row["priority_percentile_at_contact"] >= 75
     ]
-    high_priority_score_fallback = [row for row in current["boms"] if row.get("priority_percentile_at_contact") is None and row.get("priority_snapshot_quality") == "exact" and (row.get("priority_score_at_contact") or 0) >= 70]
     boms_with_percentile = [
         row for row in current["boms"]
         if _is_comparable_priority_percentile(row)
@@ -1212,9 +1211,18 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
     previous_team_planned_period = collect_planned_period(
         comparison_start, comparison_end
     )
+
+    def is_accountable_planned(row):
+        status = normalize_key(row.get("status"))
+        if status == "cancelled":
+            return False
+        if status in {"completed", "skipped"}:
+            return True
+        return row["scheduled_datetime"] <= generated
+
     accountable_planned = [
         row for row in planned_period
-        if normalize_key(row.get("status")) != "cancelled"
+        if is_accountable_planned(row)
     ]
     completed_planned = [
         row for row in accountable_planned
@@ -1235,15 +1243,20 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
         row for row in current["positive"]
         if row.get("contact_date") and (generated.date() - row["contact_date"]).days >= 3
     ]
-    planned_by_source_contact = defaultdict(list)
+    valid_planned_by_source_contact = defaultdict(list)
     for planned in planned_activities or ():
         source_contact_id = _text(planned.get("source_contact_id"))
-        if source_contact_id:
-            planned_by_source_contact[source_contact_id].append(planned)
+        if (
+            source_contact_id
+            and normalize_key(planned.get("status")) in {"planned", "completed"}
+        ):
+            valid_planned_by_source_contact[source_contact_id].append(planned)
     positive_with_next_step = []
     for row in positive_three_days_old:
         has_follow_up = bool(_date(row.get("follow_up_date")))
-        has_linked_plan = bool(planned_by_source_contact.get(row.get("contact_id")))
+        has_linked_plan = bool(
+            valid_planned_by_source_contact.get(row.get("contact_id"))
+        )
         has_order = bool(attribution["contact_to_orders"].get(row.get("contact_id")))
         if has_follow_up or has_linked_plan or has_order:
             positive_with_next_step.append(row)
@@ -1252,7 +1265,7 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
         if attribution["maturity"].get(row.get("contact_id")) == "mature"
         and not attribution["contact_to_orders"].get(row.get("contact_id"))
         and not _date(row.get("follow_up_date"))
-        and not planned_by_source_contact.get(row.get("contact_id"))
+        and not valid_planned_by_source_contact.get(row.get("contact_id"))
     ]
 
     weeks = defaultdict(list)
@@ -1330,7 +1343,6 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
         "repeat_boms": {"customers": len(repeated), "visits": sum(len(value) for value in repeated.values())},
         "high_priority_boms": len(high_priority_boms),
         "high_priority_boms_metric": high_priority_boms_metric,
-        "high_priority_score_fallback": len(high_priority_score_fallback),
         "planned": _rate(len([row for row in current["boms"] if row.get("planned_activity_id")]), len([row for row in current["visits"] if row.get("planned_activity_id")])),
         "unplanned": _rate(len([row for row in current["boms"] if not row.get("planned_activity_id")]), len([row for row in current["visits"] if not row.get("planned_activity_id")])),
         "weekday_patterns": visit_pattern([
@@ -1391,7 +1403,7 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
     def planning_metrics(period_rows):
         accountable = [
             row for row in period_rows
-            if normalize_key(row.get("status")) != "cancelled"
+            if is_accountable_planned(row)
         ]
         completed = [
             row for row in accountable
@@ -1428,7 +1440,7 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
         covered = [
             row for row in assessable
             if _date(row.get("follow_up_date"))
-            or planned_by_source_contact.get(row.get("contact_id"))
+            or valid_planned_by_source_contact.get(row.get("contact_id"))
             or attribution["contact_to_orders"].get(row.get("contact_id"))
         ]
         return _rate(len(covered), len(assessable))
@@ -1484,9 +1496,21 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
         )
 
     active_activity_counts = [row["human_activities"] for row in seller_comparison]
+    filtered_activity_comparison = {
+        "peer_median": None,
+        "peer_count": 0,
+        "delta_peer": None,
+        "previous_period": len(previous["human"]),
+        "previous_period_status": (
+            "sufficient"
+            if len(previous["human"]) >= MIN_RATE_SAMPLE else "small_sample"
+        ),
+        "delta_previous": len(current["human"]) - len(previous["human"]),
+    }
     kpis = {
         "human_activities": {
             "value": len(current["human"]),
+            "metric_type": "count",
             "status": "small_sample" if len(current["human"]) < MIN_RATE_SAMPLE else "sufficient",
             "unique_customers": len({row.get("customer_identity_key") for row in current["human"] if row.get("customer_identity_key")}),
             "channel_mix": {
@@ -1494,12 +1518,12 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
                 for key in ("visit", "phone", "email")
             },
             "comparisons": {
-                "previous_period": {"value": len(previous["human"])},
+                **filtered_activity_comparison,
                 **(
                     selected_seller_metrics["human_activities_metric"][
                         "comparisons"
                     ]
-                    if selected_seller_metrics else {}
+                    if selected_seller_metrics and channel == "all" else {}
                 ),
             },
         },
@@ -1834,7 +1858,7 @@ def build_drilldown(summary, metric, *, limit=100):
             "planned_boms": row.get("is_human") and row.get("planned_activity_id") and row.get("contact_type_key") == "visit" and row.get("result_class") == "unreachable",
             "unplanned_boms": row.get("is_human") and not row.get("planned_activity_id") and row.get("contact_type_key") == "visit" and row.get("result_class") == "unreachable",
             "repeat_boms": row.get("is_human") and row.get("contact_type_key") == "visit" and row.get("result_class") == "unreachable" and repeated_keys[row.get("customer_identity_key")] >= 2,
-            "high_priority_boms": row.get("is_human") and row.get("contact_type_key") == "visit" and row.get("result_class") == "unreachable" and (row.get("priority_percentile_at_contact") or -1) >= 75,
+            "high_priority_boms": row.get("is_human") and row.get("contact_type_key") == "visit" and row.get("result_class") == "unreachable" and _is_comparable_priority_percentile(row) and row.get("priority_percentile_at_contact") >= 75,
             "followup_success": row.get("contact_id") in drilldown_contact_ids.get("followup_success", set()),
             "followup_gap": row.get("contact_id") in drilldown_contact_ids.get("followup_gap", set()),
             "followup_gap_10d": row.get("contact_id") in drilldown_contact_ids.get("followup_gap_10d", set()),

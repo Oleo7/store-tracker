@@ -384,6 +384,26 @@ class SnapshotAndAggregateTests(TestCase):
         self.assertEqual(comparison["previous_period"], .6)
         self.assertAlmostEqual(comparison["delta_previous"], .2)
 
+    def test_channel_filtered_activity_count_uses_only_filtered_previous_period(self):
+        rows = [
+            activity(f"phone-current-{index}", f"2026-08-0{index + 1} 10:00")
+            for index in range(3)
+        ] + [
+            activity("phone-previous", "2026-07-15 10:00"),
+            activity("visit-current", "2026-08-04 10:00", channel="Besök"),
+            activity("visit-previous", "2026-07-16 10:00", channel="Besök"),
+            activity("peer-phone", "2026-08-05 10:00", seller="sofia"),
+        ]
+
+        metric = self.summary(rows, seller="olle", channel="phone")["kpis"]["human_activities"]
+
+        self.assertEqual(metric["metric_type"], "count")
+        self.assertEqual(metric["value"], 3)
+        self.assertEqual(metric["comparisons"]["previous_period"], 1)
+        self.assertEqual(metric["comparisons"]["delta_previous"], 2)
+        self.assertIsNone(metric["comparisons"]["peer_median"])
+        self.assertEqual(metric["comparisons"]["peer_count"], 0)
+
     def test_coached_team_is_only_active_non_admin_users_and_includes_zero_activity(self):
         users = [
             {"user_name": "alice", "active": "Y", "admin": "N"},
@@ -546,6 +566,37 @@ class SnapshotAndAggregateTests(TestCase):
         metric = summary["visit_efficiency"]["high_priority_boms_metric"]
         self.assertIsNone(metric["value"])
         self.assertEqual(metric["status"], "limited_coverage")
+
+    def test_high_priority_bom_drilldown_matches_only_comparable_v2_population(self):
+        comparable = [
+            activity(
+                f"v2-bom-{percentile}", f"2026-08-0{index + 1} 10:00",
+                channel="Besök", result="Ej anträffbar",
+                priority_snapshot_quality="exact",
+                analytics_snapshot_version=ANALYTICS_SNAPSHOT_VERSION,
+                priority_percentile_at_contact=str(percentile),
+                priority_percentile_basis_at_contact=PRIORITY_PERCENTILE_BASIS,
+            )
+            for index, percentile in enumerate((90, 80, 75))
+        ]
+        legacy = activity(
+            "legacy-bom", "2026-08-04 10:00", channel="Besök",
+            result="Ej anträffbar", priority_snapshot_quality="exact",
+            analytics_snapshot_version="sales_coaching_v1",
+            priority_score_at_contact="99", priority_percentile_at_contact="95",
+        )
+
+        summary = self.summary([*comparable, legacy])
+        metric = summary["visit_efficiency"]["high_priority_boms_metric"]
+        drilldown = build_drilldown(summary, "high_priority_boms")
+
+        self.assertEqual(metric["value"], 3)
+        self.assertEqual(drilldown["total_count"], metric["value"])
+        self.assertEqual(
+            {row["contact_id"] for row in drilldown["rows"]},
+            {"v2-bom-90", "v2-bom-80", "v2-bom-75"},
+        )
+        self.assertNotIn("high_priority_score_fallback", summary["visit_efficiency"])
 
     def test_overdue_planning_generates_deterministic_coaching_card(self):
         planned = [
@@ -1020,6 +1071,58 @@ class SnapshotAndAggregateTests(TestCase):
         self.assertEqual(
             selected["meta"]["planned_metric_dimension_basis"],
             "current_customer_state",
+        )
+
+    def test_future_plans_are_not_accountable_until_due_unless_already_closed(self):
+        rows = [activity("completed-early", "2026-08-19 10:00", result="Neutral")]
+        planned = [
+            {"planned_activity_id": "past-open", "scheduled_at": "2026-08-01T10:00:00", "status": "planned", "user_name": "olle", "customer_id": "customer-1"},
+            {"planned_activity_id": "future-open", "scheduled_at": "2026-08-20T18:00:00", "status": "planned", "user_name": "olle", "customer_id": "customer-1"},
+            {"planned_activity_id": "future-completed", "scheduled_at": "2026-08-20T18:00:00", "status": "completed", "completed_contact_id": "completed-early", "user_name": "olle", "customer_id": "customer-1"},
+            {"planned_activity_id": "future-skipped", "scheduled_at": "2026-08-20T18:00:00", "status": "skipped", "user_name": "olle", "customer_id": "customer-1"},
+            {"planned_activity_id": "future-cancelled", "scheduled_at": "2026-08-20T18:00:00", "status": "cancelled", "user_name": "olle", "customer_id": "customer-1"},
+        ]
+
+        discipline = self.summary(rows, planned_activities=planned)["follow_up_discipline"]
+
+        self.assertEqual(discipline["accountable_planned"], 3)
+        self.assertEqual(
+            (discipline["planned_completed_in_time"]["numerator"], discipline["planned_completed_in_time"]["denominator"]),
+            (1, 3),
+        )
+        self.assertEqual(discipline["overdue_planned"], 1)
+        self.assertEqual(discipline["skipped"], 1)
+        self.assertEqual(discipline["cancelled_excluded"], 1)
+
+    def test_only_planned_or_completed_linked_followups_are_valid_next_steps(self):
+        statuses = ("planned", "completed", "skipped", "cancelled")
+        rows = [
+            activity(f"source-{status}", f"2026-08-0{index + 1} 10:00")
+            for index, status in enumerate(statuses)
+        ]
+        planned = [
+            {
+                "planned_activity_id": f"followup-{status}",
+                "source_contact_id": f"source-{status}",
+                "scheduled_at": "2026-08-08T10:00:00",
+                "status": status,
+                "user_name": "olle",
+                "customer_id": "customer-1",
+            }
+            for status in statuses
+        ]
+
+        summary = self.summary(rows, planned_activities=planned)
+        coverage = summary["follow_up_discipline"]["positive_next_step_coverage"]
+
+        self.assertEqual((coverage["numerator"], coverage["denominator"]), (2, 4))
+        self.assertEqual(
+            {row["contact_id"] for row in build_drilldown(summary, "followup_gap")["rows"]},
+            {"source-skipped", "source-cancelled"},
+        )
+        self.assertEqual(
+            {row["contact_id"] for row in build_drilldown(summary, "followup_gap_10d")["rows"]},
+            {"source-skipped", "source-cancelled"},
         )
 
     def test_priority_diagnostics_do_not_expose_an_operational_customer_gap(self):

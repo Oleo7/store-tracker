@@ -101,6 +101,8 @@ class SalesCoachingFrontendTests(TestCase):
             with self.subTest(expected=expected):
                 self.assertIn(expected, self.javascript)
         self.assertNotIn("Math.max(3, Math.min(97", self.javascript)
+        self.assertIn("const collisionOffsets = [", self.javascript)
+        self.assertIn("[0, 0]", self.javascript)
         self.assertIn("inset: 48px 48px 56px 62px", self.css)
         self.assertIn(".sc-matrix { position: relative; height: 410px; overflow: hidden", self.css)
         self.assertIn("writing-mode: vertical-rl", self.css)
@@ -124,15 +126,31 @@ class SalesCoachingFrontendTests(TestCase):
         self.assertNotIn("priority_gap", self.javascript)
         self.assertNotIn("Nästa bästa kunder", self.javascript)
         self.assertNotIn("Aktuella högprioriterade kunder", self.javascript)
-        self.assertIn("Kan inte beräknas · historisk prioritet saknas", self.javascript)
+        self.assertIn("Kan inte beräknas · jämförbar historisk v2-percentil saknas", self.javascript)
+        self.assertNotIn("high_priority_score_fallback", self.javascript)
 
-    def test_tabs_are_keyboard_accessible_and_previous_weeks_can_be_preliminary(self):
+    def test_tabs_are_keyboard_accessible_and_only_outcomes_can_be_preliminary(self):
         self.assertIn('role="tablist" aria-label="Diagnostikflikar"', self.javascript)
         self.assertIn('role="tab"', self.javascript)
         self.assertIn("ArrowLeft", self.javascript)
         self.assertIn("ArrowRight", self.javascript)
-        self.assertIn("row.outcome_complete === false", self.javascript)
-        self.assertIn("detta kan även gälla tidigare veckor", self.javascript)
+        self.assertIn("const preliminary = isOutcome && row.outcome_complete === false", self.javascript)
+        self.assertIn('["mature_converted_contacts", "Konverterade", "#b7791f", "order_10d_sync", true]', self.javascript)
+        self.assertIn('["human_activities", "Aktiviteter", "#942a52", "human_activities", false]', self.javascript)
+        self.assertIn("aktivitet, nådda och positiva är slutliga", self.javascript)
+
+    def test_comparison_formatting_respects_count_metrics(self):
+        self.assertIn('metric?.metric_type === "count"', self.javascript)
+        self.assertIn('`${number(value, 1)} aktiviteter`', self.javascript)
+        self.assertIn('`${value >= 0 ? "+" : ""}${number(value, 1)} aktiviteter`', self.javascript)
+        self.assertIn("formatValue(comparisons.peer_median)", self.javascript)
+        self.assertIn("formatValue(previousValue)", self.javascript)
+
+    def test_matrix_has_swedish_denominator_zero_reason(self):
+        self.assertIn(
+            'positive_order_denominator_zero: "inga mogna positiva kontakter för positiv-till-order-måttet"',
+            self.javascript,
+        )
 
     def test_pr3_benchmark_and_signal_contract_is_presentational(self):
         self.assertIn("Peer median", self.javascript)
