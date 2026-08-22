@@ -222,6 +222,13 @@ class Phase4EmailIntentTests(TestCase):
             today=date(2026, 8, 5), contacts=[explicit], email_feature=feature
         )[0]
         self.assertEqual(with_activity["recommendation_suppression_reason"], "future_planned_activity")
+        self.assertEqual(
+            with_activity["recommendation_suppression_source_type"],
+            "planned_activity",
+        )
+        self.assertEqual(
+            with_activity["recommendation_suppression_source_id"], "future"
+        )
         self.assertEqual(with_followup["recommendation_suppression_reason"], "explicit_follow_up")
         self.assertNotIn("stockfiller_click_followup", with_activity["covered_trigger_keys"])
         self.assertNotIn("stockfiller_click_followup", with_followup["covered_trigger_keys"])

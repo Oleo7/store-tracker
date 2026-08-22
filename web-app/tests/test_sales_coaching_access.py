@@ -106,7 +106,7 @@ class SalesCoachingAccessTests(TestCase):
             {
                 "meta", "options", "data_quality", "kpis",
                 "seller_comparison", "team_comparison", "coaching_matrix",
-                "coaching_matrices", "funnel",
+                "coaching_matrices", "funnel", "outcome_10d",
                 "weekly_trend", "visit_efficiency", "channel_effectiveness",
                 "priority_allocation", "follow_up_discipline", "coaching_cards",
             },
@@ -233,6 +233,7 @@ class ContactAnalyticsWriteTests(TestCase):
         saved = self.spreadsheet.worksheet("sales_activities").dict_rows()[0]
         self.assertTrue(all(not saved[column] for column in app_module.FREEZER_COLUMNS))
         self.assertEqual(saved["result_class"], "unreachable")
+        self.assertEqual(saved["analytics_snapshot_version"], "sales_coaching_v2")
 
     def test_pre_contact_snapshot_is_written_once_and_replay_preserves_it(self):
         priorities = [{
@@ -268,11 +269,24 @@ class ContactAnalyticsWriteTests(TestCase):
         self.assertTrue(replay.get_json()["duplicate"])
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["priority_snapshot_quality"], "exact")
+        self.assertEqual(rows[0]["analytics_snapshot_version"], "sales_coaching_v2")
         self.assertEqual(rows[0]["priority_score_at_contact"], 88)
+        self.assertEqual(
+            rows[0]["priority_percentile_basis_at_contact"],
+            "owner_active_scored_portfolio_midrank_v2",
+        )
+        self.assertTrue(rows[0]["snapshot_created_at"])
+        self.assertIsNotNone(rows[0]["snapshot_lag_hours"])
         self.assertIs(rows[0]["recommendation_eligible_at_contact"], True)
         self.assertEqual(rows[0]["suppression_reason_at_contact"], "")
         self.assertEqual(rows[0], first_row)
         snapshot_mock.assert_called_once()
+
+    def test_priority_percentile_basis_is_last_analytics_column(self):
+        self.assertEqual(
+            app_module.CONTACT_ANALYTICS_COLUMNS[-1],
+            "priority_percentile_basis_at_contact",
+        )
 
 
 if __name__ == "__main__":

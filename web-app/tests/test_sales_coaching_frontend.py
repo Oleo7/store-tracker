@@ -28,13 +28,24 @@ class SalesCoachingFrontendTests(TestCase):
 
     def test_dashboard_has_all_specified_sections_and_filters(self):
         for expected in (
-            "Period", "Säljare", "Kanal", "Lifecycle", "Kundsegment", "Jämförelse",
-            "Coachningsöversikt", "Teamets coachningsmatris", "Säljtratt", "Veckotrend",
-            "Besökseffektivitet", "Kanalernas effektivitet",
-            "Prioritering och kundallokering", "Uppföljningsdisciplin", "Coachningskort",
+            "Period", "Säljare", "Kanal", "Lifecycle", "Kundsegment",
+            "Coachningsöversikt", "Coachningskort", "Teamjämförelse",
+            "Teamets coachningsmatriser", "Aktivitetstratt", "10-dagarsutfall",
+            "Konvertering", "Besök", "Kanaler", "Uppföljning", "Prioritering",
+            "Datakvalitet och definitioner",
         ):
             with self.subTest(expected=expected):
                 self.assertIn(expected, self.javascript)
+        self.assertNotIn('id="sc-comparison"', self.javascript)
+
+    def test_exactly_four_main_kpis_are_rendered(self):
+        self.assertIn(
+            'const order = ["human_activities", "reach", "positive_dialogue", "positive_to_order_10d"]',
+            self.javascript,
+        )
+        self.assertNotIn(
+            '"order_10d", "priority_focus", "bom_ratio"', self.javascript
+        )
 
     def test_frontend_uses_backend_rate_contract_without_recalculating_kpis(self):
         self.assertIn("percent(metric.value)", self.javascript)
@@ -43,10 +54,13 @@ class SalesCoachingFrontendTests(TestCase):
         self.assertNotIn("attributed_orders /", self.javascript)
         self.assertNotIn("priority_percentile_at_contact >=", self.javascript)
 
-    def test_matrix_does_not_invent_medians_and_followup_cards_use_exact_metrics(self):
+    def test_matrix_uses_generic_backend_axes_and_does_not_invent_medians(self):
         self.assertIn("Otillräckligt jämförbart underlag", self.javascript)
         self.assertNotIn("matrix.medians?.priority_focus ?? 0.5", self.javascript)
         self.assertNotIn("matrix.medians?.order_10d ?? 0.5", self.javascript)
+        self.assertIn("matrix.axes?.x?.key", self.javascript)
+        self.assertIn("matrix.axes?.y?.key", self.javascript)
+        self.assertNotIn('const xKey = sales ?', self.javascript)
         for metric in (
             "followup_success", "followup_gap", "followup_gap_10d",
             "planned_on_time", "planned_overdue", "planned_skipped",
@@ -54,36 +68,35 @@ class SalesCoachingFrontendTests(TestCase):
             with self.subTest(metric=metric):
                 self.assertIn(f'"{metric}"', self.javascript)
 
-    def test_data_quality_banner_distinguishes_rows_from_issue_count(self):
+    def test_compact_data_quality_is_folded_and_separates_history(self):
         self.assertIn("order_attribution_identity_coverage", self.javascript)
-        self.assertIn("flagged_activity_rows", self.javascript)
+        self.assertIn("core_flagged_activity_rows", self.javascript)
         self.assertIn("quality_issue_count", self.javascript)
-        self.assertIn("Kärndata för säljanalys", self.javascript)
-        self.assertIn("Historisk prioriteringsdata", self.javascript)
+        self.assertIn('details id="sc-quality-details"', self.javascript)
+        self.assertIn("Suppression är inte ett kvalitetsfel", self.javascript)
+        self.assertNotIn("sc-quality-debug", self.javascript)
 
-    def test_team_comparison_uses_backend_counts_and_high_touch_grouped_bars(self):
+    def test_team_comparison_has_three_activity_bars_and_exact_table(self):
         for expected in (
-            "teamComparisonMarkup", "sc-team-charts", "human_activities_total",
+            "teamComparisonMarkup", "human_activities_total",
             "visit_breakdown?.analysable", "visit_breakdown?.reached",
-            "visit_breakdown?.boms", "channel_mix?.phone", "positive_dialogues_count",
-            "mature_positive_dialogues_count", "converted_positive_contacts_count",
-            "waiting_positive_dialogues_count", "positive_to_order_10d",
+            "visit_breakdown?.boms", "channel_mix?.phone", "channel_mix?.email",
+            "positive_to_order_10d", "positive_next_step_coverage",
             "is-visit-stack", "is-visit-reached", "is-visit-bom",
+            "is-email", "sc-comparison-table", "Nästa-steg-täckning",
         ):
             with self.subTest(expected=expected):
                 self.assertIn(expected, self.javascript)
         self.assertNotIn("item.attributed_orders /", self.javascript)
-        self.assertNotIn("Sufficient", self.javascript)
-        self.assertNotIn("· ${number(item.attributed_orders)} order", self.javascript)
-        self.assertIn("statusLabel(sampleStatus)", self.javascript)
+        self.assertNotIn('class="sc-team-secondary"', self.javascript)
 
-    def test_matrix_uses_radius_safe_inner_plot_ticks_and_separate_axes(self):
+    def test_matrix_uses_fixed_points_offsets_ticks_and_separate_axes(self):
         for expected in (
             "MATRIX_TICKS = [0, 25, 50, 75, 100]",
-            "MATRIX_MAX_BUBBLE_SIZE = 78",
             "sc-matrix-inner", "sc-matrix-gridline",
             "sc-matrix-x-axis-label", "sc-matrix-y-axis-label",
             "Math.max(0, Math.min(100",
+            "const occupied = new Map()", "--offset-x",
         ):
             with self.subTest(expected=expected):
                 self.assertIn(expected, self.javascript)
@@ -101,12 +114,39 @@ class SalesCoachingFrontendTests(TestCase):
         self.assertIn("is-small-sample", self.css)
         self.assertIn("is-selected", self.css)
 
-    def test_qa_labels_and_sequential_funnel_contract_are_rendered(self):
+    def test_funnel_outcome_and_aggregate_priority_are_separate(self):
         self.assertIn("Bom-ratio – planerade besök", self.javascript)
         self.assertIn("Bom-ratio – oplanerade besök", self.javascript)
-        self.assertIn("Aktuella högprioriterade kunder att bearbeta", self.javascript)
         self.assertIn("funnel.steps", self.javascript)
+        self.assertIn("Mogen är en mätbar utfallskohort", self.javascript)
+        self.assertIn("Följdes av attribuerad order", self.javascript)
+        self.assertIn("priorityDiagnosticsMarkup", self.javascript)
+        self.assertNotIn("priority_gap", self.javascript)
+        self.assertNotIn("Nästa bästa kunder", self.javascript)
+        self.assertNotIn("Aktuella högprioriterade kunder", self.javascript)
         self.assertIn("Kan inte beräknas · historisk prioritet saknas", self.javascript)
+
+    def test_tabs_are_keyboard_accessible_and_previous_weeks_can_be_preliminary(self):
+        self.assertIn('role="tablist" aria-label="Diagnostikflikar"', self.javascript)
+        self.assertIn('role="tab"', self.javascript)
+        self.assertIn("ArrowLeft", self.javascript)
+        self.assertIn("ArrowRight", self.javascript)
+        self.assertIn("row.outcome_complete === false", self.javascript)
+        self.assertIn("detta kan även gälla tidigare veckor", self.javascript)
+
+    def test_pr3_benchmark_and_signal_contract_is_presentational(self):
+        self.assertIn("Peer median", self.javascript)
+        self.assertIn("delta_peer", self.javascript)
+        self.assertIn("Föregående period", self.javascript)
+        self.assertIn("card.next_action", self.javascript)
+        self.assertNotIn("card.code ===", self.javascript)
+        self.assertNotIn("switch (card.code", self.javascript)
+
+    def test_drilldown_explains_each_rows_cohort_role(self):
+        self.assertIn("cohortLabels", self.javascript)
+        self.assertIn('numerator: "Täljare"', self.javascript)
+        self.assertIn('denominator_only: "Endast nämnare"', self.javascript)
+        self.assertIn('missed_outcome: "Missat utfall"', self.javascript)
 
     def test_stale_response_and_transient_error_handling_are_explicit(self):
         self.assertIn("requestSerial", self.javascript)

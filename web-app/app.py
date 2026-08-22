@@ -48,6 +48,7 @@ from priority import (
     normalize_customer_key,
 )
 from sales_coaching import (
+    ANALYTICS_SNAPSHOT_VERSION,
     CONTACT_ANALYTICS_COLUMNS,
     DRILLDOWN_METRICS,
     build_drilldown as build_sales_coaching_drilldown,
@@ -6322,6 +6323,7 @@ def get_authoritative_priority_snapshot(
         )
         payload = {
             "priorities": priorities,
+            "snapshot_created_at": stockholm_now().isoformat(timespec="seconds"),
             "email_engagement": email_snapshot,
             "customers": customers,
             "order_rows": order_rows,
@@ -13153,6 +13155,37 @@ def add_contact(customer_name):
             400,
         )
 
+    spreadsheet = None
+    customers = None
+    requested_customer = None
+    # Strong IDs permit an early ownership check, preventing validation
+    # differences from exposing another seller's customer. Legacy name-only
+    # clients retain their established payload-validation order.
+    if str(data.get("customer_id") or "").strip():
+        try:
+            spreadsheet = get_spreadsheet_with_retry()
+        except Exception:
+            app.logger.exception("Could not open contact store")
+            return planning_error(
+                "contact_store_unavailable",
+                "Kontakten kunde inte sparas. Försök igen.",
+                503,
+            )
+        customers = get_customer_rows(spreadsheet)
+        requested_customer = resolve_accessible_customer(
+            customers,
+            current_user(),
+            customer_id=data.get("customer_id"),
+            customer_name=customer_name,
+        )
+        if (
+            requested_customer is None
+            or normalize_key(requested_customer.get("customer"))
+            != normalize_key(customer_name)
+        ):
+            return jsonify({"ok": False, "error": "customer_not_found"}), 404
+        customer_name = str(requested_customer.get("customer") or "").strip()
+
     raw_contact_channel = str(data.get("contact_channel") or "").strip()
     # Legacy customer-card clients omitted the channel to mean a physical visit.
     # Preserve that payload contract while persisting the canonical visit key.
@@ -13252,29 +13285,31 @@ def add_contact(customer_name):
             field="client_request_id",
         )
 
-    try:
-        spreadsheet = get_spreadsheet_with_retry()
-    except Exception:
-        app.logger.exception("Could not open contact store")
-        return planning_error(
-            "contact_store_unavailable",
-            "Kontakten kunde inte sparas. Försök igen.",
-            503,
+    if spreadsheet is None:
+        try:
+            spreadsheet = get_spreadsheet_with_retry()
+        except Exception:
+            app.logger.exception("Could not open contact store")
+            return planning_error(
+                "contact_store_unavailable",
+                "Kontakten kunde inte sparas. Försök igen.",
+                503,
+            )
+        customers = get_customer_rows(spreadsheet)
+        requested_customer = resolve_accessible_customer(
+            customers,
+            current_user(),
+            customer_id=data.get("customer_id"),
+            customer_name=customer_name,
         )
-    customers = get_customer_rows(spreadsheet)
-    requested_customer = resolve_accessible_customer(
-        customers,
-        current_user(),
-        customer_id=data.get("customer_id"),
-        customer_name=customer_name,
-    )
-    if (
-        requested_customer is None
-        or normalize_key(requested_customer.get("customer"))
-        != normalize_key(customer_name)
-    ):
-        return jsonify({"ok": False, "error": "customer_not_found"}), 404
-    customer_name = str(requested_customer.get("customer") or "").strip()
+        if (
+            requested_customer is None
+            or normalize_key(requested_customer.get("customer"))
+            != normalize_key(customer_name)
+        ):
+            return jsonify({"ok": False, "error": "customer_not_found"}), 404
+        customer_name = str(requested_customer.get("customer") or "").strip()
+
     session_caller = current_user()
     if not planned_activity_id:
         resolution = resolve_contact_planned_activity(
@@ -13745,7 +13780,7 @@ def add_contact(customer_name):
                 "source_trigger_key": str(
                     planned_row.get("source_trigger_key") or ""
                 ).strip(),
-                "analytics_snapshot_version": "sales_coaching_v1",
+                "analytics_snapshot_version": ANALYTICS_SNAPSHOT_VERSION,
                 "priority_snapshot_quality": "missing",
                 "priority_score_version": SCORE_VERSION,
             }
@@ -13760,6 +13795,11 @@ def add_contact(customer_name):
                     priorities=pre_contact_snapshot["priorities"],
                     planned_row=planned_row,
                     score_version=SCORE_VERSION,
+                    contact_at=data.get("date_time"),
+                    snapshot_created_at=(
+                        pre_contact_snapshot.get("snapshot_created_at")
+                        or stockholm_now()
+                    ),
                 ))
             except Exception:
                 # Analytics enrichment must never block the operational contact,

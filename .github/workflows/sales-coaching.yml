@@ -1,0 +1,45 @@
+name: Sales coaching QA
+
+on:
+  pull_request:
+  push:
+    branches: [master, main]
+
+jobs:
+  sales-coaching:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: web-app/requirements.txt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install Python dependencies
+        run: pip install -r web-app/requirements.txt
+      - name: Compile Python
+        run: python -m compileall -q web-app
+      - name: Run complete Python test suite
+        run: python -m unittest discover -s web-app/tests -p 'test_*.py'
+      - name: Run sales-coaching frontend contract tests
+        run: python -m unittest web-app.tests.test_sales_coaching_frontend
+      - name: Install browser runtime
+        run: |
+          npm install --no-save playwright@1.55.0
+          npx playwright install --with-deps chromium
+      - name: Start isolated sales-coaching harness
+        run: |
+          python web-app/tests/sales_coaching_browser_harness.py > sales-coaching-harness.log 2>&1 &
+          for attempt in $(seq 1 30); do
+            curl --fail --silent http://127.0.0.1:5065/ >/dev/null && exit 0
+            sleep 1
+          done
+          cat sales-coaching-harness.log
+          exit 1
+      - name: Desktop browser smoke
+        run: node web-app/tests/sales_coaching_browser_smoke.cjs desktop
+      - name: Mobile browser smoke
+        run: node web-app/tests/sales_coaching_browser_smoke.cjs mobile
