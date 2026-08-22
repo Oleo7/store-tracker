@@ -45,22 +45,41 @@ body.user-admin .sales-coaching-dashboard:not([hidden]) { display: block; }
   width: min(1180px, calc(100% - 32px));
   margin: 14px auto 72px;
   color: var(--sc-ink);
+  overflow-x: clip;
 }
 
 .sc-filter-bar {
-  position: sticky;
-  top: 8px;
-  z-index: 18;
   display: grid;
-  grid-template-columns: repeat(6, minmax(120px, 1fr));
+  grid-template-columns: repeat(5, minmax(120px, 1fr));
   gap: 10px;
   padding: 14px;
   border: 1px solid var(--sc-border);
   border-radius: 16px;
-  background: rgba(255, 255, 255, 0.96);
+  background: #fff;
   box-shadow: 0 10px 30px rgba(64, 36, 48, 0.1);
-  backdrop-filter: blur(12px);
 }
+
+.sc-sticky-summary {
+  position: sticky;
+  top: 8px;
+  z-index: 18;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: fit-content;
+  max-width: 100%;
+  margin: 8px 0 -4px auto;
+  padding: 8px 10px 8px 14px;
+  border: 1px solid var(--sc-border);
+  border-radius: 999px;
+  background: rgba(255,255,255,.96);
+  box-shadow: 0 8px 22px rgba(64,36,48,.1);
+  color: var(--sc-muted);
+  font-size: .78rem;
+  backdrop-filter: blur(10px);
+}
+.sc-sticky-summary button { border: 0; border-radius: 999px; padding: 6px 9px; background: #f4e8ed; color: var(--sc-brand); font: inherit; font-weight: 800; cursor: pointer; }
 
 .sc-field { min-width: 0; }
 .sc-field label {
@@ -91,9 +110,9 @@ body.user-admin .sales-coaching-dashboard:not([hidden]) { display: block; }
   gap: 10px;
 }
 
-.sc-quality-banner {
-  display: grid;
-  grid-template-columns: auto 1fr auto;
+.sc-quality-status {
+  display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 14px;
   width: 100%;
@@ -107,16 +126,13 @@ body.user-admin .sales-coaching-dashboard:not([hidden]) { display: block; }
   cursor: pointer;
 }
 
-.sc-quality-banner[data-status="sufficient"] {
+.sc-quality-status[data-status="sufficient"] {
   border-color: #cce2d4;
   background: #f2faf5;
   color: #28583e;
 }
 
-.sc-quality-title { font-weight: 850; }
-.sc-quality-summary { color: inherit; font-size: 0.9rem; line-height: 1.55; }
-.sc-quality-debug { opacity: 0.78; font-size: 0.78rem; }
-.sc-quality-arrow { font-size: 1.25rem; }
+.sc-quality-status span + span::before { content: "·"; margin-right: 14px; opacity: .55; }
 
 .sc-section {
   margin-top: 16px;
@@ -141,7 +157,7 @@ body.user-admin .sales-coaching-dashboard:not([hidden]) { display: block; }
 
 .sc-kpi-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 12px;
 }
 
@@ -209,11 +225,14 @@ button.sc-kpi-card {
 .sc-team-bar-segment.is-visit-reached { background: #9d3560; }
 .sc-team-bar-segment.is-visit-bom { background: #b7791f; }
 .sc-team-bar.is-phone { background: #2b6f8c; }
+.sc-team-bar.is-email { background: #7b6ca8; }
 .sc-team-bar.is-positive { background: var(--sc-positive); }
 .sc-team-bar.is-mature-positive { background: #2b6f8c; }
 .sc-team-bar.is-converted-positive { background: #b7791f; }
 .sc-team-seller { overflow-wrap: anywhere; margin-top: 8px; font-size: 0.78rem; font-weight: 850; }
-.sc-team-secondary { margin-top: 3px; color: var(--sc-muted); font-size: 0.68rem; line-height: 1.35; }
+.sc-rate-value { display: block; font-weight: 850; }
+.sc-comparison-table small { display: block; margin-top: 3px; color: var(--sc-muted); white-space: nowrap; }
+.sc-comparison-table tr.is-selected { background: #fbf3f6; }
 .sc-card-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
 .sc-mini-card { padding: 14px; border: 1px solid var(--sc-border); border-radius: 13px; background: var(--sc-soft); }
 button.sc-mini-card { color: inherit; font: inherit; text-align: left; cursor: pointer; }
@@ -264,7 +283,7 @@ button.sc-mini-card { color: inherit; font: inherit; text-align: left; cursor: p
 .sc-matrix-median-x, .sc-matrix-median-y { position: absolute; background: #967b87; opacity: 0.65; pointer-events: none; }
 .sc-matrix-median-x { z-index: 1; top: 0; bottom: 0; width: 1px; }
 .sc-matrix-median-y { z-index: 1; left: 0; right: 0; height: 1px; }
-.sc-bubble { position: absolute; z-index: 2; display: grid; place-items: center; transform: translate(-50%, 50%); border: 2px solid #fff; border-radius: 50%; background: #9d3560; color: #fff; box-shadow: 0 4px 14px rgba(67, 32, 47, 0.2); font-size: 0.72rem; font-weight: 800; cursor: pointer; }
+.sc-bubble { position: absolute; z-index: 2; display: grid; width: 40px; height: 40px; place-items: center; transform: translate(calc(-50% + var(--offset-x, 0px)), calc(50% + var(--offset-y, 0px))); border: 2px solid #fff; border-radius: 50%; background: #9d3560; color: #fff; box-shadow: 0 4px 14px rgba(67, 32, 47, 0.2); font-size: 0.72rem; font-weight: 800; cursor: pointer; }
 .sc-bubble.is-small-sample { border: 2px dashed #7f7379; background: #fff; color: #665961; box-shadow: none; }
 .sc-bubble.is-selected { outline: 4px solid rgba(148, 42, 82, 0.3); outline-offset: 3px; }
 .sc-matrix-x-axis-label { padding-top: 10px; color: var(--sc-muted); font-size: 0.78rem; font-weight: 750; text-align: center; }
@@ -281,7 +300,7 @@ button.sc-mini-card { color: inherit; font: inherit; text-align: left; cursor: p
 .sc-coaching-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 .sc-coaching-card { display: flex; flex-direction: column; min-height: 220px; padding: 16px; border: 1px solid var(--sc-border); border-left: 5px solid #ae7b24; border-radius: 14px; background: #fffaf0; }
 .sc-coaching-card[data-severity="strength"] { border-left-color: var(--sc-positive); background: #f4fbf7; }
-.sc-coaching-code { color: var(--sc-muted); font-size: 0.7rem; font-weight: 850; text-transform: uppercase; }
+.sc-coaching-label { color: var(--sc-muted); font-size: 0.7rem; font-weight: 850; letter-spacing: .05em; }
 .sc-coaching-card h3 { margin: 7px 0; font-size: 1rem; }
 .sc-coaching-card p { margin: 4px 0; color: #594b53; font-size: 0.86rem; line-height: 1.5; }
 .sc-coaching-card button { align-self: flex-start; margin-top: auto; padding: 8px 12px; border: 1px solid #cbaaba; border-radius: 9px; background: #fff; color: var(--sc-brand); font: inherit; font-weight: 800; cursor: pointer; }
@@ -299,6 +318,18 @@ button.sc-mini-card { color: inherit; font: inherit; text-align: left; cursor: p
 .sc-drawer-close { width: 38px; height: 38px; border: 1px solid var(--sc-border); border-radius: 50%; background: #fff; font-size: 1.1rem; cursor: pointer; }
 .sc-drawer-meta { margin-bottom: 12px; color: var(--sc-muted); font-size: 0.82rem; }
 
+.sc-diagnostic-tabs { display: flex; gap: 4px; overflow-x: auto; margin-bottom: 16px; padding: 4px; border: 1px solid var(--sc-border); border-radius: 12px; background: var(--sc-soft); }
+.sc-diagnostic-tabs button { flex: 1 0 auto; min-height: 42px; padding: 8px 14px; border: 0; border-radius: 9px; background: transparent; color: var(--sc-muted); font: inherit; font-weight: 800; cursor: pointer; }
+.sc-diagnostic-tabs button[aria-selected="true"] { background: #fff; color: var(--sc-brand); box-shadow: 0 3px 10px rgba(65,33,46,.12); }
+.sc-diagnostic-panel > .sc-section { box-shadow: none; }
+.sc-outcome-block .sc-card-grid { grid-template-columns: 1fr; }
+.sc-conversion-rates { margin-top: 16px; grid-template-columns: repeat(2, minmax(0,1fr)); }
+.sc-trend-point.is-preliminary { stroke-dasharray: 3 2; opacity: .72; }
+.sc-details-section details > summary { cursor: pointer; font-size: 1rem; font-weight: 850; }
+.sc-details-grid { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 16px; margin-top: 16px; }
+.sc-details-grid h3 { margin: 0 0 6px; font-size: .92rem; }
+.sc-details-grid p { color: var(--sc-muted); font-size: .82rem; line-height: 1.5; }
+
 .sales-coaching-dashboard button:focus-visible,
 .sales-coaching-dashboard select:focus-visible,
 .sales-coaching-dashboard input:focus-visible,
@@ -313,25 +344,30 @@ button.sc-mini-card { color: inherit; font: inherit; text-align: left; cursor: p
   .sc-card-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .sc-two-column { grid-template-columns: 1fr; }
   .sc-team-charts { grid-template-columns: 1fr; }
+  .sc-kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .sc-details-grid { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 620px) {
   .insights-view-toggle,
   .sales-coaching-dashboard { width: calc(100% - 20px); }
-  .sc-filter-bar { top: 4px; grid-template-columns: repeat(2, minmax(0, 1fr)); padding: 10px; }
+  .sc-filter-bar { grid-template-columns: repeat(2, minmax(0, 1fr)); padding: 10px; }
+  .sc-sticky-summary { top: 4px; width: 100%; border-radius: 12px; }
   .sc-custom-dates { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .sc-kpi-grid,
   .sc-coaching-grid { grid-template-columns: 1fr; }
   .sc-section { padding: 15px; }
   .sc-funnel { grid-template-columns: 1fr; }
   .sc-funnel-step:nth-child(n) { margin-inline: 0; }
-  .sc-quality-banner { grid-template-columns: 1fr auto; }
-  .sc-quality-summary { grid-column: 1 / -1; }
+  .sc-quality-status { align-items: flex-start; }
+  .sc-quality-status span { width: 100%; }
+  .sc-quality-status span + span::before { content: none; }
   .sc-drawer { width: 100vw; }
   .sc-team-plot { grid-template-columns: repeat(auto-fit, minmax(82px, 1fr)); }
   .sc-team-group { min-height: 230px; padding-inline: 4px; }
   .sc-matrix-tabs { display: flex; width: 100%; }
   .sc-matrix-tabs button { flex: 1; }
+  .sc-matrix-layout { grid-template-columns: 30px minmax(500px, 1fr); min-width: 540px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

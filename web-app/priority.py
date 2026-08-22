@@ -1276,6 +1276,8 @@ def build_priority_customers(
             today=today,
         )
         suppression = ""
+        suppression_source_type = ""
+        suppression_source_id = ""
         status_text = ""
         if not sales_person or not customer_id:
             suppression = "invalid_or_inactive_owner"
@@ -1285,6 +1287,10 @@ def build_priority_customers(
             status_text = "Framtida leverans registrerad"
         elif activity:
             suppression = "future_planned_activity"
+            suppression_source_type = "planned_activity"
+            suppression_source_id = str(
+                activity["row"].get("planned_activity_id") or ""
+            ).strip()
             activity_type = str(activity["row"].get("contact_type") or "Aktivitet").strip()
             status_text = f"{activity_type.capitalize()} planerad {activity['date'].isoformat()}"
         elif has_current_explicit_follow_up:
@@ -1292,6 +1298,7 @@ def build_priority_customers(
             status_text = f"Uppföljning beslutad {latest_follow_up_date.isoformat()}"
         elif future_follow_up_days is not None:
             suppression = "future_planned_activity"
+            suppression_source_type = "follow_up_date"
             status_text = f"Uppföljning planerad om {future_follow_up_days} dagar"
         elif active_email_intent.get("waiting"):
             suppression = "recent_email_engagement_wait"
@@ -1415,6 +1422,8 @@ def build_priority_customers(
             "strategic_index": strategic_index,
             "recommendation_eligible": recommendation_eligible,
             "recommendation_suppression_reason": suppression,
+            "recommendation_suppression_source_type": suppression_source_type,
+            "recommendation_suppression_source_id": suppression_source_id,
             "primary_reason_code": reason_code,
             "primary_reason_text": reason_text,
             "primary_trigger_type": trigger_snapshot["primary_trigger_type"],

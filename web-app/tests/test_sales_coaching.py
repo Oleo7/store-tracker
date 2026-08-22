@@ -8,6 +8,8 @@ WEB_APP_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(WEB_APP_DIR))
 
 from sales_coaching import (  # noqa: E402
+    ANALYTICS_SNAPSHOT_VERSION,
+    PRIORITY_PERCENTILE_BASIS,
     CustomerIdentityIndex,
     attribute_orders_to_contacts,
     build_drilldown,
@@ -218,10 +220,10 @@ class SnapshotAndAggregateTests(TestCase):
             [order("ORDER-1", "2026-08-02"), order("ORDER-2", "2026-08-03")],
         )
 
-        order_kpi = summary["kpis"]["order_10d"]
+        order_kpi = summary["outcome_10d"]["order_10d"]
         self.assertEqual((order_kpi["numerator"], order_kpi["denominator"]), (1, 1))
         self.assertEqual(order_kpi["value"], 1)
-        self.assertEqual(order_kpi["attributed_orders"], 2)
+        self.assertEqual(summary["outcome_10d"]["attributed_order_contact_count"], 1)
 
     def test_unresolved_identity_does_not_lower_mature_order_conversion(self):
         summary = self.summary(
@@ -235,7 +237,7 @@ class SnapshotAndAggregateTests(TestCase):
             [order("ORDER-1", "2026-08-03")],
         )
 
-        order_kpi = summary["kpis"]["order_10d"]
+        order_kpi = summary["outcome_10d"]["order_10d"]
         identity_coverage = summary["data_quality"]["order_attribution_identity_coverage"]
         self.assertEqual((order_kpi["numerator"], order_kpi["denominator"]), (1, 1))
         self.assertEqual((identity_coverage["numerator"], identity_coverage["denominator"]), (1, 2))
@@ -251,7 +253,7 @@ class SnapshotAndAggregateTests(TestCase):
             [order("FRESH", "2026-08-16")],
         )
 
-        self.assertEqual(summary["kpis"]["order_10d"]["denominator"], 0)
+        self.assertEqual(summary["outcome_10d"]["order_10d"]["denominator"], 0)
         self.assertEqual(build_drilldown(summary, "order_10d")["total_count"], 0)
         self.assertEqual(build_drilldown(summary, "order_10d_sync")["total_count"], 0)
 
@@ -263,7 +265,7 @@ class SnapshotAndAggregateTests(TestCase):
 
         self.assertEqual(summary["funnel"]["attempts"], 1)
         self.assertEqual(summary["funnel"]["reached"], 1)
-        self.assertNotIn("positive", summary["funnel"])
+        self.assertEqual(summary["funnel"]["positive"], 0)
         self.assertEqual(summary["channel_effectiveness"]["email"]["positive_dialogue"]["numerator"], 1)
 
     def test_positive_drilldowns_match_kpi_and_synchronous_populations(self):
@@ -286,7 +288,13 @@ class SnapshotAndAggregateTests(TestCase):
     def test_approximate_snapshot_without_percentile_is_not_priority_focus_denominator(self):
         summary = build_sales_coaching_summary(
             activities=[
-                activity("exact", "2026-08-01 10:00", priority_snapshot_quality="exact", priority_percentile_at_contact="80"),
+                activity(
+                    "exact", "2026-08-01 10:00",
+                    priority_snapshot_quality="exact",
+                    analytics_snapshot_version=ANALYTICS_SNAPSHOT_VERSION,
+                    priority_percentile_at_contact="80",
+                    priority_percentile_basis_at_contact=PRIORITY_PERCENTILE_BASIS,
+                ),
                 activity("approx", "2026-08-02 10:00", planned_activity_id="planned-1"),
             ],
             customers=CUSTOMERS,
@@ -299,13 +307,13 @@ class SnapshotAndAggregateTests(TestCase):
             generated_at="2026-08-20 12:00",
         )
 
-        focus = summary["kpis"]["priority_focus"]
+        focus = summary["priority_allocation"]["priority_focus"]
         coverage = summary["priority_allocation"]["priority_percentile_coverage"]
         self.assertEqual((focus["numerator"], focus["denominator"]), (1, 1))
-        self.assertEqual((coverage["numerator"], coverage["denominator"]), (1, 2))
-        self.assertEqual(summary["priority_allocation"]["snapshot_coverage"]["numerator"], 2)
+        self.assertEqual((coverage["numerator"], coverage["denominator"]), (1, 1))
+        self.assertEqual(summary["priority_allocation"]["snapshot_coverage"]["numerator"], 1)
 
-    def test_small_sample_seller_does_not_affect_team_rate_median(self):
+    def test_small_sample_seller_does_not_count_as_peer(self):
         rows = []
         for seller, reached, attempts in (("alice", 5, 10), ("bob", 7, 10), ("tiny", 1, 1)):
             for index in range(attempts):
@@ -325,7 +333,8 @@ class SnapshotAndAggregateTests(TestCase):
 
         self.assertEqual(comparisons["tiny"]["reach"]["value"], 1)
         self.assertEqual(comparisons["tiny"]["reach"]["status"], "small_sample")
-        self.assertEqual(summary["kpis"]["reach"]["comparisons"]["team_median"], 0.6)
+        self.assertIsNone(summary["kpis"]["reach"]["comparisons"]["peer_median"])
+        self.assertEqual(summary["kpis"]["reach"]["comparisons"]["peer_count"], 1)
 
     def test_team_rate_median_requires_two_sufficient_sellers(self):
         rows = [
@@ -342,8 +351,59 @@ class SnapshotAndAggregateTests(TestCase):
         ]
         summary = self.summary(rows, seller="alice", users=users)
 
-        self.assertIsNone(summary["kpis"]["reach"]["comparisons"]["team_median"])
+        self.assertIsNone(summary["kpis"]["reach"]["comparisons"]["peer_median"])
         self.assertNotIn("reach_low", {card["code"] for card in summary["coaching_cards"]})
+
+    def test_summary_uses_self_excluding_peers_and_previous_period_per_seller(self):
+        rows = []
+        for seller, current_reached, previous_reached in (
+            ("sofia", 8, 6), ("olle", 5, 4), ("maja", 7, 9),
+        ):
+            for index in range(10):
+                rows.append(activity(
+                    f"{seller}-current-{index}",
+                    f"2026-08-{index + 1:02d} 10:00", seller=seller,
+                    result="Neutral" if index < current_reached else "Ej anträffbar",
+                ))
+                rows.append(activity(
+                    f"{seller}-previous-{index}",
+                    f"2026-07-{12 + index:02d} 10:00", seller=seller,
+                    result="Neutral" if index < previous_reached else "Ej anträffbar",
+                ))
+        users = [
+            {"user_name": name, "active": "Y", "admin": "N"}
+            for name in ("sofia", "olle", "maja")
+        ]
+
+        summary = self.summary(rows, seller="sofia", users=users)
+        comparison = summary["kpis"]["reach"]["comparisons"]
+
+        self.assertEqual(comparison["peer_median"], .6)
+        self.assertEqual(comparison["peer_count"], 2)
+        self.assertAlmostEqual(comparison["delta_peer"], .2)
+        self.assertEqual(comparison["previous_period"], .6)
+        self.assertAlmostEqual(comparison["delta_previous"], .2)
+
+    def test_channel_filtered_activity_count_uses_only_filtered_previous_period(self):
+        rows = [
+            activity(f"phone-current-{index}", f"2026-08-0{index + 1} 10:00")
+            for index in range(3)
+        ] + [
+            activity("phone-previous", "2026-07-15 10:00"),
+            activity("visit-current", "2026-08-04 10:00", channel="Besök"),
+            activity("visit-previous", "2026-07-16 10:00", channel="Besök"),
+            activity("peer-phone", "2026-08-05 10:00", seller="sofia"),
+        ]
+
+        metric = self.summary(rows, seller="olle", channel="phone")["kpis"]["human_activities"]
+
+        self.assertEqual(metric["metric_type"], "count")
+        self.assertEqual(metric["unit"], "aktiviteter")
+        self.assertEqual(metric["value"], 3)
+        self.assertEqual(metric["comparisons"]["previous_period"], 1)
+        self.assertEqual(metric["comparisons"]["delta_previous"], 2)
+        self.assertIsNone(metric["comparisons"]["peer_median"])
+        self.assertEqual(metric["comparisons"]["peer_count"], 0)
 
     def test_coached_team_is_only_active_non_admin_users_and_includes_zero_activity(self):
         users = [
@@ -369,7 +429,7 @@ class SnapshotAndAggregateTests(TestCase):
             ["alice", "zero"],
         )
         self.assertEqual(summary["kpis"]["human_activities"]["value"], 1)
-        self.assertEqual(summary["kpis"]["order_10d"]["numerator"], 1)
+        self.assertEqual(summary["outcome_10d"]["order_10d"]["numerator"], 1)
         self.assertEqual(
             summary["team_comparison"]["benchmarks"]["human_activities_median"],
             0.5,
@@ -433,7 +493,7 @@ class SnapshotAndAggregateTests(TestCase):
             for name in ("alice", "bob", "tiny", "zero")
         ]
         rows = []
-        for seller, positives, total in (("alice", 5, 10), ("bob", 7, 10), ("tiny", 1, 1)):
+        for seller, positives, total in (("alice", 10, 20), ("bob", 14, 20), ("tiny", 1, 1)):
             for index in range(total):
                 rows.append(activity(
                     f"{seller}-{index}", f"2026-08-{index + 1:02d} 10:00",
@@ -447,7 +507,7 @@ class SnapshotAndAggregateTests(TestCase):
         self.assertEqual(set(sellers), {"alice", "bob", "tiny"})
         self.assertEqual(sellers["tiny"]["sample_status"], "small_sample")
         self.assertEqual(matrix["medians"]["positive_dialogue"], 0.6)
-        self.assertEqual(matrix["medians"]["order_10d"], 0)
+        self.assertEqual(matrix["medians"]["positive_to_order_10d"], 0)
         self.assertEqual(matrix["insufficient_sample"][0]["seller"], "zero")
         self.assertIn("positive_denominator_zero", matrix["insufficient_sample"][0]["reasons"])
 
@@ -489,10 +549,11 @@ class SnapshotAndAggregateTests(TestCase):
         summary = self.summary(rows, [order("ORDER", "2026-08-04")])
         funnel = summary["funnel"]
 
-        self.assertEqual([step["count"] for step in funnel["steps"]], [4, 3, 1, 1])
+        self.assertEqual([step["count"] for step in funnel["steps"]], [4, 3, 0])
         self.assertEqual(funnel["steps"][1]["rate"]["denominator"], 4)
         self.assertEqual(funnel["steps"][2]["rate"]["denominator"], 3)
-        self.assertEqual(funnel["steps"][3]["rate"]["denominator"], 1)
+        self.assertEqual(summary["outcome_10d"]["mature_contact_count"], 1)
+        self.assertEqual(summary["outcome_10d"]["attributed_order_contact_count"], 1)
         self.assertEqual(
             [row["contact_id"] for row in build_drilldown(summary, "mature_reached_sync")["rows"]],
             ["mature"],
@@ -506,6 +567,37 @@ class SnapshotAndAggregateTests(TestCase):
         metric = summary["visit_efficiency"]["high_priority_boms_metric"]
         self.assertIsNone(metric["value"])
         self.assertEqual(metric["status"], "limited_coverage")
+
+    def test_high_priority_bom_drilldown_matches_only_comparable_v2_population(self):
+        comparable = [
+            activity(
+                f"v2-bom-{percentile}", f"2026-08-0{index + 1} 10:00",
+                channel="Besök", result="Ej anträffbar",
+                priority_snapshot_quality="exact",
+                analytics_snapshot_version=ANALYTICS_SNAPSHOT_VERSION,
+                priority_percentile_at_contact=str(percentile),
+                priority_percentile_basis_at_contact=PRIORITY_PERCENTILE_BASIS,
+            )
+            for index, percentile in enumerate((90, 80, 75))
+        ]
+        legacy = activity(
+            "legacy-bom", "2026-08-04 10:00", channel="Besök",
+            result="Ej anträffbar", priority_snapshot_quality="exact",
+            analytics_snapshot_version="sales_coaching_v1",
+            priority_score_at_contact="99", priority_percentile_at_contact="95",
+        )
+
+        summary = self.summary([*comparable, legacy])
+        metric = summary["visit_efficiency"]["high_priority_boms_metric"]
+        drilldown = build_drilldown(summary, "high_priority_boms")
+
+        self.assertEqual(metric["value"], 3)
+        self.assertEqual(drilldown["total_count"], metric["value"])
+        self.assertEqual(
+            {row["contact_id"] for row in drilldown["rows"]},
+            {"v2-bom-90", "v2-bom-80", "v2-bom-75"},
+        )
+        self.assertNotIn("high_priority_score_fallback", summary["visit_efficiency"])
 
     def test_overdue_planning_generates_deterministic_coaching_card(self):
         planned = [
@@ -522,10 +614,10 @@ class SnapshotAndAggregateTests(TestCase):
         ]
 
         summary = self.summary([], planned_activities=planned)
-        card = next(card for card in summary["coaching_cards"] if card["code"] == "planning_discipline")
+        card = next(card for card in summary["coaching_cards"] if card["code"] == "team_planning_discipline")
 
         self.assertEqual(summary["follow_up_discipline"]["accountable_planned"], 10)
-        self.assertEqual((card["evidence"]["numerator"], card["evidence"]["denominator"]), (2, 10))
+        self.assertEqual((card["evidence"]["numerator"], card["evidence"]["denominator"]), (0, 10))
         self.assertEqual(card["drilldown_metric"], "planned_overdue")
 
     def test_data_quality_separates_core_from_historical_priority(self):
@@ -534,17 +626,44 @@ class SnapshotAndAggregateTests(TestCase):
         ])["data_quality"]
 
         self.assertEqual(quality["core_analytics"]["status"], "small_sample")
-        self.assertEqual(quality["historical_priority"]["status"], "building")
+        self.assertEqual(quality["historical_priority"]["status"], "not_computable")
         self.assertEqual(quality["core_analytics"]["secure_customer_identity"]["value"], 1)
 
-    def test_reach_drilldown_contains_only_reached_contacts(self):
+    def test_reach_drilldown_contains_the_full_attempt_denominator(self):
         summary = self.summary([
             activity("reached", "2026-08-01 10:00", result="Neutral"),
             activity("unreachable", "2026-08-02 10:00", result="Ej anträffbar"),
         ])
 
-        self.assertEqual([row["contact_id"] for row in build_drilldown(summary, "reach")["rows"]], ["reached"])
+        reach_rows = build_drilldown(summary, "reach")["rows"]
+        self.assertEqual({row["contact_id"] for row in reach_rows}, {"reached", "unreachable"})
+        self.assertEqual(
+            {row["contact_id"]: row["cohort_role"] for row in reach_rows},
+            {"reached": "numerator", "unreachable": "denominator_only"},
+        )
         self.assertEqual({row["contact_id"] for row in build_drilldown(summary, "attempts")["rows"]}, {"reached", "unreachable"})
+
+    def test_rate_drilldowns_return_full_denominators_with_cohort_roles(self):
+        rows = [
+            activity("positive-order", "2026-08-01 10:00", customer_id="customer-1", result="Positiv"),
+            activity("positive-miss", "2026-08-02 10:00", customer_id="customer-2", customer="Andra butiken", result="Positiv"),
+            activity("neutral", "2026-08-03 10:00", result="Neutral"),
+            activity("priority-top", "2026-08-04 10:00", result="Neutral", analytics_snapshot_version=ANALYTICS_SNAPSHOT_VERSION, priority_snapshot_quality="exact", priority_percentile_at_contact="90", priority_percentile_basis_at_contact=PRIORITY_PERCENTILE_BASIS),
+            activity("priority-low", "2026-08-05 10:00", result="Neutral", analytics_snapshot_version=ANALYTICS_SNAPSHOT_VERSION, priority_snapshot_quality="exact", priority_percentile_at_contact="40", priority_percentile_basis_at_contact=PRIORITY_PERCENTILE_BASIS),
+        ]
+        summary = self.summary(rows, orders=[order("ORDER", "2026-08-02")])
+
+        positive = build_drilldown(summary, "positive_dialogue")["rows"]
+        closing = build_drilldown(summary, "positive_to_order_10d")["rows"]
+        priority = build_drilldown(summary, "priority_focus")["rows"]
+
+        self.assertEqual(len(positive), 5)
+        self.assertEqual({row["contact_id"]: row["cohort_role"] for row in closing}, {
+            "positive-order": "numerator", "positive-miss": "missed_outcome",
+        })
+        self.assertEqual({row["contact_id"]: row["cohort_role"] for row in priority}, {
+            "priority-top": "numerator", "priority-low": "denominator_only",
+        })
 
     def test_missing_historical_segment_does_not_fall_back_to_current_segment(self):
         rows = [activity("legacy", "2026-08-01 10:00")]
@@ -578,7 +697,9 @@ class SnapshotAndAggregateTests(TestCase):
                 rows.append(activity(
                     f"exact-{index}", f"2026-08-{index + 1:02d} 10:00",
                     priority_snapshot_quality="exact",
+                    analytics_snapshot_version=ANALYTICS_SNAPSHOT_VERSION,
                     priority_percentile_at_contact="80",
+                    priority_percentile_basis_at_contact=PRIORITY_PERCENTILE_BASIS,
                 ))
             else:
                 planned_id = f"planned-{index}"
@@ -586,6 +707,7 @@ class SnapshotAndAggregateTests(TestCase):
                 rows.append(activity(
                     f"approx-{index}", f"2026-08-{index + 1:02d} 10:00",
                     planned_activity_id=planned_id,
+                    analytics_snapshot_version=ANALYTICS_SNAPSHOT_VERSION,
                 ))
                 planned.append({"planned_activity_id": planned_id, "source_suggestion_id": suggestion_id})
                 suggestions.append({"suggestion_id": suggestion_id, "priority_score_at_creation": "70"})
@@ -602,7 +724,7 @@ class SnapshotAndAggregateTests(TestCase):
             generated_at="2026-08-20 12:00",
         )
 
-        self.assertEqual(summary["seller_comparison"][0]["snapshot_coverage"]["value"], 1)
+        self.assertEqual(summary["seller_comparison"][0]["snapshot_coverage"]["value"], 0.6)
         self.assertEqual(summary["seller_comparison"][0]["priority_percentile_coverage"]["value"], 0.6)
         self.assertEqual(summary["coaching_matrix"]["sellers"], [])
         self.assertEqual(
@@ -630,11 +752,11 @@ class SnapshotAndAggregateTests(TestCase):
         second = self.summary(rows)
 
         self.assertEqual(first["coaching_cards"], second["coaching_cards"])
-        self.assertLessEqual(len(first["coaching_cards"]), 4)
-        self.assertEqual(first["coaching_cards"][0]["code"], "repeat_boms")
+        self.assertLessEqual(len(first["coaching_cards"]), 3)
+        self.assertEqual(first["coaching_cards"][0]["code"], "team_repeat_boms")
         self.assertEqual(
             set(first["coaching_cards"][0]),
-            {"code", "severity", "title", "diagnosis", "evidence", "comparison", "recommendation", "drilldown_metric", "drilldown_filters"},
+            {"code", "dimension", "polarity", "severity", "metric_key", "title", "observation", "evidence", "benchmark", "next_action", "recommendation", "target", "drilldown_metric", "drilldown_filters", "ranking_score"},
         )
         for key, kpi in first["kpis"].items():
             with self.subTest(kpi=key):
@@ -642,7 +764,7 @@ class SnapshotAndAggregateTests(TestCase):
                 self.assertTrue(kpi["drilldown_metric"])
         self.assertEqual(
             [step["drilldown_metric"] for step in first["funnel"]["steps"]],
-            ["attempts", "reach", "mature_reached_sync", "order_10d_sync"],
+            ["attempts", "reach", "positive_sync"],
         )
 
     def test_snapshot_quality_exact_approximate_and_missing(self):
@@ -685,7 +807,11 @@ class SnapshotAndAggregateTests(TestCase):
             {"customer_id": "customer-2", "sales_person": "Olle", "priority_score": 20, "recommendation_eligible": True},
             {"customer_id": "other", "sales_person": "Sofia", "priority_score": 100, "recommendation_eligible": True},
         ]
-        args = dict(customer=CUSTOMERS[0], owner=USERS[0], priorities=priorities, score_version="v2.1")
+        args = dict(
+            customer=CUSTOMERS[0], owner=USERS[0], priorities=priorities,
+            score_version="v2.1", contact_at="2026-08-20 10:00",
+            snapshot_created_at="2026-08-20T12:00:00+02:00",
+        )
 
         first = build_pre_contact_snapshot(**args)
         second = build_pre_contact_snapshot(**args)
@@ -693,10 +819,15 @@ class SnapshotAndAggregateTests(TestCase):
         self.assertEqual(first, second)
         self.assertEqual(first["priority_snapshot_quality"], "exact")
         self.assertEqual(first["seller_portfolio_size_at_contact"], 2)
-        self.assertEqual(first["priority_percentile_at_contact"], 100)
+        self.assertEqual(first["priority_percentile_at_contact"], 75)
+        self.assertEqual(
+            first["priority_percentile_basis_at_contact"],
+            PRIORITY_PERCENTILE_BASIS,
+        )
+        self.assertEqual(first["snapshot_lag_hours"], 2)
         self.assertIs(first["recommendation_eligible_at_contact"], True)
 
-    def test_suppressed_customer_snapshot_has_no_priority_percentile(self):
+    def test_suppressed_customer_snapshot_keeps_numeric_priority_percentile(self):
         priorities = [
             {"customer_id": "customer-1", "sales_person": "Olle", "priority_score": 99, "recommendation_eligible": False, "recommendation_suppression_reason": "recent_contact"},
             {"customer_id": "customer-2", "sales_person": "Olle", "priority_score": 20, "recommendation_eligible": True},
@@ -709,10 +840,293 @@ class SnapshotAndAggregateTests(TestCase):
 
         self.assertIs(snapshot["recommendation_eligible_at_contact"], False)
         self.assertEqual(snapshot["suppression_reason_at_contact"], "recent_contact")
-        self.assertEqual(snapshot["priority_percentile_at_contact"], "")
-        self.assertEqual(snapshot["seller_portfolio_size_at_contact"], 1)
+        self.assertEqual(snapshot["priority_percentile_at_contact"], 75)
+        self.assertEqual(snapshot["seller_portfolio_size_at_contact"], 2)
 
-    def test_priority_gap_contains_only_recommendation_eligible_customers(self):
+    def test_current_planned_activity_keeps_percentile_and_traces_suppression(self):
+        priorities = [
+            {
+                "customer_id": "customer-1", "sales_person": "Olle",
+                "priority_score": 92, "recommendation_eligible": False,
+                "recommendation_suppression_reason": "future_planned_activity",
+                "recommendation_suppression_source_type": "planned_activity",
+                "recommendation_suppression_source_id": "planned-current",
+            },
+            {
+                "customer_id": "customer-2", "sales_person": "Olle",
+                "priority_score": 20, "recommendation_eligible": True,
+            },
+        ]
+
+        snapshot = build_pre_contact_snapshot(
+            customer=CUSTOMERS[0], owner=USERS[0], priorities=priorities,
+            planned_row={
+                "planned_activity_id": "planned-current",
+                "source": "manual",
+            },
+            contact_at="2026-08-20 10:00",
+            snapshot_created_at="2026-08-20T10:01:00+02:00",
+        )
+
+        self.assertIs(snapshot["recommendation_eligible_at_contact"], False)
+        self.assertEqual(snapshot["priority_percentile_at_contact"], 75)
+        self.assertEqual(
+            snapshot["suppression_reason_at_contact"],
+            "current_planned_activity",
+        )
+        self.assertEqual(
+            snapshot["suppression_source_id_at_contact"], "planned-current"
+        )
+
+    def test_separate_future_activity_keeps_future_suppression_reason(self):
+        snapshot = build_pre_contact_snapshot(
+            customer=CUSTOMERS[0], owner=USERS[0],
+            priorities=[{
+                "customer_id": "customer-1", "sales_person": "Olle",
+                "priority_score": 92, "recommendation_eligible": False,
+                "recommendation_suppression_reason": "future_planned_activity",
+                "recommendation_suppression_source_id": "planned-future",
+            }],
+            planned_row={"planned_activity_id": "planned-current"},
+            snapshot_created_at="2026-08-20T10:00:00+02:00",
+        )
+
+        self.assertEqual(
+            snapshot["suppression_reason_at_contact"], "future_planned_activity"
+        )
+
+    def test_percentile_uses_all_scored_owner_customers_and_midrank_ties(self):
+        priorities = [
+            {
+                "customer_id": "customer-1", "sales_person": "Olle",
+                "priority_score": 50, "recommendation_eligible": False,
+            },
+            {
+                "customer_id": "customer-2", "sales_person": "Olle",
+                "priority_score": 50, "recommendation_eligible": True,
+            },
+            {
+                "customer_id": "customer-3", "sales_person": "Olle",
+                "priority_score": 10, "recommendation_eligible": False,
+            },
+            {
+                "customer_id": "customer-4", "sales_person": "Olle",
+                "priority_score": 90, "recommendation_eligible": True,
+            },
+            {
+                "customer_id": "other", "sales_person": "Sofia",
+                "priority_score": 100, "recommendation_eligible": True,
+            },
+        ]
+
+        snapshot = build_pre_contact_snapshot(
+            customer=CUSTOMERS[0], owner=USERS[0], priorities=priorities,
+            snapshot_created_at="2026-08-20T10:00:00+02:00",
+        )
+
+        self.assertEqual(snapshot["seller_portfolio_size_at_contact"], 4)
+        self.assertEqual(snapshot["priority_percentile_at_contact"], 50)
+
+    def test_v1_percentile_is_legacy_and_not_priority_focus(self):
+        summary = self.summary([
+            activity(
+                "legacy", "2026-08-01 10:00",
+                analytics_snapshot_version="sales_coaching_v1",
+                priority_snapshot_quality="exact",
+                priority_score_at_contact="90",
+                priority_percentile_at_contact="95",
+            ),
+            activity(
+                "v2", "2026-08-02 10:00",
+                analytics_snapshot_version=ANALYTICS_SNAPSHOT_VERSION,
+                priority_snapshot_quality="exact",
+                priority_score_at_contact="80",
+                priority_percentile_at_contact="80",
+                priority_percentile_basis_at_contact=PRIORITY_PERCENTILE_BASIS,
+            ),
+        ])
+
+        self.assertEqual(
+            (
+                summary["priority_allocation"]["priority_focus"]["numerator"],
+                summary["priority_allocation"]["priority_focus"]["denominator"],
+            ),
+            (1, 1),
+        )
+        rows = build_drilldown(summary, "human_activities")["rows"]
+        legacy = next(row for row in rows if row["contact_id"] == "legacy")
+        self.assertEqual(
+            legacy["priority_percentile_comparability"], "legacy_incomparable"
+        )
+
+    def test_historical_coverage_denominator_contains_only_v2_contacts(self):
+        rows = [
+            activity(f"legacy-{index}", "2026-08-01 10:00")
+            for index in range(20)
+        ] + [
+            activity(
+                "v2-exact", "2026-08-02 10:00",
+                analytics_snapshot_version=ANALYTICS_SNAPSHOT_VERSION,
+                priority_snapshot_quality="exact",
+                priority_percentile_at_contact="80",
+                priority_percentile_basis_at_contact=PRIORITY_PERCENTILE_BASIS,
+            ),
+            activity(
+                "v2-missing", "2026-08-03 10:00",
+                analytics_snapshot_version=ANALYTICS_SNAPSHOT_VERSION,
+                priority_snapshot_quality="missing",
+            ),
+        ]
+
+        history = self.summary(rows)["data_quality"]["historical_priority"]
+
+        self.assertEqual(history["v2_contact_count"], 2)
+        self.assertEqual(history["comparable_percentile_count"], 1)
+        self.assertEqual(history["comparable_percentile_rate"]["value"], 0.5)
+
+    def test_missing_percentile_is_not_a_core_data_quality_error(self):
+        quality = self.summary([
+            activity(
+                "v2-missing", "2026-08-01 10:00", result="Neutral",
+                analytics_snapshot_version=ANALYTICS_SNAPSHOT_VERSION,
+                priority_snapshot_quality="missing",
+            )
+        ])["data_quality"]
+
+        self.assertEqual(quality["core_flagged_activity_rows"], 0)
+        self.assertNotIn("missing_priority_percentile", quality["exclusion_reasons"])
+        self.assertEqual(
+            quality["historical_priority"]["comparable_percentile_count"], 0
+        )
+
+    def test_visit_patterns_use_canonical_contact_at(self):
+        rows = [
+            activity(
+                f"monday-{index}", "2026-08-03 09:00",
+                channel="Besök",
+                result="Ej anträffbar" if index < 4 else "Neutral",
+            )
+            for index in range(10)
+        ]
+
+        efficiency = self.summary(rows)["visit_efficiency"]
+
+        self.assertEqual(efficiency["weekday_patterns"][0]["label"], "Måndag")
+        self.assertEqual(efficiency["time_band_patterns"][0]["label"], "Före 10")
+        self.assertEqual(
+            efficiency["weekday_patterns"][0]["bom_ratio"]["value"], 0.4
+        )
+
+    def test_previous_week_is_incomplete_while_ten_day_outcome_is_waiting(self):
+        summary = self.summary([
+            activity("previous-week", "2026-08-14 10:00", result="Neutral")
+        ])
+
+        week = summary["weekly_trend"][0]
+        self.assertEqual(week["week"], "2026-W33")
+        self.assertFalse(week["outcome_complete"])
+        self.assertEqual(week["waiting_outcome_count"], 1)
+        self.assertEqual(week["mature_contact_count"], 0)
+
+    def test_planning_discipline_respects_current_segment_and_lifecycle(self):
+        priorities = [
+            {
+                "customer_id": "customer-1", "customer_number": "100",
+                "customer": "Nytt namn", "sales_person": "Olle",
+                "segment": "A", "lifecycle": "prospect",
+                "priority_score": 80, "recommendation_eligible": True,
+            },
+            {
+                "customer_id": "customer-2", "customer_number": "200",
+                "customer": "Andra butiken", "sales_person": "Olle",
+                "segment": "B", "lifecycle": "established",
+                "priority_score": 60, "recommendation_eligible": True,
+            },
+        ]
+        planned = [
+            {
+                "planned_activity_id": f"a-{index}",
+                "scheduled_at": "2026-08-05T10:00:00",
+                "status": "planned", "user_name": "olle",
+                "customer_id": "customer-1", "customer_number": "100",
+            }
+            for index in range(10)
+        ] + [{
+            "planned_activity_id": "b-1",
+            "scheduled_at": "2026-08-05T10:00:00",
+            "status": "planned", "user_name": "olle",
+            "customer_id": "customer-2", "customer_number": "200",
+        }]
+
+        selected = self.summary(
+            [], planned_activities=planned, current_priorities=priorities,
+            segment="A", lifecycle="prospect",
+        )
+        excluded = self.summary(
+            [], planned_activities=planned, current_priorities=priorities,
+            segment="A", lifecycle="established",
+        )
+
+        self.assertEqual(selected["follow_up_discipline"]["accountable_planned"], 10)
+        self.assertEqual(excluded["follow_up_discipline"]["accountable_planned"], 0)
+        self.assertEqual(
+            selected["meta"]["planned_metric_dimension_basis"],
+            "current_customer_state",
+        )
+
+    def test_future_plans_are_not_accountable_until_due_unless_already_closed(self):
+        rows = [activity("completed-early", "2026-08-19 10:00", result="Neutral")]
+        planned = [
+            {"planned_activity_id": "past-open", "scheduled_at": "2026-08-01T10:00:00", "status": "planned", "user_name": "olle", "customer_id": "customer-1"},
+            {"planned_activity_id": "future-open", "scheduled_at": "2026-08-20T18:00:00", "status": "planned", "user_name": "olle", "customer_id": "customer-1"},
+            {"planned_activity_id": "future-completed", "scheduled_at": "2026-08-20T18:00:00", "status": "completed", "completed_contact_id": "completed-early", "user_name": "olle", "customer_id": "customer-1"},
+            {"planned_activity_id": "future-skipped", "scheduled_at": "2026-08-20T18:00:00", "status": "skipped", "user_name": "olle", "customer_id": "customer-1"},
+            {"planned_activity_id": "future-cancelled", "scheduled_at": "2026-08-20T18:00:00", "status": "cancelled", "user_name": "olle", "customer_id": "customer-1"},
+        ]
+
+        discipline = self.summary(rows, planned_activities=planned)["follow_up_discipline"]
+
+        self.assertEqual(discipline["accountable_planned"], 3)
+        self.assertEqual(
+            (discipline["planned_completed_in_time"]["numerator"], discipline["planned_completed_in_time"]["denominator"]),
+            (1, 3),
+        )
+        self.assertEqual(discipline["overdue_planned"], 1)
+        self.assertEqual(discipline["skipped"], 1)
+        self.assertEqual(discipline["cancelled_excluded"], 1)
+
+    def test_only_planned_or_completed_linked_followups_are_valid_next_steps(self):
+        statuses = ("planned", "completed", "skipped", "cancelled")
+        rows = [
+            activity(f"source-{status}", f"2026-08-0{index + 1} 10:00")
+            for index, status in enumerate(statuses)
+        ]
+        planned = [
+            {
+                "planned_activity_id": f"followup-{status}",
+                "source_contact_id": f"source-{status}",
+                "scheduled_at": "2026-08-08T10:00:00",
+                "status": status,
+                "user_name": "olle",
+                "customer_id": "customer-1",
+            }
+            for status in statuses
+        ]
+
+        summary = self.summary(rows, planned_activities=planned)
+        coverage = summary["follow_up_discipline"]["positive_next_step_coverage"]
+
+        self.assertEqual((coverage["numerator"], coverage["denominator"]), (2, 4))
+        self.assertEqual(
+            {row["contact_id"] for row in build_drilldown(summary, "followup_gap")["rows"]},
+            {"source-skipped", "source-cancelled"},
+        )
+        self.assertEqual(
+            {row["contact_id"] for row in build_drilldown(summary, "followup_gap_10d")["rows"]},
+            {"source-skipped", "source-cancelled"},
+        )
+
+    def test_priority_diagnostics_do_not_expose_an_operational_customer_gap(self):
         summary = build_sales_coaching_summary(
             activities=[], customers=CUSTOMERS, users=USERS, order_rows=[],
             current_priorities=[
@@ -723,9 +1137,8 @@ class SnapshotAndAggregateTests(TestCase):
             generated_at="2026-08-20 12:00",
         )
 
-        gap = summary["priority_allocation"]["priority_gap"]
-        self.assertEqual(gap["count"], 1)
-        self.assertEqual(gap["customers"][0]["customer_id"], "customer-2")
+        self.assertNotIn("priority_gap", summary["priority_allocation"])
+        self.assertNotIn("customers", str(summary["priority_allocation"]))
 
     def test_followup_and_planning_drilldowns_match_each_card(self):
         rows = [
@@ -748,9 +1161,9 @@ class SnapshotAndAggregateTests(TestCase):
             "followup_success": 1,
             "followup_gap": 1,
             "followup_gap_10d": 1,
-            "planned_on_time": 1,
-            "planned_overdue": 1,
-            "planned_skipped": 1,
+            "planned_on_time": 3,
+            "planned_overdue": 3,
+            "planned_skipped": 3,
         }
         for metric, count in expected.items():
             with self.subTest(metric=metric):
@@ -758,8 +1171,8 @@ class SnapshotAndAggregateTests(TestCase):
 
     def test_bom_ratio_repeat_high_priority_and_small_sample(self):
         rows = [
-            activity("bom-1", "2026-08-01 10:00", channel="Besök", result="Ej anträffbar", planned_activity_id="planned-bom", priority_snapshot_quality="exact", analytics_snapshot_version="sales_coaching_v1", priority_score_at_contact="80", priority_percentile_at_contact="90"),
-            activity("bom-2", "2026-08-02 10:00", channel="Besök", result="Ej anträffbar", priority_snapshot_quality="exact", analytics_snapshot_version="sales_coaching_v1", priority_score_at_contact="75", priority_percentile_at_contact="80"),
+            activity("bom-1", "2026-08-01 10:00", channel="Besök", result="Ej anträffbar", planned_activity_id="planned-bom", priority_snapshot_quality="exact", analytics_snapshot_version=ANALYTICS_SNAPSHOT_VERSION, priority_score_at_contact="80", priority_percentile_at_contact="90", priority_percentile_basis_at_contact=PRIORITY_PERCENTILE_BASIS),
+            activity("bom-2", "2026-08-02 10:00", channel="Besök", result="Ej anträffbar", priority_snapshot_quality="exact", analytics_snapshot_version=ANALYTICS_SNAPSHOT_VERSION, priority_score_at_contact="75", priority_percentile_at_contact="80", priority_percentile_basis_at_contact=PRIORITY_PERCENTILE_BASIS),
             activity("visit", "2026-08-03 10:00", channel="Besök", result="Neutral"),
             activity("auto-email", "2026-08-04 10:00", channel="Mejl", result="Positiv", email_id="mail", activity_source="crm_email"),
         ]
@@ -775,13 +1188,13 @@ class SnapshotAndAggregateTests(TestCase):
             score_version="v2.1",
         )
 
-        bom = summary["kpis"]["bom_ratio"]
+        bom = summary["visit_efficiency"]["bom_ratio"]
         self.assertEqual((bom["numerator"], bom["denominator"]), (2, 3))
         self.assertEqual(bom["status"], "small_sample")
         self.assertEqual(summary["visit_efficiency"]["repeat_boms"], {"customers": 1, "visits": 2})
         self.assertEqual(summary["visit_efficiency"]["high_priority_boms"], 2)
         self.assertEqual(summary["kpis"]["human_activities"]["value"], 3)
-        self.assertEqual(build_drilldown(summary, "bom_ratio")["total_count"], 2)
+        self.assertEqual(build_drilldown(summary, "bom_ratio")["total_count"], 3)
         self.assertEqual(build_drilldown(summary, "planned_boms")["total_count"], 1)
         self.assertEqual(build_drilldown(summary, "unplanned_boms")["total_count"], 1)
 
