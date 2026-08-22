@@ -1364,6 +1364,12 @@ class EmailInsightsEndpointTests(unittest.TestCase):
         ])
         orders = FakeWorksheet("order_rows", app_module.ORDER_COLUMNS, [])
         contacts = FakeWorksheet("sales_activities", app_module.CONTACT_COLUMNS, [])
+        users = FakeWorksheet("users", USER_COLUMNS, [
+            {
+                "user_name": "Sofia", "name": "Sofia Andersson",
+                "active": "Y", "admin": "N",
+            },
+        ])
         messages = FakeWorksheet("email_messages", EMAIL_MESSAGES_COLUMNS, [
             {
                 "email_id": "a-mail", "customer": "Butik A", "email_type": "new_customer",
@@ -1404,7 +1410,7 @@ class EmailInsightsEndpointTests(unittest.TestCase):
         ])
         events = FakeWorksheet("email_events", EMAIL_EVENTS_COLUMNS, [])
         self.spreadsheet = FakeSpreadsheet([
-            customers, orders, contacts, messages, recipients, events,
+            customers, orders, contacts, users, messages, recipients, events,
         ])
         app_module.app.config.update(TESTING=True, SECRET_KEY="test-secret")
         app_module._email_sheets_cache = None
