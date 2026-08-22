@@ -398,6 +398,7 @@ class SnapshotAndAggregateTests(TestCase):
         metric = self.summary(rows, seller="olle", channel="phone")["kpis"]["human_activities"]
 
         self.assertEqual(metric["metric_type"], "count")
+        self.assertEqual(metric["unit"], "aktiviteter")
         self.assertEqual(metric["value"], 3)
         self.assertEqual(metric["comparisons"]["previous_period"], 1)
         self.assertEqual(metric["comparisons"]["delta_previous"], 2)

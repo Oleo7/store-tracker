@@ -215,11 +215,21 @@ def _select(signals):
             item["code"],
         ),
     )
-    attention = [item for item in ordered if item["polarity"] == "attention"]
-    strength = [item for item in ordered if item["polarity"] == "strength"]
-    if attention:
-        return attention[:MAX_ATTENTION] + strength[:MAX_STRENGTH]
-    return strength[:2]
+    deduplicated = []
+    selected_dimensions = set()
+    for item in ordered:
+        dimension = item["dimension"]
+        if dimension in selected_dimensions:
+            continue
+        selected_dimensions.add(dimension)
+        deduplicated.append(item)
+    attention = [
+        item for item in deduplicated if item["polarity"] == "attention"
+    ]
+    strength = [
+        item for item in deduplicated if item["polarity"] == "strength"
+    ]
+    return attention[:MAX_ATTENTION] + strength[:MAX_STRENGTH]
 
 
 def build_seller_signals(*, seller, metrics, repeat_boms, channel_effectiveness):
@@ -399,7 +409,12 @@ def build_seller_signals(*, seller, metrics, repeat_boms, channel_effectiveness)
 
     if (repeat_boms or {}).get("customers", 0) >= 2:
         evidence = {"value": repeat_boms["customers"], "numerator": repeat_boms["customers"],
-                    "denominator": repeat_boms.get("visits", 0), "status": "sufficient"}
+                    "denominator": repeat_boms.get("visits", 0), "status": "sufficient",
+                    "metric_type": "count", "unit": "kunder",
+                    "secondary_evidence": {
+                        "value": repeat_boms.get("visits", 0),
+                        "unit": "bom-besök",
+                    }}
         signals.append(_signal(
             code="repeat_boms", dimension="bom", polarity="attention",
             metric_key="repeat_boms", title="Återkommande bommar kräver nytt arbetssätt",
@@ -478,7 +493,12 @@ def build_team_signals(*, metrics, previous_metrics, repeat_boms):
         ))
     if (repeat_boms or {}).get("customers", 0) >= 2:
         evidence = {"value": repeat_boms["customers"], "numerator": repeat_boms["customers"],
-                    "denominator": repeat_boms.get("visits", 0), "status": "sufficient"}
+                    "denominator": repeat_boms.get("visits", 0), "status": "sufficient",
+                    "metric_type": "count", "unit": "kunder",
+                    "secondary_evidence": {
+                        "value": repeat_boms.get("visits", 0),
+                        "unit": "bom-besök",
+                    }}
         signals.append(_signal(
             code="team_repeat_boms", dimension="bom", polarity="attention",
             metric_key="repeat_boms", title="Teamet har återkommande bommar",

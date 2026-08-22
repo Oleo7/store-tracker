@@ -831,6 +831,7 @@ def _seller_comparison(rows, attribution, sellers):
                 "value": len(aggregate["human"]),
                 "denominator": len(aggregate["human"]),
                 "metric_type": "count",
+                "unit": "aktiviteter",
                 "status": (
                     "sufficient"
                     if len(aggregate["human"]) >= MIN_RATE_SAMPLE
@@ -1511,6 +1512,7 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
         "human_activities": {
             "value": len(current["human"]),
             "metric_type": "count",
+            "unit": "aktiviteter",
             "status": "small_sample" if len(current["human"]) < MIN_RATE_SAMPLE else "sufficient",
             "unique_customers": len({row.get("customer_identity_key") for row in current["human"] if row.get("customer_identity_key")}),
             "channel_mix": {

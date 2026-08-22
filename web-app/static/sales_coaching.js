@@ -531,9 +531,19 @@
   }
 
   function coachingMarkup(cards) {
-    const evidence = card => card.evidence?.denominator !== undefined
-      ? `${rateEvidence(card.evidence)} · ${percent(card.evidence.value)}`
-      : number(card.evidence?.value);
+    const evidence = card => {
+      const item = card.evidence || {};
+      if (item.metric_type === "count") {
+        const primary = `${number(item.value)} ${escapeHtml(item.unit || "st")}`;
+        const secondary = item.secondary_evidence;
+        return secondary?.value === null || secondary?.value === undefined
+          ? primary
+          : `${primary} · ${number(secondary.value)} ${escapeHtml(secondary.unit || "st")}`;
+      }
+      return item.denominator !== undefined
+        ? `${rateEvidence(item)} · ${percent(item.value)}`
+        : number(item.value);
+    };
     const comparison = card => card.benchmark?.label || card.comparison?.label || comparisonText({ comparisons: card.comparison || card.benchmark || {} });
     return `<section class="sc-section" aria-labelledby="sc-coaching-title"><div class="sc-section-heading"><div><h2 id="sc-coaching-title">Coachningskort</h2><p>Prioriterade observationer med tydligt underlag.</p></div></div>${cards?.length ? `<div class="sc-coaching-grid">${cards.map(card => `<article class="sc-coaching-card" data-severity="${escapeHtml(card.polarity || card.severity)}"><span class="sc-coaching-label">${(card.polarity || card.severity) === "strength" ? "STYRKA" : "FOKUSOMRÅDE"}</span><h3>${escapeHtml(card.title)}</h3><p><strong>Observation:</strong> ${escapeHtml(card.observation || card.diagnosis || "")}</p><p><strong>Bevis:</strong> ${evidence(card)}</p>${comparison(card) ? `<p><strong>Jämförelse:</strong> ${escapeHtml(comparison(card))}</p>` : ""}<p><strong>Nästa steg:</strong> ${escapeHtml(card.next_action || card.recommendation || "")}</p>${card.target ? `<p><strong>Mål:</strong> ${escapeHtml(card.target)}</p>` : ""}<button type="button" data-drilldown="${escapeHtml(card.drilldown_metric)}" data-drilldown-filters="${escapeHtml(JSON.stringify(card.drilldown_filters || {}))}">Visa underlag</button></article>`).join("")}</div>` : `<div class="sc-empty">Inget coachningskort aktiveras med tillräckligt underlag i valt filter.</div>`}</section>`;
   }

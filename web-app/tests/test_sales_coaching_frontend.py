@@ -160,6 +160,17 @@ class SalesCoachingFrontendTests(TestCase):
         self.assertNotIn("card.code ===", self.javascript)
         self.assertNotIn("switch (card.code", self.javascript)
 
+    def test_coaching_evidence_formats_counts_without_percentages(self):
+        self.assertIn('item.metric_type === "count"', self.javascript)
+        self.assertIn('item.unit || "st"', self.javascript)
+        self.assertIn("item.secondary_evidence", self.javascript)
+        self.assertIn("`${rateEvidence(item)} · ${percent(item.value)}`", self.javascript)
+        count_branch = self.javascript.split(
+            'if (item.metric_type === "count")', 1
+        )[1].split("return item.denominator", 1)[0]
+        self.assertNotIn("percent(", count_branch)
+        self.assertNotIn("card.code", count_branch)
+
     def test_drilldown_explains_each_rows_cohort_role(self):
         self.assertIn("cohortLabels", self.javascript)
         self.assertIn('numerator: "Täljare"', self.javascript)

@@ -167,9 +167,12 @@ class SignalRuleTests(TestCase):
     def test_activity_benchmark_labels_counts_as_activities(self):
         metric = rate(5, denominator=20, peer=10, previous=7)
         metric["metric_type"] = "count"
+        metric["unit"] = "aktiviteter"
         signals = self.signals(seller_metrics(human_activities_metric=metric))
         activity = next(item for item in signals if item["code"] == "activity_low")
 
+        self.assertEqual(activity["evidence"]["metric_type"], "count")
+        self.assertEqual(activity["evidence"]["unit"], "aktiviteter")
         self.assertIn("10 aktiviteter", activity["benchmark"]["label"])
         self.assertIn("-", activity["benchmark"]["label"])
         self.assertNotIn("%", activity["benchmark"]["label"])
@@ -264,9 +267,72 @@ class SignalRuleTests(TestCase):
         second = self.signals(metrics)
 
         self.assertEqual(first, second)
+        self.assertEqual(
+            [item["code"] for item in first],
+            [
+                "bom_ratio_high",
+                "positive_dialogue_low",
+                "planned_completed_in_time_strength",
+            ],
+        )
         self.assertLessEqual(len(first), 3)
         self.assertLessEqual(sum(item["polarity"] == "attention" for item in first), 2)
         self.assertLessEqual(sum(item["polarity"] == "strength" for item in first), 1)
+
+    def test_multiple_strengths_without_attention_return_at_most_one(self):
+        signals = self.signals(seller_metrics(
+            reach=rate(.80, peer=.60),
+            positive_dialogue=rate(.85, peer=.60),
+            bom_ratio=rate(.10, peer=.30),
+        ))
+
+        self.assertEqual(len(signals), 1)
+        self.assertEqual(signals[0]["polarity"], "strength")
+        self.assertEqual(signals[0]["code"], "positive_dialogue_strength")
+
+    def test_repeat_boms_attention_wins_over_bom_ratio_strength(self):
+        signals = build_seller_signals(
+            seller="Sofia",
+            metrics=seller_metrics(bom_ratio=rate(.10, peer=.30)),
+            repeat_boms={"customers": 3, "visits": 7},
+            channel_effectiveness={},
+        )
+        bom = [item for item in signals if item["dimension"] == "bom"]
+
+        self.assertEqual([item["code"] for item in bom], ["repeat_boms"])
+        self.assertEqual(bom[0]["evidence"]["metric_type"], "count")
+        self.assertEqual(bom[0]["evidence"]["unit"], "kunder")
+        self.assertEqual(
+            bom[0]["evidence"]["secondary_evidence"],
+            {"value": 7, "unit": "bom-besök"},
+        )
+
+    def test_highest_ranked_attention_wins_within_bom_dimension(self):
+        signals = build_seller_signals(
+            seller="Sofia",
+            metrics=seller_metrics(bom_ratio=rate(.80, peer=.20)),
+            repeat_boms={"customers": 2, "visits": 4},
+            channel_effectiveness={},
+        )
+
+        self.assertEqual(
+            [item["code"] for item in signals if item["dimension"] == "bom"],
+            ["bom_ratio_high"],
+        )
+
+    def test_team_repeat_boms_uses_count_evidence(self):
+        cards = build_team_signals(
+            metrics={}, previous_metrics={},
+            repeat_boms={"customers": 2, "visits": 5},
+        )
+        repeat = next(item for item in cards if item["code"] == "team_repeat_boms")
+
+        self.assertEqual(repeat["evidence"]["metric_type"], "count")
+        self.assertEqual(repeat["evidence"]["unit"], "kunder")
+        self.assertEqual(
+            repeat["evidence"]["secondary_evidence"],
+            {"value": 5, "unit": "bom-besök"},
+        )
 
     def test_team_mode_uses_separate_absolute_cards_without_peer_benchmark(self):
         cards = build_team_signals(
