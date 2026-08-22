@@ -2948,26 +2948,65 @@ def build_dfp_top_weeks(order_rows, year=2026, limit=5):
     ]
 
 
-def build_freezer_summary(contact_rows):
+def build_freezer_summary(contact_rows, customers, users):
+    active_sellers = []
+    seller_by_alias = {}
+    ambiguous_aliases = set()
+    seen_sellers = set()
+    for user in users:
+        seller_label = text_to_sheet_value(user.get("user_name"))
+        seller_key = normalize_key(seller_label)
+        if (
+            not seller_key
+            or not is_yes(user.get("active"))
+            or user_is_admin(user)
+            or seller_key in seen_sellers
+        ):
+            continue
+        seen_sellers.add(seller_key)
+        seller = {"key": seller_key, "label": seller_label}
+        active_sellers.append(seller)
+        for alias in user_route_identity_keys(user):
+            if alias in ambiguous_aliases:
+                continue
+            if alias in seller_by_alias:
+                seller_by_alias.pop(alias, None)
+                ambiguous_aliases.add(alias)
+                continue
+            seller_by_alias[alias] = seller
+
+    active_sellers.sort(key=lambda item: item["label"].casefold())
+    customer_lookup = CustomerLookup(customers)
     latest_contact_by_customer = {}
     for idx, contact in enumerate(contact_rows):
-        customer_key = normalize_key(contact.get("customer"))
+        customer = related_row_customer(
+            contact,
+            customers,
+            customer_lookup=customer_lookup,
+        )
+        if not customer:
+            continue
+        customer_id = text_to_sheet_value(customer.get("customer_id"))
+        customer_name_key = normalize_key(customer.get("customer"))
+        customer_key = (
+            f"id:{customer_id}"
+            if customer_id
+            else (f"name:{customer_name_key}" if customer_name_key else "")
+        )
         if not customer_key:
             continue
 
         registered_at = parse_datetime_value(contact.get("date_time")) or datetime.min
         sort_key = (registered_at, idx)
         if customer_key not in latest_contact_by_customer or sort_key > latest_contact_by_customer[customer_key][0]:
-            latest_contact_by_customer[customer_key] = (sort_key, contact)
+            latest_contact_by_customer[customer_key] = (sort_key, contact, customer)
 
     product_customer_sets = {item["field"]: set() for item in FREEZER_SUMMARY_ROWS}
     seller_customer_sets = {
         item["field"]: defaultdict(set)
         for item in FREEZER_SUMMARY_ROWS
     }
-    seller_labels = {}
-
-    for customer_key, (_, contact) in latest_contact_by_customer.items():
+    for customer_key, (_, contact, customer) in latest_contact_by_customer.items():
         checked_fields = [
             field for field in FREEZER_COLUMNS
             if is_checked_value(contact.get(field))
@@ -2975,18 +3014,16 @@ def build_freezer_summary(contact_rows):
         if not checked_fields:
             continue
 
-        seller_label = text_to_sheet_value(contact.get("sales_person")) or "Ej angiven"
-        seller_key = seller_label.casefold()
-        seller_labels.setdefault(seller_key, seller_label)
+        seller = seller_by_alias.get(normalize_key(customer.get("sales_person")))
+        if not seller:
+            continue
+        seller_key = seller["key"]
 
         for field in checked_fields:
             product_customer_sets[field].add(customer_key)
             seller_customer_sets[field][seller_key].add(customer_key)
 
-    sales_people = [
-        {"key": key, "label": seller_labels[key]}
-        for key in sorted(seller_labels, key=lambda value: seller_labels[value].casefold())
-    ]
+    sales_people = active_sellers
 
     rows = []
     for item in FREEZER_SUMMARY_ROWS:
@@ -12876,6 +12913,7 @@ def get_followup_insights():
 
     customers_by_name = {}
     customers = get_customer_rows(spreadsheet)
+    users = get_user_rows(spreadsheet)
     for customer in customers:
         customers_by_name[normalize_key(customer["customer"])] = customer
 
@@ -13027,7 +13065,7 @@ def get_followup_insights():
         "weeks": weeks,
         "dfp_leaderboard": dfp_leaderboard,
         "dfp_top_weeks_2026": dfp_top_weeks_2026,
-        "freezer_summary": build_freezer_summary(contact_rows),
+        "freezer_summary": build_freezer_summary(contact_rows, customers, users),
         "contacts": {
             "current_week_count": current_contacts,
             "previous_week_count": previous_contacts,

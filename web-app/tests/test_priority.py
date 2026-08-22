@@ -976,6 +976,10 @@ class PriorityTests(TestCase):
                 "customers_enriched": customers,
                 "order_rows": orders,
                 "sales_activities": contacts,
+                "users": _users(
+                    {"user_name": "Daniel", "name": "Daniel", "active": "Y", "admin": "N"},
+                    {"user_name": "Johan", "name": "Johan", "active": "Y", "admin": "N"},
+                ),
             }
         )
 
@@ -988,60 +992,53 @@ class PriorityTests(TestCase):
         self.assertNotIn("priority_customers", data)
         self.assertEqual(data["selected_responsible"], "Daniel")
 
-    def test_followup_insights_returns_freezer_summary_by_sales_person(self):
+    def test_followup_insights_freezer_summary_uses_current_active_owner(self):
         customers = [
             [
                 "customer",
+                "customer_id",
                 "cancelled_flag",
                 "sales_person",
                 "customer_segment",
                 "customer_number",
             ],
+            ["Current A", "customer-a", "", "Johan", "A", "1001"],
+            ["Store B", "customer-b", "", "Daniel", "A", "1002"],
+            ["Store C", "", "", "Sofia", "B", "1003"],
+            ["Inactive Store", "customer-d", "", "Inactive", "B", "1004"],
+            ["Admin Store", "customer-e", "", "Olle", "B", "1005"],
         ]
+        users = _users(
+            {"user_name": "Daniel", "name": "Daniel", "active": "Y", "admin": "N"},
+            {"user_name": "Johan", "name": "Johan Persson", "active": "Y", "admin": "N"},
+            {"user_name": "Sofia", "name": "Sofia Andersson", "active": "Y", "admin": ""},
+            {"user_name": "Inactive", "name": "Inactive Seller", "active": "N", "admin": "N"},
+            {"user_name": "Olle", "name": "Olle Rönningberg", "active": "Y", "admin": "Y"},
+        )
         orders = [app_module.ORDER_COLUMNS]
         contacts = [
             app_module.CONTACT_COLUMNS,
             _row(
                 app_module.CONTACT_COLUMNS,
                 {
-                    **_contact("ICA Kvantum A", "2026-06-01 10:00", "Daniel", "Neutral"),
-                    "Franui": "1",
+                    **_contact("Old A", "2026-06-01 10:00", "Johan - TEL", "Neutral"),
+                    "customer_id": "customer-a",
                     "polarbar": "1",
                 },
             ),
             _row(
                 app_module.CONTACT_COLUMNS,
                 {
-                    **_contact("ica kvantum a", "2026-06-02 10:00", "Daniel", "Neutral"),
+                    **_contact("Old A", "2026-06-02 10:00", "Sofia Andersson", "Neutral"),
+                    "customer_id": "customer-a",
                     "Franui": "1",
-                    "Boujee": "1",
                 },
             ),
             _row(
                 app_module.CONTACT_COLUMNS,
                 {
-                    **_contact("Store B", "2026-06-03 10:00", "Johan", "Neutral"),
-                    "polarbar": "true",
-                },
-            ),
-            _row(
-                app_module.CONTACT_COLUMNS,
-                {
-                    **_contact("Store C", "2026-06-04 10:00", "Johan", "Neutral"),
-                    "none": "1",
-                },
-            ),
-            _row(
-                app_module.CONTACT_COLUMNS,
-                {
-                    **_contact("Store D", "2026-06-05 10:00", "johan", "Neutral"),
-                    "none": "yes",
-                },
-            ),
-            _row(
-                app_module.CONTACT_COLUMNS,
-                {
-                    **_contact("ICA Supermarket Medborgarplatsen", "2026-05-04 10:00", "Sofia", "Neutral"),
+                    **_contact("Wrong name", "2026-06-03 10:00", "Olle Rönningberg", "Neutral"),
+                    "customer_id": "customer-b",
                     "Boujee": "1",
                     "polarbar": "1",
                 },
@@ -1049,8 +1046,24 @@ class PriorityTests(TestCase):
             _row(
                 app_module.CONTACT_COLUMNS,
                 {
-                    **_contact("ica supermarket medborgarplatsen", "2026-06-12 10:00", "Sofia", "Neutral"),
+                    **_contact("store c", "2026-06-04 10:00", "Johan Persson", "Neutral"),
                     "none": "1",
+                },
+            ),
+            _row(
+                app_module.CONTACT_COLUMNS,
+                {
+                    **_contact("Inactive Store", "2026-06-05 10:00", "Johan - TEL", "Neutral"),
+                    "customer_id": "customer-d",
+                    "polarbar": "1",
+                },
+            ),
+            _row(
+                app_module.CONTACT_COLUMNS,
+                {
+                    **_contact("Admin Store", "2026-06-06 10:00", "Olle Rönningberg", "Neutral"),
+                    "customer_id": "customer-e",
+                    "polarbar": "1",
                 },
             ),
         ]
@@ -1059,6 +1072,7 @@ class PriorityTests(TestCase):
                 "customers_enriched": customers,
                 "order_rows": orders,
                 "sales_activities": contacts,
+                "users": users,
             }
         )
 
@@ -1073,23 +1087,54 @@ class PriorityTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual([person["label"] for person in summary["sales_people"]], ["Daniel", "Johan", "Sofia"])
+        self.assertNotIn("Sofia Andersson", seller_keys)
+        self.assertNotIn("Johan - TEL", seller_keys)
+        self.assertNotIn("Johan Persson", seller_keys)
+        self.assertNotIn("Olle Rönningberg", seller_keys)
         self.assertEqual(rows["Franui"]["total"], 1)
-        self.assertEqual(rows["Franui"]["counts"][seller_keys["Daniel"]], 1)
+        self.assertEqual(rows["Franui"]["counts"][seller_keys["Johan"]], 1)
         self.assertEqual(rows["Boujee"]["total"], 1)
-        self.assertEqual(rows["Boujee"]["counts"][seller_keys["Sofia"]], 0)
+        self.assertEqual(rows["Boujee"]["counts"][seller_keys["Daniel"]], 1)
         self.assertEqual(rows["polarbar"]["total"], 1)
-        self.assertEqual(rows["polarbar"]["counts"][seller_keys["Daniel"]], 0)
-        self.assertEqual(rows["polarbar"]["counts"][seller_keys["Johan"]], 1)
-        self.assertEqual(rows["none"]["counts"][seller_keys["Johan"]], 2)
+        self.assertEqual(rows["polarbar"]["counts"][seller_keys["Daniel"]], 1)
         self.assertEqual(rows["none"]["counts"][seller_keys["Sofia"]], 1)
-        self.assertEqual(summary["sum_row"]["total"], 6)
+        self.assertTrue(all(row["total"] == sum(row["counts"].values()) for row in summary["rows"]))
+        self.assertEqual(summary["sum_row"]["total"], 4)
         self.assertEqual(summary["sum_row"]["counts"][seller_keys["Daniel"]], 2)
-        self.assertEqual(summary["sum_row"]["counts"][seller_keys["Johan"]], 3)
+        self.assertEqual(summary["sum_row"]["counts"][seller_keys["Johan"]], 1)
         self.assertEqual(summary["sum_row"]["counts"][seller_keys["Sofia"]], 1)
-        self.assertEqual(summary["polarbar_share_row"]["total"], 17)
-        self.assertEqual(summary["polarbar_share_row"]["counts"][seller_keys["Daniel"]], 0)
-        self.assertEqual(summary["polarbar_share_row"]["counts"][seller_keys["Johan"]], 33)
+        self.assertEqual(summary["sum_row"]["total"], sum(summary["sum_row"]["counts"].values()))
+        self.assertEqual(summary["polarbar_share_row"]["total"], 25)
+        self.assertEqual(summary["polarbar_share_row"]["counts"][seller_keys["Daniel"]], 50)
+        self.assertEqual(summary["polarbar_share_row"]["counts"][seller_keys["Johan"]], 0)
         self.assertEqual(summary["polarbar_share_row"]["counts"][seller_keys["Sofia"]], 0)
+
+    def test_freezer_summary_moves_status_when_current_owner_changes(self):
+        users = [
+            {"user_name": "Johan", "name": "Johan Persson", "active": "Y", "admin": "N"},
+            {"user_name": "Sofia", "name": "Sofia Andersson", "active": "Y", "admin": "N"},
+        ]
+        customers = [{
+            "customer": "Store A",
+            "customer_id": "customer-a",
+            "sales_person": "Johan",
+        }]
+        contacts = [{
+            **_contact("Historical Store A", "2026-06-02 10:00", "Sofia Andersson", "Neutral"),
+            "customer_id": "customer-a",
+            "Franui": "1",
+        }]
+
+        before = app_module.build_freezer_summary(contacts, customers, users)
+        customers[0]["sales_person"] = "Sofia"
+        after = app_module.build_freezer_summary(contacts, customers, users)
+        before_keys = {person["label"]: person["key"] for person in before["sales_people"]}
+        after_keys = {person["label"]: person["key"] for person in after["sales_people"]}
+
+        self.assertEqual(before["rows"][0]["counts"][before_keys["Johan"]], 1)
+        self.assertEqual(before["rows"][0]["counts"][before_keys["Sofia"]], 0)
+        self.assertEqual(after["rows"][0]["counts"][after_keys["Johan"]], 0)
+        self.assertEqual(after["rows"][0]["counts"][after_keys["Sofia"]], 1)
 
     def test_followup_insights_dfp_team_total_includes_all_salespeople(self):
         customers = [
@@ -1127,6 +1172,10 @@ class PriorityTests(TestCase):
                 "customers_enriched": customers,
                 "order_rows": orders,
                 "sales_activities": [app_module.CONTACT_COLUMNS],
+                "users": _users(*(
+                    {"user_name": name, "name": name, "active": "Y", "admin": "N"}
+                    for name in ("Daniel", "Johan", "Sara", "Lisa")
+                )),
             }
         )
 
@@ -1180,6 +1229,7 @@ class PriorityTests(TestCase):
                 "customers_enriched": customers,
                 "order_rows": orders,
                 "sales_activities": [app_module.CONTACT_COLUMNS],
+                "users": _users(),
             }
         )
 
@@ -1730,6 +1780,13 @@ def _contact(customer, date_time, sales_person, result, follow_up_date="", comme
         "customer_contact_person": "",
         "follow_up_date": follow_up_date,
     }
+
+
+def _users(*rows):
+    return [
+        app_module.USER_COLUMNS,
+        *[_row(app_module.USER_COLUMNS, row) for row in rows],
+    ]
 
 
 def _row(columns, values):
