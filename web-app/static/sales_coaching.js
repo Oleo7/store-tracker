@@ -16,6 +16,23 @@
     filters: defaultFilters(),
   };
   const MATRIX_TICKS = [0, 25, 50, 75, 100];
+  const KPI_PRESENTATION = Object.freeze({
+    human_activities: {
+      explanation: "Alla mänskliga aktiviteter via besök, telefon och manuella mejl. Automatiska CRM-mejl räknas inte.",
+    },
+    reach: {
+      denominatorLabel: "analyserbara besök/telefonsamtal",
+      explanation: "Andelen analyserbara besök och telefonsamtal där säljaren faktiskt nådde kunden. Manuella mejl ingår inte i träffgraden.",
+    },
+    positive_dialogue: {
+      denominatorLabel: "nådda kontakter",
+      explanation: "Andelen nådda mänskliga kontakter som slutade i positiv dialog eller order. Ej anträffbar/bom räknas inte i nämnaren.",
+    },
+    positive_to_order_10d: {
+      denominatorLabel: "mogna positiva kontakter",
+      explanation: "Andelen positiva kontakter som följdes av en attribuerad order inom 0–10 dagar. Endast kontakter som hunnit få ett fullständigt 10-dagarsutfall ingår.",
+    },
+  });
 
   const root = document.getElementById("sales-coaching-dashboard");
   const businessPanel = document.getElementById("business-overview-content");
@@ -360,6 +377,12 @@
   function kpiMarkup(key, metric) {
     const isRate = metric.denominator !== undefined;
     const value = isRate ? percent(metric.value) : number(metric.value);
+    const presentation = KPI_PRESENTATION[key] || {};
+    const explanation = presentation.explanation || metric.definition || "";
+    const explanationId = `sc-kpi-explanation-${key}`;
+    const evidence = isRate
+      ? `<span class="sc-kpi-evidence"><span>${rateEvidence(metric)}</span><span class="sc-kpi-denominator">${escapeHtml(presentation.denominatorLabel || "kontakter")}</span></span>`
+      : "";
     let secondary = "";
     if (key === "human_activities") {
       secondary = `Unika kunder ${number(metric.unique_customers)} · Besök ${number(metric.channel_mix?.visit)} · Telefon ${number(metric.channel_mix?.phone)} · Manuellt mejl ${number(metric.channel_mix?.email)}`;
@@ -368,14 +391,18 @@
       secondary = `${number(metric.waiting_outcome_count)} väntar fortfarande på fullt 10-dagarsutfall`;
     }
     return `
-      <button type="button" class="sc-kpi-card" data-drilldown="${escapeHtml(metric.drilldown_metric)}" aria-label="${escapeHtml(metric.label)}: ${value}">
-        <span class="sc-kpi-header"><span class="sc-kpi-label">${escapeHtml(metric.label)}</span><span class="sc-kpi-info" title="${escapeHtml(metric.definition)}" aria-label="Definition: ${escapeHtml(metric.definition)}">i</span></span>
-        <span class="sc-kpi-value">${value}</span>
-        ${isRate ? `<span class="sc-kpi-evidence">${rateEvidence(metric)}</span>` : ""}
-        <span class="sc-status">${statusLabel(metric.status)}</span>
-        <span class="sc-kpi-comparison">${escapeHtml(comparisonText(metric))}</span>
-        ${secondary ? `<span class="sc-kpi-secondary">${secondary}</span>` : ""}
-      </button>`;
+      <article class="sc-kpi-card" data-kpi-key="${escapeHtml(key)}">
+        <button type="button" class="sc-kpi-main" data-drilldown="${escapeHtml(metric.drilldown_metric)}" aria-label="${escapeHtml(metric.label)}: ${value}">
+          <span class="sc-kpi-header"><span class="sc-kpi-label">${escapeHtml(metric.label)}</span></span>
+          <span class="sc-kpi-value">${value}</span>
+          ${evidence}
+          <span class="sc-status">${statusLabel(metric.status)}</span>
+          <span class="sc-kpi-comparison">${escapeHtml(comparisonText(metric))}</span>
+          ${secondary ? `<span class="sc-kpi-secondary">${secondary}</span>` : ""}
+        </button>
+        <button type="button" class="sc-kpi-info" data-sc-action="kpi-info" aria-expanded="false" aria-controls="${explanationId}" title="${escapeHtml(explanation)}" aria-label="Förklaring för ${escapeHtml(metric.label)}">i</button>
+        <p class="sc-kpi-explanation" id="${explanationId}" hidden>${escapeHtml(explanation)}</p>
+      </article>`;
   }
 
   function kpisMarkup(kpis) {
@@ -586,6 +613,15 @@
   }
 
   function handleDashboardClick(event) {
+    const kpiInfo = event.target.closest('[data-sc-action="kpi-info"]');
+    if (kpiInfo) {
+      const explanation = document.getElementById(kpiInfo.getAttribute("aria-controls"));
+      if (!explanation) return;
+      const expanded = kpiInfo.getAttribute("aria-expanded") === "true";
+      kpiInfo.setAttribute("aria-expanded", String(!expanded));
+      explanation.hidden = expanded;
+      return;
+    }
     const retry = event.target.closest('[data-sc-action="retry"]');
     if (retry) return void loadSummary();
     const editFilters = event.target.closest('[data-sc-action="edit-filters"]');

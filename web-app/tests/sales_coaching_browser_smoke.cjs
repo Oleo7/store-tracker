@@ -32,6 +32,34 @@ const viewport = mode === "mobile"
     await page.locator(".sc-kpi-card").first().waitFor();
     const kpiCount = await page.locator(".sc-kpi-card").count();
     if (kpiCount !== 4) throw new Error(`${mode}: expected 4 KPI cards, got ${kpiCount}`);
+    const expectedDenominators = [
+      "analyserbara besök/telefonsamtal",
+      "nådda kontakter",
+      "mogna positiva kontakter",
+    ];
+    const denominatorText = await page.locator(".sc-kpi-denominator").allInnerTexts();
+    for (const expected of expectedDenominators) {
+      if (!denominatorText.includes(expected)) {
+        throw new Error(`${mode}: missing KPI denominator explanation: ${expected}`);
+      }
+    }
+    const infoButtons = page.locator('.sc-kpi-info[data-sc-action="kpi-info"]');
+    if (await infoButtons.count() !== 4) {
+      throw new Error(`${mode}: expected four KPI information controls`);
+    }
+    for (let index = 0; index < 4; index += 1) {
+      const info = infoButtons.nth(index);
+      await info.click();
+      const explanationId = await info.getAttribute("aria-controls");
+      const explanation = page.locator(`#${explanationId}`);
+      if (!(await explanation.isVisible()) || !(await explanation.innerText()).trim()) {
+        throw new Error(`${mode}: KPI explanation ${index + 1} did not open`);
+      }
+      await info.click();
+      if (await explanation.isVisible()) {
+        throw new Error(`${mode}: KPI explanation ${index + 1} did not close`);
+      }
+    }
     const bodyText = await page.locator("body").innerText();
     if (bodyText.includes("Nästa bästa kunder")) {
       throw new Error(`${mode}: operational customer list leaked into sales coaching`);
