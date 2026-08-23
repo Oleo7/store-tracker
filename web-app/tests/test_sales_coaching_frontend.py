@@ -47,6 +47,40 @@ class SalesCoachingFrontendTests(TestCase):
             '"order_10d", "priority_focus", "bom_ratio"', self.javascript
         )
 
+    def test_main_kpis_explain_their_denominators_in_plain_swedish(self):
+        for expected in (
+            'denominatorLabel: "analyserbara besök/telefonsamtal"',
+            'denominatorLabel: "nådda kontakter"',
+            'denominatorLabel: "mogna positiva kontakter"',
+        ):
+            with self.subTest(expected=expected):
+                self.assertIn(expected, self.javascript)
+        self.assertIn("sc-kpi-denominator", self.javascript)
+        self.assertIn("flex-wrap: wrap", self.css)
+
+    def test_all_main_kpis_have_clickable_plain_language_explanations(self):
+        explanations = (
+            "Alla mänskliga aktiviteter via besök, telefon och manuella mejl. Automatiska CRM-mejl räknas inte.",
+            "Andelen analyserbara besök och telefonsamtal där säljaren faktiskt nådde kunden. Manuella mejl ingår inte i träffgraden.",
+            "Andelen nådda mänskliga kontakter som slutade i positiv dialog eller order. Ej anträffbar/bom räknas inte i nämnaren.",
+            "Andelen positiva kontakter som följdes av en attribuerad order inom 0–10 dagar. Endast kontakter som hunnit få ett fullständigt 10-dagarsutfall ingår.",
+        )
+        for explanation in explanations:
+            with self.subTest(explanation=explanation):
+                self.assertIn(explanation, self.javascript)
+        self.assertIn('data-sc-action="kpi-info"', self.javascript)
+        self.assertIn('aria-expanded="false"', self.javascript)
+        self.assertIn("explanation.hidden = expanded", self.javascript)
+        presentation = self.javascript.split(
+            "const KPI_PRESENTATION", 1
+        )[1].split("const root", 1)[0]
+        for internal_term in (
+            "mature cohort", "qualified dialogue", "attribution_eligible",
+            "historical_snapshot", "current_customer_state",
+        ):
+            with self.subTest(internal_term=internal_term):
+                self.assertNotIn(internal_term, presentation.lower())
+
     def test_frontend_uses_backend_rate_contract_without_recalculating_kpis(self):
         self.assertIn("percent(metric.value)", self.javascript)
         self.assertIn("rateEvidence(metric)", self.javascript)
