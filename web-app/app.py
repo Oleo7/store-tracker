@@ -367,9 +367,23 @@ PERFORMANCE_ENDPOINTS = {
     "/followup-insights",
     "/sales-coaching-insights",
     "/sales-coaching-insights/drilldown",
+    "/customers/<int:row>/email-proposal-draft",
+    "/customers/<int:row>/reminder-email-draft",
+    "/customers/<int:row>/email-proposal/send",
+    "/customers/<int:row>/reminder-email/send",
+    "/customers/<customer_name>/contacts",
     "/planning/activities",
+    "/planning/activities/<activity_id>",
     "/planning/suggestions",
+    "/planning/suggestions/<suggestion_id>/snooze",
+    "/planning/suggestions/<suggestion_id>/dismiss",
+    "/planning/suggestions/<suggestion_id>/plan",
+    "/planning/route-apply",
+    "/planning/route-import",
     "/planning/route-preview",
+    "/planning/route-preview-status",
+    "/route-proposal",
+    "/api/brevo/reconcile/<secret>",
     "/customers/<customer_name>/stats",
 }
 PERFORMANCE_SHEETS = {
@@ -694,6 +708,33 @@ _route_optimization_provider_lock = threading.Lock()
 _route_optimization_provider = None
 _route_optimization_provider_config = None
 _planning_write_lock = threading.RLock()
+_planning_write_lock_state = threading.local()
+
+
+@contextmanager
+def planning_write_lock():
+    """Acquire the existing planning RLock and time only the outer section."""
+    depth = getattr(_planning_write_lock_state, "depth", 0)
+    wait_started_at = time.perf_counter()
+    _planning_write_lock.acquire()
+    outermost = depth == 0
+    hold_started_at = time.perf_counter()
+    try:
+        if outermost:
+            record_performance_step(
+                "lock.wait.planning_write", wait_started_at
+            )
+        _planning_write_lock_state.depth = depth + 1
+        yield
+    finally:
+        try:
+            if outermost:
+                record_performance_step(
+                    "lock.hold.planning_write", hold_started_at
+                )
+        finally:
+            _planning_write_lock_state.depth = depth
+            _planning_write_lock.release()
 
 
 READ_CACHE_TITLES = {
@@ -876,7 +917,7 @@ def ensure_unique_worksheet_columns(sheet, headers, columns):
 
 
 def ensure_contact_worksheet_schema(sheet):
-    with _planning_write_lock:
+    with planning_write_lock():
         headers = ensure_worksheet_columns(
             sheet,
             read_with_retry(
@@ -978,15 +1019,18 @@ def cached_worksheet_values(sheet, spreadsheet=None):
         title not in READ_CACHE_TITLES
         or not sheet_cache_enabled(spreadsheet)
     ):
-        return read_with_retry(
+        values = read_with_retry(
             sheet.get_all_values,
             on_retry=_log_sheet_read_retry(f"values.{title or 'other'}"),
-        ), False
+        )
+        record_google_sheet_read(False)
+        return values, False
     values, cache_hit = _sheet_read_cache.values(
         spreadsheet,
         title,
         loader=sheet.get_all_values,
     )
+    record_google_sheet_read(cache_hit)
     return values, cache_hit
 
 
@@ -1128,7 +1172,7 @@ def get_or_create_worksheet(spreadsheet, title, columns, rows=1000):
 
 
 def ensure_planned_activities_worksheet(spreadsheet):
-    with _planning_write_lock:
+    with planning_write_lock():
         return get_or_create_worksheet(
             spreadsheet,
             PLANNED_ACTIVITIES_SHEET,
@@ -1137,8 +1181,22 @@ def ensure_planned_activities_worksheet(spreadsheet):
         )
 
 
-def get_planned_activity_snapshot(spreadsheet):
-    with _planning_write_lock:
+def read_planned_activity_snapshot(spreadsheet):
+    """Return the cached planning snapshot without locking or schema writes."""
+    try:
+        sheet = get_worksheet(spreadsheet, PLANNED_ACTIVITIES_SHEET)
+    except WorksheetNotFound:
+        return None, list(PLANNED_ACTIVITY_COLUMNS), []
+    headers, rows = worksheet_snapshot(
+        sheet,
+        expected_columns=PLANNED_ACTIVITY_COLUMNS,
+    )
+    return sheet, headers, rows
+
+
+def write_planned_activity_snapshot(spreadsheet):
+    """Ensure planning storage and snapshot it inside the planning write lock."""
+    with planning_write_lock():
         sheet = ensure_planned_activities_worksheet(spreadsheet)
         headers, rows = worksheet_snapshot(
             sheet,
@@ -1534,7 +1592,12 @@ def update_sheet_row(sheet, row_index, headers, updates):
         invalidate_sheet_for_write(sheet)
 
 
-def worksheet_snapshot(sheet, expected_columns=None):
+def worksheet_snapshot(
+    sheet,
+    expected_columns=None,
+    required_columns=None,
+    merge_duplicate_checkbox_columns=None,
+):
     with performance_step(_performance_sheet_step(sheet)) as measurement:
         values, cache_hit = cached_worksheet_values(sheet)
         measurement["row_count"] = max(0, len(values) - 1)
@@ -1544,12 +1607,36 @@ def worksheet_snapshot(sheet, expected_columns=None):
         max(0, len(values) - 1),
     )
     if not values:
+        if required_columns:
+            missing = ", ".join(required_columns)
+            raise ValueError(
+                f"Worksheet '{sheet.title}' saknar obligatoriska kolumner: {missing}"
+            )
         return list(expected_columns or []), []
     headers = [str(header).strip() for header in values[0]]
+    missing_columns = [
+        column for column in (required_columns or []) if column not in headers
+    ]
+    if missing_columns:
+        missing = ", ".join(missing_columns)
+        raise ValueError(
+            f"Worksheet '{sheet.title}' saknar obligatoriska kolumner: {missing}"
+        )
     rows = []
+    checkbox_columns = set(merge_duplicate_checkbox_columns or ())
     for row_index, row in enumerate(values[1:], start=2):
         padded = row + [""] * (len(headers) - len(row))
         item = dict(zip(headers, padded))
+        for column in checkbox_columns:
+            column_indexes = [
+                index for index, header in enumerate(headers) if header == column
+            ]
+            if len(column_indexes) > 1:
+                item[column] = (
+                    "1"
+                    if any(is_checked_value(padded[index]) for index in column_indexes)
+                    else ""
+                )
         if expected_columns:
             item = {column: item.get(column, "") for column in expected_columns}
         rows.append((row_index, item))
@@ -2491,7 +2578,7 @@ def active_planned_activity_queue_state(
 
 
 def find_planned_activity(spreadsheet, activity_id):
-    sheet, headers, rows = get_planned_activity_snapshot(spreadsheet)
+    sheet, headers, rows = write_planned_activity_snapshot(spreadsheet)
     requested = str(activity_id or "").strip()
     for row_index, row in rows:
         if str(row.get("planned_activity_id") or "").strip() == requested:
@@ -3168,7 +3255,7 @@ def planning_suggestion_stub_enabled():
 def planning_suggestion_service(spreadsheet):
     return PlanningSuggestionService(
         spreadsheet,
-        lock=_planning_write_lock,
+        lock=planning_write_lock,
         now=stockholm_now(),
         zone=STOCKHOLM_ZONE,
         worksheet_getter=get_worksheet,
@@ -3628,7 +3715,7 @@ def resolve_contact_planned_activity(
     if not customer_id or contact_at is None:
         return {"kind": "no_match"}
     contact_date = contact_at.astimezone(STOCKHOLM_ZONE).date()
-    _sheet, _headers, rows = get_planned_activity_snapshot(spreadsheet)
+    _sheet, _headers, rows = read_planned_activity_snapshot(spreadsheet)
     owner_name = normalize_key((owner or {}).get("user_name"))
 
     def is_same_activity_context(row):
@@ -5247,7 +5334,6 @@ def get_customers():
     with performance_step(_performance_sheet_step(sheet)) as measurement:
         all_rows, cache_hit = cached_worksheet_values(sheet, spreadsheet)
         measurement["row_count"] = max(0, len(all_rows) - 1)
-    record_google_sheet_read(cache_hit)
     headers = all_rows[0]
 
     customers = []
@@ -6210,7 +6296,7 @@ def get_customer_stats(customer_name):
         contact.pop("_sort_date", None)
 
     _activity_sheet, _activity_headers, indexed_activities = (
-        get_planned_activity_snapshot(spreadsheet)
+        read_planned_activity_snapshot(spreadsheet)
     )
     activity_rows = [row for _row_index, row in indexed_activities]
     next_follow_up = select_next_customer_follow_up(
@@ -6342,7 +6428,7 @@ def get_authoritative_priority_snapshot(
     )
     if planned_activity_rows is None:
         try:
-            _sheet, _headers, indexed = get_planned_activity_snapshot(
+            _sheet, _headers, indexed = read_planned_activity_snapshot(
                 spreadsheet
             )
             planned_activity_rows = [row for _index, row in indexed]
@@ -6841,7 +6927,7 @@ def suggestion_queue_payload(
 ):
     with performance_step("suggestions.activity_snapshot") as measurement:
         _activity_sheet, _activity_headers, indexed_activities = (
-            get_planned_activity_snapshot(spreadsheet)
+            read_planned_activity_snapshot(spreadsheet)
         )
         activity_rows = [row for _index, row in indexed_activities]
         measurement["row_count"] = len(activity_rows)
@@ -7035,7 +7121,7 @@ def mutate_planning_suggestion(suggestion_id, action):
         if owner_error is not None:
             return owner_error
         _activity_sheet, _activity_headers, indexed_activities = (
-            get_planned_activity_snapshot(spreadsheet)
+            write_planned_activity_snapshot(spreadsheet)
         )
         activity_rows = [item for _index, item in indexed_activities]
         live_candidate = suggestion_candidates_by_id(
@@ -7126,7 +7212,7 @@ def plan_planning_suggestion(suggestion_id):
     try:
         spreadsheet = get_spreadsheet_with_retry()
         service = planning_suggestion_service(spreadsheet)
-        with _planning_write_lock:
+        with planning_write_lock():
             if expected_revision == 0:
                 owner, owner_error = resolve_planning_owner(
                     spreadsheet, data.get("user_name")
@@ -7162,7 +7248,7 @@ def plan_planning_suggestion(suggestion_id):
                     409,
                 )
             _activity_sheet, _activity_headers, indexed_activities = (
-                get_planned_activity_snapshot(spreadsheet)
+                write_planned_activity_snapshot(spreadsheet)
             )
             activity_rows = [row for _index, row in indexed_activities]
             live_candidates = planning_suggestion_candidates(
@@ -7495,8 +7581,8 @@ def planning_activities():
                     field="source_contact_id",
                 )
 
-        with _planning_write_lock:
-            sheet, _headers, existing_rows = get_planned_activity_snapshot(
+        with planning_write_lock():
+            sheet, _headers, existing_rows = write_planned_activity_snapshot(
                 spreadsheet
             )
             create_request_scope = planning_request_scope(
@@ -7653,14 +7739,15 @@ def planning_activities():
         )
 
     try:
-        _sheet, _headers, activity_rows = get_planned_activity_snapshot(
+        _sheet, _headers, activity_rows = read_planned_activity_snapshot(
             spreadsheet
         )
         contact_sheet = get_worksheet(spreadsheet, "sales_activities")
-        ensure_contact_worksheet_schema(contact_sheet)
         _contact_headers, indexed_contacts = worksheet_snapshot(
             contact_sheet,
             expected_columns=CONTACT_COLUMNS,
+            required_columns=CONTACT_REQUIRED_COLUMNS,
+            merge_duplicate_checkbox_columns=FREEZER_COLUMNS,
         )
         planning_customers = get_customer_rows(spreadsheet)
     except Exception:
@@ -7991,7 +8078,7 @@ def update_planning_activity(activity_id):
                 409,
             )
 
-    with _planning_write_lock:
+    with planning_write_lock():
         sheet, headers, row_index, current = find_planned_activity(
             spreadsheet,
             activity_id,
@@ -9590,7 +9677,7 @@ def build_route_optimization_inputs(
 ):
     """Build one coherent, full-owner automatic optimization universe."""
     route_start_at = route_start_at_override or route_start_datetime(route_date)
-    _sheet, _headers, indexed_rows = get_planned_activity_snapshot(spreadsheet)
+    _sheet, _headers, indexed_rows = read_planned_activity_snapshot(spreadsheet)
     planned_rows = [row for _index, row in indexed_rows]
     snapshot = get_authoritative_priority_snapshot(
         spreadsheet,
@@ -11167,7 +11254,7 @@ def build_planning_route_preview(
     start,
     candidate_rows,
 ):
-    _sheet, _headers, all_rows = get_planned_activity_snapshot(spreadsheet)
+    _sheet, _headers, all_rows = read_planned_activity_snapshot(spreadsheet)
     customers = get_customer_rows(spreadsheet)
     customer_lookup = CustomerLookup(customers)
     customer_by_row = {
@@ -11705,8 +11792,8 @@ def apply_planning_route(
             )
         resolved_customers_by_id[customer_id] = matches[0]
 
-    with _planning_write_lock:
-        sheet, headers, all_rows = get_planned_activity_snapshot(spreadsheet)
+    with planning_write_lock():
+        sheet, headers, all_rows = write_planned_activity_snapshot(spreadsheet)
         date_rows = planning_rows_for_date(all_rows, owner, route_date)
         conflicting_request_rows = [
             row
@@ -12186,7 +12273,7 @@ def planning_route_import():
         )
     route_customers = get_customer_rows(spreadsheet)
     route_customer_lookup = CustomerLookup(route_customers)
-    _sheet, _headers, all_rows = get_planned_activity_snapshot(spreadsheet)
+    _sheet, _headers, all_rows = read_planned_activity_snapshot(spreadsheet)
     date_rows = planning_rows_for_date(all_rows, owner, route_date)
     active_date_rows = [
         (row_index, row)
@@ -13701,7 +13788,7 @@ def add_contact(customer_name):
     follow_up_activity = None
     partial_errors = []
 
-    with _planning_write_lock:
+    with planning_write_lock():
         if planned_activity_id:
             (
                 _live_planned_sheet,
@@ -13985,7 +14072,7 @@ def add_contact(customer_name):
         if follow_up_enabled and customer:
             try:
                 follow_sheet, _follow_headers, follow_rows = (
-                    get_planned_activity_snapshot(spreadsheet)
+                    write_planned_activity_snapshot(spreadsheet)
                 )
                 existing_follow_up = next(
                     (

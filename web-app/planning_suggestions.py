@@ -307,6 +307,9 @@ class PlanningSuggestionService:
         self.values_reader = values_reader
         self.invalidator = invalidator
 
+    def lock_context(self):
+        return self.lock() if callable(self.lock) else self.lock
+
     def ensure_schema(self):
         suggestion_sheet = _get_or_create(
             self.spreadsheet, SUGGESTIONS_SHEET, SUGGESTION_COLUMNS, 2000,
@@ -485,7 +488,7 @@ class PlanningSuggestionService:
         materialize_top=True,
     ):
         """Reconcile stored state, sparsely materialize only the visible top row."""
-        with self.lock:
+        with self.lock_context():
             sheet, events, headers, stored = self.snapshot()
             owner_key = _key(owner.get("user_name"))
             stored_by_id = {
@@ -684,7 +687,7 @@ class PlanningSuggestionService:
 
     def materialize_candidate(self, owner, candidate):
         """Materialize exactly one recomputed candidate for revision-zero planning."""
-        with self.lock:
+        with self.lock_context():
             sheet, events, headers, stored = self.snapshot()
             row = self._candidate_row(owner, candidate)
             matches = [
@@ -765,7 +768,7 @@ class PlanningSuggestionService:
         }
         if action not in targets:
             raise SuggestionError("invalid_suggestion_transition", "Ogiltig statusövergång.")
-        with self.lock:
+        with self.lock_context():
             sheet, events, headers, row_index, row = self.find(suggestion_id)
             if _key(row.get("user_name")) != _key(owner_name):
                 raise SuggestionError(
@@ -858,7 +861,7 @@ class PlanningSuggestionService:
 
     def resolve_customer(self, *, owner_name, customer_id, resolved_by_type,
                          resolved_by_id, request_id):
-        with self.lock:
+        with self.lock_context():
             sheet, events, headers, rows = self.snapshot()
             changed = []
             for row_index, row in rows:
