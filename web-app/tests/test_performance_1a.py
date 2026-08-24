@@ -3,6 +3,8 @@ import logging
 import os
 from pathlib import Path
 import sys
+import threading
+import time
 from unittest import TestCase
 from unittest.mock import patch
 
@@ -21,6 +23,8 @@ class Performance1ATests(TestCase):
 
     def setUp(self):
         app_module.app.config.update(TESTING=True, SECRET_KEY="performance-1a-test")
+        app_module._sheet_read_cache.clear()
+        self.addCleanup(app_module._sheet_read_cache.clear)
         current_user_patcher = patch.object(
             app_module,
             "current_user",
@@ -28,6 +32,104 @@ class Performance1ATests(TestCase):
         )
         current_user_patcher.start()
         self.addCleanup(current_user_patcher.stop)
+
+    def _run_customer_cache_contention(self, *, invalidate_during_load=False):
+        spreadsheet = default_spreadsheet()
+        spreadsheet._store_tracker_enable_read_cache = True
+        # Keep the request focused on the contended customers dataset.
+        app_module.get_contact_rows(spreadsheet)
+        sheet = spreadsheet.worksheet("customers_enriched")
+        original_loader = sheet.get_all_values
+        loader_started = threading.Event()
+        release_loader = threading.Event()
+        waiter_waiting = threading.Event()
+        calls = 0
+        clock_counts = {}
+        clock_values = {}
+        clock_lock = threading.Lock()
+        original_clock = app_module._sheet_read_cache.monotonic
+
+        def monitored_clock():
+            name = threading.current_thread().name
+            with clock_lock:
+                count = clock_counts.get(name, 0) + 1
+                clock_counts[name] = count
+                value = max(time.monotonic(), clock_values.get(name, 0.0))
+                if name == "cache-waiter" and count == 2:
+                    waiter_waiting.set()
+                elif name == "cache-waiter" and count == 3:
+                    value = max(value, clock_values[name] + 0.125)
+                clock_values[name] = value
+                return value
+
+        def load():
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                loader_started.set()
+                self.assertTrue(release_loader.wait(2))
+            return original_loader()
+
+        responses = {}
+        errors = []
+
+        def request_customers(name):
+            try:
+                responses[name] = app_module.app.test_client().get("/customers")
+            except Exception as error:
+                errors.append(error)
+
+        sheet.get_all_values = load
+        app_module._sheet_read_cache.monotonic = monitored_clock
+        try:
+            with patch.dict(
+                os.environ,
+                {"PERFORMANCE_LOGGING_ENABLED": "true"},
+                clear=False,
+            ), patch.object(
+                app_module,
+                "get_spreadsheet_with_retry",
+                return_value=spreadsheet,
+            ), self.assertLogs(
+                app_module.PERFORMANCE_LOGGER_NAME,
+                level=logging.INFO,
+            ) as captured:
+                loader_thread = threading.Thread(
+                    target=request_customers,
+                    args=("loader",),
+                    name="cache-loader",
+                )
+                waiter_thread = threading.Thread(
+                    target=request_customers,
+                    args=("waiter",),
+                    name="cache-waiter",
+                )
+                loader_thread.start()
+                self.assertTrue(loader_started.wait(2))
+                waiter_thread.start()
+                self.assertTrue(waiter_waiting.wait(2))
+                if invalidate_during_load:
+                    app_module._sheet_read_cache.invalidate(
+                        spreadsheet, "customers_enriched"
+                    )
+                release_loader.set()
+                loader_thread.join(2)
+                waiter_thread.join(2)
+                self.assertFalse(loader_thread.is_alive())
+                self.assertFalse(waiter_thread.is_alive())
+                responses["immediate"] = app_module.app.test_client().get(
+                    "/customers"
+                )
+        finally:
+            sheet.get_all_values = original_loader
+            app_module._sheet_read_cache.monotonic = original_clock
+
+        self.assertFalse(errors)
+        self.assertEqual(
+            {response.status_code for response in responses.values()}, {200}
+        )
+        records = [json.loads(record.getMessage()) for record in captured.records]
+        return records, calls, captured.output
 
     def test_customer_list_renders_before_slow_or_failed_insights(self):
         start = self.html.index("function loadCustomers()")
@@ -146,6 +248,81 @@ class Performance1ATests(TestCase):
         self.assertFalse(app_module.performance_logger.propagate)
         self.assertEqual(handlers[0].level, logging.INFO)
         self.assertIs(handlers[0].stream, sys.stdout)
+
+    def test_waited_hit_emits_wait_without_counting_physical_read(self):
+        records, calls, output = self._run_customer_cache_contention()
+        wait_records = [
+            record for record in records
+            if record["step"] == "sheets.cache.wait.customers_enriched"
+        ]
+        self.assertEqual(calls, 1)
+        self.assertEqual(len(wait_records), 1)
+        self.assertGreater(wait_records[0]["duration_ms"], 0)
+        waiter_request_id = wait_records[0]["request_id"]
+        waiter_records = [
+            record for record in records
+            if record["request_id"] == waiter_request_id
+        ]
+        self.assertEqual(
+            {record["google_sheets_read_count"] for record in waiter_records},
+            {0},
+        )
+        self.assertIn(
+            "sheets.cache.hit",
+            {record["step"] for record in waiter_records},
+        )
+        request_ids_with_wait = {
+            record["request_id"] for record in records
+            if record["step"].startswith("sheets.cache.wait.")
+        }
+        immediate_ids = {
+            record["request_id"] for record in records
+            if record["step"] == "total"
+            and record["google_sheets_read_count"] == 0
+            and record["request_id"] not in request_ids_with_wait
+        }
+        self.assertEqual(len(immediate_ids), 1)
+        self.assertNotIn("Butik A", " ".join(output))
+
+    def test_wait_then_loader_and_store_skipped_telemetry_are_exact(self):
+        records, calls, output = self._run_customer_cache_contention(
+            invalidate_during_load=True
+        )
+        self.assertEqual(calls, 2)
+        wait_records = [
+            record for record in records
+            if record["step"] == "sheets.cache.wait.customers_enriched"
+        ]
+        skipped_records = [
+            record for record in records
+            if record["step"]
+            == "sheets.cache.store_skipped.customers_enriched"
+        ]
+        self.assertEqual(len(wait_records), 1)
+        self.assertGreater(wait_records[0]["duration_ms"], 0)
+        self.assertEqual(len(skipped_records), 1)
+        self.assertEqual(skipped_records[0]["duration_ms"], 0)
+        waiter_request_id = wait_records[0]["request_id"]
+        skipped_request_id = skipped_records[0]["request_id"]
+        for request_id in (waiter_request_id, skipped_request_id):
+            request_records = [
+                record for record in records
+                if record["request_id"] == request_id
+            ]
+            self.assertEqual(
+                {
+                    record["google_sheets_read_count"]
+                    for record in request_records
+                },
+                {1},
+            )
+        serialized = " ".join(output)
+        for forbidden in (
+            "Butik A",
+            "11111111-1111-4111-8111-111111111111",
+            "performance-test",
+        ):
+            self.assertNotIn(forbidden, serialized)
 
 
 if __name__ == "__main__":

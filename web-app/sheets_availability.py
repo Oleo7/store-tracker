@@ -75,6 +75,15 @@ class _Entry:
     rows: tuple
 
 
+@dataclass(frozen=True)
+class CacheReadInfo:
+    cache_hit: bool
+    waited_seconds: float
+    performed_load: bool
+    stored: bool
+    invalidated_during_load: bool
+
+
 class SheetReadCache:
     """Thread-safe TTL cache with per-dataset single-flight loading."""
 
@@ -86,6 +95,9 @@ class SheetReadCache:
         self._loading = set()
         self._worksheets = {}
         self._generation = 0
+        self._global_epoch = 0
+        self._spreadsheet_epochs = {}
+        self._dataset_generations = {}
 
     @property
     def generation(self):
@@ -100,6 +112,26 @@ class SheetReadCache:
     def _copy(rows):
         return [list(row) for row in rows]
 
+    def _version_token(self, key):
+        spreadsheet_id, _title = key
+        return (
+            self._global_epoch,
+            self._spreadsheet_epochs.get(spreadsheet_id, 0),
+            self._dataset_generations.get(key, 0),
+        )
+
+    def generation_signature(self, spreadsheet, titles):
+        spreadsheet_id = id(spreadsheet)
+        normalized = sorted({str(title) for title in titles if str(title)})
+        with self._condition:
+            return tuple(
+                (
+                    title,
+                    self._version_token((spreadsheet_id, title)),
+                )
+                for title in normalized
+            )
+
     def worksheet(self, spreadsheet, title, *, loader=None):
         key = self._dataset_key(spreadsheet, title)
         with self._condition:
@@ -111,44 +143,90 @@ class SheetReadCache:
         with self._condition:
             return self._worksheets.setdefault(key, sheet)
 
-    def values(self, spreadsheet, title, *, loader):
+    def values_with_info(self, spreadsheet, title, *, loader):
         key = self._dataset_key(spreadsheet, title)
+        waited_seconds = 0.0
         with self._condition:
             while True:
                 now = self.monotonic()
                 entry = self._entries.get(key)
                 if entry is not None and entry.expires_at > now:
-                    return self._copy(entry.rows), True
+                    return self._copy(entry.rows), CacheReadInfo(
+                        cache_hit=True,
+                        waited_seconds=waited_seconds,
+                        performed_load=False,
+                        stored=False,
+                        invalidated_during_load=False,
+                    )
                 if key not in self._loading:
                     self._loading.add(key)
-                    load_generation = self._generation
+                    load_token = self._version_token(key)
                     break
+                wait_started_at = self.monotonic()
                 self._condition.wait()
+                waited_seconds += max(
+                    0.0, self.monotonic() - wait_started_at
+                )
         try:
             loaded = read_with_retry(loader)
             frozen = tuple(tuple(cell for cell in row) for row in (loaded or []))
             with self._condition:
-                if self._generation == load_generation:
+                stored = self._version_token(key) == load_token
+                if stored:
                     self._entries[key] = _Entry(
                         expires_at=self.monotonic() + self.ttl_seconds,
                         rows=frozen,
                     )
-            return self._copy(frozen), False
+            return self._copy(frozen), CacheReadInfo(
+                cache_hit=False,
+                waited_seconds=waited_seconds,
+                performed_load=True,
+                stored=stored,
+                invalidated_during_load=not stored,
+            )
         finally:
             with self._condition:
                 self._loading.discard(key)
                 self._condition.notify_all()
 
+    def values(self, spreadsheet, title, *, loader):
+        rows, info = self.values_with_info(
+            spreadsheet, title, loader=loader
+        )
+        return rows, info.cache_hit
+
     def invalidate(self, spreadsheet=None, *titles, worksheets=False):
         normalized = {str(title) for title in titles if str(title)}
         spreadsheet_id = id(spreadsheet) if spreadsheet is not None else None
         with self._condition:
-            for key in list(self._entries):
-                if spreadsheet_id is not None and key[0] != spreadsheet_id:
-                    continue
-                if normalized and key[1] not in normalized:
-                    continue
-                self._entries.pop(key, None)
+            if spreadsheet_id is None and not normalized:
+                self._global_epoch += 1
+                self._entries.clear()
+            elif spreadsheet_id is not None and not normalized:
+                self._spreadsheet_epochs[spreadsheet_id] = (
+                    self._spreadsheet_epochs.get(spreadsheet_id, 0) + 1
+                )
+                for key in list(self._entries):
+                    if key[0] == spreadsheet_id:
+                        self._entries.pop(key, None)
+            else:
+                known_keys = set(self._entries)
+                known_keys.update(self._loading)
+                known_keys.update(self._worksheets)
+                known_keys.update(self._dataset_generations)
+                if spreadsheet_id is not None:
+                    target_keys = {
+                        (spreadsheet_id, title) for title in normalized
+                    }
+                else:
+                    target_keys = {
+                        key for key in known_keys if key[1] in normalized
+                    }
+                for key in target_keys:
+                    self._entries.pop(key, None)
+                    self._dataset_generations[key] = (
+                        self._dataset_generations.get(key, 0) + 1
+                    )
             if worksheets:
                 for key in list(self._worksheets):
                     if spreadsheet_id is not None and key[0] != spreadsheet_id:

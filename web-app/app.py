@@ -412,26 +412,37 @@ def _performance_endpoint():
     return rule if rule in PERFORMANCE_ENDPOINTS else ""
 
 
-def _performance_sheet_step(sheet):
+def _performance_sheet_name(sheet):
     title = str(getattr(sheet, "title", "") or "").strip()
-    safe_title = title if title in PERFORMANCE_SHEETS else "other"
-    return f"sheets.read.{safe_title}"
+    return title if title in PERFORMANCE_SHEETS else "other"
+
+
+def _performance_sheet_step(sheet):
+    return f"sheets.read.{_performance_sheet_name(sheet)}"
 
 
 def record_performance_step(step, started_at, row_count=None):
+    record_performance_duration(
+        step,
+        time.perf_counter() - started_at,
+        row_count=row_count,
+    )
+
+
+def record_performance_duration(step, duration_seconds, row_count=None):
     if not performance_logging_enabled() or not has_request_context():
         return
     if not getattr(g, "performance_request_id", ""):
         return
     g.performance_steps.append({
         "step": str(step),
-        "duration_ms": round((time.perf_counter() - started_at) * 1000, 1),
+        "duration_ms": round(max(0.0, duration_seconds) * 1000, 1),
         "row_count": row_count,
     })
 
 
-def record_google_sheet_read(cache_hit):
-    if not cache_hit and has_request_context() and getattr(
+def record_google_sheet_read(performed_load):
+    if performed_load and has_request_context() and getattr(
         g, "performance_request_id", ""
     ):
         g.google_sheets_read_count += 1
@@ -750,6 +761,14 @@ READ_CACHE_TITLES = {
     "score_events",
     ROUTE_OPTIMIZATION_RUNS_SHEET,
 }
+PRIORITY_SNAPSHOT_CACHE_TITLES = frozenset({
+    "customers_enriched",
+    "order_rows",
+    "sales_activities",
+    "email_messages",
+    "email_recipients",
+    "planned_activities",
+})
 
 
 def route_engine_name(environ=None):
@@ -1023,15 +1042,26 @@ def cached_worksheet_values(sheet, spreadsheet=None):
             sheet.get_all_values,
             on_retry=_log_sheet_read_retry(f"values.{title or 'other'}"),
         )
-        record_google_sheet_read(False)
+        record_google_sheet_read(True)
         return values, False
-    values, cache_hit = _sheet_read_cache.values(
+    values, read_info = _sheet_read_cache.values_with_info(
         spreadsheet,
         title,
         loader=sheet.get_all_values,
     )
-    record_google_sheet_read(cache_hit)
-    return values, cache_hit
+    safe_title = _performance_sheet_name(sheet)
+    if read_info.waited_seconds > 0:
+        record_performance_duration(
+            f"sheets.cache.wait.{safe_title}",
+            read_info.waited_seconds,
+        )
+    if read_info.performed_load and read_info.invalidated_during_load:
+        record_performance_duration(
+            f"sheets.cache.store_skipped.{safe_title}",
+            0.0,
+        )
+    record_google_sheet_read(read_info.performed_load)
+    return values, read_info.cache_hit
 
 
 def invalidate_priority_snapshot():
@@ -1043,7 +1073,7 @@ def invalidate_priority_snapshot():
 
 def invalidate_sheet_cache(spreadsheet, *titles, worksheets=False):
     _sheet_read_cache.invalidate(spreadsheet, *titles, worksheets=worksheets)
-    if set(titles) & READ_CACHE_TITLES:
+    if not titles or set(titles) & PRIORITY_SNAPSHOT_CACHE_TITLES:
         invalidate_priority_snapshot()
 
 
@@ -6422,8 +6452,11 @@ def get_authoritative_priority_snapshot(
     global _priority_snapshot_entry
     date_key = today.isoformat() if isinstance(today, date) else str(today)
     cache_enabled = sheet_cache_enabled(spreadsheet)
-    generation = (
-        _sheet_read_cache.generation
+    dependency_signature = (
+        _sheet_read_cache.generation_signature(
+            spreadsheet,
+            PRIORITY_SNAPSHOT_CACHE_TITLES,
+        )
         if cache_enabled else time.monotonic_ns()
     )
     if planned_activity_rows is None:
@@ -6443,7 +6476,7 @@ def get_authoritative_priority_snapshot(
         planned_activity_rows
     )
     key = (
-        id(spreadsheet), date_key, generation, planning_signature,
+        id(spreadsheet), date_key, dependency_signature, planning_signature,
         planning_time_signature,
     )
     with _priority_snapshot_condition:
@@ -6481,8 +6514,18 @@ def get_authoritative_priority_snapshot(
             "recipient_rows": recipient_rows,
             "planned_activity_rows": list(planned_activity_rows or ()),
         }
+        current_dependency_signature = (
+            _sheet_read_cache.generation_signature(
+                spreadsheet,
+                PRIORITY_SNAPSHOT_CACHE_TITLES,
+            )
+            if cache_enabled else None
+        )
         with _priority_snapshot_condition:
-            if cache_enabled and _sheet_read_cache.generation == generation:
+            if (
+                cache_enabled
+                and current_dependency_signature == dependency_signature
+            ):
                 _priority_snapshot_entry = (key, copy.deepcopy(payload))
         return copy.deepcopy(payload)
     finally:
