@@ -133,7 +133,9 @@ class SignalRuleTests(TestCase):
         signals = self.signals(seller_metrics(
             positive_next_step_coverage=rate(.50, peer=.40),
         ))
-        self.assertIn("followup_gap", {item["code"] for item in signals})
+        follow_up = next(item for item in signals if item["code"] == "followup_gap")
+        self.assertEqual(follow_up["title"], "Positiva kontakter saknar nästa steg")
+        self.assertNotIn("positiva dialoger", follow_up["next_action"].casefold())
 
     def test_follow_up_below_absolute_standard_cannot_be_peer_strength(self):
         signals = self.signals(seller_metrics(
@@ -174,9 +176,19 @@ class SignalRuleTests(TestCase):
         self.assertEqual(activity["evidence"]["metric_type"], "count")
         self.assertEqual(activity["evidence"]["unit"], "aktiviteter")
         self.assertIn("10 aktiviteter", activity["benchmark"]["label"])
+        self.assertIn("Median övriga säljare", activity["benchmark"]["label"])
+        self.assertNotIn("Peer median", activity["benchmark"]["label"])
         self.assertIn("-", activity["benchmark"]["label"])
         self.assertNotIn("%", activity["benchmark"]["label"])
         self.assertNotIn("pp", activity["benchmark"]["label"])
+
+    def test_rate_benchmark_uses_self_excluding_swedish_label(self):
+        signal = self.signals(seller_metrics(
+            positive_dialogue=rate(.80, peer=.60),
+        ))[0]
+
+        self.assertIn("Median övriga säljare 60.0%", signal["benchmark"]["label"])
+        self.assertNotIn("Peer median", signal["benchmark"]["label"])
 
     def test_planning_below_absolute_standard_cannot_be_peer_strength(self):
         signals = self.signals(seller_metrics(
@@ -345,6 +357,8 @@ class SignalRuleTests(TestCase):
         )
 
         self.assertEqual(cards[0]["code"], "team_followup_gap")
+        self.assertEqual(cards[0]["title"], "Teamets positiva kontakter saknar nästa steg")
+        self.assertNotIn("positiva dialoger", cards[0]["next_action"].casefold())
         self.assertNotIn("peer_median", cards[0]["benchmark"])
 
 

@@ -104,7 +104,7 @@ class SalesCoachingAccessTests(TestCase):
         self.assertEqual(
             set(payload),
             {
-                "meta", "options", "data_quality", "kpis",
+                "meta", "options", "data_quality", "metric_definitions", "kpis",
                 "seller_comparison", "team_comparison", "coaching_matrix",
                 "coaching_matrices", "funnel", "outcome_10d",
                 "weekly_trend", "visit_efficiency", "channel_effectiveness",
@@ -117,6 +117,7 @@ class SalesCoachingAccessTests(TestCase):
         self.assertIn("quality_issue_count", payload["data_quality"])
         self.assertIn("core_analytics", payload["data_quality"])
         self.assertIn("historical_priority", payload["data_quality"])
+        self.assertIn("positive_dialogue", payload["metric_definitions"])
         self.assertNotIn("admin", payload["options"]["sellers"])
         self.assertEqual(
             payload["team_comparison"]["sellers"],

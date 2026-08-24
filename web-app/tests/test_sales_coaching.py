@@ -9,6 +9,8 @@ sys.path.insert(0, str(WEB_APP_DIR))
 
 from sales_coaching import (  # noqa: E402
     ANALYTICS_SNAPSHOT_VERSION,
+    MAIN_KPI_KEYS,
+    METRIC_DEFINITIONS,
     PRIORITY_PERCENTILE_BASIS,
     CustomerIdentityIndex,
     attribute_orders_to_contacts,
@@ -266,7 +268,114 @@ class SnapshotAndAggregateTests(TestCase):
         self.assertEqual(summary["funnel"]["attempts"], 1)
         self.assertEqual(summary["funnel"]["reached"], 1)
         self.assertEqual(summary["funnel"]["positive"], 0)
-        self.assertEqual(summary["channel_effectiveness"]["email"]["positive_dialogue"]["numerator"], 1)
+        self.assertEqual(sum(week["positive"] for week in summary["weekly_trend"]), 0)
+        email_dialogue = summary["channel_effectiveness"]["email"]["positive_dialogue"]
+        self.assertEqual((email_dialogue["numerator"], email_dialogue["denominator"]), (0, 0))
+        self.assertIsNone(email_dialogue["value"])
+        self.assertEqual(email_dialogue["status"], "not_computable")
+        email_closing = summary["channel_effectiveness"]["email"]["positive_to_order_10d"]
+        self.assertEqual((email_closing["numerator"], email_closing["denominator"]), (0, 0))
+        self.assertIsNone(email_closing["value"])
+        self.assertEqual(email_closing["status"], "not_computable")
+
+    def test_positive_to_order_excludes_email_but_includes_visit_and_phone(self):
+        customers = CUSTOMERS + [{
+            "customer": "Tredje butiken",
+            "customer_id": "customer-3",
+            "customer_number": "300",
+            "sales_person": "Olle",
+            "customer_segment": "A",
+        }]
+        phone = activity(
+            "phone-positive", "2026-08-01 10:00",
+            customer_id="customer-1", result="Positiv",
+        )
+        email = activity(
+            "email-positive", "2026-08-03 10:00",
+            customer_id="customer-2", customer="Andra butiken",
+            channel="Mejl", result="Positiv",
+        )
+        visit = activity(
+            "visit-positive", "2026-08-05 10:00",
+            customer_id="customer-3", customer="Tredje butiken",
+            channel="Besök", result="Positiv",
+        )
+        phone_order = order("PHONE", "2026-08-02", customer_id="customer-1")
+        email_order = order(
+            "EMAIL", "2026-08-04", customer_id="customer-2",
+            customer="Andra butiken",
+        )
+        visit_order = order(
+            "VISIT", "2026-08-06", customer_id="customer-3",
+            customer="Tredje butiken",
+        )
+        visit_order["Customer number"] = "300"
+
+        phone_summary = self.summary(
+            [phone], [phone_order], customers=customers,
+        )
+        email_summary = self.summary(
+            [phone, email], [phone_order, email_order], customers=customers,
+        )
+        visit_summary = self.summary(
+            [phone, email, visit],
+            [phone_order, email_order, visit_order],
+            customers=customers,
+        )
+
+        self.assertEqual(
+            (phone_summary["kpis"]["positive_to_order_10d"]["numerator"],
+             phone_summary["kpis"]["positive_to_order_10d"]["denominator"]),
+            (1, 1),
+        )
+        self.assertEqual(
+            (email_summary["kpis"]["positive_to_order_10d"]["numerator"],
+             email_summary["kpis"]["positive_to_order_10d"]["denominator"]),
+            (1, 1),
+        )
+        self.assertEqual(
+            (visit_summary["kpis"]["positive_to_order_10d"]["numerator"],
+             visit_summary["kpis"]["positive_to_order_10d"]["denominator"]),
+            (2, 2),
+        )
+        email_channel = visit_summary["channel_effectiveness"]["email"]
+        self.assertEqual(
+            (email_channel["positive_to_order_10d"]["numerator"],
+             email_channel["positive_to_order_10d"]["denominator"]),
+            (0, 0),
+        )
+        self.assertEqual(email_channel["positive_to_order_10d"]["status"], "not_computable")
+        self.assertEqual(
+            (email_channel["order_10d"]["numerator"], email_channel["order_10d"]["denominator"]),
+            (1, 1),
+        )
+        self.assertEqual(email_channel["attributed_orders"], 1)
+        self.assertEqual(email_channel["dfp"], 1)
+        self.assertEqual(email_channel["order_value_by_currency"], {"SEK": 100.0})
+        closing_rows = build_drilldown(visit_summary, "positive_to_order_10d")["rows"]
+        self.assertEqual(
+            {row["contact_id"] for row in closing_rows},
+            {"phone-positive", "visit-positive"},
+        )
+        self.assertEqual({row["channel"] for row in closing_rows}, {"visit", "phone"})
+
+        waiting_summary = self.summary(
+            [
+                phone,
+                activity(
+                    "email-waiting", "2026-08-15 10:00",
+                    customer_id="customer-2", customer="Andra butiken",
+                    channel="Mejl", result="Positiv",
+                ),
+            ],
+            [phone_order],
+            customers=customers,
+        )
+        self.assertEqual(
+            waiting_summary["kpis"]["positive_to_order_10d"]["waiting_outcome_count"],
+            0,
+        )
+        self.assertEqual(waiting_summary["outcome_10d"]["waiting_outcome_count"], 1)
 
     def test_positive_drilldowns_match_kpi_and_synchronous_populations(self):
         summary = self.summary([
@@ -275,15 +384,336 @@ class SnapshotAndAggregateTests(TestCase):
             activity("unknown-channel", "2026-08-03 10:00", channel="SMS", result="Positiv"),
         ])
 
-        self.assertEqual(summary["kpis"]["positive_dialogue"]["numerator"], 2)
+        self.assertEqual(summary["kpis"]["positive_dialogue"]["numerator"], 1)
         self.assertEqual(
             {row["contact_id"] for row in build_drilldown(summary, "positive_dialogue")["rows"]},
-            {"manual-email", "sync-positive"},
+            {"sync-positive"},
         )
         self.assertEqual(
             [row["contact_id"] for row in build_drilldown(summary, "positive_sync")["rows"]],
             ["sync-positive"],
         )
+
+    def test_positive_dialogue_uses_only_reached_visits_and_phone_calls(self):
+        base = [
+            activity("phone-neutral", "2026-08-01 10:00", channel="Telefon", result="Neutral"),
+        ]
+        email_added = base + [
+            activity("email-positive", "2026-08-02 10:00", channel="Mejl", result="Positiv"),
+        ]
+        phone_added = email_added + [
+            activity("phone-positive", "2026-08-03 10:00", channel="Telefon", result="Positiv"),
+        ]
+        visit_added = phone_added + [
+            activity("visit-positive", "2026-08-04 10:00", channel="Besök", result="Positiv"),
+            activity("visit-bom", "2026-08-05 10:00", channel="Besök", result="Ej anträffbar"),
+        ]
+
+        base_metric = self.summary(base)["kpis"]["positive_dialogue"]
+        email_metric = self.summary(email_added)["kpis"]["positive_dialogue"]
+        phone_metric = self.summary(phone_added)["kpis"]["positive_dialogue"]
+        visit_metric = self.summary(visit_added)["kpis"]["positive_dialogue"]
+
+        self.assertEqual((base_metric["numerator"], base_metric["denominator"]), (0, 1))
+        self.assertEqual((email_metric["numerator"], email_metric["denominator"]), (0, 1))
+        self.assertEqual((phone_metric["numerator"], phone_metric["denominator"]), (1, 2))
+        self.assertEqual((visit_metric["numerator"], visit_metric["denominator"]), (2, 3))
+        self.assertEqual(visit_metric["value"], .6667)
+
+    def test_positive_dialogue_drilldown_reconciles_numerator_and_denominator(self):
+        summary = self.summary([
+            activity("phone-positive", "2026-08-01 10:00", channel="Telefon", result="Positiv"),
+            activity("visit-neutral", "2026-08-02 10:00", channel="Besök", result="Neutral"),
+            activity("phone-negative", "2026-08-03 10:00", channel="Telefon", result="Negativ"),
+            activity("email-positive", "2026-08-04 10:00", channel="Mejl", result="Positiv"),
+            activity("visit-bom", "2026-08-05 10:00", channel="Besök", result="Ej anträffbar"),
+        ])
+
+        metric = summary["kpis"]["positive_dialogue"]
+        drilldown = build_drilldown(summary, "positive_dialogue")
+        roles = [row["cohort_role"] for row in drilldown["rows"]]
+
+        self.assertEqual((metric["numerator"], metric["denominator"]), (1, 3))
+        self.assertEqual(drilldown["total_count"], metric["denominator"])
+        self.assertEqual(roles.count("numerator"), metric["numerator"])
+        self.assertEqual(roles.count("denominator_only"), 2)
+        self.assertEqual(
+            {row["channel"] for row in drilldown["rows"]}, {"visit", "phone"}
+        )
+
+    def test_email_filter_makes_synchronous_dialogue_metrics_not_computable(self):
+        summary = self.summary(
+            [activity("email-positive", "2026-08-01 10:00", channel="Mejl", result="Positiv")],
+            channel="email",
+        )
+
+        for key in ("positive_dialogue", "positive_to_order_10d"):
+            with self.subTest(key=key):
+                metric = summary["kpis"][key]
+                self.assertEqual((metric["numerator"], metric["denominator"]), (0, 0))
+                self.assertIsNone(metric["value"])
+                self.assertEqual(metric["status"], "not_computable")
+                channel_metric = summary["channel_effectiveness"]["email"][key]
+                self.assertEqual(channel_metric["status"], "not_computable")
+
+    def test_positive_dialogue_contract_propagates_to_comparison_matrix_previous_and_rules(self):
+        rows = []
+        users = [
+            {"user_name": seller, "active": "Y", "admin": "N"}
+            for seller in ("sofia", "olle", "maja")
+        ]
+        for seller, current_positive, previous_positive, email_positive in (
+            ("sofia", 2, 4, 8),
+            ("olle", 6, 5, 0),
+            ("maja", 8, 7, 0),
+        ):
+            for index in range(10):
+                rows.append(activity(
+                    f"{seller}-current-{index}",
+                    f"2026-08-{index + 1:02d} 10:00",
+                    seller=seller,
+                    result="Positiv" if index < current_positive else "Neutral",
+                ))
+                rows.append(activity(
+                    f"{seller}-previous-{index}",
+                    f"2026-07-{12 + index:02d} 10:00",
+                    seller=seller,
+                    result="Positiv" if index < previous_positive else "Neutral",
+                ))
+            for index in range(email_positive):
+                rows.append(activity(
+                    f"{seller}-email-{index}",
+                    f"2026-08-{index + 1:02d} 12:00",
+                    seller=seller,
+                    channel="Mejl",
+                    result="Positiv",
+                ))
+
+        summary = self.summary(rows, users=users, seller="sofia")
+        comparison = {
+            item["seller"]: item for item in summary["seller_comparison"]
+        }
+        matrix_seller = next(
+            item for item in summary["coaching_matrices"]["sales"]["sellers"]
+            if item["seller"] == "sofia"
+        )
+        positive_card = next(
+            card for card in summary["coaching_cards"]
+            if card["metric_key"] == "positive_dialogue"
+        )
+
+        self.assertEqual(comparison["sofia"]["positive_dialogue"]["value"], .2)
+        self.assertEqual(comparison["sofia"]["positive_dialogues_count"], 2)
+        self.assertEqual(matrix_seller["positive_dialogue"]["value"], .2)
+        self.assertEqual(summary["kpis"]["positive_dialogue"]["value"], .2)
+        self.assertEqual(
+            summary["kpis"]["positive_dialogue"]["comparisons"]["previous_period"],
+            .4,
+        )
+        self.assertEqual(
+            summary["kpis"]["positive_dialogue"]["comparisons"]["peer_median"],
+            .7,
+        )
+        self.assertEqual(positive_card["evidence"]["value"], .2)
+        self.assertEqual(positive_card["code"], "positive_dialogue_low")
+
+    def test_sync_positive_to_order_cohort_propagates_to_matrix_weekly_previous_and_coaching(self):
+        users = [
+            {"user_name": seller, "active": "Y", "admin": "N"}
+            for seller in ("sofia", "olle", "maja")
+        ]
+        customer_specs = [
+            ("customer-1", "Sofias butik", "100"),
+            ("customer-2", "Olles butik", "200"),
+            ("customer-3", "Majas butik", "300"),
+            ("customer-4", "Sofias mejlbutik", "400"),
+            ("customer-5", "Sofias tidigare mejlbutik", "500"),
+        ]
+        customers = [
+            {
+                "customer": name,
+                "customer_id": customer_id,
+                "customer_number": customer_number,
+                "sales_person": "Sofia",
+                "customer_segment": "A",
+            }
+            for customer_id, name, customer_number in customer_specs
+        ]
+        rows = []
+        for seller, customer_id, customer_name in (
+            ("sofia", "customer-1", "Sofias butik"),
+            ("olle", "customer-2", "Olles butik"),
+            ("maja", "customer-3", "Majas butik"),
+        ):
+            for index in range(10):
+                rows.append(activity(
+                    f"{seller}-sync-{index}",
+                    f"2026-08-{index + 1:02d} 10:00",
+                    seller=seller,
+                    customer_id=customer_id,
+                    customer=customer_name,
+                    channel="Telefon",
+                    result="Positiv",
+                ))
+        for index in range(10):
+            rows.append(activity(
+                f"sofia-previous-sync-{index}",
+                f"2026-07-{index + 12:02d} 10:00",
+                seller="sofia",
+                customer_id="customer-1",
+                customer="Sofias butik",
+                channel="Telefon",
+                result="Positiv",
+            ))
+        for index in range(5):
+            rows.append(activity(
+                f"sofia-current-email-{index}",
+                f"2026-08-{index + 1:02d} 12:00",
+                seller="sofia",
+                customer_id="customer-4",
+                customer="Sofias mejlbutik",
+                channel="Mejl",
+                result="Positiv",
+            ))
+            rows.append(activity(
+                f"sofia-previous-email-{index}",
+                f"2026-07-{index + 12:02d} 12:00",
+                seller="sofia",
+                customer_id="customer-5",
+                customer="Sofias tidigare mejlbutik",
+                channel="Mejl",
+                result="Positiv",
+            ))
+
+        def identified_order(reference, order_date, customer_id, customer_name, number):
+            row = order(
+                reference, order_date,
+                customer_id=customer_id, customer=customer_name,
+            )
+            row["Customer number"] = number
+            return row
+
+        orders = [
+            identified_order("OLLE", "2026-08-11", "customer-2", "Olles butik", "200"),
+            identified_order("MAJA", "2026-08-11", "customer-3", "Majas butik", "300"),
+            identified_order("EMAIL-CURRENT", "2026-08-06", "customer-4", "Sofias mejlbutik", "400"),
+            identified_order("EMAIL-PREVIOUS", "2026-07-18", "customer-5", "Sofias tidigare mejlbutik", "500"),
+        ]
+        summary = self.summary(
+            rows, orders, users=users, customers=customers, seller="sofia",
+        )
+        comparison = {item["seller"]: item for item in summary["seller_comparison"]}
+        matrix_seller = next(
+            item for item in summary["coaching_matrices"]["sales"]["sellers"]
+            if item["seller"] == "sofia"
+        )
+        closing_card = next(
+            card for card in summary["coaching_cards"]
+            if card["code"] == "closing_gap"
+        )
+        expected = (0, 10)
+
+        self.assertEqual(
+            (summary["kpis"]["positive_to_order_10d"]["numerator"],
+             summary["kpis"]["positive_to_order_10d"]["denominator"]),
+            expected,
+        )
+        self.assertEqual(
+            (comparison["sofia"]["positive_to_order_10d"]["numerator"],
+             comparison["sofia"]["positive_to_order_10d"]["denominator"]),
+            expected,
+        )
+        self.assertEqual(
+            (matrix_seller["positive_to_order_10d"]["numerator"],
+             matrix_seller["positive_to_order_10d"]["denominator"]),
+            expected,
+        )
+        self.assertEqual(
+            (closing_card["evidence"]["numerator"], closing_card["evidence"]["denominator"]),
+            expected,
+        )
+        self.assertEqual(
+            summary["kpis"]["positive_to_order_10d"]["comparisons"]["previous_period"],
+            0,
+        )
+        self.assertEqual(
+            sum(week["positive_to_order_10d"]["denominator"] for week in summary["weekly_trend"]),
+            10,
+        )
+        drilldown = build_drilldown(summary, "positive_to_order_10d")
+        self.assertEqual(drilldown["total_count"], 10)
+        self.assertEqual({row["channel"] for row in drilldown["rows"]}, {"phone"})
+        email_channel = summary["channel_effectiveness"]["email"]
+        self.assertEqual(email_channel["positive_to_order_10d"]["status"], "not_computable")
+        self.assertEqual(
+            (email_channel["order_10d"]["numerator"], email_channel["order_10d"]["denominator"]),
+            (1, 5),
+        )
+        self.assertEqual(email_channel["attributed_orders"], 1)
+
+    def test_metric_registry_is_public_complete_and_shared_with_main_kpis(self):
+        required = {
+            "human_activities", "reach", "positive_dialogue",
+            "positive_to_order_10d", "order_10d", "bom_ratio",
+            "high_priority_boms", "median_days_to_order",
+            "positive_next_step_coverage", "planned_completed_in_time",
+            "priority_focus", "strategic_coverage",
+        }
+        summary = self.summary([])
+
+        self.assertTrue(required.issubset(METRIC_DEFINITIONS))
+        self.assertEqual(summary["metric_definitions"], METRIC_DEFINITIONS)
+        self.assertEqual(
+            METRIC_DEFINITIONS["positive_dialogue"]["channels"],
+            ["visit", "phone"],
+        )
+        self.assertEqual(
+            METRIC_DEFINITIONS["positive_dialogue"]["numerator_label"],
+            "positiva nådda besök/telefonsamtal",
+        )
+        self.assertEqual(
+            METRIC_DEFINITIONS["positive_dialogue"]["denominator_label"],
+            "nådda besök/telefonsamtal",
+        )
+        self.assertEqual(
+            METRIC_DEFINITIONS["positive_to_order_10d"]["channels"],
+            ["visit", "phone"],
+        )
+        self.assertEqual(
+            METRIC_DEFINITIONS["human_activities"]["definition"],
+            "Antal mänskliga aktiviteter som inte är automatiska CRM-mejl. Besök, telefon och manuella mejl redovisas som kanaler.",
+        )
+        for key in MAIN_KPI_KEYS:
+            with self.subTest(key=key):
+                definition = summary["metric_definitions"][key]
+                self.assertEqual(summary["kpis"][key]["definition"], definition["definition"])
+                self.assertEqual(summary["kpis"][key]["label"], definition["label"])
+        for key, definition in METRIC_DEFINITIONS.items():
+            if definition["metric_type"] != "rate":
+                continue
+            with self.subTest(key=key):
+                self.assertTrue(definition.get("numerator_label"))
+                self.assertTrue(definition.get("denominator_label"))
+
+    def test_registry_user_copy_contains_no_internal_analysis_names(self):
+        forbidden = {
+            "sync_reached", "sync_positive", "mature_positive",
+            "qualified_dialogue", "attribution_eligible",
+            "historical_snapshot", "v2_contacts",
+        }
+        visible_copy = " ".join(
+            str(value)
+            for definition in METRIC_DEFINITIONS.values()
+            for key, value in definition.items()
+            if key in {
+                "label", "definition", "numerator_label",
+                "denominator_label", "not_computable_text",
+            }
+        ).casefold()
+
+        for term in forbidden:
+            with self.subTest(term=term):
+                self.assertNotIn(term, visible_copy)
 
     def test_approximate_snapshot_without_percentile_is_not_priority_focus_denominator(self):
         summary = build_sales_coaching_summary(
@@ -468,9 +898,9 @@ class SnapshotAndAggregateTests(TestCase):
             + team["alice"]["visit_breakdown"]["boms"],
             team["alice"]["visit_breakdown"]["analysable"],
         )
-        self.assertEqual(team["alice"]["positive_dialogues_count"], 2)
-        self.assertEqual(team["alice"]["mature_positive_dialogues_count"], 2)
-        self.assertEqual(team["alice"]["converted_positive_contacts_count"], 1)
+        self.assertEqual(team["alice"]["positive_dialogues_count"], 1)
+        self.assertEqual(team["alice"]["mature_positive_dialogues_count"], 1)
+        self.assertEqual(team["alice"]["converted_positive_contacts_count"], 0)
         self.assertEqual(team["alice"]["waiting_positive_dialogues_count"], 0)
         self.assertEqual(team["alice"]["order_10d_converted_contacts"], 1)
         self.assertEqual(team["alice"]["attributed_orders"], 2)

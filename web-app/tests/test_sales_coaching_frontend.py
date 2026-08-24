@@ -7,6 +7,7 @@ WEB_APP_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(WEB_APP_DIR))
 
 import app as app_module  # noqa: E402
+from sales_coaching import MAIN_KPI_KEYS, METRIC_DEFINITIONS  # noqa: E402
 
 
 class SalesCoachingFrontendTests(TestCase):
@@ -48,43 +49,40 @@ class SalesCoachingFrontendTests(TestCase):
         )
 
     def test_main_kpis_explain_their_denominators_in_plain_swedish(self):
-        for expected in (
-            'denominatorLabel: "analyserbara besök/telefonsamtal"',
-            'denominatorLabel: "nådda kontakter"',
-            'denominatorLabel: "mogna positiva kontakter"',
-        ):
-            with self.subTest(expected=expected):
-                self.assertIn(expected, self.javascript)
+        self.assertEqual(
+            METRIC_DEFINITIONS["reach"]["denominator_label"],
+            "analyserbara besök/telefonsamtal",
+        )
+        self.assertEqual(
+            METRIC_DEFINITIONS["positive_dialogue"]["denominator_label"],
+            "nådda besök/telefonsamtal",
+        )
+        self.assertEqual(
+            METRIC_DEFINITIONS["positive_to_order_10d"]["denominator_label"],
+            "mogna positiva dialoger",
+        )
+        self.assertIn("definition.denominator_label", self.javascript)
         self.assertIn("sc-kpi-denominator", self.javascript)
         self.assertIn("flex-wrap: wrap", self.css)
 
     def test_all_main_kpis_have_clickable_plain_language_explanations(self):
-        explanations = (
-            "Alla mänskliga aktiviteter via besök, telefon och manuella mejl. Automatiska CRM-mejl räknas inte.",
-            "Andelen analyserbara besök och telefonsamtal där säljaren faktiskt nådde kunden. Manuella mejl ingår inte i träffgraden.",
-            "Andelen nådda mänskliga kontakter som slutade i positiv dialog eller order. Ej anträffbar/bom räknas inte i nämnaren.",
-            "Andelen positiva kontakter som följdes av en attribuerad order inom 0–10 dagar. Endast kontakter som hunnit få ett fullständigt 10-dagarsutfall ingår.",
-        )
-        for explanation in explanations:
-            with self.subTest(explanation=explanation):
-                self.assertIn(explanation, self.javascript)
-        self.assertIn('data-sc-action="kpi-info"', self.javascript)
+        for key in MAIN_KPI_KEYS:
+            with self.subTest(key=key):
+                self.assertTrue(METRIC_DEFINITIONS[key]["definition"])
+                self.assertNotIn(
+                    METRIC_DEFINITIONS[key]["definition"], self.javascript,
+                    "definition copy must not be duplicated in the frontend",
+                )
+        self.assertNotIn("KPI_PRESENTATION", self.javascript)
+        self.assertIn("state.data?.metric_definitions?.[key]", self.javascript)
+        self.assertIn('data-sc-action="metric-info"', self.javascript)
         self.assertIn('aria-expanded="false"', self.javascript)
         self.assertIn("explanation.hidden = expanded", self.javascript)
-        presentation = self.javascript.split(
-            "const KPI_PRESENTATION", 1
-        )[1].split("const root", 1)[0]
-        for internal_term in (
-            "mature cohort", "qualified dialogue", "attribution_eligible",
-            "historical_snapshot", "current_customer_state",
-        ):
-            with self.subTest(internal_term=internal_term):
-                self.assertNotIn(internal_term, presentation.lower())
 
     def test_frontend_uses_backend_rate_contract_without_recalculating_kpis(self):
         self.assertIn("percent(metric.value)", self.javascript)
         self.assertIn("rateEvidence(metric)", self.javascript)
-        self.assertIn("metric.definition", self.javascript)
+        self.assertIn("metricDefinition(key, metric)", self.javascript)
         self.assertNotIn("attributed_orders /", self.javascript)
         self.assertNotIn("priority_percentile_at_contact >=", self.javascript)
 
@@ -107,7 +105,9 @@ class SalesCoachingFrontendTests(TestCase):
         self.assertIn("core_flagged_activity_rows", self.javascript)
         self.assertIn("quality_issue_count", self.javascript)
         self.assertIn('details id="sc-quality-details"', self.javascript)
-        self.assertIn("Suppression är inte ett kvalitetsfel", self.javascript)
+        self.assertIn("Ett operativt undantag är inte i sig ett kvalitetsfel", self.javascript)
+        self.assertIn("Datakvalitet och täckning", self.javascript)
+        self.assertIn("Ordlista över mått", self.javascript)
         self.assertNotIn("sc-quality-debug", self.javascript)
 
     def test_team_comparison_has_three_activity_bars_and_exact_table(self):
@@ -154,13 +154,13 @@ class SalesCoachingFrontendTests(TestCase):
         self.assertIn("Bom-ratio – planerade besök", self.javascript)
         self.assertIn("Bom-ratio – oplanerade besök", self.javascript)
         self.assertIn("funnel.steps", self.javascript)
-        self.assertIn("Mogen är en mätbar utfallskohort", self.javascript)
+        self.assertIn("fullständigt 10-dagarsutfall ingår i utfallsmåtten", self.javascript)
         self.assertIn("Följdes av attribuerad order", self.javascript)
         self.assertIn("priorityDiagnosticsMarkup", self.javascript)
         self.assertNotIn("priority_gap", self.javascript)
         self.assertNotIn("Nästa bästa kunder", self.javascript)
         self.assertNotIn("Aktuella högprioriterade kunder", self.javascript)
-        self.assertIn("Kan inte beräknas · jämförbar historisk v2-percentil saknas", self.javascript)
+        self.assertIn("Kan inte beräknas · jämförbar historisk prioritet saknas", self.javascript)
         self.assertNotIn("high_priority_score_fallback", self.javascript)
 
     def test_tabs_are_keyboard_accessible_and_only_outcomes_can_be_preliminary(self):
@@ -182,17 +182,63 @@ class SalesCoachingFrontendTests(TestCase):
 
     def test_matrix_has_swedish_denominator_zero_reason(self):
         self.assertIn(
-            'positive_order_denominator_zero: "inga mogna positiva kontakter för positiv-till-order-måttet"',
+            'positive_order_denominator_zero: "inga mogna positiva dialoger för positiv-till-order-måttet"',
             self.javascript,
         )
 
     def test_pr3_benchmark_and_signal_contract_is_presentational(self):
-        self.assertIn("Peer median", self.javascript)
+        self.assertIn("Median övriga säljare", self.javascript)
+        self.assertNotIn("Peer median", self.javascript)
         self.assertIn("delta_peer", self.javascript)
         self.assertIn("Föregående period", self.javascript)
         self.assertIn("card.next_action", self.javascript)
         self.assertNotIn("card.code ===", self.javascript)
         self.assertNotIn("switch (card.code", self.javascript)
+
+    def test_registry_drives_glossary_and_local_metric_information(self):
+        required = {
+            "bom_ratio", "high_priority_boms", "human_activities",
+            "median_days_to_order", "positive_next_step_coverage",
+            "order_10d", "planned_completed_in_time", "positive_dialogue",
+            "positive_to_order_10d", "priority_focus", "strategic_coverage",
+            "reach",
+        }
+        self.assertTrue(required.issubset(METRIC_DEFINITIONS))
+        self.assertIn('new Intl.Collator("sv-SE"', self.javascript)
+        self.assertIn("collator.compare(left.label, right.label)", self.javascript)
+        self.assertIn('data-definition-key="${escapeHtml(key)}"', self.javascript)
+        self.assertIn("definitionParts(definitionKey, context)", self.javascript)
+        self.assertIn("definitionParts(card.metric_key", self.javascript)
+        self.assertIn("metricHeader(", self.javascript)
+        self.assertIn("sc-metric-info", self.css)
+
+    def test_synchronous_dialogue_metrics_are_not_applicable_for_email(self):
+        self.assertEqual(
+            METRIC_DEFINITIONS["positive_dialogue"]["not_computable_text"],
+            "Positiv dialog mäts endast för Besök och Telefon.",
+        )
+        self.assertEqual(
+            METRIC_DEFINITIONS["positive_to_order_10d"]["not_computable_text"],
+            "Positiv → order mäts endast för Besök och Telefon.",
+        )
+        self.assertIn("channelRate(key, \"positive_dialogue\"", self.javascript)
+        self.assertIn("channelRate(key, \"positive_to_order_10d\"", self.javascript)
+        self.assertIn('? "Ej tillämpligt"', self.javascript)
+        self.assertIn('data-channel-row="${key}"', self.javascript)
+        self.assertIn('data-channel-metric="positive_to_order_10d"', self.javascript)
+        self.assertNotIn("Fördjupa analysen utan operativa kundlistor.", self.javascript)
+
+    def test_metric_information_is_separate_from_drilldown_and_accessible(self):
+        info_branch = self.javascript.split(
+            'const metricInfo = event.target.closest(\'[data-sc-action="metric-info"]\')', 1
+        )[1].split('const retry =', 1)[0]
+        self.assertIn("aria-controls", self.javascript)
+        self.assertIn("aria-expanded", self.javascript)
+        self.assertIn("return;", info_branch)
+        self.assertNotIn("openDrilldown", info_branch)
+        self.assertIn("buttonClass", self.javascript)
+        self.assertIn(".sc-glossary dl { grid-template-columns: 1fr; }", self.css)
+        self.assertIn("overflow-wrap: anywhere", self.css)
 
     def test_coaching_evidence_formats_counts_without_percentages(self):
         self.assertIn('item.metric_type === "count"', self.javascript)

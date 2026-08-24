@@ -21,7 +21,7 @@ from sales_coaching_rules import (
 )
 
 
-DEFINITIONS_VERSION = "sales_coaching_v3"
+DEFINITIONS_VERSION = "sales_coaching_v4"
 ANALYTICS_SNAPSHOT_VERSION = "sales_coaching_v2"
 PRIORITY_PERCENTILE_BASIS = "owner_active_scored_portfolio_midrank_v2"
 STOCKHOLM_ZONE = ZoneInfo("Europe/Stockholm")
@@ -29,44 +29,204 @@ ATTRIBUTION_WINDOW_DAYS = 10
 MIN_RATE_SAMPLE = 10
 MIN_PRIORITY_COVERAGE = 0.70
 
-KPI_DEFINITIONS = {
+METRIC_DEFINITIONS = {
     "human_activities": {
         "label": "Mänskliga aktiviteter",
-        "definition": "Unika manuella eller planerade Besök, Telefon och manuella Mejl; automatiserade CRM-mejl exkluderas.",
+        "definition": "Antal mänskliga aktiviteter som inte är automatiska CRM-mejl. Besök, telefon och manuella mejl redovisas som kanaler.",
+        "metric_type": "count",
+        "unit": "aktiviteter",
+        "channels": ["visit", "phone", "email"],
         "drilldown_metric": "human_activities",
     },
     "reach": {
         "label": "Träffgrad",
-        "definition": "Nådda synkrona kontakter dividerat med analyserbara kontaktförsök via Besök eller Telefon.",
+        "definition": "Andelen analyserbara besök och telefonsamtal där säljaren nådde kunden. Manuella mejl ingår inte.",
+        "metric_type": "rate",
+        "numerator_label": "nådda besök/telefonsamtal",
+        "denominator_label": "analyserbara besök/telefonsamtal",
+        "channels": ["visit", "phone"],
         "drilldown_metric": "reach",
         "denominator_drilldown_metric": "attempts",
     },
     "positive_dialogue": {
         "label": "Positiv dialog",
-        "definition": "Nådda mänskliga kontakter med positivt resultat eller order dividerat med alla nådda mänskliga kontakter.",
+        "definition": "Andelen nådda besök och telefonsamtal som slutade i positiv dialog eller order. Bommar och manuella mejl ingår inte.",
+        "metric_type": "rate",
+        "numerator_label": "positiva nådda besök/telefonsamtal",
+        "denominator_label": "nådda besök/telefonsamtal",
+        "channels": ["visit", "phone"],
+        "not_computable_text": "Positiv dialog mäts endast för Besök och Telefon.",
         "drilldown_metric": "positive_dialogue",
     },
     "positive_to_order_10d": {
         "label": "Positiv dialog → order inom 10 dagar",
-        "definition": "Mogna positiva kontakter som följdes av attribuerad order inom 0–10 dagar dividerat med alla mogna positiva kontakter med säker kundidentitet.",
+        "definition": "Andelen positiva besök och telefonsamtal med säker kundidentitet som följdes av en attribuerad order inom 0–10 dagar. Endast dialoger som hunnit få ett fullständigt 10-dagarsutfall ingår.",
+        "metric_type": "rate",
+        "numerator_label": "positiva dialoger följda av attribuerad order",
+        "denominator_label": "mogna positiva dialoger",
+        "channels": ["visit", "phone"],
+        "not_computable_text": "Positiv → order mäts endast för Besök och Telefon.",
+        "window_days": ATTRIBUTION_WINDOW_DAYS,
         "drilldown_metric": "positive_to_order_10d",
     },
     "order_10d": {
         "label": "Order inom 10 dagar",
-        "definition": "Mogna nådda kontakter med säker kundidentitet och minst en exklusivt attribuerad order inom 0–10 dagar dividerat med mogna nådda kontakter med säker kundidentitet.",
+        "definition": "Andelen nådda mänskliga kontakter med säker kundidentitet som följdes av en attribuerad order inom 0–10 dagar. Endast kontakter som hunnit få ett fullständigt 10-dagarsutfall ingår.",
+        "metric_type": "rate",
+        "numerator_label": "nådda kontakter följda av attribuerad order",
+        "denominator_label": "mogna nådda kontakter",
+        "channels": ["visit", "phone", "email"],
+        "window_days": ATTRIBUTION_WINDOW_DAYS,
         "drilldown_metric": "order_10d",
     },
     "priority_focus": {
         "label": "Prioritetsfokus",
-        "definition": "Kontakter i säljarens historiska översta prioritetskvartil dividerat med aktiviteter där historisk prioritetpercentil finns.",
+        "definition": "Andelen kontakter som gjordes med kunder som vid kontakttillfället låg i säljarens högsta prioritetskvartil. Endast kontakter med jämförbar historisk prioritetsdata ingår.",
+        "metric_type": "rate",
+        "numerator_label": "kontakter i högsta prioritetskvartilen",
+        "denominator_label": "kontakter med jämförbar historisk prioritet",
         "drilldown_metric": "priority_focus",
     },
     "bom_ratio": {
-        "label": "Bom-ratio för besök",
-        "definition": "Besök med Ej anträffbar dividerat med alla besök med analyserbart resultat.",
+        "label": "Bom-ratio",
+        "definition": "Andelen analyserbara butiksbesök där rätt person inte kunde nås. Beräknas som ej anträffbar dividerat med alla analyserbara besök.",
+        "metric_type": "rate",
+        "numerator_label": "besök där kunden inte nåddes",
+        "denominator_label": "analyserbara besök",
+        "channels": ["visit"],
         "drilldown_metric": "bom_ratio",
     },
+    "planned_bom_ratio": {
+        "label": "Bom-ratio – planerade besök",
+        "definition": "Andelen analyserbara planerade besök där rätt person inte kunde nås.",
+        "metric_type": "rate",
+        "numerator_label": "planerade besök där kunden inte nåddes",
+        "denominator_label": "analyserbara planerade besök",
+        "channels": ["visit"],
+        "drilldown_metric": "planned_boms",
+    },
+    "unplanned_bom_ratio": {
+        "label": "Bom-ratio – oplanerade besök",
+        "definition": "Andelen analyserbara oplanerade besök där rätt person inte kunde nås.",
+        "metric_type": "rate",
+        "numerator_label": "oplanerade besök där kunden inte nåddes",
+        "denominator_label": "analyserbara oplanerade besök",
+        "channels": ["visit"],
+        "drilldown_metric": "unplanned_boms",
+    },
+    "repeat_boms": {
+        "label": "Återkommande bommar",
+        "definition": "Antal kunder med minst två butiksbesök där rätt person inte kunde nås under vald period.",
+        "metric_type": "count",
+        "unit": "kunder",
+        "drilldown_metric": "repeat_boms",
+    },
+    "high_priority_boms": {
+        "label": "Högprioriterade bommar",
+        "definition": "Antal bom-besök hos kunder som vid besöket låg i säljarens högsta prioritetskvartil. Måttet visas bara när den historiska prioritetstäckningen är tillräcklig.",
+        "metric_type": "count",
+        "unit": "bom-besök",
+        "drilldown_metric": "high_priority_boms",
+    },
+    "median_days_to_order": {
+        "label": "Median dagar till order",
+        "definition": "Medianantal dagar mellan en mänsklig kontakt och en attribuerad order inom 0–10 dagar. Visas när minst fem attribuerade order finns.",
+        "metric_type": "duration",
+        "unit": "dagar",
+        "window_days": ATTRIBUTION_WINDOW_DAYS,
+    },
+    "positive_next_step_coverage": {
+        "label": "Nästa-steg-täckning",
+        "definition": "Andelen positiva kontakter som är minst tre dagar gamla och har ett angivet uppföljningsdatum, en giltig länkad planerad aktivitet eller en attribuerad order.",
+        "metric_type": "rate",
+        "numerator_label": "positiva kontakter med nästa steg eller order",
+        "denominator_label": "positiva kontakter minst tre dagar gamla",
+        "drilldown_metric": "followup_success",
+    },
+    "positive_without_next_step": {
+        "label": "Positiva utan nästa steg",
+        "definition": "Antal positiva kontakter som är minst tre dagar gamla och saknar uppföljningsdatum, giltig länkad planerad aktivitet och attribuerad order.",
+        "metric_type": "count",
+        "unit": "kontakter",
+        "drilldown_metric": "followup_gap",
+    },
+    "positive_without_order_or_follow_up_10d": {
+        "label": "Positiv utan order eller uppföljning efter 10 dagar",
+        "definition": "Antal positiva kontakter med fullständigt 10-dagarsutfall som varken följdes av en attribuerad order eller har uppföljningsdatum eller giltig länkad planerad aktivitet.",
+        "metric_type": "count",
+        "unit": "kontakter",
+        "window_days": ATTRIBUTION_WINDOW_DAYS,
+        "drilldown_metric": "followup_gap_10d",
+    },
+    "planned_completed_in_time": {
+        "label": "Planerade genomförda i tid",
+        "definition": "Av de planerade aktiviteter som har förfallit eller redan avslutats: andelen som genomfördes senast på planerat datum. Avbrutna aktiviteter exkluderas.",
+        "metric_type": "rate",
+        "numerator_label": "planerade aktiviteter genomförda i tid",
+        "denominator_label": "ansvariga planerade aktiviteter",
+        "drilldown_metric": "planned_on_time",
+    },
+    "overdue_planned": {
+        "label": "Försenade planerade aktiviteter",
+        "definition": "Antal planerade aktiviteter vars planerade tid har passerat och som fortfarande är öppna.",
+        "metric_type": "count",
+        "unit": "aktiviteter",
+        "drilldown_metric": "planned_overdue",
+    },
+    "skipped_planned": {
+        "label": "Överhoppade planerade aktiviteter",
+        "definition": "Antal ansvariga planerade aktiviteter som markerats som överhoppade. Avbrutna aktiviteter är exkluderade.",
+        "metric_type": "count",
+        "unit": "aktiviteter",
+        "drilldown_metric": "planned_skipped",
+    },
+    "priority_percentile_coverage": {
+        "label": "Jämförbar historisk prioritetstäckning",
+        "definition": "Andelen kontakter från den nuvarande analysmodellen som har en jämförbar historisk prioritetspercentil.",
+        "metric_type": "rate",
+        "numerator_label": "kontakter med jämförbar historisk prioritet",
+        "denominator_label": "kontakter från nuvarande analysmodell",
+    },
+    "strategic_coverage": {
+        "label": "Strategisk täckning",
+        "definition": "Andelen kunder i säljarens aktuella strategiska portfölj som hade minst en mänsklig aktivitet under vald period. Strategisk innebär segment A eller den högsta värdekvartilen.",
+        "metric_type": "rate",
+        "numerator_label": "strategiska kunder med mänsklig aktivitet",
+        "denominator_label": "kunder i aktuell strategisk portfölj",
+    },
+    "secure_customer_identity": {
+        "label": "Säker kundidentitet",
+        "definition": "Andelen mänskliga aktiviteter som kan kopplas entydigt till en kund.",
+        "metric_type": "rate",
+        "numerator_label": "aktiviteter med säker kundidentitet",
+        "denominator_label": "mänskliga aktiviteter",
+    },
+    "order_attribution_identity_coverage": {
+        "label": "Identitetstäckning för orderutfall",
+        "definition": "Andelen nådda mänskliga kontakter som kan kopplas entydigt till en kund och därför kan följas mot attribuerade order.",
+        "metric_type": "rate",
+        "numerator_label": "nådda kontakter med säker kundidentitet",
+        "denominator_label": "nådda mänskliga kontakter",
+    },
+    "standardized_activity": {
+        "label": "Standardiserade aktiviteter",
+        "definition": "Andelen mänskliga aktiviteter där både kanal och resultat kan tolkas enligt Sales Coachings gemensamma kategorier.",
+        "metric_type": "rate",
+        "numerator_label": "aktiviteter med tolkad kanal och resultat",
+        "denominator_label": "mänskliga aktiviteter",
+    },
+    "attributed_orders": {
+        "label": "Attribuerade order",
+        "definition": "Antal order inom 0–10 dagar som har kopplats till den senaste berättigade mänskliga kontakten före ordern. Det beskriver attribution, inte bevisad orsak.",
+        "metric_type": "count",
+        "unit": "order",
+        "window_days": ATTRIBUTION_WINDOW_DAYS,
+    },
 }
+
+MAIN_KPI_KEYS = (
+    "human_activities", "reach", "positive_dialogue", "positive_to_order_10d",
+)
 
 CONTACT_ANALYTICS_COLUMNS = [
     "sales_user_name",
@@ -755,12 +915,25 @@ def _aggregate_period(rows, attribution):
     sync_attribution_eligible = [row for row in sync_reached if row.get("customer_identity_key")]
     sync_mature = [row for row in sync_attribution_eligible if attribution["maturity"].get(row["contact_id"]) == "mature"]
     sync_converted = [row for row in sync_mature if attribution["contact_to_orders"].get(row["contact_id"])]
+    sync_positive_attribution_eligible = [
+        row for row in sync_positive if row.get("customer_identity_key")
+    ]
+    sync_mature_positive = [
+        row for row in sync_positive_attribution_eligible
+        if attribution["maturity"].get(row["contact_id"]) == "mature"
+    ]
+    sync_converted_positive = [
+        row for row in sync_mature_positive
+        if attribution["contact_to_orders"].get(row["contact_id"])
+    ]
+    sync_waiting_positive = [
+        row for row in sync_positive_attribution_eligible
+        if attribution["maturity"].get(row["contact_id"]) == "waiting_outcome"
+    ]
     reached = [row for row in human if _is_reached_human(row)]
     attribution_eligible = [row for row in reached if row.get("customer_identity_key")]
     positive = [row for row in reached if row.get("result_class") in {"positive", "order"}]
     mature = [row for row in attribution_eligible if attribution["maturity"].get(row["contact_id"]) == "mature"]
-    mature_positive = [row for row in positive if row.get("customer_identity_key") and attribution["maturity"].get(row["contact_id"]) == "mature"]
-    converted_positive = [row for row in mature_positive if attribution["contact_to_orders"].get(row["contact_id"])]
     waiting = [row for row in attribution_eligible if attribution["maturity"].get(row["contact_id"]) == "waiting_outcome"]
     ordered_contacts = [row for row in mature if attribution["contact_to_orders"].get(row["contact_id"])]
     visits = [row for row in human if row.get("contact_type_key") == "visit" and row.get("result_class") in ANALYSABLE_RESULTS]
@@ -783,12 +956,14 @@ def _aggregate_period(rows, attribution):
         "sync_attribution_eligible": sync_attribution_eligible,
         "sync_mature": sync_mature,
         "sync_converted": sync_converted,
+        "sync_positive_attribution_eligible": sync_positive_attribution_eligible,
+        "sync_mature_positive": sync_mature_positive,
+        "sync_converted_positive": sync_converted_positive,
+        "sync_waiting_positive": sync_waiting_positive,
         "reached": reached,
         "attribution_eligible": attribution_eligible,
         "positive": positive,
         "mature": mature,
-        "mature_positive": mature_positive,
-        "converted_positive": converted_positive,
         "waiting": waiting,
         "ordered_contacts": ordered_contacts,
         "visits": visits,
@@ -803,8 +978,10 @@ def _aggregate_period(rows, attribution):
                 len(sync_reached),
                 len(sync),
             ),
-            "positive_dialogue": _rate(len(positive), len(reached)),
-            "positive_to_order_10d": _rate(len(converted_positive), len(mature_positive)),
+            "positive_dialogue": _rate(len(sync_positive), len(sync_reached)),
+            "positive_to_order_10d": _rate(
+                len(sync_converted_positive), len(sync_mature_positive)
+            ),
             "order_10d": _rate(len(ordered_contacts), len(mature)),
             "priority_focus": _rate(len(top_priority), len(percentile_rows)),
             "bom_ratio": _rate(len(boms), len(visits)),
@@ -847,12 +1024,10 @@ def _seller_comparison(rows, attribution, sellers):
                 "reached": len(aggregate["visits"]) - len(aggregate["boms"]),
                 "boms": len(aggregate["boms"]),
             },
-            "positive_dialogues_count": len(aggregate["positive"]),
-            "mature_positive_dialogues_count": len(aggregate["mature_positive"]),
-            "converted_positive_contacts_count": len(aggregate["converted_positive"]),
-            "waiting_positive_dialogues_count": (
-                len(aggregate["positive"]) - len(aggregate["mature_positive"])
-            ),
+            "positive_dialogues_count": len(aggregate["sync_positive"]),
+            "mature_positive_dialogues_count": len(aggregate["sync_mature_positive"]),
+            "converted_positive_contacts_count": len(aggregate["sync_converted_positive"]),
+            "waiting_positive_dialogues_count": len(aggregate["sync_waiting_positive"]),
             "order_10d_converted_contacts": len(aggregate["ordered_contacts"]),
             "attributed_orders": len(aggregate["attributed"]),
             "waiting_outcome_count": len(aggregate["waiting"]),
@@ -1533,16 +1708,11 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
         "positive_dialogue": current["rates"]["positive_dialogue"],
         "positive_to_order_10d": {
             **current["rates"]["positive_to_order_10d"],
-            "waiting_outcome_count": sum(
-                bool(row.get("customer_identity_key"))
-                and attribution["maturity"].get(row.get("contact_id"))
-                == "waiting_outcome"
-                for row in current["positive"]
-            ),
+            "waiting_outcome_count": len(current["sync_waiting_positive"]),
         },
     }
-    for key, metric in kpis.items():
-        metric.update(KPI_DEFINITIONS[key])
+    for key in MAIN_KPI_KEYS:
+        kpis[key].update(METRIC_DEFINITIONS[key])
     data_quality = _data_quality(rows, canonical_result, order_result, attribution)
     sales_matrix_sellers = [
         {
@@ -1709,6 +1879,10 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
             "lifecycles": ["all", "prospect", "first_order", "established", "reactivation"],
         },
         "data_quality": data_quality,
+        "metric_definitions": {
+            key: dict(definition)
+            for key, definition in METRIC_DEFINITIONS.items()
+        },
         "kpis": kpis,
         "seller_comparison": seller_comparison,
         "team_comparison": {
@@ -1849,8 +2023,8 @@ def build_drilldown(summary, metric, *, limit=100):
             "attempts": row.get("is_human") and row.get("contact_type_key") in SYNCHRONOUS_CHANNELS and row.get("result_class") in ANALYSABLE_RESULTS,
             "reach": row.get("is_human") and row.get("contact_type_key") in SYNCHRONOUS_CHANNELS and row.get("result_class") in ANALYSABLE_RESULTS,
             "positive_sync": _is_sync_reached(row) and row.get("result_class") in {"positive", "order"},
-            "positive_dialogue": _is_reached_human(row),
-            "positive_to_order_10d": _is_reached_human(row) and row.get("result_class") in {"positive", "order"} and bool(row.get("customer_identity_key")) and maturity == "mature",
+            "positive_dialogue": _is_sync_reached(row),
+            "positive_to_order_10d": _is_sync_reached(row) and row.get("result_class") in {"positive", "order"} and bool(row.get("customer_identity_key")) and maturity == "mature",
             "mature_reached_sync": _is_sync_reached(row) and bool(row.get("customer_identity_key")) and maturity == "mature",
             "order_10d": _is_attribution_eligible(row) and maturity == "mature",
             "order_10d_sync": _is_sync_reached(row) and bool(row.get("customer_identity_key")) and maturity == "mature" and bool(orders),
