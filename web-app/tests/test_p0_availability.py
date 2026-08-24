@@ -57,6 +57,494 @@ class SheetAvailabilityUnitTests(TestCase):
         self.assertTrue(hit)
         self.assertEqual(warm[1][0], "value")
 
+    def test_unrelated_invalidation_preserves_in_flight_store(self):
+        cache = SheetReadCache(ttl_seconds=12)
+        spreadsheet = object()
+        loader_started = threading.Event()
+        release_loader = threading.Event()
+        calls = 0
+
+        def load():
+            nonlocal calls
+            calls += 1
+            loader_started.set()
+            self.assertTrue(release_loader.wait(2))
+            return [["header"], ["sales"]]
+
+        before = cache.generation_signature(
+            spreadsheet, ["sales_activities"]
+        )
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            first_future = pool.submit(
+                cache.values_with_info,
+                spreadsheet,
+                "sales_activities",
+                loader=load,
+            )
+            self.assertTrue(loader_started.wait(2))
+            cache.invalidate(spreadsheet, "planned_activities")
+            after = cache.generation_signature(
+                spreadsheet, ["sales_activities"]
+            )
+            release_loader.set()
+            first_rows, first_info = first_future.result(timeout=2)
+
+        second_rows, second_info = cache.values_with_info(
+            spreadsheet, "sales_activities", loader=load
+        )
+        self.assertEqual(before, after)
+        self.assertEqual(calls, 1)
+        self.assertEqual(first_rows, [["header"], ["sales"]])
+        self.assertTrue(first_info.stored)
+        self.assertTrue(second_info.cache_hit)
+        self.assertEqual(second_rows, first_rows)
+
+    def test_same_dataset_invalidation_rejects_in_flight_store(self):
+        cache = SheetReadCache(ttl_seconds=12)
+        spreadsheet = object()
+        loader_started = threading.Event()
+        release_loader = threading.Event()
+        calls = 0
+
+        def load():
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                loader_started.set()
+                self.assertTrue(release_loader.wait(2))
+                return [["header"], ["old"]]
+            return [["header"], ["new"]]
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            first_future = pool.submit(
+                cache.values_with_info,
+                spreadsheet,
+                "sales_activities",
+                loader=load,
+            )
+            self.assertTrue(loader_started.wait(2))
+            cache.invalidate(spreadsheet, "sales_activities")
+            release_loader.set()
+            first_rows, first_info = first_future.result(timeout=2)
+
+        second_rows, second_info = cache.values_with_info(
+            spreadsheet, "sales_activities", loader=load
+        )
+        self.assertEqual(first_rows[1][0], "old")
+        self.assertTrue(first_info.invalidated_during_load)
+        self.assertFalse(first_info.stored)
+        self.assertEqual(second_rows[1][0], "new")
+        self.assertTrue(second_info.performed_load)
+        self.assertTrue(second_info.stored)
+        self.assertEqual(calls, 2)
+
+    def test_multiple_waiters_survive_unrelated_invalidation_single_flight(self):
+        wait_events = {
+            "waiter-b": threading.Event(),
+            "waiter-c": threading.Event(),
+        }
+        clock_counts = {}
+        clock_lock = threading.Lock()
+
+        def monitored_clock():
+            name = threading.current_thread().name
+            with clock_lock:
+                clock_counts[name] = clock_counts.get(name, 0) + 1
+                if name in wait_events and clock_counts[name] == 2:
+                    wait_events[name].set()
+            return time.monotonic()
+
+        cache = SheetReadCache(ttl_seconds=12, monotonic=monitored_clock)
+        spreadsheet = object()
+        loader_started = threading.Event()
+        release_loader = threading.Event()
+        calls = 0
+        results = {}
+        errors = []
+
+        def load():
+            nonlocal calls
+            calls += 1
+            loader_started.set()
+            self.assertTrue(release_loader.wait(2))
+            return [["header"], ["current"]]
+
+        def read(name):
+            try:
+                results[name] = cache.values_with_info(
+                    spreadsheet, "sales_activities", loader=load
+                )
+            except Exception as error:
+                errors.append(error)
+
+        threads = [
+            threading.Thread(target=read, args=(name,), name=name)
+            for name in ("loader", "waiter-b", "waiter-c")
+        ]
+        threads[0].start()
+        self.assertTrue(loader_started.wait(2))
+        threads[1].start()
+        threads[2].start()
+        self.assertTrue(wait_events["waiter-b"].wait(2))
+        self.assertTrue(wait_events["waiter-c"].wait(2))
+        cache.invalidate(spreadsheet, "planned_activities")
+        release_loader.set()
+        for thread in threads:
+            thread.join(2)
+            self.assertFalse(thread.is_alive())
+
+        self.assertFalse(errors)
+        self.assertEqual(calls, 1)
+        self.assertEqual(
+            {rows[1][0] for rows, _info in results.values()},
+            {"current"},
+        )
+        for name in ("waiter-b", "waiter-c"):
+            self.assertTrue(results[name][1].cache_hit)
+            self.assertGreater(results[name][1].waited_seconds, 0)
+
+    def test_same_dataset_invalidation_elects_one_second_loader(self):
+        wait_events = {
+            "waiter-b": threading.Event(),
+            "waiter-c": threading.Event(),
+        }
+        clock_counts = {}
+        clock_lock = threading.Lock()
+
+        def monitored_clock():
+            name = threading.current_thread().name
+            with clock_lock:
+                clock_counts[name] = clock_counts.get(name, 0) + 1
+                if name in wait_events and clock_counts[name] == 2:
+                    wait_events[name].set()
+            return time.monotonic()
+
+        cache = SheetReadCache(ttl_seconds=12, monotonic=monitored_clock)
+        spreadsheet = object()
+        loader_started = threading.Event()
+        release_loader = threading.Event()
+        calls = 0
+        active_loaders = 0
+        max_active_loaders = 0
+        load_lock = threading.Lock()
+        results = {}
+        errors = []
+
+        def load():
+            nonlocal calls, active_loaders, max_active_loaders
+            with load_lock:
+                calls += 1
+                call_number = calls
+                active_loaders += 1
+                max_active_loaders = max(max_active_loaders, active_loaders)
+            try:
+                if call_number == 1:
+                    loader_started.set()
+                    self.assertTrue(release_loader.wait(2))
+                    return [["header"], ["old"]]
+                return [["header"], ["new"]]
+            finally:
+                with load_lock:
+                    active_loaders -= 1
+
+        def read(name):
+            try:
+                results[name] = cache.values_with_info(
+                    spreadsheet, "sales_activities", loader=load
+                )
+            except Exception as error:
+                errors.append(error)
+
+        threads = [
+            threading.Thread(target=read, args=(name,), name=name)
+            for name in ("loader", "waiter-b", "waiter-c")
+        ]
+        threads[0].start()
+        self.assertTrue(loader_started.wait(2))
+        threads[1].start()
+        threads[2].start()
+        self.assertTrue(wait_events["waiter-b"].wait(2))
+        self.assertTrue(wait_events["waiter-c"].wait(2))
+        cache.invalidate(spreadsheet, "sales_activities")
+        release_loader.set()
+        for thread in threads:
+            thread.join(2)
+            self.assertFalse(thread.is_alive())
+
+        self.assertFalse(errors)
+        self.assertEqual(calls, 2)
+        self.assertEqual(max_active_loaders, 1)
+        self.assertEqual(results["loader"][0][1][0], "old")
+        self.assertTrue(results["loader"][1].invalidated_during_load)
+        waiter_results = [results["waiter-b"], results["waiter-c"]]
+        self.assertEqual(
+            {rows[1][0] for rows, _info in waiter_results}, {"new"}
+        )
+        loaders = [info for _rows, info in waiter_results if info.performed_load]
+        self.assertEqual(len(loaders), 1)
+        self.assertGreater(loaders[0].waited_seconds, 0)
+
+    def test_spreadsheet_and_global_invalidation_are_aba_safe(self):
+        for scope in ("spreadsheet", "global"):
+            with self.subTest(scope=scope):
+                cache = SheetReadCache(ttl_seconds=12)
+                spreadsheet = object()
+                loader_started = threading.Event()
+                release_loader = threading.Event()
+                calls = 0
+
+                def load():
+                    nonlocal calls
+                    calls += 1
+                    if calls == 1:
+                        loader_started.set()
+                        self.assertTrue(release_loader.wait(2))
+                        return [["header"], ["old"]]
+                    return [["header"], ["new"]]
+
+                old_token = cache.generation_signature(
+                    spreadsheet, ["sales_activities"]
+                )
+                with ThreadPoolExecutor(max_workers=1) as pool:
+                    future = pool.submit(
+                        cache.values_with_info,
+                        spreadsheet,
+                        "sales_activities",
+                        loader=load,
+                    )
+                    self.assertTrue(loader_started.wait(2))
+                    if scope == "spreadsheet":
+                        cache.invalidate(spreadsheet)
+                    else:
+                        cache.clear()
+                    current_token = cache.generation_signature(
+                        spreadsheet, ["sales_activities"]
+                    )
+                    release_loader.set()
+                    _old_rows, old_info = future.result(timeout=2)
+
+                current_rows, current_info = cache.values_with_info(
+                    spreadsheet, "sales_activities", loader=load
+                )
+                self.assertNotEqual(old_token, current_token)
+                self.assertTrue(old_info.invalidated_during_load)
+                self.assertEqual(current_rows[1][0], "new")
+                self.assertTrue(current_info.performed_load)
+                self.assertEqual(calls, 2)
+
+    def test_generation_signature_is_immutable_deterministic_and_scoped(self):
+        cache = SheetReadCache(ttl_seconds=12)
+        spreadsheet = object()
+        titles = ["sales_activities", "order_rows"]
+        initial = cache.generation_signature(spreadsheet, titles)
+        reordered = cache.generation_signature(
+            spreadsheet, reversed(titles)
+        )
+        self.assertEqual(initial, reordered)
+        self.assertIsInstance(initial, tuple)
+        with self.assertRaises(TypeError):
+            initial[0] = ("changed", (0, 0, 0))
+
+        cache.invalidate(spreadsheet, "score_events")
+        self.assertEqual(
+            initial, cache.generation_signature(spreadsheet, titles)
+        )
+        cache.invalidate(spreadsheet, "sales_activities")
+        relevant = cache.generation_signature(spreadsheet, titles)
+        self.assertNotEqual(initial, relevant)
+        cache.invalidate(spreadsheet)
+        broad = cache.generation_signature(spreadsheet, titles)
+        self.assertNotEqual(relevant, broad)
+        cache.clear()
+        self.assertNotEqual(
+            broad, cache.generation_signature(spreadsheet, titles)
+        )
+
+    def test_multiple_titles_and_cross_spreadsheet_title_invalidation_are_exact(self):
+        cache = SheetReadCache(ttl_seconds=12)
+        first_spreadsheet = object()
+        second_spreadsheet = object()
+        all_titles = ["sales_activities", "planned_activities", "order_rows"]
+        first_before = dict(cache.generation_signature(
+            first_spreadsheet, all_titles
+        ))
+        second_before = dict(cache.generation_signature(
+            second_spreadsheet, all_titles
+        ))
+        cache.values(
+            first_spreadsheet,
+            "sales_activities",
+            loader=lambda: [["first"]],
+        )
+        cache.values(
+            second_spreadsheet,
+            "sales_activities",
+            loader=lambda: [["second"]],
+        )
+
+        cache.invalidate(
+            first_spreadsheet,
+            "sales_activities",
+            "planned_activities",
+        )
+        first_after = dict(cache.generation_signature(
+            first_spreadsheet, all_titles
+        ))
+        second_after = dict(cache.generation_signature(
+            second_spreadsheet, all_titles
+        ))
+        self.assertNotEqual(
+            first_before["sales_activities"],
+            first_after["sales_activities"],
+        )
+        self.assertNotEqual(
+            first_before["planned_activities"],
+            first_after["planned_activities"],
+        )
+        self.assertEqual(
+            first_before["order_rows"], first_after["order_rows"]
+        )
+        self.assertEqual(second_before, second_after)
+
+        cache.invalidate(None, "sales_activities")
+        self.assertNotEqual(
+            first_after["sales_activities"],
+            dict(cache.generation_signature(
+                first_spreadsheet, all_titles
+            ))["sales_activities"],
+        )
+        self.assertNotEqual(
+            second_after["sales_activities"],
+            dict(cache.generation_signature(
+                second_spreadsheet, all_titles
+            ))["sales_activities"],
+        )
+
+    def test_title_only_invalidation_rejects_known_in_flight_load(self):
+        cache = SheetReadCache(ttl_seconds=12)
+        spreadsheet = object()
+        loader_started = threading.Event()
+        release_loader = threading.Event()
+        calls = 0
+
+        def load():
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                loader_started.set()
+                self.assertTrue(release_loader.wait(2))
+                return [["old"]]
+            return [["new"]]
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(
+                cache.values_with_info,
+                spreadsheet,
+                "sales_activities",
+                loader=load,
+            )
+            self.assertTrue(loader_started.wait(2))
+            cache.invalidate(None, "sales_activities")
+            release_loader.set()
+            _rows, old_info = future.result(timeout=2)
+
+        current_rows, current_info = cache.values_with_info(
+            spreadsheet, "sales_activities", loader=load
+        )
+        self.assertTrue(old_info.invalidated_during_load)
+        self.assertEqual(current_rows, [["new"]])
+        self.assertTrue(current_info.performed_load)
+        self.assertEqual(calls, 2)
+
+    def test_loader_exception_releases_single_flight_waiters(self):
+        waiter_waiting = threading.Event()
+        clock_counts = {}
+        clock_lock = threading.Lock()
+
+        def monitored_clock():
+            name = threading.current_thread().name
+            with clock_lock:
+                clock_counts[name] = clock_counts.get(name, 0) + 1
+                if name == "exception-waiter" and clock_counts[name] == 2:
+                    waiter_waiting.set()
+            return time.monotonic()
+
+        cache = SheetReadCache(ttl_seconds=12, monotonic=monitored_clock)
+        spreadsheet = object()
+        loader_started = threading.Event()
+        release_loader = threading.Event()
+        calls = 0
+        waiter_result = []
+
+        def load():
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                loader_started.set()
+                self.assertTrue(release_loader.wait(2))
+                raise RuntimeError("expected read failure")
+            return [["current"]]
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            failed_future = pool.submit(
+                cache.values_with_info,
+                spreadsheet,
+                "sales_activities",
+                loader=load,
+            )
+            self.assertTrue(loader_started.wait(2))
+            waiter = threading.Thread(
+                target=lambda: waiter_result.append(
+                    cache.values_with_info(
+                        spreadsheet, "sales_activities", loader=load
+                    )
+                ),
+                name="exception-waiter",
+            )
+            waiter.start()
+            self.assertTrue(waiter_waiting.wait(2))
+            release_loader.set()
+            with self.assertRaises(RuntimeError):
+                failed_future.result(timeout=2)
+            waiter.join(2)
+            self.assertFalse(waiter.is_alive())
+
+        self.assertEqual(waiter_result[0][0], [["current"]])
+        self.assertTrue(waiter_result[0][1].performed_load)
+        self.assertEqual(calls, 2)
+        self.assertFalse(cache._loading)
+
+    def test_read_metadata_and_defensive_copy_contract(self):
+        cache = SheetReadCache(ttl_seconds=12)
+        spreadsheet = object()
+        calls = 0
+
+        def load():
+            nonlocal calls
+            calls += 1
+            return [["header"], ["value"]]
+
+        first_rows, first_info = cache.values_with_info(
+            spreadsheet, "customers_enriched", loader=load
+        )
+        self.assertFalse(first_info.cache_hit)
+        self.assertEqual(first_info.waited_seconds, 0)
+        self.assertTrue(first_info.performed_load)
+        self.assertTrue(first_info.stored)
+        self.assertFalse(first_info.invalidated_during_load)
+        first_rows[1][0] = "mutated"
+
+        second_rows, second_info = cache.values_with_info(
+            spreadsheet, "customers_enriched", loader=load
+        )
+        self.assertTrue(second_info.cache_hit)
+        self.assertEqual(second_info.waited_seconds, 0)
+        self.assertFalse(second_info.performed_load)
+        self.assertFalse(second_info.stored)
+        self.assertFalse(second_info.invalidated_during_load)
+        self.assertEqual(second_rows[1][0], "value")
+        self.assertEqual(calls, 1)
+
     def test_first_429_retries_then_succeeds_and_honors_retry_after(self):
         calls = 0
         sleeps = []
@@ -162,6 +650,165 @@ class AppAvailabilityTests(TestCase):
                 self.spreadsheet, today=date(2026, 8, 8)
             )
             self.assertEqual(build.call_count, 2)
+
+    def test_priority_snapshot_ignores_unrelated_dataset_invalidations(self):
+        app_module.ensure_email_worksheets(
+            self.spreadsheet, include_events=False
+        )
+        with patch.object(
+            app_module,
+            "build_current_priority_snapshot",
+            wraps=app_module.build_current_priority_snapshot,
+        ) as build:
+            app_module.get_authoritative_priority_snapshot(
+                self.spreadsheet, today=date(2026, 8, 8)
+            )
+            for title in ("score_events", "planning_suggestions"):
+                app_module.invalidate_sheet_cache(self.spreadsheet, title)
+                app_module.get_authoritative_priority_snapshot(
+                    self.spreadsheet, today=date(2026, 8, 8)
+                )
+
+        self.assertEqual(build.call_count, 1)
+
+    def test_priority_snapshot_rebuilds_for_each_relevant_dependency(self):
+        app_module.ensure_email_worksheets(
+            self.spreadsheet, include_events=False
+        )
+        with patch.object(
+            app_module,
+            "build_current_priority_snapshot",
+            wraps=app_module.build_current_priority_snapshot,
+        ) as build:
+            app_module.get_authoritative_priority_snapshot(
+                self.spreadsheet, today=date(2026, 8, 8)
+            )
+            for expected_count, title in enumerate(
+                ("sales_activities", "order_rows"), start=2
+            ):
+                app_module.invalidate_sheet_cache(self.spreadsheet, title)
+                app_module.get_authoritative_priority_snapshot(
+                    self.spreadsheet, today=date(2026, 8, 8)
+                )
+                self.assertEqual(build.call_count, expected_count)
+
+    def test_relevant_invalidation_during_snapshot_build_prevents_reuse(self):
+        self._assert_snapshot_build_race("sales_activities", expected_builds=2)
+
+    def test_unrelated_invalidation_during_snapshot_build_allows_reuse(self):
+        self._assert_snapshot_build_race("score_events", expected_builds=1)
+
+    def _assert_snapshot_build_race(self, invalidated_title, *, expected_builds):
+        app_module.ensure_email_worksheets(
+            self.spreadsheet, include_events=False
+        )
+        original = app_module.build_current_priority_snapshot
+        build_started = threading.Event()
+        release_build = threading.Event()
+        build_count = 0
+        first_result = []
+        errors = []
+
+        def blocked_build(*args, **kwargs):
+            nonlocal build_count
+            build_count += 1
+            if build_count == 1:
+                build_started.set()
+                self.assertTrue(release_build.wait(2))
+            return original(*args, **kwargs)
+
+        def build_snapshot():
+            try:
+                first_result.append(
+                    app_module.get_authoritative_priority_snapshot(
+                        self.spreadsheet, today=date(2026, 8, 8)
+                    )
+                )
+            except Exception as error:
+                errors.append(error)
+
+        with patch.object(
+            app_module,
+            "build_current_priority_snapshot",
+            side_effect=blocked_build,
+        ):
+            thread = threading.Thread(target=build_snapshot)
+            thread.start()
+            self.assertTrue(build_started.wait(2))
+            app_module.invalidate_sheet_cache(
+                self.spreadsheet, invalidated_title
+            )
+            release_build.set()
+            thread.join(2)
+            self.assertFalse(thread.is_alive())
+            self.assertFalse(errors)
+            self.assertEqual(len(first_result), 1)
+            app_module.get_authoritative_priority_snapshot(
+                self.spreadsheet, today=date(2026, 8, 8)
+            )
+
+        self.assertEqual(build_count, expected_builds)
+
+    def test_explicit_planning_rows_still_use_planned_dataset_generation(self):
+        app_module.ensure_email_worksheets(
+            self.spreadsheet, include_events=False
+        )
+        planned_rows = [{
+            "planned_activity_id": "explicit-plan",
+            "status": "planned",
+            "scheduled_at": "2026-08-10T10:00:00+02:00",
+        }]
+        with patch.object(
+            app_module,
+            "build_current_priority_snapshot",
+            wraps=app_module.build_current_priority_snapshot,
+        ) as build:
+            app_module.get_authoritative_priority_snapshot(
+                self.spreadsheet,
+                today=date(2026, 8, 8),
+                planned_activity_rows=planned_rows,
+            )
+            app_module.get_authoritative_priority_snapshot(
+                self.spreadsheet,
+                today=date(2026, 8, 8),
+                planned_activity_rows=planned_rows,
+            )
+            self.assertEqual(build.call_count, 1)
+            app_module.invalidate_sheet_cache(
+                self.spreadsheet, "planned_activities"
+            )
+            app_module.get_authoritative_priority_snapshot(
+                self.spreadsheet,
+                today=date(2026, 8, 8),
+                planned_activity_rows=planned_rows,
+            )
+
+        self.assertEqual(build.call_count, 2)
+
+    def test_broad_and_global_cache_invalidation_rebuild_priority_snapshot(self):
+        app_module.ensure_email_worksheets(
+            self.spreadsheet, include_events=False
+        )
+        with patch.object(
+            app_module,
+            "build_current_priority_snapshot",
+            wraps=app_module.build_current_priority_snapshot,
+        ) as build:
+            app_module.get_authoritative_priority_snapshot(
+                self.spreadsheet, today=date(2026, 8, 8)
+            )
+            self.assertEqual(build.call_count, 1)
+            app_module._sheet_read_cache.invalidate(self.spreadsheet)
+            app_module.get_authoritative_priority_snapshot(
+                self.spreadsheet, today=date(2026, 8, 8)
+            )
+            self.assertEqual(build.call_count, 2)
+            app_module._sheet_read_cache.clear()
+            app_module.get_authoritative_priority_snapshot(
+                self.spreadsheet, today=date(2026, 8, 8)
+            )
+
+        self.assertEqual(build.call_count, 3)
 
     def test_email_sales_activity_persists_canonical_customer_id(self):
         app_module.build_sales_activity_for_email(
