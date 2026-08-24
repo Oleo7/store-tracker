@@ -23,6 +23,7 @@ from queue import Empty, Full, Queue
 import os
 import json
 import hashlib
+import logging
 import math
 import re
 import requests
@@ -336,6 +337,29 @@ app.config.update(
 CORS(app, supports_credentials=True)
 
 
+PERFORMANCE_LOGGER_NAME = "store_tracker.performance"
+
+
+def configure_performance_logger():
+    logger = logging.getLogger(PERFORMANCE_LOGGER_NAME)
+    logger.setLevel(logging.INFO)
+    logger.disabled = False
+    logger.propagate = False
+    if not any(
+        getattr(handler, "store_tracker_performance_handler", False)
+        for handler in logger.handlers
+    ):
+        handler = logging.StreamHandler(sys.stdout)
+        handler.setLevel(logging.INFO)
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        handler.store_tracker_performance_handler = True
+        logger.addHandler(handler)
+    return logger
+
+
+performance_logger = configure_performance_logger()
+
+
 PERFORMANCE_ENDPOINTS = {
     "/session",
     "/customers",
@@ -453,7 +477,9 @@ def finalize_response(response):
     entries = [{**common, "step": "total", "duration_ms": total_ms, "row_count": None}]
     entries.extend({**common, **step} for step in g.performance_steps)
     for entry in entries:
-        app.logger.info(json.dumps(entry, separators=(",", ":"), sort_keys=True))
+        performance_logger.info(
+            json.dumps(entry, separators=(",", ":"), sort_keys=True)
+        )
     return response
 
 
