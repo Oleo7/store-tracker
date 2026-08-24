@@ -1,3 +1,6 @@
+import json
+import logging
+import os
 from pathlib import Path
 import sys
 from unittest import TestCase
@@ -8,6 +11,7 @@ WEB_APP_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(WEB_APP_DIR))
 
 import app as app_module
+from test_planning import default_spreadsheet
 
 
 class Performance1ATests(TestCase):
@@ -85,6 +89,63 @@ class Performance1ATests(TestCase):
 
         self.assertEqual(rows, ([], [], []))
         self.assertNotIn(app_module.EMAIL_EVENTS_SHEET, accessed_worksheets)
+
+    def test_planning_activities_emits_structured_performance_records_at_info(self):
+        spreadsheet = default_spreadsheet()
+        with patch.dict(
+            os.environ,
+            {"PERFORMANCE_LOGGING_ENABLED": "true"},
+            clear=False,
+        ), patch.object(
+            app_module,
+            "get_spreadsheet_with_retry",
+            return_value=spreadsheet,
+        ), patch.object(
+            app_module,
+            "current_user",
+            return_value={"user_name": "olle", "role": "Säljare"},
+        ), self.assertLogs(
+            app_module.PERFORMANCE_LOGGER_NAME,
+            level=logging.INFO,
+        ) as captured:
+            response = app_module.app.test_client().get(
+                "/planning/activities?start=2026-07-27&end=2026-08-02"
+            )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        records = [json.loads(record.getMessage()) for record in captured.records]
+        self.assertTrue(records)
+        self.assertTrue(all(
+            record.levelno == logging.INFO for record in captured.records
+        ))
+        self.assertEqual({entry["event"] for entry in records}, {"performance"})
+        self.assertEqual(
+            {entry["endpoint"] for entry in records},
+            {"/planning/activities"},
+        )
+        self.assertEqual(len({entry["request_id"] for entry in records}), 1)
+        self.assertTrue(next(iter({entry["request_id"] for entry in records})))
+        self.assertIn("total", {entry["step"] for entry in records})
+        for entry in records:
+            with self.subTest(step=entry["step"]):
+                self.assertIn("total_ms", entry)
+                self.assertIn("duration_ms", entry)
+                self.assertIn("row_count", entry)
+                self.assertIn("google_sheets_read_count", entry)
+                self.assertNotIn("customer", entry)
+        self.assertNotIn("Butik A", " ".join(captured.output))
+
+    def test_performance_logger_has_dedicated_info_stdout_handler(self):
+        handlers = [
+            handler for handler in app_module.performance_logger.handlers
+            if getattr(handler, "store_tracker_performance_handler", False)
+        ]
+
+        self.assertEqual(len(handlers), 1)
+        self.assertEqual(app_module.performance_logger.level, logging.INFO)
+        self.assertFalse(app_module.performance_logger.propagate)
+        self.assertEqual(handlers[0].level, logging.INFO)
+        self.assertIs(handlers[0].stream, sys.stdout)
 
 
 if __name__ == "__main__":

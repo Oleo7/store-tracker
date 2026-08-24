@@ -936,7 +936,7 @@ class RouteOptimizationIntegrationTests(TestCase):
             app_module, "get_authoritative_priority_snapshot", return_value=snapshot
         ), patch.object(
             app_module, "route_optimization_provider", return_value=Provider()
-        ), patch.object(app_module.app.logger, "info") as performance_logs:
+        ), patch.object(app_module.performance_logger, "info") as performance_logs:
             response = self.client.post("/planning/route-preview", json={
                     "route_date": NOW.date().isoformat(),
                     "route_mode": "automatic",
