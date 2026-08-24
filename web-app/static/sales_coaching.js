@@ -394,9 +394,12 @@
     const value = isRate ? percent(metric.value) : number(metric.value);
     const definition = metricDefinition(key, metric);
     const info = definitionParts(key, `kpi-${key}`, metric, "sc-kpi-info sc-metric-info");
-    const emailUnavailable = key === "positive_dialogue" && state.filters.channel === "email" && metric.status === "not_computable";
+    const selectedChannelUnavailable = state.filters.channel !== "all"
+      && metric.status === "not_computable"
+      && Array.isArray(definition.channels)
+      && !definition.channels.includes(state.filters.channel);
     const evidence = isRate
-      ? emailUnavailable
+      ? selectedChannelUnavailable
         ? `<span class="sc-kpi-evidence">${escapeHtml(definition.not_computable_text || statusLabel(metric.status))}</span>`
         : `<span class="sc-kpi-evidence"><span>${rateEvidence(metric)}</span><span class="sc-kpi-denominator">${escapeHtml(definition.denominator_label || "kontakter")}</span></span>`
       : "";
@@ -404,7 +407,7 @@
     if (key === "human_activities") {
       secondary = `Unika kunder ${number(metric.unique_customers)} · Besök ${number(metric.channel_mix?.visit)} · Telefon ${number(metric.channel_mix?.phone)} · Manuellt mejl ${number(metric.channel_mix?.email)}`;
     }
-    if (key === "positive_to_order_10d") {
+    if (key === "positive_to_order_10d" && !selectedChannelUnavailable) {
       secondary = `${number(metric.waiting_outcome_count)} väntar fortfarande på fullt 10-dagarsutfall`;
     }
     return `
@@ -449,7 +452,7 @@
   function matrixReasonLabel(reason) {
     return ({
       positive_denominator_zero: "inga nådda besök eller telefonsamtal för positiv dialog",
-      positive_order_denominator_zero: "inga mogna positiva kontakter för positiv-till-order-måttet",
+      positive_order_denominator_zero: "inga mogna positiva dialoger för positiv-till-order-måttet",
       order_denominator_zero: "inga mogna kontakter för ordermåttet",
       priority_denominator_zero: "ingen sparad historisk percentil",
       order_sample_below_10: "färre än 10 mogna kontakter",
@@ -560,9 +563,14 @@
   function channelMarkup(channels) {
     const labels = { visit: "Besök", phone: "Telefon", email: "Manuellt mejl" };
     const displayRate = rate => `${percent(rate.value)} (${rateEvidence(rate)})${rate.status === "small_sample" ? " · Litet underlag" : ""}`;
-    const positiveUnavailable = metricDefinition("positive_dialogue").not_computable_text || "Positiv dialog mäts endast för Besök och Telefon.";
+    const channelRate = (channel, key, rate) => {
+      const definition = metricDefinition(key, rate);
+      return Array.isArray(definition.channels) && !definition.channels.includes(channel)
+        ? "Ej tillämpligt"
+        : displayRate(rate);
+    };
     const medianInfo = definitionParts("median_days_to_order", "channel-median-days", {}, "sc-metric-info sc-table-info");
-    return `<section class="sc-section" aria-labelledby="sc-channel-title"><div class="sc-section-heading"><div><h2 id="sc-channel-title">Kanalernas effektivitet</h2><p>Automatiserade CRM-mejl ingår inte. Små underlag märks uttryckligen.</p></div></div><div class="sc-table-wrap"><table class="sc-table"><thead><tr><th>Kanal</th><th>Aktiviteter</th><th>${metricHeader("Träffgrad", "reach", "channel-reach")}</th><th>${metricHeader("Positiv dialog", "positive_dialogue", "channel-positive")}</th><th>${metricHeader("Kontakt → order", "order_10d", "channel-order")}</th><th>${metricHeader("Positiv → order", "positive_to_order_10d", "channel-positive-order")}</th><th>${metricHeader("Attribuerat utfall", "attributed_orders", "channel-attributed")}${medianInfo.button}${medianInfo.explanation}</th></tr></thead><tbody>${Object.entries(channels || {}).map(([key, item]) => `<tr><td><button type="button" data-channel="${key}" data-drilldown="human_activities">${labels[key]}</button></td><td>${number(item.human_activities)}</td><td>${key === "email" ? "Ej tillämpligt" : displayRate(item.reach)}</td><td>${key === "email" ? escapeHtml(positiveUnavailable) : displayRate(item.positive_dialogue)}</td><td>${displayRate(item.order_10d)}</td><td>${displayRate(item.positive_to_order_10d)}</td><td>${number(item.attributed_orders)} order · ${number(item.dfp, 2)} DFP · ${orderValues(item.order_value_by_currency)}${item.median_days_to_order === null ? " · Median kräver 5 order" : ` · ${number(item.median_days_to_order, 1)} dagar median`}</td></tr>`).join("")}</tbody></table></div></section>`;
+    return `<section class="sc-section" aria-labelledby="sc-channel-title"><div class="sc-section-heading"><div><h2 id="sc-channel-title">Kanalernas effektivitet</h2><p>Automatiserade CRM-mejl ingår inte. Små underlag märks uttryckligen.</p></div></div><div class="sc-table-wrap"><table class="sc-table"><thead><tr><th>Kanal</th><th>Aktiviteter</th><th>${metricHeader("Träffgrad", "reach", "channel-reach")}</th><th>${metricHeader("Positiv dialog", "positive_dialogue", "channel-positive")}</th><th>${metricHeader("Kontakt → order", "order_10d", "channel-order")}</th><th>${metricHeader("Positiv → order", "positive_to_order_10d", "channel-positive-order")}</th><th>${metricHeader("Attribuerat utfall", "attributed_orders", "channel-attributed")}${medianInfo.button}${medianInfo.explanation}</th></tr></thead><tbody>${Object.entries(channels || {}).map(([key, item]) => `<tr data-channel-row="${key}"><td><button type="button" data-channel="${key}" data-drilldown="human_activities">${labels[key]}</button></td><td>${number(item.human_activities)}</td><td data-channel-metric="reach">${channelRate(key, "reach", item.reach)}</td><td data-channel-metric="positive_dialogue">${channelRate(key, "positive_dialogue", item.positive_dialogue)}</td><td data-channel-metric="order_10d">${channelRate(key, "order_10d", item.order_10d)}</td><td data-channel-metric="positive_to_order_10d">${channelRate(key, "positive_to_order_10d", item.positive_to_order_10d)}</td><td>${number(item.attributed_orders)} order · ${number(item.dfp, 2)} DFP · ${orderValues(item.order_value_by_currency)}${item.median_days_to_order === null ? " · Median kräver 5 order" : ` · ${number(item.median_days_to_order, 1)} dagar median`}</td></tr>`).join("")}</tbody></table></div></section>`;
   }
 
   function priorityDiagnosticsMarkup(data) {

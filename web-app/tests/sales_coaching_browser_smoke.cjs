@@ -35,7 +35,7 @@ const viewport = mode === "mobile"
     const expectedDenominators = [
       "analyserbara besök/telefonsamtal",
       "nådda besök/telefonsamtal",
-      "mogna positiva kontakter",
+      "mogna positiva dialoger",
     ];
     const denominatorText = await page.locator(".sc-kpi-denominator").allInnerTexts();
     for (const expected of expectedDenominators) {
@@ -98,6 +98,19 @@ const viewport = mode === "mobile"
     const emailPositive = await page.locator('.sc-kpi-card[data-kpi-key="positive_dialogue"]').innerText();
     if (!emailPositive.includes("Positiv dialog mäts endast för Besök och Telefon.")) {
       throw new Error(`${mode}: email filter fabricated a positive-dialogue rate`);
+    }
+    const emailPositiveOrder = await page.locator('.sc-kpi-card[data-kpi-key="positive_to_order_10d"]').innerText();
+    if (!emailPositiveOrder.includes("Positiv → order mäts endast för Besök och Telefon.")) {
+      throw new Error(`${mode}: email filter fabricated a positive-to-order rate`);
+    }
+    await page.locator('[data-diagnostic-tab="channels"]').click();
+    const emailRow = page.locator('[data-channel-row="email"]');
+    await emailRow.waitFor();
+    for (const metric of ["positive_dialogue", "positive_to_order_10d"]) {
+      const cell = await emailRow.locator(`[data-channel-metric="${metric}"]`).innerText();
+      if (cell.trim() !== "Ej tillämpligt") {
+        throw new Error(`${mode}: email row fabricated ${metric}: ${cell}`);
+      }
     }
 
     const bodyText = await page.locator("body").innerText();

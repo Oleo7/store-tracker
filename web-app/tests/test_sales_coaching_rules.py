@@ -133,7 +133,9 @@ class SignalRuleTests(TestCase):
         signals = self.signals(seller_metrics(
             positive_next_step_coverage=rate(.50, peer=.40),
         ))
-        self.assertIn("followup_gap", {item["code"] for item in signals})
+        follow_up = next(item for item in signals if item["code"] == "followup_gap")
+        self.assertEqual(follow_up["title"], "Positiva kontakter saknar nästa steg")
+        self.assertNotIn("positiva dialoger", follow_up["next_action"].casefold())
 
     def test_follow_up_below_absolute_standard_cannot_be_peer_strength(self):
         signals = self.signals(seller_metrics(
@@ -355,6 +357,8 @@ class SignalRuleTests(TestCase):
         )
 
         self.assertEqual(cards[0]["code"], "team_followup_gap")
+        self.assertEqual(cards[0]["title"], "Teamets positiva kontakter saknar nästa steg")
+        self.assertNotIn("positiva dialoger", cards[0]["next_action"].casefold())
         self.assertNotIn("peer_median", cards[0]["benchmark"])
 
 

@@ -285,7 +285,7 @@ def build_seller_signals(*, seller, metrics, repeat_boms, channel_effectiveness)
                 code="closing_gap", dimension="closing", polarity="attention",
                 metric_key="positive_to_order_10d",
                 title="Positiv dialog blir mer sällan order",
-                observation=f"{seller} når minst nivån för övriga säljares positiva dialoger men färre positiva kontakter med fullständigt 10-dagarsutfall följs av order.",
+                observation=f"{seller} når minst nivån för övriga säljares positiva dialoger men färre positiva dialoger med fullständigt 10-dagarsutfall följs av order.",
                 evidence=closing, benchmark=_benchmark(closing),
                 next_action="Granska överenskommet nästa steg, erbjudande och uppföljning efter positiva dialoger.",
                 target="Minska gapet till övriga säljare med minst 10 procentenheter.",
@@ -297,10 +297,10 @@ def build_seller_signals(*, seller, metrics, repeat_boms, channel_effectiveness)
             signals.append(_signal(
                 code="positive_to_order_10d_strength", dimension="closing", polarity="strength",
                 metric_key="positive_to_order_10d", title="Stark positiv-till-order-konvertering",
-                observation=f"{seller} ligger tydligt över övriga säljare för positiva kontakter med fullständigt 10-dagarsutfall.",
+                observation=f"{seller} ligger tydligt över övriga säljare för positiva dialoger med fullständigt 10-dagarsutfall.",
                 evidence=closing, benchmark=_benchmark(closing),
                 next_action="Identifiera vilka överenskommelser och uppföljningar som driver utfallet.",
-                target="Behåll nivån med minst 30 mogna positiva kontakter.",
+                target="Behåll nivån med minst 30 mogna positiva dialoger.",
                 drilldown_metric="positive_to_order_10d",
                 ranking_score=_rank("closing", closing, gap, RATE_GAP),
             ))
@@ -328,10 +328,10 @@ def build_seller_signals(*, seller, metrics, repeat_boms, channel_effectiveness)
                         "denominator": follow_up["denominator"], "status": "sufficient"}
             signals.append(_signal(
                 code="followup_gap", dimension="follow_up", polarity="attention",
-                metric_key="positive_next_step_coverage", title="Positiva dialoger saknar nästa steg",
+                metric_key="positive_next_step_coverage", title="Positiva kontakter saknar nästa steg",
                 observation="Minst 30 procent av bedömningsbara positiva kontakter saknar order, uppföljningsdatum eller länkad aktivitet efter tre dagar.",
                 evidence=evidence, benchmark=_benchmark(follow_up),
-                next_action="Bestäm datum, ansvar och syfte för nästa steg redan i dialogen.",
+                next_action="Bestäm datum, ansvar och syfte för nästa steg redan vid den positiva kontakten.",
                 target="Minst 70 % nästa-steg-täckning.", drilldown_metric="followup_gap",
                 ranking_score=_absolute_rank("follow_up", evidence["denominator"], missing_rate - FOLLOW_UP_GAP),
             ))
@@ -470,10 +470,10 @@ def build_team_signals(*, metrics, previous_metrics, repeat_boms):
                     "denominator": follow_up["denominator"], "status": "sufficient"}
         signals.append(_signal(
             code="team_followup_gap", dimension="follow_up", polarity="attention",
-            metric_key="positive_next_step_coverage", title="Teamets positiva dialoger saknar nästa steg",
+            metric_key="positive_next_step_coverage", title="Teamets positiva kontakter saknar nästa steg",
             observation="Teamet ligger under den absoluta processen för nästa-steg-täckning.",
             evidence=evidence, benchmark=benchmark,
-            next_action="Säkra datum, ansvar och syfte för nästa steg i positiva dialoger.",
+            next_action="Säkra datum, ansvar och syfte för nästa steg vid positiva kontakter.",
             target="Minst 70 % nästa-steg-täckning.", drilldown_metric="followup_gap",
             ranking_score=_absolute_rank("follow_up", evidence["denominator"], evidence["value"] - FOLLOW_UP_GAP),
         ))

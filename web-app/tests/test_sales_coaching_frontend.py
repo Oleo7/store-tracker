@@ -59,7 +59,7 @@ class SalesCoachingFrontendTests(TestCase):
         )
         self.assertEqual(
             METRIC_DEFINITIONS["positive_to_order_10d"]["denominator_label"],
-            "mogna positiva kontakter",
+            "mogna positiva dialoger",
         )
         self.assertIn("definition.denominator_label", self.javascript)
         self.assertIn("sc-kpi-denominator", self.javascript)
@@ -182,7 +182,7 @@ class SalesCoachingFrontendTests(TestCase):
 
     def test_matrix_has_swedish_denominator_zero_reason(self):
         self.assertIn(
-            'positive_order_denominator_zero: "inga mogna positiva kontakter för positiv-till-order-måttet"',
+            'positive_order_denominator_zero: "inga mogna positiva dialoger för positiv-till-order-måttet"',
             self.javascript,
         )
 
@@ -212,12 +212,20 @@ class SalesCoachingFrontendTests(TestCase):
         self.assertIn("metricHeader(", self.javascript)
         self.assertIn("sc-metric-info", self.css)
 
-    def test_positive_dialogue_email_copy_and_diagnostics_copy_are_plain(self):
+    def test_synchronous_dialogue_metrics_are_not_applicable_for_email(self):
         self.assertEqual(
             METRIC_DEFINITIONS["positive_dialogue"]["not_computable_text"],
             "Positiv dialog mäts endast för Besök och Telefon.",
         )
-        self.assertIn('key === "email" ? escapeHtml(positiveUnavailable)', self.javascript)
+        self.assertEqual(
+            METRIC_DEFINITIONS["positive_to_order_10d"]["not_computable_text"],
+            "Positiv → order mäts endast för Besök och Telefon.",
+        )
+        self.assertIn("channelRate(key, \"positive_dialogue\"", self.javascript)
+        self.assertIn("channelRate(key, \"positive_to_order_10d\"", self.javascript)
+        self.assertIn('? "Ej tillämpligt"', self.javascript)
+        self.assertIn('data-channel-row="${key}"', self.javascript)
+        self.assertIn('data-channel-metric="positive_to_order_10d"', self.javascript)
         self.assertNotIn("Fördjupa analysen utan operativa kundlistor.", self.javascript)
 
     def test_metric_information_is_separate_from_drilldown_and_accessible(self):
