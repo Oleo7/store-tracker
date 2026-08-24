@@ -132,9 +132,9 @@ def _benchmark(metric):
     count_metric = metric.get("metric_type") == "count"
     if peer is not None:
         labels.append((
-            f"Peer median {peer:g} aktiviteter · {comparisons.get('delta_peer', 0):+g} aktiviteter"
+            f"Median övriga säljare {peer:g} aktiviteter · {comparisons.get('delta_peer', 0):+g} aktiviteter"
             if count_metric else
-            f"Peer median {peer:.1%} · {comparisons.get('delta_peer', 0) * 100:+.1f} pp"
+            f"Median övriga säljare {peer:.1%} · {comparisons.get('delta_peer', 0) * 100:+.1f} pp"
         ))
     if previous is not None:
         labels.append((
@@ -185,9 +185,9 @@ def _peer_signal(*, seller, metric_key, metric, dimension, lower_is_better,
     polarity = "attention" if attention else "strength"
     direction = "över" if gap > 0 else "under"
     observation = (
-        f"{seller} ligger tydligt {direction} peergruppen för {title_attention.lower()}."
+        f"{seller} ligger tydligt {direction} övriga säljare för {title_attention.lower()}."
         if attention else
-        f"{seller} ligger tydligt {direction} peergruppen och visar en styrka inom {title_strength.lower()}."
+        f"{seller} ligger tydligt {direction} övriga säljare och visar en styrka inom {title_strength.lower()}."
     )
     return [_signal(
         code=f"{metric_key}_{'high' if lower_is_better and attention else 'low' if attention else 'strength'}",
@@ -238,7 +238,7 @@ def build_seller_signals(*, seller, metrics, repeat_boms, channel_effectiveness)
     signals = []
     definitions = (
         ("reach", "reach", False, "Träffgraden kan förbättras", "Hög träffgrad", "Granska tidpunkt, kontaktperson och förberedelse för missade försök.", "Identifiera och återanvänd förberedelserna bakom den höga träffgraden.", "Behåll minst 10 analyserbara försök.", "reach"),
-        ("positive_dialogue", "positive_dialogue", False, "Färre dialoger blir positiva", "Hög andel positiva dialoger", "Granska behovsfrågor, invändningar och hur nästa steg förankras.", "Identifiera vilka frågor och kundsituationer som driver de starka dialogerna.", "Behåll nivån med minst 30 analyserbara kontakter.", "positive_dialogue"),
+        ("positive_dialogue", "positive_dialogue", False, "Färre dialoger blir positiva", "Hög andel positiva dialoger", "Granska behovsfrågor, invändningar och hur nästa steg förankras.", "Identifiera vilka frågor och kundsituationer som driver de starka dialogerna.", "Behåll nivån med minst 30 nådda besök och telefonsamtal.", "positive_dialogue"),
         ("bom_ratio", "bom", True, "Många besök blir bom", "Låg bom-ratio", "Se över besökstid, bokning och rätt kontaktperson.", "Förstå och återanvänd bokningsarbetet bakom den låga bom-ration.", "Behåll minst 10 analyserbara besök.", "bom_ratio"),
     )
     for key, dimension, lower, attention_title, strength_title, attention_action, strength_action, target, drilldown in definitions:
@@ -260,10 +260,10 @@ def build_seller_signals(*, seller, metrics, repeat_boms, channel_effectiveness)
                 signals.append(_signal(
                     code="activity_low", dimension="activity", polarity="attention",
                     metric_key="human_activities", title="Aktivitetsnivån är låg",
-                    observation=f"{seller} har tydligt färre mänskliga aktiviteter än peergruppen.",
+                    observation=f"{seller} har tydligt färre mänskliga aktiviteter än övriga säljare.",
                     evidence=activity, benchmark=_benchmark(activity),
                     next_action="Utforska vad som begränsar planerad kontakttid.",
-                    target="Närma aktivitetsnivån till peergruppen utan att sänka kvaliteten.",
+                    target="Närma aktivitetsnivån till övriga säljare utan att sänka kvaliteten.",
                     drilldown_metric="human_activities",
                     ranking_score=_rank("activity", activity, relative_gap, ACTIVITY_SHARE_GAP),
                 ))
@@ -285,10 +285,10 @@ def build_seller_signals(*, seller, metrics, repeat_boms, channel_effectiveness)
                 code="closing_gap", dimension="closing", polarity="attention",
                 metric_key="positive_to_order_10d",
                 title="Positiv dialog blir mer sällan order",
-                observation=f"{seller} når minst peergruppens positiva dialognivå men färre mogna positiva kontakter följs av order.",
+                observation=f"{seller} når minst nivån för övriga säljares positiva dialoger men färre positiva kontakter med fullständigt 10-dagarsutfall följs av order.",
                 evidence=closing, benchmark=_benchmark(closing),
                 next_action="Granska överenskommet nästa steg, erbjudande och uppföljning efter positiva dialoger.",
-                target="Minska gapet till peergruppen med minst 10 procentenheter.",
+                target="Minska gapet till övriga säljare med minst 10 procentenheter.",
                 drilldown_metric="positive_to_order_10d",
                 ranking_score=_rank("closing", closing, gap, RATE_GAP),
             ))
@@ -297,7 +297,7 @@ def build_seller_signals(*, seller, metrics, repeat_boms, channel_effectiveness)
             signals.append(_signal(
                 code="positive_to_order_10d_strength", dimension="closing", polarity="strength",
                 metric_key="positive_to_order_10d", title="Stark positiv-till-order-konvertering",
-                observation=f"{seller} ligger tydligt över peergruppen i mogen positiv-till-order-konvertering.",
+                observation=f"{seller} ligger tydligt över övriga säljare för positiva kontakter med fullständigt 10-dagarsutfall.",
                 evidence=closing, benchmark=_benchmark(closing),
                 next_action="Identifiera vilka överenskommelser och uppföljningar som driver utfallet.",
                 target="Behåll nivån med minst 30 mogna positiva kontakter.",
@@ -350,7 +350,7 @@ def build_seller_signals(*, seller, metrics, repeat_boms, channel_effectiveness)
                     dimension="follow_up", polarity="strength",
                     metric_key="positive_next_step_coverage",
                     title="Hög nästa-steg-täckning",
-                    observation=f"{seller} uppfyller processstandarden och ligger tydligt över peergruppen i nästa-steg-täckning.",
+                    observation=f"{seller} uppfyller processstandarden och ligger tydligt över övriga säljare i nästa-steg-täckning.",
                     evidence=follow_up, benchmark=_benchmark(follow_up),
                     next_action="Återanvänd rutinen som säkrar tydliga nästa steg.",
                     target="Behåll minst 70 % nästa-steg-täckning.",
@@ -399,7 +399,7 @@ def build_seller_signals(*, seller, metrics, repeat_boms, channel_effectiveness)
                     dimension="planning", polarity="strength",
                     metric_key="planned_completed_in_time",
                     title="Hög planeringsdisciplin",
-                    observation=f"{seller} uppfyller processstandarden och ligger tydligt över peergruppen i planeringar genomförda i tid.",
+                    observation=f"{seller} uppfyller processstandarden och ligger tydligt över övriga säljare i planeringar genomförda i tid.",
                     evidence=planned, benchmark=_benchmark(planned),
                     next_action="Förstå och återanvänd arbetssättet som håller planeringarna i tid.",
                     target="Behåll minst 70 % genomförda i tid och under 20 % försenade.",

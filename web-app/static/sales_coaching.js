@@ -16,23 +16,6 @@
     filters: defaultFilters(),
   };
   const MATRIX_TICKS = [0, 25, 50, 75, 100];
-  const KPI_PRESENTATION = Object.freeze({
-    human_activities: {
-      explanation: "Alla mänskliga aktiviteter via besök, telefon och manuella mejl. Automatiska CRM-mejl räknas inte.",
-    },
-    reach: {
-      denominatorLabel: "analyserbara besök/telefonsamtal",
-      explanation: "Andelen analyserbara besök och telefonsamtal där säljaren faktiskt nådde kunden. Manuella mejl ingår inte i träffgraden.",
-    },
-    positive_dialogue: {
-      denominatorLabel: "nådda kontakter",
-      explanation: "Andelen nådda mänskliga kontakter som slutade i positiv dialog eller order. Ej anträffbar/bom räknas inte i nämnaren.",
-    },
-    positive_to_order_10d: {
-      denominatorLabel: "mogna positiva kontakter",
-      explanation: "Andelen positiva kontakter som följdes av en attribuerad order inom 0–10 dagar. Endast kontakter som hunnit få ett fullständigt 10-dagarsutfall ingår.",
-    },
-  });
 
   const root = document.getElementById("sales-coaching-dashboard");
   const businessPanel = document.getElementById("business-overview-content");
@@ -69,6 +52,36 @@
       .replace(/>/g, "&gt;")
       .replace(/"/g, "&quot;")
       .replace(/'/g, "&#039;");
+  }
+
+  function metricDefinition(key, fallback = {}) {
+    return state.data?.metric_definitions?.[key] || fallback || {};
+  }
+
+  function definitionParts(key, context, fallback = {}, buttonClass = "sc-metric-info") {
+    const definition = metricDefinition(key, fallback);
+    if (!definition.definition) return { button: "", explanation: "" };
+    const safeContext = String(context || key).replace(/[^a-z0-9_-]+/gi, "-");
+    const explanationId = `sc-metric-explanation-${safeContext}-${key}`;
+    const label = definition.label || fallback.label || key;
+    return {
+      button: `<button type="button" class="${buttonClass}" data-sc-action="metric-info" aria-expanded="false" aria-controls="${explanationId}" title="${escapeHtml(definition.definition)}" aria-label="Förklaring för ${escapeHtml(label)}">i</button>`,
+      explanation: `<span class="sc-metric-explanation" id="${explanationId}" hidden>${escapeHtml(definition.definition)}</span>`,
+    };
+  }
+
+  function miniMetricCard({ context, label, value, evidence = "", definitionKey = "", drilldownMetric = "", channel = "" }) {
+    const info = definitionParts(definitionKey, context);
+    const content = `<span class="sc-mini-label">${escapeHtml(label)}</span><span class="sc-mini-value">${value}</span>${evidence ? `<span class="sc-mini-evidence">${evidence}</span>` : ""}`;
+    const main = drilldownMetric
+      ? `<button type="button" class="sc-mini-main" data-drilldown="${escapeHtml(drilldownMetric)}"${channel ? ` data-channel="${escapeHtml(channel)}"` : ""}>${content}</button>`
+      : `<div class="sc-mini-main">${content}</div>`;
+    return `<article class="sc-mini-card">${main}${info.button}${info.explanation}</article>`;
+  }
+
+  function metricHeader(label, key, context) {
+    const info = definitionParts(key, context, {}, "sc-metric-info sc-table-info");
+    return `<span class="sc-table-metric-label">${escapeHtml(label)}${info.button}${info.explanation}</span>`;
   }
 
   function number(value, digits = 0) {
@@ -118,7 +131,7 @@
     const parts = [];
     if (comparisons.peer_median !== null && comparisons.peer_median !== undefined) {
       const delta = comparisons.delta_peer;
-      parts.push(`Peer median ${formatValue(comparisons.peer_median)}${delta === null || delta === undefined ? "" : ` · ${formatDelta(delta)}`}`);
+      parts.push(`Median övriga säljare ${formatValue(comparisons.peer_median)}${delta === null || delta === undefined ? "" : ` · ${formatDelta(delta)}`}`);
     }
     if (previousValue !== null && previousValue !== undefined) {
       const delta = comparisons.delta_previous;
@@ -360,28 +373,32 @@
     return `
       <button type="button" class="sc-quality-status" data-sc-action="quality-details" data-status="${escapeHtml(core.status || quality.status)}">
         <span><strong>Kärndata ${percent(identity)}</strong></span>
-        <span>Historisk percentile ${number(history.comparable_percentile_count)} av ${number(history.v2_contact_count)} nya kontakter</span>
+        <span>Jämförbar historisk prioritet ${number(history.comparable_percentile_count)} av ${number(history.v2_contact_count)} nya kontakter</span>
         <span>${number(quality.waiting_outcome_count)} kontakter väntar på 10-dagarsutfall</span>
         <span aria-hidden="true">Visa detaljer ↓</span>
       </button>`;
   }
 
-  function dataQualityDetailsMarkup(quality, meta) {
+  function dataQualityDetailsMarkup(quality, definitions) {
     const core = quality.core_analytics || {};
     const history = quality.historical_priority || {};
-    const suppression = Object.entries(history.suppression_reason_counts || {})
-      .map(([reason, count]) => `${escapeHtml(reason)} ${number(count)}`).join(" · ") || "Inga";
-    return `<section class="sc-section sc-details-section" aria-labelledby="sc-details-title"><details id="sc-quality-details"><summary id="sc-details-title">Datakvalitet och definitioner</summary><div class="sc-details-grid"><div><h3>Kärndata</h3><p>Säker kundidentitet ${percent(core.secure_customer_identity?.value)} · orderattributionsidentitet ${percent(core.order_attribution_identity_coverage?.value)} · standardiserad aktivitet ${percent(core.standardized_activity?.value)}.</p><p>Flaggade kärnrader: ${number(quality.core_flagged_activity_rows)} · orsaker: ${number(quality.quality_issue_count)}.</p><button type="button" data-drilldown="data_quality">Visa kärndataunderlag</button></div><div><h3>Historisk analysmognad</h3><p>Jämförbar v2-percentile ${number(history.comparable_percentile_count)} av ${number(history.v2_contact_count)} · exakta snapshots ${number(history.exact_snapshot_count)} · sena snapshots över 24 timmar ${number(history.late_snapshot_count)}.</p><p>Operativt suppressade ${number(history.operationally_suppressed_count)}. Suppression är inte ett kvalitetsfel. ${suppression}</p></div><div><h3>Definitioner</h3><p>Kontaktmått använder ${escapeHtml(meta.contact_metric_dimension_basis || "historical_snapshot")}; planeringsmått använder ${escapeHtml(meta.planned_metric_dimension_basis || "current_customer_state")}.</p><p>10-dagarsutfall är en mätbar kohort, inte ett pipeline-steg. Version ${escapeHtml(meta.definitions_version || "")}.</p></div></div></details></section>`;
+    const collator = new Intl.Collator("sv-SE", { sensitivity: "base" });
+    const glossary = Object.entries(definitions || {})
+      .filter(([, definition]) => definition?.label && definition?.definition)
+      .sort(([, left], [, right]) => collator.compare(left.label, right.label));
+    return `<section class="sc-section sc-details-section" aria-labelledby="sc-details-title"><details id="sc-quality-details"><summary id="sc-details-title">Datakvalitet och definitioner</summary><div class="sc-details-grid"><div><h3>Datakvalitet och täckning</h3><p>Säker kundidentitet ${percent(core.secure_customer_identity?.value)} · identitetstäckning för orderutfall ${percent(core.order_attribution_identity_coverage?.value)} · standardiserade aktiviteter ${percent(core.standardized_activity?.value)}.</p><p>Flaggade aktivitetsrader: ${number(quality.core_flagged_activity_rows)} · registrerade kvalitetsorsaker: ${number(quality.quality_issue_count)}. <button type="button" data-drilldown="data_quality">Visa kvalitetsunderlag</button></p><p>Jämförbar historisk prioritet finns för ${number(history.comparable_percentile_count)} av ${number(history.v2_contact_count)} kontakter från den nuvarande analysmodellen. Fullständiga sparade kontaktvärden: ${number(history.exact_snapshot_count)} · sparade senare än 24 timmar: ${number(history.late_snapshot_count)}.</p><p>Operativt undantagna kontakter: ${number(history.operationally_suppressed_count)}. Ett operativt undantag är inte i sig ett kvalitetsfel.</p></div><div class="sc-glossary"><h3>Ordlista över mått</h3><dl>${glossary.map(([key, definition]) => `<div data-definition-key="${escapeHtml(key)}"><dt>${escapeHtml(definition.label)}</dt><dd>${escapeHtml(definition.definition)}</dd></div>`).join("")}</dl></div></div></details></section>`;
   }
 
   function kpiMarkup(key, metric) {
     const isRate = metric.denominator !== undefined;
     const value = isRate ? percent(metric.value) : number(metric.value);
-    const presentation = KPI_PRESENTATION[key] || {};
-    const explanation = presentation.explanation || metric.definition || "";
-    const explanationId = `sc-kpi-explanation-${key}`;
+    const definition = metricDefinition(key, metric);
+    const info = definitionParts(key, `kpi-${key}`, metric, "sc-kpi-info sc-metric-info");
+    const emailUnavailable = key === "positive_dialogue" && state.filters.channel === "email" && metric.status === "not_computable";
     const evidence = isRate
-      ? `<span class="sc-kpi-evidence"><span>${rateEvidence(metric)}</span><span class="sc-kpi-denominator">${escapeHtml(presentation.denominatorLabel || "kontakter")}</span></span>`
+      ? emailUnavailable
+        ? `<span class="sc-kpi-evidence">${escapeHtml(definition.not_computable_text || statusLabel(metric.status))}</span>`
+        : `<span class="sc-kpi-evidence"><span>${rateEvidence(metric)}</span><span class="sc-kpi-denominator">${escapeHtml(definition.denominator_label || "kontakter")}</span></span>`
       : "";
     let secondary = "";
     if (key === "human_activities") {
@@ -400,8 +417,8 @@
           <span class="sc-kpi-comparison">${escapeHtml(comparisonText(metric))}</span>
           ${secondary ? `<span class="sc-kpi-secondary">${secondary}</span>` : ""}
         </button>
-        <button type="button" class="sc-kpi-info" data-sc-action="kpi-info" aria-expanded="false" aria-controls="${explanationId}" title="${escapeHtml(explanation)}" aria-label="Förklaring för ${escapeHtml(metric.label)}">i</button>
-        <p class="sc-kpi-explanation" id="${explanationId}" hidden>${escapeHtml(explanation)}</p>
+        ${info.button}
+        ${info.explanation}
       </article>`;
   }
 
@@ -426,12 +443,12 @@
     }).join("");
     const rateCell = metric => `<span class="sc-rate-value">${percent(metric?.value)}</span><small>${rateEvidence(metric)} · ${statusLabel(metric?.status)}</small>${comparisonText(metric) ? `<small>${escapeHtml(comparisonText(metric))}</small>` : ""}`;
     const rows = sellers.map(item => `<tr${sellerSelected(item.seller) ? ' class="is-selected"' : ""}><th><button type="button" data-seller="${escapeHtml(item.seller)}">${escapeHtml(item.seller)}</button></th><td>${number(item.human_activities_total)}</td><td>${rateCell(item.reach)}</td><td>${rateCell(item.positive_dialogue)}</td><td>${rateCell(item.positive_to_order_10d)}</td><td>${rateCell(item.positive_next_step_coverage)}</td><td>${rateCell(item.bom_ratio)}</td></tr>`).join("");
-    return `<section class="sc-section" aria-labelledby="sc-team-title"><div class="sc-section-heading"><div><h2 id="sc-team-title">Teamjämförelse</h2><p>All-channel-jämförelse för vald period, lifecycle och segment. Kanal- och säljarfilter påverkar inte teamblocken.</p></div></div><article class="sc-team-chart"><h3>Mänskliga aktiviteter</h3><p>Besök är stackade: <span class="sc-legend-key is-visit">nådda besök</span> + <span class="sc-legend-key is-bom">bom</span>. <span class="sc-legend-key is-phone">Telefon</span> och manuellt mejl visas separat.</p><div class="sc-team-plot">${activityGroups}</div></article><div class="sc-table-wrap"><table class="sc-table sc-comparison-table"><thead><tr><th>Säljare</th><th>Aktiviteter</th><th>Träffgrad</th><th>Positiv dialog</th><th>Positiv → order 10 dagar</th><th>Nästa-steg-täckning</th><th>Bom-ratio</th></tr></thead><tbody>${rows}</tbody></table></div></section>`;
+    return `<section class="sc-section" aria-labelledby="sc-team-title"><div class="sc-section-heading"><div><h2 id="sc-team-title">Teamjämförelse</h2><p>Jämförelse för alla kanaler under vald period, lifecycle och segment. Kanal- och säljarfilter påverkar inte teamblocken.</p></div></div><article class="sc-team-chart"><h3>Mänskliga aktiviteter</h3><p>Besök är stackade: <span class="sc-legend-key is-visit">nådda besök</span> + <span class="sc-legend-key is-bom">bom</span>. <span class="sc-legend-key is-phone">Telefon</span> och manuellt mejl visas separat.</p><div class="sc-team-plot">${activityGroups}</div></article><div class="sc-table-wrap"><table class="sc-table sc-comparison-table"><thead><tr><th>Säljare</th><th>Aktiviteter</th><th>${metricHeader("Träffgrad", "reach", "team-reach")}</th><th>${metricHeader("Positiv dialog", "positive_dialogue", "team-positive")}</th><th>${metricHeader("Positiv → order 10 dagar", "positive_to_order_10d", "team-positive-order")}</th><th>${metricHeader("Nästa-steg-täckning", "positive_next_step_coverage", "team-next-step")}</th><th>${metricHeader("Bom-ratio", "bom_ratio", "team-bom")}</th></tr></thead><tbody>${rows}</tbody></table></div></section>`;
   }
 
   function matrixReasonLabel(reason) {
     return ({
-      positive_denominator_zero: "inga nådda kontakter för positiv dialog",
+      positive_denominator_zero: "inga nådda besök eller telefonsamtal för positiv dialog",
       positive_order_denominator_zero: "inga mogna positiva kontakter för positiv-till-order-måttet",
       order_denominator_zero: "inga mogna kontakter för ordermåttet",
       priority_denominator_zero: "ingen sparad historisk percentil",
@@ -451,7 +468,7 @@
     const yMedian = matrix.medians?.[yKey];
     const insufficient = (matrix.insufficient_sample || []).map(item => `${escapeHtml(item.seller)} (${(item.reasons || []).map(matrixReasonLabel).join(", ")})`).join(" · ");
     if (!sales && !matrix.available) {
-      return `<div class="sc-matrix-panel" id="sc-matrix-${type}" role="tabpanel" aria-labelledby="sc-matrix-tab-${type}"><div class="sc-priority-build-up"><strong>Historisk prioriteringsdata byggs upp.</strong><br>${rateEvidence(matrix.build_up?.coverage)} nya kontakter har jämförbar percentile.<br>Matrisen aktiveras vid minst ${percent(matrix.build_up?.minimum_coverage)} täckning och två jämförbara säljare.</div></div>`;
+      return `<div class="sc-matrix-panel" id="sc-matrix-${type}" role="tabpanel" aria-labelledby="sc-matrix-tab-${type}"><div class="sc-priority-build-up"><strong>Historisk prioriteringsdata byggs upp.</strong><br>${rateEvidence(matrix.build_up?.coverage)} nya kontakter har jämförbar historisk prioritet.<br>Matrisen aktiveras vid minst ${percent(matrix.build_up?.minimum_coverage)} täckning och två jämförbara säljare.</div></div>`;
     }
     const medianLines = `${xMedian === null || xMedian === undefined ? "" : `<span class="sc-matrix-median-x" style="left:${Number(xMedian) * 100}%" aria-hidden="true"></span>`}${yMedian === null || yMedian === undefined ? "" : `<span class="sc-matrix-median-y" style="bottom:${Number(yMedian) * 100}%" aria-hidden="true"></span>`}`;
     const gridLines = MATRIX_TICKS.map(tick => `<span class="sc-matrix-gridline is-vertical" style="left:${tick}%" aria-hidden="true"><span class="sc-matrix-x-tick">${tick} %</span></span><span class="sc-matrix-gridline is-horizontal" style="bottom:${tick}%" aria-hidden="true"><span class="sc-matrix-y-tick">${tick} %</span></span>`).join("");
@@ -469,7 +486,7 @@
       const collisionRing = Math.floor(overlap / collisionOffsets.length);
       const offsetX = collisionOffset[0] * (collisionRing + 1);
       const offsetY = collisionOffset[1] * (collisionRing + 1);
-      const coverage = sales ? "" : `, percentiltäckning ${percent(item.priority_percentile_coverage?.value)}`;
+      const coverage = sales ? "" : `, historisk prioritetstäckning ${percent(item.priority_percentile_coverage?.value)}`;
       const title = `${item.seller}: ${xLabel} ${percent(xRate.value)} (${rateEvidence(xRate)}, ${statusLabel(xRate.status)}), ${yLabel} ${percent(yRate.value)} (${rateEvidence(yRate)}, ${statusLabel(yRate.status)}), ${item.human_activities} mänskliga aktiviteter${coverage}`;
       return `<button type="button" class="sc-bubble${item.sample_status === "small_sample" ? " is-small-sample" : ""}${sellerSelected(item.seller) ? " is-selected" : ""}" style="left:${x}%;bottom:${y}%;--offset-x:${offsetX}px;--offset-y:${offsetY}px" data-seller="${escapeHtml(item.seller)}" title="${escapeHtml(title)}" aria-label="${escapeHtml(title)}">${escapeHtml(String(item.seller).slice(0, 2).toUpperCase())}</button>`;
     }).join("");
@@ -488,7 +505,12 @@
 
   function funnelMarkup(funnel, outcome) {
     const activity = `<div><div class="sc-section-heading"><div><h2>Aktivitetstratt</h2><p>Endast Besök och Telefon. Manuella mejl analyseras under Kanaler.</p></div></div><div class="sc-funnel">${(funnel.steps || []).map(step => `<button type="button" class="sc-funnel-step" data-drilldown="${escapeHtml(step.drilldown_metric)}"><span class="sc-funnel-count">${number(step.count)}</span><span class="sc-funnel-label">${escapeHtml(step.label)}</span><span class="sc-funnel-rate">${step.rate ? `${percent(step.rate.value)} · ${rateEvidence(step.rate)} · ${statusLabel(step.rate.status)}` : "Startpopulation"}</span></button>`).join("")}</div></div>`;
-    const cohort = `<div class="sc-outcome-block"><div class="sc-section-heading"><div><h2>10-dagarsutfall</h2><p>Mogen är en mätbar utfallskohort, inte ett säljpipeline-steg.</p></div></div><div class="sc-card-grid"><button type="button" class="sc-mini-card" data-drilldown="order_10d"><span class="sc-mini-label">Mogna nådda kontakter</span><span class="sc-mini-value">${number(outcome.mature_contact_count)}</span></button><button type="button" class="sc-mini-card" data-drilldown="order_10d"><span class="sc-mini-label">Följdes av attribuerad order</span><span class="sc-mini-value">${number(outcome.attributed_order_contact_count)}</span></button><button type="button" class="sc-mini-card" data-drilldown="waiting_outcome"><span class="sc-mini-label">Väntar på fullt utfall</span><span class="sc-mini-value">${number(outcome.waiting_outcome_count)}</span></button></div></div>`;
+    const outcomeCards = [
+      miniMetricCard({ context: "outcome-complete", label: "Kontakter med fullständigt 10-dagarsutfall", value: number(outcome.mature_contact_count), drilldownMetric: "order_10d" }),
+      miniMetricCard({ context: "outcome-attributed", label: "Följdes av attribuerad order", value: number(outcome.attributed_order_contact_count), drilldownMetric: "order_10d" }),
+      miniMetricCard({ context: "outcome-waiting", label: "Väntar på fullt utfall", value: number(outcome.waiting_outcome_count), drilldownMetric: "waiting_outcome" }),
+    ];
+    const cohort = `<div class="sc-outcome-block"><div class="sc-section-heading"><div><h2>10-dagarsutfall</h2><p>Endast kontakter som hunnit få ett fullständigt 10-dagarsutfall ingår i utfallsmåtten.</p></div></div><div class="sc-card-grid">${outcomeCards.join("")}</div></div>`;
     return `<div class="sc-two-column">${activity}${cohort}</div>`;
   }
 
@@ -514,47 +536,54 @@
     }).join("");
     const grid = [0, .25, .5, .75, 1].map(part => `<line class="sc-trend-grid" x1="${pad}" x2="${width - pad}" y1="${y(max * part)}" y2="${y(max * part)}"></line>`).join("");
     const labels = rows.map((row, index) => `<text x="${x(index)}" y="${height - 8}" text-anchor="middle" font-size="11" fill="#746772">${escapeHtml(row.week.replace(/^\d{4}-/, ""))}</text>`).join("");
-    return `<div><div class="sc-section-heading"><div><h2>Veckotrend</h2><p>* Endast order-/utfallsserien är preliminär medan 10-dagarskohorten byggs upp; aktivitet, nådda och positiva är slutliga.</p></div></div><div class="sc-trend-wrap"><svg class="sc-trend" viewBox="0 0 ${width} ${height}" role="img" aria-label="Veckotrend för aktiviteter, nådda, positiva och konverterade kontakter">${grid}${lines}${labels}</svg></div><div class="sc-trend-legend">${series.map(([, label, color, , isOutcome]) => `<span><i class="sc-legend-dot" style="background:${color}"></i>${label}${isOutcome ? "*" : ""}</span>`).join("")}</div></div>`;
+    return `<div><div class="sc-section-heading"><div><h2>Veckotrend</h2><p>* Endast order-/utfallsserien är preliminär medan alla kontakter ännu inte hunnit få fullt 10-dagarsutfall; aktivitet, nådda och positiva är slutliga.</p></div></div><div class="sc-trend-wrap"><svg class="sc-trend" viewBox="0 0 ${width} ${height}" role="img" aria-label="Veckotrend för aktiviteter, nådda, positiva och konverterade kontakter">${grid}${lines}${labels}</svg></div><div class="sc-trend-legend">${series.map(([, label, color, , isOutcome]) => `<span><i class="sc-legend-dot" style="background:${color}"></i>${label}${isOutcome ? "*" : ""}</span>`).join("")}</div></div>`;
   }
 
   function visitMarkup(data) {
     const highPriority = data.high_priority_boms_metric || { value: data.high_priority_boms, status: "sufficient" };
     const cards = [
-      ["Bom-ratio", percent(data.bom_ratio.value), rateEvidence(data.bom_ratio), "bom_ratio"],
-      ["Träffgrad för besök", percent(data.reach.value), rateEvidence(data.reach), "reach", "visit"],
-      ["Återkommande bommar", number(data.repeat_boms.customers), `${number(data.repeat_boms.visits)} besök`, "repeat_boms"],
-      ["Högprioriterade bommar", highPriority.value === null ? "—" : number(highPriority.value), highPriority.value === null ? "Kan inte beräknas · jämförbar historisk v2-percentil saknas" : `${rateEvidence(highPriority.coverage)} med jämförbar v2-percentil`, highPriority.value === null ? "" : "high_priority_boms"],
-      ["Bom-ratio – planerade besök", percent(data.planned.value), rateEvidence(data.planned), "planned_boms"],
-      ["Bom-ratio – oplanerade besök", percent(data.unplanned.value), rateEvidence(data.unplanned), "unplanned_boms"],
+      ["Bom-ratio", percent(data.bom_ratio.value), rateEvidence(data.bom_ratio), "bom_ratio", "bom_ratio"],
+      ["Träffgrad för besök", percent(data.reach.value), rateEvidence(data.reach), "reach", "reach", "visit"],
+      ["Återkommande bommar", number(data.repeat_boms.customers), `${number(data.repeat_boms.visits)} besök`, "repeat_boms", "repeat_boms"],
+      ["Högprioriterade bommar", highPriority.value === null ? "—" : number(highPriority.value), highPriority.value === null ? "Kan inte beräknas · jämförbar historisk prioritet saknas" : `${rateEvidence(highPriority.coverage)} med jämförbar historisk prioritet`, "high_priority_boms", highPriority.value === null ? "" : "high_priority_boms"],
+      ["Bom-ratio – planerade besök", percent(data.planned.value), rateEvidence(data.planned), "planned_bom_ratio", "planned_boms"],
+      ["Bom-ratio – oplanerade besök", percent(data.unplanned.value), rateEvidence(data.unplanned), "unplanned_bom_ratio", "unplanned_boms"],
     ];
     const patterns = [...(data.weekday_patterns || []), ...(data.time_band_patterns || [])];
-    const cardMarkup = cards.map(([label, value, evidence, metric, channel]) => metric
-      ? `<button type="button" class="sc-mini-card" data-drilldown="${metric}"${channel ? ` data-channel="${channel}"` : ""}><div class="sc-mini-label">${label}</div><div class="sc-mini-value">${value}</div><div class="sc-mini-evidence">${evidence}</div></button>`
-      : `<div class="sc-mini-card" aria-label="${escapeHtml(`${label}: ${evidence}`)}"><div class="sc-mini-label">${label}</div><div class="sc-mini-value">${value}</div><div class="sc-mini-evidence">${evidence}</div></div>`
-    ).join("");
+    const cardMarkup = cards.map(([label, value, evidence, definitionKey, drilldownMetric, channel], index) => miniMetricCard({
+      context: `visit-${index}`, label, value, evidence, definitionKey,
+      drilldownMetric, channel,
+    })).join("");
     return `<section class="sc-section" aria-labelledby="sc-visit-title"><div class="sc-section-heading"><div><h2 id="sc-visit-title">Besökseffektivitet</h2><p>Bom-ratio visas som procent och x av y. Mönster kräver minst tio besök.</p></div></div><div class="sc-card-grid">${cardMarkup}</div>${patterns.length ? `<div class="sc-table-wrap"><table class="sc-table"><thead><tr><th>Mönster</th><th>Bom-ratio</th><th>Underlag</th></tr></thead><tbody>${patterns.map(item => `<tr><td>${escapeHtml(item.label)}</td><td>${percent(item.bom_ratio.value)}</td><td>${rateEvidence(item.bom_ratio)}</td></tr>`).join("")}</tbody></table></div>` : `<div class="sc-insufficient">Inga veckodags- eller tidsgrupper har minst tio besök.</div>`}</section>`;
   }
 
   function channelMarkup(channels) {
     const labels = { visit: "Besök", phone: "Telefon", email: "Manuellt mejl" };
     const displayRate = rate => `${percent(rate.value)} (${rateEvidence(rate)})${rate.status === "small_sample" ? " · Litet underlag" : ""}`;
-    return `<section class="sc-section" aria-labelledby="sc-channel-title"><div class="sc-section-heading"><div><h2 id="sc-channel-title">Kanalernas effektivitet</h2><p>Automatiserade CRM-mejl ingår inte. Små underlag märks uttryckligen.</p></div></div><div class="sc-table-wrap"><table class="sc-table"><thead><tr><th>Kanal</th><th>Aktiviteter</th><th>Träffgrad</th><th>Positiv dialog</th><th>Kontakt → order</th><th>Positiv → order</th><th>Attribuerat utfall</th></tr></thead><tbody>${Object.entries(channels || {}).map(([key, item]) => `<tr><td><button type="button" data-channel="${key}" data-drilldown="human_activities">${labels[key]}</button></td><td>${number(item.human_activities)}</td><td>${key === "email" ? "Ej tillämpligt" : displayRate(item.reach)}</td><td>${displayRate(item.positive_dialogue)}</td><td>${displayRate(item.order_10d)}</td><td>${displayRate(item.positive_to_order_10d)}</td><td>${number(item.attributed_orders)} order · ${number(item.dfp, 2)} DFP · ${orderValues(item.order_value_by_currency)}${item.median_days_to_order === null ? " · Median kräver 5 order" : ` · ${number(item.median_days_to_order, 1)} dagar median`}</td></tr>`).join("")}</tbody></table></div></section>`;
+    const positiveUnavailable = metricDefinition("positive_dialogue").not_computable_text || "Positiv dialog mäts endast för Besök och Telefon.";
+    const medianInfo = definitionParts("median_days_to_order", "channel-median-days", {}, "sc-metric-info sc-table-info");
+    return `<section class="sc-section" aria-labelledby="sc-channel-title"><div class="sc-section-heading"><div><h2 id="sc-channel-title">Kanalernas effektivitet</h2><p>Automatiserade CRM-mejl ingår inte. Små underlag märks uttryckligen.</p></div></div><div class="sc-table-wrap"><table class="sc-table"><thead><tr><th>Kanal</th><th>Aktiviteter</th><th>${metricHeader("Träffgrad", "reach", "channel-reach")}</th><th>${metricHeader("Positiv dialog", "positive_dialogue", "channel-positive")}</th><th>${metricHeader("Kontakt → order", "order_10d", "channel-order")}</th><th>${metricHeader("Positiv → order", "positive_to_order_10d", "channel-positive-order")}</th><th>${metricHeader("Attribuerat utfall", "attributed_orders", "channel-attributed")}${medianInfo.button}${medianInfo.explanation}</th></tr></thead><tbody>${Object.entries(channels || {}).map(([key, item]) => `<tr><td><button type="button" data-channel="${key}" data-drilldown="human_activities">${labels[key]}</button></td><td>${number(item.human_activities)}</td><td>${key === "email" ? "Ej tillämpligt" : displayRate(item.reach)}</td><td>${key === "email" ? escapeHtml(positiveUnavailable) : displayRate(item.positive_dialogue)}</td><td>${displayRate(item.order_10d)}</td><td>${displayRate(item.positive_to_order_10d)}</td><td>${number(item.attributed_orders)} order · ${number(item.dfp, 2)} DFP · ${orderValues(item.order_value_by_currency)}${item.median_days_to_order === null ? " · Median kräver 5 order" : ` · ${number(item.median_days_to_order, 1)} dagar median`}</td></tr>`).join("")}</tbody></table></div></section>`;
   }
 
   function priorityDiagnosticsMarkup(data) {
-    return `<section aria-labelledby="sc-priority-title"><div class="sc-section-heading"><div><h2 id="sc-priority-title">Prioritering</h2><p>Endast aggregerad analys. Historiskt prioritetsfokus hålls isär från aktuell strategisk portföljtäckning.</p></div></div><div class="sc-card-grid"><button type="button" class="sc-mini-card" data-drilldown="priority_focus"><div class="sc-mini-label">Historiskt prioritetsfokus</div><div class="sc-mini-value">${percent(data.priority_focus?.value)}</div><div class="sc-mini-evidence">${rateEvidence(data.priority_focus)}</div></button><div class="sc-mini-card"><div class="sc-mini-label">Jämförbar v2-percentiltäckning</div><div class="sc-mini-value">${percent(data.priority_percentile_coverage?.value)}</div><div class="sc-mini-evidence">${rateEvidence(data.priority_percentile_coverage)}</div></div><div class="sc-mini-card"><div class="sc-mini-label">Strategisk täckning, aktuell portfölj</div><div class="sc-mini-value">${percent(data.strategic_coverage?.value)}</div><div class="sc-mini-evidence">${rateEvidence(data.strategic_coverage)}</div></div></div></section>`;
+    const cards = [
+      miniMetricCard({ context: "priority-focus", label: "Historiskt prioritetsfokus", value: percent(data.priority_focus?.value), evidence: rateEvidence(data.priority_focus), definitionKey: "priority_focus", drilldownMetric: "priority_focus" }),
+      miniMetricCard({ context: "priority-coverage", label: "Jämförbar historisk prioritetstäckning", value: percent(data.priority_percentile_coverage?.value), evidence: rateEvidence(data.priority_percentile_coverage), definitionKey: "priority_percentile_coverage" }),
+      miniMetricCard({ context: "strategic-coverage", label: "Strategisk täckning, aktuell portfölj", value: percent(data.strategic_coverage?.value), evidence: rateEvidence(data.strategic_coverage), definitionKey: "strategic_coverage" }),
+    ];
+    return `<section aria-labelledby="sc-priority-title"><div class="sc-section-heading"><div><h2 id="sc-priority-title">Prioritering</h2><p>Endast aggregerad analys. Historiskt prioritetsfokus hålls isär från aktuell strategisk portföljtäckning.</p></div></div><div class="sc-card-grid">${cards.join("")}</div></section>`;
   }
 
   function followupMarkup(data) {
     const cards = [
-      ["Positiv kontakt med nästa steg/order", percent(data.positive_next_step_coverage.value), rateEvidence(data.positive_next_step_coverage), "followup_success"],
-      ["Positiva utan nästa steg", number(data.positive_without_next_step), "minst tre dagar gamla", "followup_gap"],
-      ["Planerade genomförda i tid", percent(data.planned_completed_in_time.value), rateEvidence(data.planned_completed_in_time), "planned_on_time"],
-      ["Försenade planerade", number(data.overdue_planned), "fortfarande öppna", "planned_overdue"],
-      ["Skipped", number(data.skipped), `${number(data.cancelled_excluded)} cancelled exkluderade`, "planned_skipped"],
-      ["Positiv utan order/uppföljning 10 dagar", number(data.positive_without_order_or_follow_up_10d), "mogen kontaktkohort", "followup_gap_10d"],
+      ["Positiv kontakt med nästa steg/order", percent(data.positive_next_step_coverage.value), rateEvidence(data.positive_next_step_coverage), "positive_next_step_coverage", "followup_success"],
+      ["Positiva utan nästa steg", number(data.positive_without_next_step), "minst tre dagar gamla", "positive_without_next_step", "followup_gap"],
+      ["Planerade genomförda i tid", percent(data.planned_completed_in_time.value), rateEvidence(data.planned_completed_in_time), "planned_completed_in_time", "planned_on_time"],
+      ["Försenade planerade", number(data.overdue_planned), "fortfarande öppna", "overdue_planned", "planned_overdue"],
+      ["Överhoppade planerade", number(data.skipped), `${number(data.cancelled_excluded)} avbrutna exkluderade`, "skipped_planned", "planned_skipped"],
+      ["Positiv utan order/uppföljning 10 dagar", number(data.positive_without_order_or_follow_up_10d), "fullständigt 10-dagarsutfall", "positive_without_order_or_follow_up_10d", "followup_gap_10d"],
     ];
-    return `<section class="sc-section" aria-labelledby="sc-followup-title"><div class="sc-section-heading"><div><h2 id="sc-followup-title">Uppföljningsdisciplin</h2><p>Cancelled räknas inte som misslyckat genomförande.</p></div></div><div class="sc-card-grid">${cards.map(([label, value, evidence, metric]) => `<button type="button" class="sc-mini-card" data-drilldown="${metric}" style="text-align:left;color:inherit;font:inherit;cursor:pointer"><div class="sc-mini-label">${label}</div><div class="sc-mini-value">${value}</div><div class="sc-mini-evidence">${evidence}</div></button>`).join("")}</div></section>`;
+    return `<section class="sc-section" aria-labelledby="sc-followup-title"><div class="sc-section-heading"><div><h2 id="sc-followup-title">Uppföljningsdisciplin</h2><p>Avbrutna aktiviteter räknas inte som misslyckat genomförande.</p></div></div><div class="sc-card-grid">${cards.map(([label, value, evidence, definitionKey, drilldownMetric], index) => miniMetricCard({ context: `followup-${index}`, label, value, evidence, definitionKey, drilldownMetric })).join("")}</div></section>`;
   }
 
   function coachingMarkup(cards) {
@@ -572,12 +601,20 @@
         : number(item.value);
     };
     const comparison = card => card.benchmark?.label || card.comparison?.label || comparisonText({ comparisons: card.comparison || card.benchmark || {} });
-    return `<section class="sc-section" aria-labelledby="sc-coaching-title"><div class="sc-section-heading"><div><h2 id="sc-coaching-title">Coachningskort</h2><p>Prioriterade observationer med tydligt underlag.</p></div></div>${cards?.length ? `<div class="sc-coaching-grid">${cards.map(card => `<article class="sc-coaching-card" data-severity="${escapeHtml(card.polarity || card.severity)}"><span class="sc-coaching-label">${(card.polarity || card.severity) === "strength" ? "STYRKA" : "FOKUSOMRÅDE"}</span><h3>${escapeHtml(card.title)}</h3><p><strong>Observation:</strong> ${escapeHtml(card.observation || card.diagnosis || "")}</p><p><strong>Bevis:</strong> ${evidence(card)}</p>${comparison(card) ? `<p><strong>Jämförelse:</strong> ${escapeHtml(comparison(card))}</p>` : ""}<p><strong>Nästa steg:</strong> ${escapeHtml(card.next_action || card.recommendation || "")}</p>${card.target ? `<p><strong>Mål:</strong> ${escapeHtml(card.target)}</p>` : ""}<button type="button" data-drilldown="${escapeHtml(card.drilldown_metric)}" data-drilldown-filters="${escapeHtml(JSON.stringify(card.drilldown_filters || {}))}">Visa underlag</button></article>`).join("")}</div>` : `<div class="sc-empty">Inget coachningskort aktiveras med tillräckligt underlag i valt filter.</div>`}</section>`;
+    const cardMarkup = (cards || []).map((card, index) => {
+      const info = definitionParts(card.metric_key, `coaching-${index}`);
+      return `<article class="sc-coaching-card" data-severity="${escapeHtml(card.polarity || card.severity)}"><span class="sc-coaching-label">${(card.polarity || card.severity) === "strength" ? "STYRKA" : "FOKUSOMRÅDE"}</span>${info.button}${info.explanation}<h3>${escapeHtml(card.title)}</h3><p><strong>Observation:</strong> ${escapeHtml(card.observation || card.diagnosis || "")}</p><p><strong>Bevis:</strong> ${evidence(card)}</p>${comparison(card) ? `<p><strong>Jämförelse:</strong> ${escapeHtml(comparison(card))}</p>` : ""}<p><strong>Nästa steg:</strong> ${escapeHtml(card.next_action || card.recommendation || "")}</p>${card.target ? `<p><strong>Mål:</strong> ${escapeHtml(card.target)}</p>` : ""}<button type="button" data-drilldown="${escapeHtml(card.drilldown_metric)}" data-drilldown-filters="${escapeHtml(JSON.stringify(card.drilldown_filters || {}))}">Visa underlag</button></article>`;
+    }).join("");
+    return `<section class="sc-section" aria-labelledby="sc-coaching-title"><div class="sc-section-heading"><div><h2 id="sc-coaching-title">Coachningskort</h2><p>Prioriterade observationer med tydligt underlag.</p></div></div>${cardMarkup ? `<div class="sc-coaching-grid">${cardMarkup}</div>` : `<div class="sc-empty">Inget coachningskort aktiveras med tillräckligt underlag i valt filter.</div>`}</section>`;
   }
 
   function conversionMarkup(data) {
     const outcome = data.outcome_10d || {};
-    return `${funnelMarkup(data.funnel || {}, outcome)}<div class="sc-section diagnostic-trend">${trendMarkup(data.weekly_trend || [])}</div><div class="sc-card-grid sc-conversion-rates"><button type="button" class="sc-mini-card" data-drilldown="order_10d"><span class="sc-mini-label">Kontakt → order inom 10 dagar</span><span class="sc-mini-value">${percent(outcome.order_10d?.value)}</span><span class="sc-mini-evidence">${rateEvidence(outcome.order_10d)}</span></button><button type="button" class="sc-mini-card" data-drilldown="positive_to_order_10d"><span class="sc-mini-label">Positiv → order inom 10 dagar</span><span class="sc-mini-value">${percent(outcome.positive_to_order_10d?.value)}</span><span class="sc-mini-evidence">${rateEvidence(outcome.positive_to_order_10d)}</span></button></div>`;
+    const rates = [
+      miniMetricCard({ context: "conversion-order", label: "Kontakt → order inom 10 dagar", value: percent(outcome.order_10d?.value), evidence: rateEvidence(outcome.order_10d), definitionKey: "order_10d", drilldownMetric: "order_10d" }),
+      miniMetricCard({ context: "conversion-positive-order", label: "Positiv → order inom 10 dagar", value: percent(outcome.positive_to_order_10d?.value), evidence: rateEvidence(outcome.positive_to_order_10d), definitionKey: "positive_to_order_10d", drilldownMetric: "positive_to_order_10d" }),
+    ];
+    return `${funnelMarkup(data.funnel || {}, outcome)}<div class="sc-section diagnostic-trend">${trendMarkup(data.weekly_trend || [])}</div><div class="sc-card-grid sc-conversion-rates">${rates.join("")}</div>`;
   }
 
   function diagnosticsMarkup(data) {
@@ -594,7 +631,7 @@
       priority: () => priorityDiagnosticsMarkup(data.priority_allocation || {}),
     };
     const active = panels[state.diagnosticTab] ? state.diagnosticTab : "conversion";
-    return `<section class="sc-section sc-diagnostics" aria-labelledby="sc-diagnostics-title"><div class="sc-section-heading"><div><h2 id="sc-diagnostics-title">Diagnostik</h2><p>Fördjupa analysen utan operativa kundlistor.</p></div></div><div class="sc-diagnostic-tabs" role="tablist" aria-label="Diagnostikflikar">${tabs.map(([key, label]) => `<button type="button" role="tab" id="sc-diagnostic-tab-${key}" data-diagnostic-tab="${key}" aria-selected="${active === key}" aria-controls="sc-diagnostic-panel-${key}" tabindex="${active === key ? "0" : "-1"}">${label}</button>`).join("")}</div><div class="sc-diagnostic-panel" id="sc-diagnostic-panel-${active}" role="tabpanel" aria-labelledby="sc-diagnostic-tab-${active}">${panels[active]()}</div></section>`;
+    return `<section class="sc-section sc-diagnostics" aria-labelledby="sc-diagnostics-title"><div class="sc-section-heading"><h2 id="sc-diagnostics-title">Diagnostik</h2></div><div class="sc-diagnostic-tabs" role="tablist" aria-label="Diagnostikflikar">${tabs.map(([key, label]) => `<button type="button" role="tab" id="sc-diagnostic-tab-${key}" data-diagnostic-tab="${key}" aria-selected="${active === key}" aria-controls="sc-diagnostic-panel-${key}" tabindex="${active === key ? "0" : "-1"}">${label}</button>`).join("")}</div><div class="sc-diagnostic-panel" id="sc-diagnostic-panel-${active}" role="tabpanel" aria-labelledby="sc-diagnostic-tab-${active}">${panels[active]()}</div></section>`;
   }
 
   function renderDashboard(data) {
@@ -608,17 +645,17 @@
       teamComparisonMarkup(data.team_comparison || { sellers: [] }),
       matricesMarkup(data.coaching_matrices || {}),
       diagnosticsMarkup(data),
-      dataQualityDetailsMarkup(data.data_quality || {}, data.meta || {}),
+      dataQualityDetailsMarkup(data.data_quality || {}, data.metric_definitions || {}),
     ].join("");
   }
 
   function handleDashboardClick(event) {
-    const kpiInfo = event.target.closest('[data-sc-action="kpi-info"]');
-    if (kpiInfo) {
-      const explanation = document.getElementById(kpiInfo.getAttribute("aria-controls"));
+    const metricInfo = event.target.closest('[data-sc-action="metric-info"]');
+    if (metricInfo) {
+      const explanation = document.getElementById(metricInfo.getAttribute("aria-controls"));
       if (!explanation) return;
-      const expanded = kpiInfo.getAttribute("aria-expanded") === "true";
-      kpiInfo.setAttribute("aria-expanded", String(!expanded));
+      const expanded = metricInfo.getAttribute("aria-expanded") === "true";
+      metricInfo.setAttribute("aria-expanded", String(!expanded));
       explanation.hidden = expanded;
       return;
     }

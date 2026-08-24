@@ -9,6 +9,8 @@ sys.path.insert(0, str(WEB_APP_DIR))
 
 from sales_coaching import (  # noqa: E402
     ANALYTICS_SNAPSHOT_VERSION,
+    MAIN_KPI_KEYS,
+    METRIC_DEFINITIONS,
     PRIORITY_PERCENTILE_BASIS,
     CustomerIdentityIndex,
     attribute_orders_to_contacts,
@@ -266,7 +268,15 @@ class SnapshotAndAggregateTests(TestCase):
         self.assertEqual(summary["funnel"]["attempts"], 1)
         self.assertEqual(summary["funnel"]["reached"], 1)
         self.assertEqual(summary["funnel"]["positive"], 0)
-        self.assertEqual(summary["channel_effectiveness"]["email"]["positive_dialogue"]["numerator"], 1)
+        self.assertEqual(sum(week["positive"] for week in summary["weekly_trend"]), 0)
+        email_dialogue = summary["channel_effectiveness"]["email"]["positive_dialogue"]
+        self.assertEqual((email_dialogue["numerator"], email_dialogue["denominator"]), (0, 0))
+        self.assertIsNone(email_dialogue["value"])
+        self.assertEqual(email_dialogue["status"], "not_computable")
+        self.assertEqual(
+            summary["channel_effectiveness"]["email"]["positive_to_order_10d"]["denominator"],
+            1,
+        )
 
     def test_positive_drilldowns_match_kpi_and_synchronous_populations(self):
         summary = self.summary([
@@ -275,15 +285,191 @@ class SnapshotAndAggregateTests(TestCase):
             activity("unknown-channel", "2026-08-03 10:00", channel="SMS", result="Positiv"),
         ])
 
-        self.assertEqual(summary["kpis"]["positive_dialogue"]["numerator"], 2)
+        self.assertEqual(summary["kpis"]["positive_dialogue"]["numerator"], 1)
         self.assertEqual(
             {row["contact_id"] for row in build_drilldown(summary, "positive_dialogue")["rows"]},
-            {"manual-email", "sync-positive"},
+            {"sync-positive"},
         )
         self.assertEqual(
             [row["contact_id"] for row in build_drilldown(summary, "positive_sync")["rows"]],
             ["sync-positive"],
         )
+
+    def test_positive_dialogue_uses_only_reached_visits_and_phone_calls(self):
+        base = [
+            activity("phone-neutral", "2026-08-01 10:00", channel="Telefon", result="Neutral"),
+        ]
+        email_added = base + [
+            activity("email-positive", "2026-08-02 10:00", channel="Mejl", result="Positiv"),
+        ]
+        phone_added = email_added + [
+            activity("phone-positive", "2026-08-03 10:00", channel="Telefon", result="Positiv"),
+        ]
+        visit_added = phone_added + [
+            activity("visit-positive", "2026-08-04 10:00", channel="Besök", result="Positiv"),
+            activity("visit-bom", "2026-08-05 10:00", channel="Besök", result="Ej anträffbar"),
+        ]
+
+        base_metric = self.summary(base)["kpis"]["positive_dialogue"]
+        email_metric = self.summary(email_added)["kpis"]["positive_dialogue"]
+        phone_metric = self.summary(phone_added)["kpis"]["positive_dialogue"]
+        visit_metric = self.summary(visit_added)["kpis"]["positive_dialogue"]
+
+        self.assertEqual((base_metric["numerator"], base_metric["denominator"]), (0, 1))
+        self.assertEqual((email_metric["numerator"], email_metric["denominator"]), (0, 1))
+        self.assertEqual((phone_metric["numerator"], phone_metric["denominator"]), (1, 2))
+        self.assertEqual((visit_metric["numerator"], visit_metric["denominator"]), (2, 3))
+        self.assertEqual(visit_metric["value"], .6667)
+
+    def test_positive_dialogue_drilldown_reconciles_numerator_and_denominator(self):
+        summary = self.summary([
+            activity("phone-positive", "2026-08-01 10:00", channel="Telefon", result="Positiv"),
+            activity("visit-neutral", "2026-08-02 10:00", channel="Besök", result="Neutral"),
+            activity("phone-negative", "2026-08-03 10:00", channel="Telefon", result="Negativ"),
+            activity("email-positive", "2026-08-04 10:00", channel="Mejl", result="Positiv"),
+            activity("visit-bom", "2026-08-05 10:00", channel="Besök", result="Ej anträffbar"),
+        ])
+
+        metric = summary["kpis"]["positive_dialogue"]
+        drilldown = build_drilldown(summary, "positive_dialogue")
+        roles = [row["cohort_role"] for row in drilldown["rows"]]
+
+        self.assertEqual((metric["numerator"], metric["denominator"]), (1, 3))
+        self.assertEqual(drilldown["total_count"], metric["denominator"])
+        self.assertEqual(roles.count("numerator"), metric["numerator"])
+        self.assertEqual(roles.count("denominator_only"), 2)
+        self.assertEqual(
+            {row["channel"] for row in drilldown["rows"]}, {"visit", "phone"}
+        )
+
+    def test_email_filter_makes_positive_dialogue_not_computable(self):
+        summary = self.summary(
+            [activity("email-positive", "2026-08-01 10:00", channel="Mejl", result="Positiv")],
+            channel="email",
+        )
+
+        metric = summary["kpis"]["positive_dialogue"]
+
+        self.assertEqual((metric["numerator"], metric["denominator"]), (0, 0))
+        self.assertIsNone(metric["value"])
+        self.assertEqual(metric["status"], "not_computable")
+
+    def test_positive_dialogue_contract_propagates_to_comparison_matrix_previous_and_rules(self):
+        rows = []
+        users = [
+            {"user_name": seller, "active": "Y", "admin": "N"}
+            for seller in ("sofia", "olle", "maja")
+        ]
+        for seller, current_positive, previous_positive, email_positive in (
+            ("sofia", 2, 4, 8),
+            ("olle", 6, 5, 0),
+            ("maja", 8, 7, 0),
+        ):
+            for index in range(10):
+                rows.append(activity(
+                    f"{seller}-current-{index}",
+                    f"2026-08-{index + 1:02d} 10:00",
+                    seller=seller,
+                    result="Positiv" if index < current_positive else "Neutral",
+                ))
+                rows.append(activity(
+                    f"{seller}-previous-{index}",
+                    f"2026-07-{12 + index:02d} 10:00",
+                    seller=seller,
+                    result="Positiv" if index < previous_positive else "Neutral",
+                ))
+            for index in range(email_positive):
+                rows.append(activity(
+                    f"{seller}-email-{index}",
+                    f"2026-08-{index + 1:02d} 12:00",
+                    seller=seller,
+                    channel="Mejl",
+                    result="Positiv",
+                ))
+
+        summary = self.summary(rows, users=users, seller="sofia")
+        comparison = {
+            item["seller"]: item for item in summary["seller_comparison"]
+        }
+        matrix_seller = next(
+            item for item in summary["coaching_matrices"]["sales"]["sellers"]
+            if item["seller"] == "sofia"
+        )
+        positive_card = next(
+            card for card in summary["coaching_cards"]
+            if card["metric_key"] == "positive_dialogue"
+        )
+
+        self.assertEqual(comparison["sofia"]["positive_dialogue"]["value"], .2)
+        self.assertEqual(comparison["sofia"]["positive_dialogues_count"], 2)
+        self.assertEqual(matrix_seller["positive_dialogue"]["value"], .2)
+        self.assertEqual(summary["kpis"]["positive_dialogue"]["value"], .2)
+        self.assertEqual(
+            summary["kpis"]["positive_dialogue"]["comparisons"]["previous_period"],
+            .4,
+        )
+        self.assertEqual(
+            summary["kpis"]["positive_dialogue"]["comparisons"]["peer_median"],
+            .7,
+        )
+        self.assertEqual(positive_card["evidence"]["value"], .2)
+        self.assertEqual(positive_card["code"], "positive_dialogue_low")
+
+    def test_metric_registry_is_public_complete_and_shared_with_main_kpis(self):
+        required = {
+            "human_activities", "reach", "positive_dialogue",
+            "positive_to_order_10d", "order_10d", "bom_ratio",
+            "high_priority_boms", "median_days_to_order",
+            "positive_next_step_coverage", "planned_completed_in_time",
+            "priority_focus", "strategic_coverage",
+        }
+        summary = self.summary([])
+
+        self.assertTrue(required.issubset(METRIC_DEFINITIONS))
+        self.assertEqual(summary["metric_definitions"], METRIC_DEFINITIONS)
+        self.assertEqual(
+            METRIC_DEFINITIONS["positive_dialogue"]["channels"],
+            ["visit", "phone"],
+        )
+        self.assertEqual(
+            METRIC_DEFINITIONS["positive_dialogue"]["numerator_label"],
+            "positiva nådda besök/telefonsamtal",
+        )
+        self.assertEqual(
+            METRIC_DEFINITIONS["positive_dialogue"]["denominator_label"],
+            "nådda besök/telefonsamtal",
+        )
+        for key in MAIN_KPI_KEYS:
+            with self.subTest(key=key):
+                definition = summary["metric_definitions"][key]
+                self.assertEqual(summary["kpis"][key]["definition"], definition["definition"])
+                self.assertEqual(summary["kpis"][key]["label"], definition["label"])
+        for key, definition in METRIC_DEFINITIONS.items():
+            if definition["metric_type"] != "rate":
+                continue
+            with self.subTest(key=key):
+                self.assertTrue(definition.get("numerator_label"))
+                self.assertTrue(definition.get("denominator_label"))
+
+    def test_registry_user_copy_contains_no_internal_analysis_names(self):
+        forbidden = {
+            "sync_reached", "sync_positive", "mature_positive",
+            "qualified_dialogue", "attribution_eligible",
+            "historical_snapshot", "v2_contacts",
+        }
+        visible_copy = " ".join(
+            str(value)
+            for definition in METRIC_DEFINITIONS.values()
+            for key, value in definition.items()
+            if key in {
+                "label", "definition", "numerator_label",
+                "denominator_label", "not_computable_text",
+            }
+        ).casefold()
+
+        for term in forbidden:
+            with self.subTest(term=term):
+                self.assertNotIn(term, visible_copy)
 
     def test_approximate_snapshot_without_percentile_is_not_priority_focus_denominator(self):
         summary = build_sales_coaching_summary(
@@ -468,7 +654,7 @@ class SnapshotAndAggregateTests(TestCase):
             + team["alice"]["visit_breakdown"]["boms"],
             team["alice"]["visit_breakdown"]["analysable"],
         )
-        self.assertEqual(team["alice"]["positive_dialogues_count"], 2)
+        self.assertEqual(team["alice"]["positive_dialogues_count"], 1)
         self.assertEqual(team["alice"]["mature_positive_dialogues_count"], 2)
         self.assertEqual(team["alice"]["converted_positive_contacts_count"], 1)
         self.assertEqual(team["alice"]["waiting_positive_dialogues_count"], 0)

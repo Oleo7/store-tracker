@@ -174,9 +174,19 @@ class SignalRuleTests(TestCase):
         self.assertEqual(activity["evidence"]["metric_type"], "count")
         self.assertEqual(activity["evidence"]["unit"], "aktiviteter")
         self.assertIn("10 aktiviteter", activity["benchmark"]["label"])
+        self.assertIn("Median övriga säljare", activity["benchmark"]["label"])
+        self.assertNotIn("Peer median", activity["benchmark"]["label"])
         self.assertIn("-", activity["benchmark"]["label"])
         self.assertNotIn("%", activity["benchmark"]["label"])
         self.assertNotIn("pp", activity["benchmark"]["label"])
+
+    def test_rate_benchmark_uses_self_excluding_swedish_label(self):
+        signal = self.signals(seller_metrics(
+            positive_dialogue=rate(.80, peer=.60),
+        ))[0]
+
+        self.assertIn("Median övriga säljare 60.0%", signal["benchmark"]["label"])
+        self.assertNotIn("Peer median", signal["benchmark"]["label"])
 
     def test_planning_below_absolute_standard_cannot_be_peer_strength(self):
         signals = self.signals(seller_metrics(

@@ -188,14 +188,10 @@ body.user-admin .sales-coaching-dashboard:not([hidden]) { display: block; }
 
 .sc-kpi-header { display: flex; align-items: start; justify-content: space-between; gap: 8px; }
 .sc-kpi-label { padding-right: 28px; font-weight: 800; }
-.sc-kpi-info {
-  position: absolute;
-  z-index: 1;
-  top: 16px;
-  right: 16px;
-  display: grid;
-  width: 24px;
-  height: 24px;
+.sc-metric-info {
+  display: inline-grid;
+  width: 22px;
+  height: 22px;
   padding: 0;
   place-items: center;
   border: 1px solid #d7c5cd;
@@ -204,6 +200,16 @@ body.user-admin .sales-coaching-dashboard:not([hidden]) { display: block; }
   color: var(--sc-muted);
   cursor: pointer;
   font: inherit;
+  font-size: 0.74rem;
+  line-height: 1;
+}
+.sc-kpi-info {
+  position: absolute;
+  z-index: 1;
+  top: 16px;
+  right: 16px;
+  width: 24px;
+  height: 24px;
   font-size: 0.78rem;
 }
 .sc-kpi-value { margin: 14px 0 6px; font-size: clamp(1.8rem, 4vw, 2.5rem); font-weight: 900; line-height: 1; }
@@ -214,8 +220,8 @@ body.user-admin .sales-coaching-dashboard:not([hidden]) { display: block; }
 .sc-kpi-denominator { font-weight: 700; }
 .sc-kpi-comparison { margin-top: 8px; }
 .sc-kpi-secondary { margin-top: 7px; color: #60424f; }
-.sc-kpi-explanation { margin: -2px 16px 16px; padding: 10px 12px; border-radius: 10px; background: #f4edf0; color: #51434a; font-size: .82rem; line-height: 1.5; }
-.sc-kpi-explanation[hidden] { display: none; }
+.sc-metric-explanation { display: block; overflow-wrap: anywhere; margin: -2px 16px 16px; padding: 10px 12px; border-radius: 10px; background: #f4edf0; color: #51434a; font-size: .82rem; font-weight: 400; line-height: 1.5; white-space: normal; }
+.sc-metric-explanation[hidden] { display: none; }
 .sc-status { display: inline-flex; margin-top: 8px; padding: 4px 8px; border-radius: 999px; background: #f0eaed; color: #6e5f67; font-size: 0.72rem; font-weight: 800; }
 .sc-tone-positive .sc-kpi-value, .sc-delta-positive { color: var(--sc-positive); }
 .sc-tone-negative .sc-kpi-value, .sc-delta-negative { color: var(--sc-negative); }
@@ -255,9 +261,12 @@ body.user-admin .sales-coaching-dashboard:not([hidden]) { display: block; }
 .sc-comparison-table small { display: block; margin-top: 3px; color: var(--sc-muted); white-space: nowrap; }
 .sc-comparison-table tr.is-selected { background: #fbf3f6; }
 .sc-card-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
-.sc-mini-card { padding: 14px; border: 1px solid var(--sc-border); border-radius: 13px; background: var(--sc-soft); }
-button.sc-mini-card { color: inherit; font: inherit; text-align: left; cursor: pointer; }
-.sc-mini-label { color: var(--sc-muted); font-size: 0.78rem; font-weight: 750; }
+.sc-mini-card { position: relative; min-width: 0; border: 1px solid var(--sc-border); border-radius: 13px; background: var(--sc-soft); overflow: hidden; }
+.sc-mini-main { display: flex; width: 100%; min-height: 100%; padding: 14px; border: 0; background: transparent; color: inherit; font: inherit; text-align: left; flex-direction: column; align-items: flex-start; }
+button.sc-mini-main { cursor: pointer; }
+.sc-mini-card > .sc-metric-info { position: absolute; z-index: 1; top: 10px; right: 10px; }
+.sc-mini-card > .sc-metric-explanation { margin: -3px 12px 12px; }
+.sc-mini-label { padding-right: 24px; color: var(--sc-muted); font-size: 0.78rem; font-weight: 750; }
 .sc-mini-value { margin-top: 7px; font-size: 1.28rem; font-weight: 850; }
 .sc-mini-evidence { margin-top: 4px; color: var(--sc-muted); font-size: 0.76rem; }
 
@@ -319,12 +328,14 @@ button.sc-mini-card { color: inherit; font: inherit; text-align: left; cursor: p
 .sc-table button { border: 0; background: none; color: var(--sc-brand); font: inherit; font-weight: 750; cursor: pointer; }
 
 .sc-coaching-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
-.sc-coaching-card { display: flex; flex-direction: column; min-height: 220px; padding: 16px; border: 1px solid var(--sc-border); border-left: 5px solid #ae7b24; border-radius: 14px; background: #fffaf0; }
+.sc-coaching-card { position: relative; display: flex; flex-direction: column; min-height: 220px; padding: 16px; border: 1px solid var(--sc-border); border-left: 5px solid #ae7b24; border-radius: 14px; background: #fffaf0; }
 .sc-coaching-card[data-severity="strength"] { border-left-color: var(--sc-positive); background: #f4fbf7; }
 .sc-coaching-label { color: var(--sc-muted); font-size: 0.7rem; font-weight: 850; letter-spacing: .05em; }
 .sc-coaching-card h3 { margin: 7px 0; font-size: 1rem; }
 .sc-coaching-card p { margin: 4px 0; color: #594b53; font-size: 0.86rem; line-height: 1.5; }
 .sc-coaching-card button { align-self: flex-start; margin-top: auto; padding: 8px 12px; border: 1px solid #cbaaba; border-radius: 9px; background: #fff; color: var(--sc-brand); font: inherit; font-weight: 800; cursor: pointer; }
+.sc-coaching-card > .sc-metric-info { position: absolute; top: 12px; right: 12px; width: 22px; height: 22px; margin: 0; padding: 0; border-radius: 50%; color: var(--sc-muted); font-size: .74rem; font-weight: 400; }
+.sc-coaching-card > .sc-metric-explanation { margin: 8px 0 4px; }
 
 .sc-empty,
 .sc-error { padding: 28px; border-radius: 13px; background: var(--sc-soft); color: var(--sc-muted); text-align: center; }
@@ -347,9 +358,16 @@ button.sc-mini-card { color: inherit; font: inherit; text-align: left; cursor: p
 .sc-conversion-rates { margin-top: 16px; grid-template-columns: repeat(2, minmax(0,1fr)); }
 .sc-trend-point.is-preliminary { stroke-dasharray: 3 2; opacity: .72; }
 .sc-details-section details > summary { cursor: pointer; font-size: 1rem; font-weight: 850; }
-.sc-details-grid { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 16px; margin-top: 16px; }
+.sc-details-grid { display: grid; grid-template-columns: minmax(0, .8fr) minmax(0, 1.2fr); gap: 20px; margin-top: 16px; }
 .sc-details-grid h3 { margin: 0 0 6px; font-size: .92rem; }
 .sc-details-grid p { color: var(--sc-muted); font-size: .82rem; line-height: 1.5; }
+.sc-glossary { min-width: 0; }
+.sc-glossary dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 10px 0 0; }
+.sc-glossary dl > div { min-width: 0; padding: 10px; border-radius: 10px; background: var(--sc-soft); overflow-wrap: anywhere; }
+.sc-glossary dt { font-size: .82rem; font-weight: 850; }
+.sc-glossary dd { margin: 4px 0 0; color: var(--sc-muted); font-size: .78rem; line-height: 1.45; }
+.sc-table-metric-label { display: inline-flex; min-width: 0; align-items: center; gap: 5px; flex-wrap: wrap; }
+.sc-table-metric-label .sc-metric-explanation { flex-basis: 100%; min-width: 180px; margin: 4px 0 0; }
 
 .sales-coaching-dashboard button:focus-visible,
 .sales-coaching-dashboard select:focus-visible,
@@ -367,6 +385,7 @@ button.sc-mini-card { color: inherit; font: inherit; text-align: left; cursor: p
   .sc-team-charts { grid-template-columns: 1fr; }
   .sc-kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .sc-details-grid { grid-template-columns: 1fr; }
+  .sc-glossary dl { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 620px) {
