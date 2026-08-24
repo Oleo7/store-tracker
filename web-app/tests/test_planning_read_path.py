@@ -87,6 +87,16 @@ class PlanningReadPathTests(TestCase):
             "note": "Planerat butiksbesök",
         }
 
+    @staticmethod
+    def contact_payload():
+        return {
+            "customer_id": "11111111-1111-4111-8111-111111111111",
+            "date_time": "2026-08-24 10:00",
+            "contact_channel": "Telefon",
+            "result": "Positiv",
+            "comment": "Telemetry contact",
+        }
+
     def test_planning_activities_get_does_not_acquire_write_lock_or_mutate_schema(self):
         planning_sheet = self.spreadsheet.worksheet(
             app_module.PLANNED_ACTIVITIES_SHEET
@@ -233,27 +243,80 @@ class PlanningReadPathTests(TestCase):
 
     def test_duplicate_legacy_freezer_columns_merge_in_memory_without_mutation(self):
         headers = list(app_module.CONTACT_COLUMNS) + ["polarbar"]
-        row = ["" for _column in headers]
-        row[headers.index("date_time")] = "2026-07-28 11:00"
-        row[headers.index("sales_person")] = "Olle"
-        row[headers.index("customer")] = "Butik A"
-        row[headers.index("contact_channel")] = "Telefon"
-        row[headers.index("result")] = "Positiv"
-        row[-1] = "true"
-        sheet = FakeWorksheet("sales_activities", headers, [row])
+        first_blank = ["" for _column in headers]
+        first_checked = ["" for _column in headers]
+        for row in (first_blank, first_checked):
+            row[headers.index("date_time")] = "2026-07-28 11:00"
+            row[headers.index("sales_person")] = "Olle"
+            row[headers.index("customer")] = "Butik A"
+            row[headers.index("contact_channel")] = "Telefon"
+            row[headers.index("result")] = "Positiv"
+        first_blank[-1] = "true"
+        first_checked[headers.index("polarbar")] = "true"
+        sheet = FakeWorksheet(
+            "sales_activities", headers, [first_blank, first_checked]
+        )
 
         returned_headers, rows = app_module.worksheet_snapshot(
             sheet,
             expected_columns=app_module.CONTACT_COLUMNS,
             required_columns=app_module.CONTACT_REQUIRED_COLUMNS,
+            merge_duplicate_checkbox_columns=app_module.FREEZER_COLUMNS,
         )
 
         self.assertEqual(returned_headers, headers)
         self.assertEqual(rows[0][0], 2)
         self.assertEqual(rows[0][1]["polarbar"], "1")
+        self.assertEqual(rows[1][1]["polarbar"], "1")
         self.assertEqual(sheet.row_values(1).count("polarbar"), 2)
         self.assertEqual(sheet.update_cell_count, 0)
         self.assertEqual(sheet.batch_update_count, 0)
+
+    def test_duplicate_ordinary_column_keeps_last_physical_value(self):
+        sheet = FakeWorksheet(
+            "general",
+            ["status", "status"],
+            [["A", "B"], ["A", ""]],
+        )
+
+        _headers, rows = app_module.worksheet_snapshot(sheet)
+
+        self.assertEqual(rows[0][1]["status"], "B")
+        self.assertEqual(rows[1][1]["status"], "")
+
+    def test_email_route_and_general_snapshots_keep_last_column_semantics(self):
+        email_column = app_module.EMAIL_MESSAGES_COLUMNS[0]
+        route_column = "payload_json"
+        cases = (
+            (
+                "email_messages",
+                app_module.EMAIL_MESSAGES_COLUMNS,
+                email_column,
+                "B",
+            ),
+            (
+                app_module.ROUTE_PROPOSALS_SHEET,
+                app_module.ROUTE_PROPOSAL_COLUMNS,
+                route_column,
+                "",
+            ),
+            ("general", None, "value", "B"),
+        )
+        for title, expected_columns, duplicate_column, last_value in cases:
+            with self.subTest(title=title):
+                headers = list(expected_columns or [duplicate_column])
+                headers.append(duplicate_column)
+                row = ["" for _column in headers]
+                row[headers.index(duplicate_column)] = "A"
+                row[-1] = last_value
+                sheet = FakeWorksheet(title, headers, [row])
+
+                _headers, rows = app_module.worksheet_snapshot(
+                    sheet,
+                    expected_columns=expected_columns,
+                )
+
+                self.assertEqual(rows[0][1][duplicate_column], last_value)
 
     def test_sheet_read_count_counts_one_miss_and_zero_for_following_hit(self):
         self.spreadsheet._store_tracker_enable_read_cache = True
@@ -314,6 +377,79 @@ class PlanningReadPathTests(TestCase):
         self.assertNotIn(
             "11111111-1111-4111-8111-111111111111", output
         )
+
+    def test_contact_post_emits_one_safe_outer_write_lock_pair(self):
+        # Isolate the contact persistence section from the schema migration and
+        # suggestion reconciliation sections, which have separate lock scopes.
+        with patch.dict(
+            os.environ,
+            {"PERFORMANCE_LOGGING_ENABLED": "true"},
+            clear=False,
+        ), patch.object(
+            app_module,
+            "ensure_contact_worksheet_schema",
+            return_value=app_module.CONTACT_COLUMNS,
+        ), patch.object(
+            app_module,
+            "resolve_suggestions_for_contact",
+            return_value=[],
+        ), self.assertLogs(
+            app_module.PERFORMANCE_LOGGER_NAME,
+            level=logging.INFO,
+        ) as captured:
+            response = self.client.post(
+                "/customers/Butik%20A/contacts",
+                json=self.contact_payload(),
+            )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        records = [json.loads(record.getMessage()) for record in captured.records]
+        lock_steps = [
+            record for record in records
+            if str(record.get("step") or "").startswith("lock.")
+        ]
+        self.assertEqual(
+            [record["step"] for record in lock_steps],
+            ["lock.wait.planning_write", "lock.hold.planning_write"],
+        )
+        for record in lock_steps:
+            self.assertEqual(
+                record["endpoint"],
+                "/customers/<customer_name>/contacts",
+            )
+        output = " ".join(captured.output)
+        self.assertNotIn("Butik A", output)
+        self.assertNotIn("Telemetry contact", output)
+        self.assertNotIn("olle", output.casefold())
+        self.assertNotIn("customer_id", output)
+        self.assertNotIn("activity_id", output)
+        self.assertNotIn("suggestion_id", output)
+        self.assertNotIn(
+            "11111111-1111-4111-8111-111111111111", output
+        )
+        self.assertNotIn(response.get_json()["contact_id"], output)
+
+    def test_all_http_lock_callers_use_route_rule_performance_endpoints(self):
+        expected = {
+            "/customers/<int:row>/email-proposal-draft",
+            "/customers/<int:row>/reminder-email-draft",
+            "/customers/<int:row>/email-proposal/send",
+            "/customers/<int:row>/reminder-email/send",
+            "/customers/<customer_name>/contacts",
+            "/planning/activities",
+            "/planning/activities/<activity_id>",
+            "/planning/suggestions/<suggestion_id>/snooze",
+            "/planning/suggestions/<suggestion_id>/dismiss",
+            "/planning/suggestions/<suggestion_id>/plan",
+            "/planning/route-apply",
+            "/planning/route-import",
+            "/planning/route-preview",
+            "/planning/route-preview-status",
+            "/route-proposal",
+            "/api/brevo/reconcile/<secret>",
+        }
+
+        self.assertTrue(expected.issubset(app_module.PERFORMANCE_ENDPOINTS))
 
 
 if __name__ == "__main__":

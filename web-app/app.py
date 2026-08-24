@@ -367,9 +367,23 @@ PERFORMANCE_ENDPOINTS = {
     "/followup-insights",
     "/sales-coaching-insights",
     "/sales-coaching-insights/drilldown",
+    "/customers/<int:row>/email-proposal-draft",
+    "/customers/<int:row>/reminder-email-draft",
+    "/customers/<int:row>/email-proposal/send",
+    "/customers/<int:row>/reminder-email/send",
+    "/customers/<customer_name>/contacts",
     "/planning/activities",
+    "/planning/activities/<activity_id>",
     "/planning/suggestions",
+    "/planning/suggestions/<suggestion_id>/snooze",
+    "/planning/suggestions/<suggestion_id>/dismiss",
+    "/planning/suggestions/<suggestion_id>/plan",
+    "/planning/route-apply",
+    "/planning/route-import",
     "/planning/route-preview",
+    "/planning/route-preview-status",
+    "/route-proposal",
+    "/api/brevo/reconcile/<secret>",
     "/customers/<customer_name>/stats",
 }
 PERFORMANCE_SHEETS = {
@@ -1579,7 +1593,10 @@ def update_sheet_row(sheet, row_index, headers, updates):
 
 
 def worksheet_snapshot(
-    sheet, expected_columns=None, required_columns=None
+    sheet,
+    expected_columns=None,
+    required_columns=None,
+    merge_duplicate_checkbox_columns=None,
 ):
     with performance_step(_performance_sheet_step(sheet)) as measurement:
         values, cache_hit = cached_worksheet_values(sheet)
@@ -1606,19 +1623,22 @@ def worksheet_snapshot(
             f"Worksheet '{sheet.title}' saknar obligatoriska kolumner: {missing}"
         )
     rows = []
+    checkbox_columns = set(merge_duplicate_checkbox_columns or ())
     for row_index, row in enumerate(values[1:], start=2):
         padded = row + [""] * (len(headers) - len(row))
-        item = {column: "" for column in (expected_columns or headers)}
-        for index, header in enumerate(headers):
-            if not header:
-                continue
-            value = padded[index]
-            if header in item:
-                item[header] = merge_worksheet_cell_value(
-                    header, item[header], value
+        item = dict(zip(headers, padded))
+        for column in checkbox_columns:
+            column_indexes = [
+                index for index, header in enumerate(headers) if header == column
+            ]
+            if len(column_indexes) > 1:
+                item[column] = (
+                    "1"
+                    if any(is_checked_value(padded[index]) for index in column_indexes)
+                    else ""
                 )
-            elif not expected_columns:
-                item[header] = value
+        if expected_columns:
+            item = {column: item.get(column, "") for column in expected_columns}
         rows.append((row_index, item))
     return headers, rows
 
@@ -7727,6 +7747,7 @@ def planning_activities():
             contact_sheet,
             expected_columns=CONTACT_COLUMNS,
             required_columns=CONTACT_REQUIRED_COLUMNS,
+            merge_duplicate_checkbox_columns=FREEZER_COLUMNS,
         )
         planning_customers = get_customer_rows(spreadsheet)
     except Exception:
