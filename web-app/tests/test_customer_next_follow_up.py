@@ -79,8 +79,8 @@ class CustomerNextFollowUpTests(PlanningApiTestCase):
             ) as get_contacts,
             patch.object(
                 app_module,
-                "get_planned_activity_snapshot",
-                wraps=app_module.get_planned_activity_snapshot,
+                "read_planned_activity_snapshot",
+                wraps=app_module.read_planned_activity_snapshot,
             ) as get_activities,
         ):
             payload = self.get_stats()

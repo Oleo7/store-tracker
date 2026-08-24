@@ -852,8 +852,9 @@ class PlanningActivityApiTests(PlanningApiTestCase):
         self.assertEqual(day_summary["planned_activity_count"], 0)
         self.assertEqual(day_summary["activity_count"], 1)
         headers = legacy.row_values(1)
-        self.assertIn("contact_id", headers)
-        self.assertIn("planned_activity_id", headers)
+        self.assertNotIn("contact_id", headers)
+        self.assertNotIn("planned_activity_id", headers)
+        self.assertEqual(legacy.update_cell_count, 0)
 
     def test_patch_moves_activity_and_retry_is_idempotent(self):
         seeded = self.append_planning_row(planned_activity_id="move-me")
