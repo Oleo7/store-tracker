@@ -11,7 +11,7 @@
     drawerController: null,
     lastFocus: null,
     matrixView: "sales",
-    diagnosticTab: "conversion",
+    diagnosticTab: "visits",
     pendingInitialMode: "business",
     filters: defaultFilters(),
   };
@@ -403,11 +403,14 @@
         ? `<span class="sc-kpi-evidence">${escapeHtml(definition.not_computable_text || statusLabel(metric.status))}</span>`
         : `<span class="sc-kpi-evidence"><span>${rateEvidence(metric)}</span><span class="sc-kpi-denominator">${escapeHtml(definition.denominator_label || "kontakter")}</span></span>`
       : "";
+    const status = metric.status === "small_sample"
+      ? '<span class="sc-status">Inte tillräckligt underlag</span>'
+      : "";
     let secondary = "";
     if (key === "human_activities") {
       secondary = `Unika kunder ${number(metric.unique_customers)} · Besök ${number(metric.channel_mix?.visit)} · Telefon ${number(metric.channel_mix?.phone)} · Manuellt mejl ${number(metric.channel_mix?.email)}`;
     }
-    if (key === "positive_to_order_10d" && !selectedChannelUnavailable) {
+    if (["positive_to_order_10d", "order_10d"].includes(key) && !selectedChannelUnavailable) {
       secondary = `${number(metric.waiting_outcome_count)} väntar fortfarande på fullt 10-dagarsutfall`;
     }
     return `
@@ -416,7 +419,7 @@
           <span class="sc-kpi-header"><span class="sc-kpi-label">${escapeHtml(metric.label)}</span></span>
           <span class="sc-kpi-value">${value}</span>
           ${evidence}
-          <span class="sc-status">${statusLabel(metric.status)}</span>
+          ${status}
           <span class="sc-kpi-comparison">${escapeHtml(comparisonText(metric))}</span>
           ${secondary ? `<span class="sc-kpi-secondary">${secondary}</span>` : ""}
         </button>
@@ -426,7 +429,7 @@
   }
 
   function kpisMarkup(kpis) {
-    const order = ["human_activities", "reach", "positive_dialogue", "positive_to_order_10d"];
+    const order = ["human_activities", "reach", "positive_dialogue", "positive_to_order_10d", "order_10d"];
     return `<section class="sc-section" aria-labelledby="sc-kpi-title"><div class="sc-section-heading"><div><h2 id="sc-kpi-title">Coachningsöversikt</h2><p>Rates bedöms neutralt när underlaget är mindre än tio.</p></div></div><div class="sc-kpi-grid">${order.map(key => kpiMarkup(key, kpis[key])).join("")}</div></section>`;
   }
 
@@ -445,8 +448,8 @@
       return `<button type="button" class="sc-team-group${sellerSelected(item.seller) ? " is-selected" : ""}" data-seller="${escapeHtml(item.seller)}" aria-label="${escapeHtml(title)}" title="${escapeHtml(title)}"><span class="sc-team-total">Totalt ${number(item.human_activities_total)}</span><span class="sc-team-bars"><i class="sc-team-bar is-visit-stack" style="height:${visits / activityMax * 100}%"><b>${number(visits)}</b><span class="sc-team-bar-segment is-visit-reached" style="flex:${reachedVisits}" aria-hidden="true"></span><span class="sc-team-bar-segment is-visit-bom" style="flex:${boms}" aria-hidden="true"></span></i><i class="sc-team-bar is-phone" style="height:${Number(item.channel_mix?.phone || 0) / activityMax * 100}%"><b>${number(item.channel_mix?.phone)}</b></i><i class="sc-team-bar is-email" style="height:${Number(item.channel_mix?.email || 0) / activityMax * 100}%"><b>${number(item.channel_mix?.email)}</b></i></span><span class="sc-team-seller">${escapeHtml(item.seller)}</span></button>`;
     }).join("");
     const rateCell = metric => `<span class="sc-rate-value">${percent(metric?.value)}</span><small>${rateEvidence(metric)} · ${statusLabel(metric?.status)}</small>${comparisonText(metric) ? `<small>${escapeHtml(comparisonText(metric))}</small>` : ""}`;
-    const rows = sellers.map(item => `<tr${sellerSelected(item.seller) ? ' class="is-selected"' : ""}><th><button type="button" data-seller="${escapeHtml(item.seller)}">${escapeHtml(item.seller)}</button></th><td>${number(item.human_activities_total)}</td><td>${rateCell(item.reach)}</td><td>${rateCell(item.positive_dialogue)}</td><td>${rateCell(item.positive_to_order_10d)}</td><td>${rateCell(item.positive_next_step_coverage)}</td><td>${rateCell(item.bom_ratio)}</td></tr>`).join("");
-    return `<section class="sc-section" aria-labelledby="sc-team-title"><div class="sc-section-heading"><div><h2 id="sc-team-title">Teamjämförelse</h2><p>Jämförelse för alla kanaler under vald period, lifecycle och segment. Kanal- och säljarfilter påverkar inte teamblocken.</p></div></div><article class="sc-team-chart"><h3>Mänskliga aktiviteter</h3><p>Besök är stackade: <span class="sc-legend-key is-visit">nådda besök</span> + <span class="sc-legend-key is-bom">bom</span>. <span class="sc-legend-key is-phone">Telefon</span> och manuellt mejl visas separat.</p><div class="sc-team-plot">${activityGroups}</div></article><div class="sc-table-wrap"><table class="sc-table sc-comparison-table"><thead><tr><th>Säljare</th><th>Aktiviteter</th><th>${metricHeader("Träffgrad", "reach", "team-reach")}</th><th>${metricHeader("Positiv dialog", "positive_dialogue", "team-positive")}</th><th>${metricHeader("Positiv → order 10 dagar", "positive_to_order_10d", "team-positive-order")}</th><th>${metricHeader("Nästa-steg-täckning", "positive_next_step_coverage", "team-next-step")}</th><th>${metricHeader("Bom-ratio", "bom_ratio", "team-bom")}</th></tr></thead><tbody>${rows}</tbody></table></div></section>`;
+    const rows = sellers.map(item => `<tr${sellerSelected(item.seller) ? ' class="is-selected"' : ""}><th><button type="button" data-seller="${escapeHtml(item.seller)}">${escapeHtml(item.seller)}</button></th><td>${number(item.human_activities_total)}</td><td>${rateCell(item.reach)}</td><td>${rateCell(item.positive_dialogue)}</td><td>${rateCell(item.positive_to_order_10d)}</td><td>${rateCell(item.order_10d)}</td><td>${rateCell(item.positive_next_step_coverage)}</td><td>${rateCell(item.bom_ratio)}</td></tr>`).join("");
+    return `<section class="sc-section" aria-labelledby="sc-team-title"><div class="sc-section-heading"><div><h2 id="sc-team-title">Teamjämförelse</h2><p>Jämförelse för alla kanaler under vald period, lifecycle och segment. Kanal- och säljarfilter påverkar inte teamblocken.</p></div></div><article class="sc-team-chart"><h3>Mänskliga aktiviteter</h3><p>Besök är stackade: <span class="sc-legend-key is-visit">nådda besök</span> + <span class="sc-legend-key is-bom">bom</span>. <span class="sc-legend-key is-phone">Telefon</span> och manuellt mejl visas separat.</p><div class="sc-team-plot">${activityGroups}</div></article><div class="sc-table-wrap"><table class="sc-table sc-comparison-table"><thead><tr><th>Säljare</th><th>Aktiviteter</th><th>${metricHeader("Träffgrad", "reach", "team-reach")}</th><th>${metricHeader("Positiv dialog", "positive_dialogue", "team-positive")}</th><th>${metricHeader("Positiv → order 10 dagar", "positive_to_order_10d", "team-positive-order")}</th><th>${metricHeader("Kontakt – order inom 10 dagar", "order_10d", "team-order")}</th><th>${metricHeader("Nästa-steg-täckning", "positive_next_step_coverage", "team-next-step")}</th><th>${metricHeader("Bom-ratio", "bom_ratio", "team-bom")}</th></tr></thead><tbody>${rows}</tbody></table></div></section>`;
   }
 
   function matrixReasonLabel(reason) {
@@ -570,7 +573,7 @@
         : displayRate(rate);
     };
     const medianInfo = definitionParts("median_days_to_order", "channel-median-days", {}, "sc-metric-info sc-table-info");
-    return `<section class="sc-section" aria-labelledby="sc-channel-title"><div class="sc-section-heading"><div><h2 id="sc-channel-title">Kanalernas effektivitet</h2><p>Automatiserade CRM-mejl ingår inte. Små underlag märks uttryckligen.</p></div></div><div class="sc-table-wrap"><table class="sc-table"><thead><tr><th>Kanal</th><th>Aktiviteter</th><th>${metricHeader("Träffgrad", "reach", "channel-reach")}</th><th>${metricHeader("Positiv dialog", "positive_dialogue", "channel-positive")}</th><th>${metricHeader("Kontakt → order", "order_10d", "channel-order")}</th><th>${metricHeader("Positiv → order", "positive_to_order_10d", "channel-positive-order")}</th><th>${metricHeader("Attribuerat utfall", "attributed_orders", "channel-attributed")}${medianInfo.button}${medianInfo.explanation}</th></tr></thead><tbody>${Object.entries(channels || {}).map(([key, item]) => `<tr data-channel-row="${key}"><td><button type="button" data-channel="${key}" data-drilldown="human_activities">${labels[key]}</button></td><td>${number(item.human_activities)}</td><td data-channel-metric="reach">${channelRate(key, "reach", item.reach)}</td><td data-channel-metric="positive_dialogue">${channelRate(key, "positive_dialogue", item.positive_dialogue)}</td><td data-channel-metric="order_10d">${channelRate(key, "order_10d", item.order_10d)}</td><td data-channel-metric="positive_to_order_10d">${channelRate(key, "positive_to_order_10d", item.positive_to_order_10d)}</td><td>${number(item.attributed_orders)} order · ${number(item.dfp, 2)} DFP · ${orderValues(item.order_value_by_currency)}${item.median_days_to_order === null ? " · Median kräver 5 order" : ` · ${number(item.median_days_to_order, 1)} dagar median`}</td></tr>`).join("")}</tbody></table></div></section>`;
+    return `<section class="sc-section" aria-labelledby="sc-channel-title"><div class="sc-section-heading"><div><h2 id="sc-channel-title">Kanalernas effektivitet</h2><p>Automatiserade CRM-mejl ingår inte. Små underlag märks uttryckligen.</p></div></div><div class="sc-table-wrap"><table class="sc-table"><thead><tr><th>Kanal</th><th>Aktiviteter</th><th>${metricHeader("Träffgrad", "reach", "channel-reach")}</th><th>${metricHeader("Positiv dialog", "positive_dialogue", "channel-positive")}</th><th>${metricHeader("Kontakt – order", "order_10d", "channel-order")}</th><th>${metricHeader("Positiv → order", "positive_to_order_10d", "channel-positive-order")}</th><th>${metricHeader("Attribuerat utfall", "attributed_orders", "channel-attributed")}${medianInfo.button}${medianInfo.explanation}</th></tr></thead><tbody>${Object.entries(channels || {}).map(([key, item]) => `<tr data-channel-row="${key}"><td><button type="button" data-channel="${key}" data-drilldown="human_activities">${labels[key]}</button></td><td>${number(item.human_activities)}</td><td data-channel-metric="reach">${channelRate(key, "reach", item.reach)}</td><td data-channel-metric="positive_dialogue">${channelRate(key, "positive_dialogue", item.positive_dialogue)}</td><td data-channel-metric="order_10d">${channelRate(key, "order_10d", item.order_10d)}</td><td data-channel-metric="positive_to_order_10d">${channelRate(key, "positive_to_order_10d", item.positive_to_order_10d)}</td><td>${number(item.attributed_orders)} order · ${number(item.dfp, 2)} DFP · ${orderValues(item.order_value_by_currency)}${item.median_days_to_order === null ? " · Median kräver 5 order" : ` · ${number(item.median_days_to_order, 1)} dagar median`}</td></tr>`).join("")}</tbody></table></div></section>`;
   }
 
   function priorityDiagnosticsMarkup(data) {
@@ -619,7 +622,7 @@
   function conversionMarkup(data) {
     const outcome = data.outcome_10d || {};
     const rates = [
-      miniMetricCard({ context: "conversion-order", label: "Kontakt → order inom 10 dagar", value: percent(outcome.order_10d?.value), evidence: rateEvidence(outcome.order_10d), definitionKey: "order_10d", drilldownMetric: "order_10d" }),
+      miniMetricCard({ context: "conversion-order", label: "Kontakt – order inom 10 dagar", value: percent(outcome.order_10d?.value), evidence: rateEvidence(outcome.order_10d), definitionKey: "order_10d", drilldownMetric: "order_10d" }),
       miniMetricCard({ context: "conversion-positive-order", label: "Positiv → order inom 10 dagar", value: percent(outcome.positive_to_order_10d?.value), evidence: rateEvidence(outcome.positive_to_order_10d), definitionKey: "positive_to_order_10d", drilldownMetric: "positive_to_order_10d" }),
     ];
     return `${funnelMarkup(data.funnel || {}, outcome)}<div class="sc-section diagnostic-trend">${trendMarkup(data.weekly_trend || [])}</div><div class="sc-card-grid sc-conversion-rates">${rates.join("")}</div>`;
@@ -627,7 +630,7 @@
 
   function diagnosticsMarkup(data) {
     const tabs = [
-      ["conversion", "Konvertering"], ["visits", "Besök"],
+      ["visits", "Besök"], ["conversion", "Konvertering"],
       ["channels", "Kanaler"], ["followup", "Uppföljning"],
       ["priority", "Prioritering"],
     ];
@@ -638,7 +641,7 @@
       followup: () => followupMarkup(data.follow_up_discipline || {}),
       priority: () => priorityDiagnosticsMarkup(data.priority_allocation || {}),
     };
-    const active = panels[state.diagnosticTab] ? state.diagnosticTab : "conversion";
+    const active = panels[state.diagnosticTab] ? state.diagnosticTab : "visits";
     return `<section class="sc-section sc-diagnostics" aria-labelledby="sc-diagnostics-title"><div class="sc-section-heading"><h2 id="sc-diagnostics-title">Diagnostik</h2></div><div class="sc-diagnostic-tabs" role="tablist" aria-label="Diagnostikflikar">${tabs.map(([key, label]) => `<button type="button" role="tab" id="sc-diagnostic-tab-${key}" data-diagnostic-tab="${key}" aria-selected="${active === key}" aria-controls="sc-diagnostic-panel-${key}" tabindex="${active === key ? "0" : "-1"}">${label}</button>`).join("")}</div><div class="sc-diagnostic-panel" id="sc-diagnostic-panel-${active}" role="tabpanel" aria-labelledby="sc-diagnostic-tab-${active}">${panels[active]()}</div></section>`;
   }
 

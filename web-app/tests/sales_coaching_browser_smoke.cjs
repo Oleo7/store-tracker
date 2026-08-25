@@ -31,11 +31,12 @@ const viewport = mode === "mobile"
     await page.locator("#sales-coaching-dashboard:not([hidden])").waitFor();
     await page.locator(".sc-kpi-card").first().waitFor();
     const kpiCount = await page.locator(".sc-kpi-card").count();
-    if (kpiCount !== 4) throw new Error(`${mode}: expected 4 KPI cards, got ${kpiCount}`);
+    if (kpiCount !== 5) throw new Error(`${mode}: expected 5 KPI cards, got ${kpiCount}`);
     const expectedDenominators = [
       "analyserbara besök/telefonsamtal",
       "nådda besök/telefonsamtal",
       "mogna positiva dialoger",
+      "mogna nådda kontakter",
     ];
     const denominatorText = await page.locator(".sc-kpi-denominator").allInnerTexts();
     for (const expected of expectedDenominators) {
@@ -44,10 +45,10 @@ const viewport = mode === "mobile"
       }
     }
     const infoButtons = page.locator('.sc-kpi-info[data-sc-action="metric-info"]');
-    if (await infoButtons.count() !== 4) {
-      throw new Error(`${mode}: expected four KPI information controls`);
+    if (await infoButtons.count() !== 5) {
+      throw new Error(`${mode}: expected five KPI information controls`);
     }
-    for (let index = 0; index < 4; index += 1) {
+    for (let index = 0; index < 5; index += 1) {
       const info = infoButtons.nth(index);
       await info.focus();
       await info.press("Enter");
@@ -67,6 +68,18 @@ const viewport = mode === "mobile"
         throw new Error(`${mode}: KPI explanation ${index + 1} did not close`);
       }
     }
+    const activityLabel = await page.locator('.sc-kpi-card[data-kpi-key="human_activities"] .sc-kpi-label').innerText();
+    if (activityLabel.trim() !== "Aktiviteter") {
+      throw new Error(`${mode}: activity KPI has the wrong label: ${activityLabel}`);
+    }
+    const contactOrderLabel = await page.locator('.sc-kpi-card[data-kpi-key="order_10d"] .sc-kpi-label').innerText();
+    if (contactOrderLabel.trim() !== "Kontakt – order inom 10 dagar") {
+      throw new Error(`${mode}: contact-order KPI has the wrong label: ${contactOrderLabel}`);
+    }
+    const statusLabels = await page.locator(".sc-kpi-card .sc-status").allInnerTexts();
+    if (statusLabels.some(label => label.trim() !== "Inte tillräckligt underlag")) {
+      throw new Error(`${mode}: a sufficient KPI status badge is still visible`);
+    }
     const positiveCard = page.locator('.sc-kpi-card[data-kpi-key="positive_dialogue"]');
     const positiveEvidence = await positiveCard.locator(".sc-kpi-evidence").innerText();
     if (!positiveEvidence.includes("nådda besök/telefonsamtal")) {
@@ -79,6 +92,22 @@ const viewport = mode === "mobile"
     await positiveCard.locator(".sc-kpi-main").click();
     await page.locator("#sc-drawer-backdrop").waitFor();
     await page.locator("[data-sc-drawer-close]").click();
+
+    const teamHeaders = await page.locator(".sc-comparison-table thead th").allInnerTexts();
+    const normalizedTeamHeaders = teamHeaders.map(text => text.toLocaleLowerCase("sv-SE"));
+    const positiveOrderIndex = normalizedTeamHeaders.findIndex(text => text.startsWith("positiv → order 10 dagar"));
+    const contactOrderIndex = normalizedTeamHeaders.findIndex(text => text.startsWith("kontakt – order inom 10 dagar"));
+    const nextStepIndex = normalizedTeamHeaders.findIndex(text => text.startsWith("nästa-steg-täckning"));
+    if (!(positiveOrderIndex + 1 === contactOrderIndex && contactOrderIndex + 1 === nextStepIndex)) {
+      throw new Error(`${mode}: contact-order metric is in the wrong team-comparison position: ${JSON.stringify(teamHeaders)}`);
+    }
+    const diagnosticTabs = await page.locator(".sc-diagnostic-tabs [role=tab]").allInnerTexts();
+    if (diagnosticTabs[0] !== "Besök" || diagnosticTabs[1] !== "Konvertering") {
+      throw new Error(`${mode}: diagnostic tabs are in the wrong order`);
+    }
+    if (await page.locator('[data-diagnostic-tab="visits"]').getAttribute("aria-selected") !== "true") {
+      throw new Error(`${mode}: visits is not the initial diagnostic tab`);
+    }
 
     await page.locator("#sc-quality-details > summary").click();
     const glossaryLabels = await page.locator(".sc-glossary dt").allInnerTexts();
@@ -119,6 +148,9 @@ const viewport = mode === "mobile"
     }
     if (bodyText.includes("Peer median")) {
       throw new Error(`${mode}: old peer benchmark label leaked into sales coaching`);
+    }
+    if (bodyText.toLocaleLowerCase("sv-SE").includes("synkrona")) {
+      throw new Error(`${mode}: synchronous wording leaked into sales coaching`);
     }
     for (const internal of ["sync_reached", "sync_positive", "mature_positive", "attribution_eligible", "historical_snapshot", "v2_contacts"]) {
       if (bodyText.includes(internal)) {
