@@ -299,7 +299,7 @@
       const diagnosticTab = event.target.closest("[data-diagnostic-tab]");
       if (diagnosticTab && ["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
         event.preventDefault();
-        const keys = ["conversion", "visits", "channels", "followup", "priority"];
+        const keys = ["visits", "conversion", "channels", "followup", "priority"];
         const current = keys.indexOf(diagnosticTab.dataset.diagnosticTab);
         const next = event.key === "Home" ? 0 : event.key === "End" ? keys.length - 1 : (current + (event.key === "ArrowRight" ? 1 : -1) + keys.length) % keys.length;
         state.diagnosticTab = keys[next];

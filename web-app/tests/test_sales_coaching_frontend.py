@@ -201,6 +201,10 @@ class SalesCoachingFrontendTests(TestCase):
         self.assertIn('role="tab"', self.javascript)
         self.assertIn("ArrowLeft", self.javascript)
         self.assertIn("ArrowRight", self.javascript)
+        self.assertIn(
+            'const keys = ["visits", "conversion", "channels", "followup", "priority"]',
+            self.javascript,
+        )
         self.assertIn("const preliminary = isOutcome && row.outcome_complete === false", self.javascript)
         self.assertIn('["mature_converted_contacts", "Konverterade", "#b7791f", "order_10d_sync", true]', self.javascript)
         self.assertIn('["human_activities", "Aktiviteter", "#942a52", "human_activities", false]', self.javascript)

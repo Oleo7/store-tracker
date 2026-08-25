@@ -108,6 +108,27 @@ const viewport = mode === "mobile"
     if (await page.locator('[data-diagnostic-tab="visits"]').getAttribute("aria-selected") !== "true") {
       throw new Error(`${mode}: visits is not the initial diagnostic tab`);
     }
+    const assertKeyboardTab = async (key, label) => {
+      const tab = page.locator(`[data-diagnostic-tab="${key}"]`);
+      if (await tab.getAttribute("aria-selected") !== "true") {
+        throw new Error(`${mode}: ${label} was not activated by keyboard navigation`);
+      }
+      const focusedKey = await page.evaluate(() => document.activeElement?.dataset?.diagnosticTab || "");
+      if (focusedKey !== key) {
+        throw new Error(`${mode}: ${label} was activated without receiving focus`);
+      }
+    };
+    await page.locator('[data-diagnostic-tab="visits"]').focus();
+    await page.locator('[data-diagnostic-tab="visits"]').press("ArrowRight");
+    await assertKeyboardTab("conversion", "Konvertering after ArrowRight from Besök");
+    await page.locator('[data-diagnostic-tab="conversion"]').press("Home");
+    await assertKeyboardTab("visits", "Besök after Home");
+    await page.locator('[data-diagnostic-tab="visits"]').press("ArrowLeft");
+    await assertKeyboardTab("priority", "Prioritering after ArrowLeft from Besök");
+    await page.locator('[data-diagnostic-tab="priority"]').press("Home");
+    await assertKeyboardTab("visits", "Besök after Home from Prioritering");
+    await page.locator('[data-diagnostic-tab="visits"]').press("End");
+    await assertKeyboardTab("priority", "Prioritering after End");
 
     await page.locator("#sc-quality-details > summary").click();
     const glossaryLabels = await page.locator(".sc-glossary dt").allInnerTexts();
