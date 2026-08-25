@@ -31,7 +31,7 @@ MIN_PRIORITY_COVERAGE = 0.70
 
 METRIC_DEFINITIONS = {
     "human_activities": {
-        "label": "Mänskliga aktiviteter",
+        "label": "Aktiviteter",
         "definition": "Antal mänskliga aktiviteter som inte är automatiska CRM-mejl. Besök, telefon och manuella mejl redovisas som kanaler.",
         "metric_type": "count",
         "unit": "aktiviteter",
@@ -70,7 +70,7 @@ METRIC_DEFINITIONS = {
         "drilldown_metric": "positive_to_order_10d",
     },
     "order_10d": {
-        "label": "Order inom 10 dagar",
+        "label": "Kontakt – order inom 10 dagar",
         "definition": "Andelen nådda mänskliga kontakter med säker kundidentitet som följdes av en attribuerad order inom 0–10 dagar. Endast kontakter som hunnit få ett fullständigt 10-dagarsutfall ingår.",
         "metric_type": "rate",
         "numerator_label": "nådda kontakter följda av attribuerad order",
@@ -226,6 +226,7 @@ METRIC_DEFINITIONS = {
 
 MAIN_KPI_KEYS = (
     "human_activities", "reach", "positive_dialogue", "positive_to_order_10d",
+    "order_10d",
 )
 
 CONTACT_ANALYTICS_COLUMNS = [
@@ -1710,6 +1711,10 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
             **current["rates"]["positive_to_order_10d"],
             "waiting_outcome_count": len(current["sync_waiting_positive"]),
         },
+        "order_10d": {
+            **current["rates"]["order_10d"],
+            "waiting_outcome_count": len(current["waiting"]),
+        },
     }
     for key in MAIN_KPI_KEYS:
         kpis[key].update(METRIC_DEFINITIONS[key])
@@ -1795,7 +1800,7 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
         "type": "priority",
         "available": priority_matrix_available,
         "axes": {
-            "x": {"key": "order_10d", "label": "Kontakt → order inom 10 dagar"},
+            "x": {"key": "order_10d", "label": "Kontakt – order inom 10 dagar"},
             "y": {"key": "priority_focus", "label": "Historiskt prioritetsfokus"},
         },
         "sellers": priority_matrix_sellers,
@@ -1902,9 +1907,9 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
             "positive": len(current["sync_positive"]),
             "reach_rate": current["rates"]["reach"],
             "steps": [
-                {"key": "attempts", "label": "Synkrona kontaktförsök", "count": len(current["sync"]), "rate": None, "drilldown_metric": "attempts"},
-                {"key": "reached", "label": "Nådda synkrona kontakter", "count": len(current["sync_reached"]), "rate": current["rates"]["reach"], "drilldown_metric": "reach"},
-                {"key": "positive", "label": "Positiva synkrona dialoger", "count": len(current["sync_positive"]), "rate": _rate(len(current["sync_positive"]), len(current["sync_reached"])), "drilldown_metric": "positive_sync"},
+                {"key": "attempts", "label": "Kontaktförsök via Besök/Telefon", "count": len(current["sync"]), "rate": None, "drilldown_metric": "attempts"},
+                {"key": "reached", "label": "Nådda kontakter", "count": len(current["sync_reached"]), "rate": current["rates"]["reach"], "drilldown_metric": "reach"},
+                {"key": "positive", "label": "Positiva dialoger", "count": len(current["sync_positive"]), "rate": _rate(len(current["sync_positive"]), len(current["sync_reached"])), "drilldown_metric": "positive_sync"},
             ],
         },
         "outcome_10d": {

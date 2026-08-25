@@ -16,6 +16,7 @@ class SalesCoachingFrontendTests(TestCase):
         cls.html = (WEB_APP_DIR / "index.html").read_text(encoding="utf-8")
         cls.javascript = (WEB_APP_DIR / "static" / "sales_coaching.js").read_text(encoding="utf-8")
         cls.css = (WEB_APP_DIR / "static" / "sales_coaching.css").read_text(encoding="utf-8")
+        cls.sales_coaching_source = (WEB_APP_DIR / "sales_coaching.py").read_text(encoding="utf-8")
 
     def test_index_integration_is_small_and_admin_controlled(self):
         self.assertIn('href="/static/sales_coaching.css"', self.html)
@@ -39,14 +40,19 @@ class SalesCoachingFrontendTests(TestCase):
                 self.assertIn(expected, self.javascript)
         self.assertNotIn('id="sc-comparison"', self.javascript)
 
-    def test_exactly_four_main_kpis_are_rendered(self):
+    def test_exactly_five_main_kpis_are_rendered_in_requested_order(self):
         self.assertIn(
-            'const order = ["human_activities", "reach", "positive_dialogue", "positive_to_order_10d"]',
+            'const order = ["human_activities", "reach", "positive_dialogue", "positive_to_order_10d", "order_10d"]',
             self.javascript,
         )
-        self.assertNotIn(
-            '"order_10d", "priority_focus", "bom_ratio"', self.javascript
+        self.assertEqual(
+            MAIN_KPI_KEYS,
+            (
+                "human_activities", "reach", "positive_dialogue",
+                "positive_to_order_10d", "order_10d",
+            ),
         )
+        self.assertIn("grid-template-columns: repeat(5, minmax(0, 1fr))", self.css)
 
     def test_main_kpis_explain_their_denominators_in_plain_swedish(self):
         self.assertEqual(
@@ -60,6 +66,10 @@ class SalesCoachingFrontendTests(TestCase):
         self.assertEqual(
             METRIC_DEFINITIONS["positive_to_order_10d"]["denominator_label"],
             "mogna positiva dialoger",
+        )
+        self.assertEqual(
+            METRIC_DEFINITIONS["order_10d"]["denominator_label"],
+            "mogna nådda kontakter",
         )
         self.assertIn("definition.denominator_label", self.javascript)
         self.assertIn("sc-kpi-denominator", self.javascript)
@@ -85,6 +95,20 @@ class SalesCoachingFrontendTests(TestCase):
         self.assertIn("metricDefinition(key, metric)", self.javascript)
         self.assertNotIn("attributed_orders /", self.javascript)
         self.assertNotIn("priority_percentile_at_contact >=", self.javascript)
+
+    def test_main_kpi_labels_and_sample_status_are_plain_and_selective(self):
+        self.assertEqual(METRIC_DEFINITIONS["human_activities"]["label"], "Aktiviteter")
+        self.assertEqual(
+            METRIC_DEFINITIONS["order_10d"]["label"],
+            "Kontakt – order inom 10 dagar",
+        )
+        kpi_markup = self.javascript.split("function kpiMarkup", 1)[1].split(
+            "function kpisMarkup", 1
+        )[0]
+        self.assertIn('metric.status === "small_sample"', kpi_markup)
+        self.assertIn("Inte tillräckligt underlag", kpi_markup)
+        self.assertNotIn("statusLabel(metric.status)", kpi_markup.split("const status", 1)[1])
+        self.assertNotIn("Tillräckligt underlag</span>", kpi_markup)
 
     def test_matrix_uses_generic_backend_axes_and_does_not_invent_medians(self):
         self.assertIn("Otillräckligt jämförbart underlag", self.javascript)
@@ -118,11 +142,20 @@ class SalesCoachingFrontendTests(TestCase):
             "positive_to_order_10d", "positive_next_step_coverage",
             "is-visit-stack", "is-visit-reached", "is-visit-bom",
             "is-email", "sc-comparison-table", "Nästa-steg-täckning",
+            "Kontakt – order inom 10 dagar",
         ):
             with self.subTest(expected=expected):
                 self.assertIn(expected, self.javascript)
         self.assertNotIn("item.attributed_orders /", self.javascript)
         self.assertNotIn('class="sc-team-secondary"', self.javascript)
+        self.assertIn(
+            "${rateCell(item.positive_to_order_10d)}</td><td>${rateCell(item.order_10d)}</td><td>${rateCell(item.positive_next_step_coverage)}",
+            self.javascript,
+        )
+        self.assertIn(
+            'metricHeader("Kontakt – order inom 10 dagar", "order_10d", "team-order")',
+            self.javascript,
+        )
 
     def test_matrix_uses_fixed_points_offsets_ticks_and_separate_axes(self):
         for expected in (
@@ -168,10 +201,23 @@ class SalesCoachingFrontendTests(TestCase):
         self.assertIn('role="tab"', self.javascript)
         self.assertIn("ArrowLeft", self.javascript)
         self.assertIn("ArrowRight", self.javascript)
+        self.assertIn(
+            'const keys = ["visits", "conversion", "channels", "followup", "priority"]',
+            self.javascript,
+        )
         self.assertIn("const preliminary = isOutcome && row.outcome_complete === false", self.javascript)
         self.assertIn('["mature_converted_contacts", "Konverterade", "#b7791f", "order_10d_sync", true]', self.javascript)
         self.assertIn('["human_activities", "Aktiviteter", "#942a52", "human_activities", false]', self.javascript)
         self.assertIn("aktivitet, nådda och positiva är slutliga", self.javascript)
+        self.assertIn('diagnosticTab: "visits"', self.javascript)
+        self.assertLess(
+            self.javascript.index('["visits", "Besök"]'),
+            self.javascript.index('["conversion", "Konvertering"]'),
+        )
+
+    def test_visible_sales_coaching_copy_does_not_use_synchronous_wording(self):
+        self.assertNotIn("synkrona", self.javascript.casefold())
+        self.assertNotIn("synkrona", self.sales_coaching_source.casefold())
 
     def test_comparison_formatting_respects_count_metrics(self):
         self.assertIn('metric?.metric_type === "count"', self.javascript)

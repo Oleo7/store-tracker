@@ -662,7 +662,28 @@ class SnapshotAndAggregateTests(TestCase):
         summary = self.summary([])
 
         self.assertTrue(required.issubset(METRIC_DEFINITIONS))
+        self.assertEqual(
+            MAIN_KPI_KEYS,
+            (
+                "human_activities", "reach", "positive_dialogue",
+                "positive_to_order_10d", "order_10d",
+            ),
+        )
+        self.assertEqual(list(summary["kpis"]), list(MAIN_KPI_KEYS))
         self.assertEqual(summary["metric_definitions"], METRIC_DEFINITIONS)
+        self.assertEqual(METRIC_DEFINITIONS["human_activities"]["label"], "Aktiviteter")
+        self.assertEqual(
+            METRIC_DEFINITIONS["order_10d"]["label"],
+            "Kontakt – order inom 10 dagar",
+        )
+        self.assertEqual(
+            [step["label"] for step in summary["funnel"]["steps"]],
+            [
+                "Kontaktförsök via Besök/Telefon",
+                "Nådda kontakter",
+                "Positiva dialoger",
+            ],
+        )
         self.assertEqual(
             METRIC_DEFINITIONS["positive_dialogue"]["channels"],
             ["visit", "phone"],
