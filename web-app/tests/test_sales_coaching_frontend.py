@@ -65,11 +65,11 @@ class SalesCoachingFrontendTests(TestCase):
         )
         self.assertEqual(
             METRIC_DEFINITIONS["positive_to_order_10d"]["denominator_label"],
-            "mogna positiva dialoger",
+            "avgjorda positiva dialoger",
         )
         self.assertEqual(
             METRIC_DEFINITIONS["order_10d"]["denominator_label"],
-            "mogna nådda kontakter",
+            "avgjorda kontakter",
         )
         self.assertIn("definition.denominator_label", self.javascript)
         self.assertIn("sc-kpi-denominator", self.javascript)
@@ -187,7 +187,8 @@ class SalesCoachingFrontendTests(TestCase):
         self.assertIn("Bom-ratio – planerade besök", self.javascript)
         self.assertIn("Bom-ratio – oplanerade besök", self.javascript)
         self.assertIn("funnel.steps", self.javascript)
-        self.assertIn("fullständigt 10-dagarsutfall ingår i utfallsmåtten", self.javascript)
+        self.assertIn("när en attribuerad order redan finns inom fönstret", self.javascript)
+        self.assertIn("Avgjorda kontakter", self.javascript)
         self.assertIn("Följdes av attribuerad order", self.javascript)
         self.assertIn("priorityDiagnosticsMarkup", self.javascript)
         self.assertNotIn("priority_gap", self.javascript)
@@ -206,7 +207,7 @@ class SalesCoachingFrontendTests(TestCase):
             self.javascript,
         )
         self.assertIn("const preliminary = isOutcome && row.outcome_complete === false", self.javascript)
-        self.assertIn('["mature_converted_contacts", "Konverterade", "#b7791f", "order_10d_sync", true]', self.javascript)
+        self.assertIn('["resolved_converted_contacts", "Konverterade", "#b7791f", "order_10d_sync", true]', self.javascript)
         self.assertIn('["human_activities", "Aktiviteter", "#942a52", "human_activities", false]', self.javascript)
         self.assertIn("aktivitet, nådda och positiva är slutliga", self.javascript)
         self.assertIn('diagnosticTab: "visits"', self.javascript)
@@ -228,9 +229,20 @@ class SalesCoachingFrontendTests(TestCase):
 
     def test_matrix_has_swedish_denominator_zero_reason(self):
         self.assertIn(
-            'positive_order_denominator_zero: "inga mogna positiva dialoger för positiv-till-order-måttet"',
+            'positive_order_denominator_zero: "inga avgjorda positiva dialoger för positiv-till-order-måttet"',
             self.javascript,
         )
+
+    def test_pending_outcome_copy_is_preliminary_and_hidden_at_zero(self):
+        kpi_markup = self.javascript.split("function kpiMarkup", 1)[1].split(
+            "function kpisMarkup", 1
+        )[0]
+        self.assertIn("Number(metric.waiting_outcome_count) > 0", kpi_markup)
+        self.assertIn(
+            "Preliminärt · ${number(metric.waiting_outcome_count)} väntar på slutligt 10-dagarsutfall",
+            kpi_markup,
+        )
+        self.assertNotIn("väntar fortfarande på fullt 10-dagarsutfall", self.javascript)
 
     def test_pr3_benchmark_and_signal_contract_is_presentational(self):
         self.assertIn("Median övriga säljare", self.javascript)

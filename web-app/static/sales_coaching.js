@@ -374,7 +374,7 @@
       <button type="button" class="sc-quality-status" data-sc-action="quality-details" data-status="${escapeHtml(core.status || quality.status)}">
         <span><strong>Kärndata ${percent(identity)}</strong></span>
         <span>Jämförbar historisk prioritet ${number(history.comparable_percentile_count)} av ${number(history.v2_contact_count)} nya kontakter</span>
-        <span>${number(quality.waiting_outcome_count)} kontakter väntar på 10-dagarsutfall</span>
+        <span>${number(quality.waiting_outcome_count)} kontakter väntar på slutligt 10-dagarsutfall</span>
         <span aria-hidden="true">Visa detaljer ↓</span>
       </button>`;
   }
@@ -411,7 +411,9 @@
       secondary = `Unika kunder ${number(metric.unique_customers)} · Besök ${number(metric.channel_mix?.visit)} · Telefon ${number(metric.channel_mix?.phone)} · Manuellt mejl ${number(metric.channel_mix?.email)}`;
     }
     if (["positive_to_order_10d", "order_10d"].includes(key) && !selectedChannelUnavailable) {
-      secondary = `${number(metric.waiting_outcome_count)} väntar fortfarande på fullt 10-dagarsutfall`;
+      secondary = Number(metric.waiting_outcome_count) > 0
+        ? `Preliminärt · ${number(metric.waiting_outcome_count)} väntar på slutligt 10-dagarsutfall`
+        : "";
     }
     return `
       <article class="sc-kpi-card" data-kpi-key="${escapeHtml(key)}">
@@ -455,10 +457,10 @@
   function matrixReasonLabel(reason) {
     return ({
       positive_denominator_zero: "inga nådda besök eller telefonsamtal för positiv dialog",
-      positive_order_denominator_zero: "inga mogna positiva dialoger för positiv-till-order-måttet",
-      order_denominator_zero: "inga mogna kontakter för ordermåttet",
+      positive_order_denominator_zero: "inga avgjorda positiva dialoger för positiv-till-order-måttet",
+      order_denominator_zero: "inga avgjorda kontakter för ordermåttet",
       priority_denominator_zero: "ingen sparad historisk percentil",
-      order_sample_below_10: "färre än 10 mogna kontakter",
+      order_sample_below_10: "färre än 10 avgjorda kontakter",
       priority_sample_below_10: "färre än 10 kontakter med historisk percentil",
       priority_percentile_coverage_below_70: "percentiltäckning under 70 %",
     }[reason] || reason);
@@ -512,11 +514,11 @@
   function funnelMarkup(funnel, outcome) {
     const activity = `<div><div class="sc-section-heading"><div><h2>Aktivitetstratt</h2><p>Endast Besök och Telefon. Manuella mejl analyseras under Kanaler.</p></div></div><div class="sc-funnel">${(funnel.steps || []).map(step => `<button type="button" class="sc-funnel-step" data-drilldown="${escapeHtml(step.drilldown_metric)}"><span class="sc-funnel-count">${number(step.count)}</span><span class="sc-funnel-label">${escapeHtml(step.label)}</span><span class="sc-funnel-rate">${step.rate ? `${percent(step.rate.value)} · ${rateEvidence(step.rate)} · ${statusLabel(step.rate.status)}` : "Startpopulation"}</span></button>`).join("")}</div></div>`;
     const outcomeCards = [
-      miniMetricCard({ context: "outcome-complete", label: "Kontakter med fullständigt 10-dagarsutfall", value: number(outcome.mature_contact_count), drilldownMetric: "order_10d" }),
+      miniMetricCard({ context: "outcome-complete", label: "Avgjorda kontakter", value: number(outcome.resolved_contact_count), drilldownMetric: "order_10d" }),
       miniMetricCard({ context: "outcome-attributed", label: "Följdes av attribuerad order", value: number(outcome.attributed_order_contact_count), drilldownMetric: "order_10d" }),
-      miniMetricCard({ context: "outcome-waiting", label: "Väntar på fullt utfall", value: number(outcome.waiting_outcome_count), drilldownMetric: "waiting_outcome" }),
+      miniMetricCard({ context: "outcome-waiting", label: "Väntar på slutligt utfall", value: number(outcome.waiting_outcome_count), drilldownMetric: "waiting_outcome" }),
     ];
-    const cohort = `<div class="sc-outcome-block"><div class="sc-section-heading"><div><h2>10-dagarsutfall</h2><p>Endast kontakter som hunnit få ett fullständigt 10-dagarsutfall ingår i utfallsmåtten.</p></div></div><div class="sc-card-grid">${outcomeCards.join("")}</div></div>`;
+    const cohort = `<div class="sc-outcome-block"><div class="sc-section-heading"><div><h2>10-dagarsutfall</h2><p>Kontakter ingår när en attribuerad order redan finns inom fönstret eller när hela 10-dagarsfönstret har passerat.</p></div></div><div class="sc-card-grid">${outcomeCards.join("")}</div></div>`;
     return `<div class="sc-two-column">${activity}${cohort}</div>`;
   }
 
@@ -527,7 +529,7 @@
       ["human_activities", "Aktiviteter", "#942a52", "human_activities", false],
       ["reached", "Nådda", "#2b6f8c", "reach", false],
       ["positive", "Positiva", "#19704b", "positive_sync", false],
-      ["mature_converted_contacts", "Konverterade", "#b7791f", "order_10d_sync", true],
+      ["resolved_converted_contacts", "Konverterade", "#b7791f", "order_10d_sync", true],
     ];
     const max = Math.max(1, ...rows.flatMap(row => series.map(([key]) => Number(row[key] || 0))));
     const x = index => pad + (rows.length === 1 ? (width - pad * 2) / 2 : index * (width - pad * 2) / (rows.length - 1));

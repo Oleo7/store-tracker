@@ -17,7 +17,13 @@ if __name__ == "__main__":
     activity_sheet = spreadsheet.worksheet("sales_activities")
     headers = activity_sheet.values[0]
     now = datetime.now().replace(hour=10, minute=0, second=0, microsecond=0)
+    seller_customers = {
+        "olle": ("Butik A", "11111111-1111-4111-8111-111111111111"),
+        "sofia": ("Butik B", "22222222-2222-4222-8222-222222222222"),
+        "viewer": ("Butik C", "33333333-3333-4333-8333-333333333333"),
+    }
     for seller, positive_count in (("olle", 2), ("sofia", 6), ("viewer", 8)):
+        customer, customer_id = seller_customers[seller]
         for index in range(10):
             row = {
                 "date_time": (now - timedelta(days=index + 1)).isoformat(
@@ -25,14 +31,31 @@ if __name__ == "__main__":
                 ),
                 "sales_person": seller,
                 "sales_user_name": seller,
-                "customer": "Butik A",
-                "customer_id": "11111111-1111-4111-8111-111111111111",
+                "customer": customer,
+                "customer_id": customer_id,
                 "contact_channel": "Telefon",
                 "result": "Positiv" if index < positive_count else "Neutral",
                 "activity_source": "manual",
                 "contact_id": f"smoke-{seller}-{index}",
             }
             activity_sheet.append_row([row.get(header, "") for header in headers])
+
+    order_sheet = spreadsheet.worksheet("order_rows")
+    order_headers = order_sheet.values[0]
+    early_order = {
+        "Reference": "EARLY-ORDER",
+        "Order date": now.date().isoformat(),
+        "Customer": "Butik A",
+        "Customer number": "C-1",
+        "Quantity": "1",
+        "Unit": "DFP",
+        "Total": "100",
+        "Currency": "SEK",
+        "customer_id": "11111111-1111-4111-8111-111111111111",
+    }
+    order_sheet.append_row([
+        early_order.get(header, "") for header in order_headers
+    ])
 
     app_module.app.config.update(
         SECRET_KEY="sales-coaching-browser-harness",

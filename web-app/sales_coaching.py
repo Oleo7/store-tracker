@@ -21,7 +21,7 @@ from sales_coaching_rules import (
 )
 
 
-DEFINITIONS_VERSION = "sales_coaching_v4"
+DEFINITIONS_VERSION = "sales_coaching_v5"
 ANALYTICS_SNAPSHOT_VERSION = "sales_coaching_v2"
 PRIORITY_PERCENTILE_BASIS = "owner_active_scored_portfolio_midrank_v2"
 STOCKHOLM_ZONE = ZoneInfo("Europe/Stockholm")
@@ -60,10 +60,10 @@ METRIC_DEFINITIONS = {
     },
     "positive_to_order_10d": {
         "label": "Positiv dialog → order inom 10 dagar",
-        "definition": "Andelen positiva besök och telefonsamtal med säker kundidentitet som följdes av en attribuerad order inom 0–10 dagar. Endast dialoger som hunnit få ett fullständigt 10-dagarsutfall ingår.",
+        "definition": "Andelen avgjorda positiva besök och telefonsamtal med säker kundidentitet som följdes av en attribuerad order inom 0–10 dagar. Utfallet är avgjort när en order har attribuerats inom fönstret eller när hela 10-dagarsfönstret har passerat.",
         "metric_type": "rate",
         "numerator_label": "positiva dialoger följda av attribuerad order",
-        "denominator_label": "mogna positiva dialoger",
+        "denominator_label": "avgjorda positiva dialoger",
         "channels": ["visit", "phone"],
         "not_computable_text": "Positiv → order mäts endast för Besök och Telefon.",
         "window_days": ATTRIBUTION_WINDOW_DAYS,
@@ -71,10 +71,10 @@ METRIC_DEFINITIONS = {
     },
     "order_10d": {
         "label": "Kontakt – order inom 10 dagar",
-        "definition": "Andelen nådda mänskliga kontakter med säker kundidentitet som följdes av en attribuerad order inom 0–10 dagar. Endast kontakter som hunnit få ett fullständigt 10-dagarsutfall ingår.",
+        "definition": "Andelen avgjorda nådda mänskliga kontakter med säker kundidentitet som följdes av en attribuerad order inom 0–10 dagar. Utfallet är avgjort när en order har attribuerats inom fönstret eller när hela 10-dagarsfönstret har passerat.",
         "metric_type": "rate",
         "numerator_label": "nådda kontakter följda av attribuerad order",
-        "denominator_label": "mogna nådda kontakter",
+        "denominator_label": "avgjorda kontakter",
         "channels": ["visit", "phone", "email"],
         "window_days": ATTRIBUTION_WINDOW_DAYS,
         "drilldown_metric": "order_10d",
@@ -838,12 +838,22 @@ def attribute_orders_to_contacts(activities, grouped_orders, *, generated_at, wi
         }
         order_to_contact[order["order_id"]] = attribution
         contact_to_orders[latest["contact_id"]].append(attribution)
+    outcome_status = {}
+    for activity in activities or ():
+        contact_id = _text(activity.get("contact_id"))
+        if contact_to_orders.get(contact_id):
+            outcome_status[contact_id] = "converted"
+        elif maturity.get(contact_id) == "mature":
+            outcome_status[contact_id] = "resolved_without_order"
+        else:
+            outcome_status[contact_id] = "pending"
     return {
         "order_to_contact": order_to_contact,
         "contact_to_orders": dict(contact_to_orders),
         "unattributed_orders": unattributed,
         "excluded_contacts": excluded_contacts,
         "maturity": maturity,
+        "outcome_status": outcome_status,
     }
 
 
@@ -915,7 +925,19 @@ def _aggregate_period(rows, attribution):
     sync_positive = [row for row in sync_reached if row.get("result_class") in {"positive", "order"}]
     sync_attribution_eligible = [row for row in sync_reached if row.get("customer_identity_key")]
     sync_mature = [row for row in sync_attribution_eligible if attribution["maturity"].get(row["contact_id"]) == "mature"]
-    sync_converted = [row for row in sync_mature if attribution["contact_to_orders"].get(row["contact_id"])]
+    sync_mature_converted = [
+        row for row in sync_mature
+        if attribution["outcome_status"].get(row["contact_id"]) == "converted"
+    ]
+    sync_resolved = [
+        row for row in sync_attribution_eligible
+        if attribution["outcome_status"].get(row["contact_id"])
+        in {"converted", "resolved_without_order"}
+    ]
+    sync_converted = [
+        row for row in sync_resolved
+        if attribution["outcome_status"].get(row["contact_id"]) == "converted"
+    ]
     sync_positive_attribution_eligible = [
         row for row in sync_positive if row.get("customer_identity_key")
     ]
@@ -923,20 +945,36 @@ def _aggregate_period(rows, attribution):
         row for row in sync_positive_attribution_eligible
         if attribution["maturity"].get(row["contact_id"]) == "mature"
     ]
+    sync_resolved_positive = [
+        row for row in sync_positive_attribution_eligible
+        if attribution["outcome_status"].get(row["contact_id"])
+        in {"converted", "resolved_without_order"}
+    ]
     sync_converted_positive = [
-        row for row in sync_mature_positive
-        if attribution["contact_to_orders"].get(row["contact_id"])
+        row for row in sync_resolved_positive
+        if attribution["outcome_status"].get(row["contact_id"]) == "converted"
     ]
     sync_waiting_positive = [
         row for row in sync_positive_attribution_eligible
-        if attribution["maturity"].get(row["contact_id"]) == "waiting_outcome"
+        if attribution["outcome_status"].get(row["contact_id"]) == "pending"
     ]
     reached = [row for row in human if _is_reached_human(row)]
     attribution_eligible = [row for row in reached if row.get("customer_identity_key")]
     positive = [row for row in reached if row.get("result_class") in {"positive", "order"}]
     mature = [row for row in attribution_eligible if attribution["maturity"].get(row["contact_id"]) == "mature"]
-    waiting = [row for row in attribution_eligible if attribution["maturity"].get(row["contact_id"]) == "waiting_outcome"]
-    ordered_contacts = [row for row in mature if attribution["contact_to_orders"].get(row["contact_id"])]
+    resolved = [
+        row for row in attribution_eligible
+        if attribution["outcome_status"].get(row["contact_id"])
+        in {"converted", "resolved_without_order"}
+    ]
+    waiting = [
+        row for row in attribution_eligible
+        if attribution["outcome_status"].get(row["contact_id"]) == "pending"
+    ]
+    ordered_contacts = [
+        row for row in resolved
+        if attribution["outcome_status"].get(row["contact_id"]) == "converted"
+    ]
     visits = [row for row in human if row.get("contact_type_key") == "visit" and row.get("result_class") in ANALYSABLE_RESULTS]
     boms = [row for row in visits if row.get("result_class") == "unreachable"]
     snapshots = [row for row in human if row.get("priority_snapshot_quality") in {"exact", "approximate"}]
@@ -956,15 +994,19 @@ def _aggregate_period(rows, attribution):
         "sync_positive": sync_positive,
         "sync_attribution_eligible": sync_attribution_eligible,
         "sync_mature": sync_mature,
+        "sync_mature_converted": sync_mature_converted,
+        "sync_resolved": sync_resolved,
         "sync_converted": sync_converted,
         "sync_positive_attribution_eligible": sync_positive_attribution_eligible,
         "sync_mature_positive": sync_mature_positive,
+        "sync_resolved_positive": sync_resolved_positive,
         "sync_converted_positive": sync_converted_positive,
         "sync_waiting_positive": sync_waiting_positive,
         "reached": reached,
         "attribution_eligible": attribution_eligible,
         "positive": positive,
         "mature": mature,
+        "resolved": resolved,
         "waiting": waiting,
         "ordered_contacts": ordered_contacts,
         "visits": visits,
@@ -981,9 +1023,9 @@ def _aggregate_period(rows, attribution):
             ),
             "positive_dialogue": _rate(len(sync_positive), len(sync_reached)),
             "positive_to_order_10d": _rate(
-                len(sync_converted_positive), len(sync_mature_positive)
+                len(sync_converted_positive), len(sync_resolved_positive)
             ),
-            "order_10d": _rate(len(ordered_contacts), len(mature)),
+            "order_10d": _rate(len(ordered_contacts), len(resolved)),
             "priority_focus": _rate(len(top_priority), len(percentile_rows)),
             "bom_ratio": _rate(len(boms), len(visits)),
         },
@@ -1027,6 +1069,7 @@ def _seller_comparison(rows, attribution, sellers):
             },
             "positive_dialogues_count": len(aggregate["sync_positive"]),
             "mature_positive_dialogues_count": len(aggregate["sync_mature_positive"]),
+            "resolved_positive_dialogues_count": len(aggregate["sync_resolved_positive"]),
             "converted_positive_contacts_count": len(aggregate["sync_converted_positive"]),
             "waiting_positive_dialogues_count": len(aggregate["sync_waiting_positive"]),
             "order_10d_converted_contacts": len(aggregate["ordered_contacts"]),
@@ -1166,7 +1209,7 @@ def _data_quality(rows, canonical_result, order_result, attribution):
         "priority_snapshot_coverage": exact_snapshot_rate,
         "priority_percentile_coverage": comparable_percentile_rate,
         "waiting_outcome_count": sum(
-            attribution["maturity"].get(row["contact_id"]) == "waiting_outcome"
+            attribution["outcome_status"].get(row["contact_id"]) == "pending"
             for row in attributable_reached
         ),
         "core_flagged_activity_rows": core_flagged_activity_rows,
@@ -1457,6 +1500,7 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
         week_end = week_start + timedelta(days=6)
         waiting_outcome_count = len(agg["waiting"])
         mature_contact_count = len(agg["mature"])
+        resolved_contact_count = len(agg["resolved"])
         outcome_complete = waiting_outcome_count == 0
         weekly_trend.append({
             "week": week,
@@ -1467,7 +1511,8 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
             "human_activities": len(agg["human"]),
             "reached": len(agg["sync_reached"]),
             "positive": len(agg["sync_positive"]),
-            "mature_converted_contacts": len(agg["sync_converted"]),
+            "mature_converted_contacts": len(agg["sync_mature_converted"]),
+            "resolved_converted_contacts": len(agg["sync_converted"]),
             "attributed_orders": len(agg["attributed"]),
             "bom_ratio": agg["rates"]["bom_ratio"],
             "order_10d": agg["rates"]["order_10d"],
@@ -1475,6 +1520,7 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
             "outcome_complete": outcome_complete,
             "waiting_outcome_count": waiting_outcome_count,
             "mature_contact_count": mature_contact_count,
+            "resolved_contact_count": resolved_contact_count,
             "incomplete": not outcome_complete,
         })
 
@@ -1914,6 +1960,7 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
         },
         "outcome_10d": {
             "mature_contact_count": len(current["mature"]),
+            "resolved_contact_count": len(current["resolved"]),
             "attributed_order_contact_count": len(current["ordered_contacts"]),
             "waiting_outcome_count": len(current["waiting"]),
             "order_10d": current["rates"]["order_10d"],
@@ -2023,17 +2070,21 @@ def build_drilldown(summary, metric, *, limit=100):
     for row in analysis.get("rows", ()):
         orders = attribution.get("contact_to_orders", {}).get(row.get("contact_id"), ())
         maturity = attribution.get("maturity", {}).get(row.get("contact_id"))
+        outcome_status = attribution.get("outcome_status", {}).get(
+            row.get("contact_id")
+        )
+        resolved = outcome_status in {"converted", "resolved_without_order"}
         include = {
             "human_activities": row.get("is_human"),
             "attempts": row.get("is_human") and row.get("contact_type_key") in SYNCHRONOUS_CHANNELS and row.get("result_class") in ANALYSABLE_RESULTS,
             "reach": row.get("is_human") and row.get("contact_type_key") in SYNCHRONOUS_CHANNELS and row.get("result_class") in ANALYSABLE_RESULTS,
             "positive_sync": _is_sync_reached(row) and row.get("result_class") in {"positive", "order"},
             "positive_dialogue": _is_sync_reached(row),
-            "positive_to_order_10d": _is_sync_reached(row) and row.get("result_class") in {"positive", "order"} and bool(row.get("customer_identity_key")) and maturity == "mature",
+            "positive_to_order_10d": _is_sync_reached(row) and row.get("result_class") in {"positive", "order"} and bool(row.get("customer_identity_key")) and resolved,
             "mature_reached_sync": _is_sync_reached(row) and bool(row.get("customer_identity_key")) and maturity == "mature",
-            "order_10d": _is_attribution_eligible(row) and maturity == "mature",
-            "order_10d_sync": _is_sync_reached(row) and bool(row.get("customer_identity_key")) and maturity == "mature" and bool(orders),
-            "waiting_outcome": _is_attribution_eligible(row) and maturity == "waiting_outcome",
+            "order_10d": _is_attribution_eligible(row) and resolved,
+            "order_10d_sync": _is_sync_reached(row) and bool(row.get("customer_identity_key")) and outcome_status == "converted",
+            "waiting_outcome": _is_attribution_eligible(row) and outcome_status == "pending",
             "priority_focus": row.get("is_human") and _is_comparable_priority_percentile(row),
             "bom_ratio": row.get("is_human") and row.get("contact_type_key") == "visit" and row.get("result_class") in ANALYSABLE_RESULTS,
             "planned_boms": row.get("is_human") and row.get("planned_activity_id") and row.get("contact_type_key") == "visit" and row.get("result_class") == "unreachable",
