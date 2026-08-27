@@ -94,6 +94,7 @@ const viewport = mode === "mobile"
     }
     await contactOrderCard.locator(".sc-kpi-main").click();
     await page.locator("#sc-drawer-backdrop").waitFor();
+    await page.locator("#sc-drawer-content .sc-drawer-meta").waitFor();
     const orderDrawerText = await page.locator("#sc-drawer-content").innerText();
     if (!orderDrawerText.includes("Visar 2 av 2") || !orderDrawerText.includes("EARLY-ORDER")) {
       throw new Error(`${mode}: resolved drilldown does not match KPI denominator: ${orderDrawerText}`);
@@ -101,6 +102,7 @@ const viewport = mode === "mobile"
     await page.locator("[data-sc-drawer-close]").click();
     await positiveOrderCard.locator(".sc-kpi-main").click();
     await page.locator("#sc-drawer-backdrop").waitFor();
+    await page.locator("#sc-drawer-content .sc-drawer-meta").waitFor();
     const positiveDrawerText = await page.locator("#sc-drawer-content").innerText();
     if (!positiveDrawerText.includes("Visar 1 av 1") || !positiveDrawerText.includes("EARLY-ORDER")) {
       throw new Error(`${mode}: resolved positive drilldown does not match KPI denominator: ${positiveDrawerText}`);
