@@ -17,12 +17,43 @@ if __name__ == "__main__":
     activity_sheet = spreadsheet.worksheet("sales_activities")
     headers = activity_sheet.values[0]
     now = datetime.now().replace(hour=10, minute=0, second=0, microsecond=0)
+    customer_sheet = spreadsheet.worksheet("customers_enriched")
+    customer_headers = customer_sheet.values[0]
+    olle_customers = []
+    for index in range(35):
+        customer = {
+            "customer": f"Smoke-butik {index + 1}",
+            "customer_id": f"90000000-0000-4000-8000-{index + 1:012d}",
+            "sales_person": "Olle",
+            "customer_segment": "A",
+            "customer_number": f"SMOKE-{index + 1}",
+        }
+        olle_customers.append(customer)
+        customer_sheet.append_row([
+            customer.get(header, "") for header in customer_headers
+        ])
+
+    for index, customer in enumerate(olle_customers):
+        row = {
+            "date_time": (now - timedelta(days=1, minutes=index)).isoformat(
+                timespec="minutes"
+            ),
+            "sales_person": "olle",
+            "sales_user_name": "olle",
+            "customer": customer["customer"],
+            "customer_id": customer["customer_id"],
+            "contact_channel": "Telefon",
+            "result": "Positiv" if index < 28 else "Neutral",
+            "activity_source": "manual",
+            "contact_id": f"smoke-olle-{index}",
+        }
+        activity_sheet.append_row([row.get(header, "") for header in headers])
+
     seller_customers = {
-        "olle": ("Butik A", "11111111-1111-4111-8111-111111111111"),
         "sofia": ("Butik B", "22222222-2222-4222-8222-222222222222"),
         "viewer": ("Butik C", "33333333-3333-4333-8333-333333333333"),
     }
-    for seller, positive_count in (("olle", 2), ("sofia", 6), ("viewer", 8)):
+    for seller, positive_count in (("sofia", 6), ("viewer", 8)):
         customer, customer_id = seller_customers[seller]
         for index in range(10):
             row = {
@@ -42,20 +73,21 @@ if __name__ == "__main__":
 
     order_sheet = spreadsheet.worksheet("order_rows")
     order_headers = order_sheet.values[0]
-    early_order = {
-        "Reference": "EARLY-ORDER",
-        "Order date": now.date().isoformat(),
-        "Customer": "Butik A",
-        "Customer number": "C-1",
-        "Quantity": "1",
-        "Unit": "DFP",
-        "Total": "100",
-        "Currency": "SEK",
-        "customer_id": "11111111-1111-4111-8111-111111111111",
-    }
-    order_sheet.append_row([
-        early_order.get(header, "") for header in order_headers
-    ])
+    for index, customer in enumerate(olle_customers[:7], start=1):
+        early_order = {
+            "Reference": f"EARLY-ORDER-{index}",
+            "Order date": now.date().isoformat(),
+            "Customer": customer["customer"],
+            "Customer number": customer["customer_number"],
+            "Quantity": "1",
+            "Unit": "DFP",
+            "Total": "100",
+            "Currency": "SEK",
+            "customer_id": customer["customer_id"],
+        }
+        order_sheet.append_row([
+            early_order.get(header, "") for header in order_headers
+        ])
 
     app_module.app.config.update(
         SECRET_KEY="sales-coaching-browser-harness",

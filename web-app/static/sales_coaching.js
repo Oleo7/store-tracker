@@ -457,10 +457,10 @@
   function matrixReasonLabel(reason) {
     return ({
       positive_denominator_zero: "inga nådda besök eller telefonsamtal för positiv dialog",
-      positive_order_denominator_zero: "inga avgjorda positiva dialoger för positiv-till-order-måttet",
-      order_denominator_zero: "inga avgjorda kontakter för ordermåttet",
+      positive_order_denominator_zero: "inga berättigade positiva dialoger för positiv-till-order-måttet",
+      order_denominator_zero: "inga berättigade kontakter för ordermåttet",
       priority_denominator_zero: "ingen sparad historisk percentil",
-      order_sample_below_10: "färre än 10 avgjorda kontakter",
+      order_sample_below_10: "färre än 10 berättigade kontakter",
       priority_sample_below_10: "färre än 10 kontakter med historisk percentil",
       priority_percentile_coverage_below_70: "percentiltäckning under 70 %",
     }[reason] || reason);
@@ -514,8 +514,8 @@
   function funnelMarkup(funnel, outcome) {
     const activity = `<div><div class="sc-section-heading"><div><h2>Aktivitetstratt</h2><p>Endast Besök och Telefon. Manuella mejl analyseras under Kanaler.</p></div></div><div class="sc-funnel">${(funnel.steps || []).map(step => `<button type="button" class="sc-funnel-step" data-drilldown="${escapeHtml(step.drilldown_metric)}"><span class="sc-funnel-count">${number(step.count)}</span><span class="sc-funnel-label">${escapeHtml(step.label)}</span><span class="sc-funnel-rate">${step.rate ? `${percent(step.rate.value)} · ${rateEvidence(step.rate)} · ${statusLabel(step.rate.status)}` : "Startpopulation"}</span></button>`).join("")}</div></div>`;
     const outcomeCards = [
-      miniMetricCard({ context: "outcome-complete", label: "Avgjorda kontakter", value: number(outcome.resolved_contact_count), drilldownMetric: "order_10d" }),
-      miniMetricCard({ context: "outcome-attributed", label: "Följdes av attribuerad order", value: number(outcome.attributed_order_contact_count), drilldownMetric: "order_10d" }),
+      miniMetricCard({ context: "outcome-complete", label: "Avgjorda kontakter", value: number(outcome.resolved_contact_count), drilldownMetric: "resolved_order_10d" }),
+      miniMetricCard({ context: "outcome-attributed", label: "Följdes av attribuerad order", value: number(outcome.attributed_order_contact_count), drilldownMetric: "converted_order_10d" }),
       miniMetricCard({ context: "outcome-waiting", label: "Väntar på slutligt utfall", value: number(outcome.waiting_outcome_count), drilldownMetric: "waiting_outcome" }),
     ];
     const cohort = `<div class="sc-outcome-block"><div class="sc-section-heading"><div><h2>10-dagarsutfall</h2><p>Kontakter ingår när en attribuerad order redan finns inom fönstret eller när hela 10-dagarsfönstret har passerat.</p></div></div><div class="sc-card-grid">${outcomeCards.join("")}</div></div>`;
@@ -755,7 +755,13 @@
     const target = document.getElementById("sc-drawer-content");
     if (!target) return;
     const rows = data.rows || [];
-    const cohortLabels = { numerator: "Täljare", denominator_only: "Endast nämnare", missed_outcome: "Missat utfall" };
+    const cohortLabels = {
+      numerator: "Konverterad",
+      resolved_without_order: "Avgjord utan order",
+      pending: "Väntar på utfall",
+      denominator_only: "Endast nämnare",
+      missed_outcome: "Missat utfall",
+    };
     target.innerHTML = `<div class="sc-drawer-meta">Visar ${number(rows.length)} av ${number(data.total_count)}, maximalt ${number(data.limit)} rader.</div>${rows.length ? `<div class="sc-table-wrap"><table class="sc-table"><thead><tr><th>Kohortroll</th><th>Datum</th><th>Säljare</th><th>Kund</th><th>Kanal/resultat</th><th>Prioritet</th><th>Orderutfall</th></tr></thead><tbody>${rows.map(row => `<tr><td>${escapeHtml(cohortLabels[row.cohort_role] || row.cohort_role || "Underlag")}</td><td>${escapeHtml(row.date_time || "")}</td><td>${escapeHtml(row.sales_user_name || "")}</td><td>${row.customer_id ? `<button type="button" data-customer-id="${escapeHtml(row.customer_id)}">${escapeHtml(row.customer || "")}</button>` : escapeHtml(row.customer || "")}</td><td>${escapeHtml(row.channel || "")} · ${escapeHtml(row.result_class || "")}</td><td>${row.priority_percentile_at_contact === null ? "Saknas" : `${number(row.priority_percentile_at_contact, 1)} pct`} · ${escapeHtml(row.snapshot_quality || "missing")}</td><td>${row.order_reference ? `${escapeHtml(row.order_reference)} · ${number(row.days_to_order)} dagar · ${number(row.dfp, 2)} DFP` : "–"}</td></tr>`).join("")}</tbody></table></div>` : `<div class="sc-empty">Inga rader matchar underlaget.</div>`}`;
     target.addEventListener("click", event => {
       const customer = event.target.closest("[data-customer-id]");

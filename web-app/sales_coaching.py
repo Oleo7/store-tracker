@@ -21,7 +21,7 @@ from sales_coaching_rules import (
 )
 
 
-DEFINITIONS_VERSION = "sales_coaching_v5"
+DEFINITIONS_VERSION = "sales_coaching_v6"
 ANALYTICS_SNAPSHOT_VERSION = "sales_coaching_v2"
 PRIORITY_PERCENTILE_BASIS = "owner_active_scored_portfolio_midrank_v2"
 STOCKHOLM_ZONE = ZoneInfo("Europe/Stockholm")
@@ -60,10 +60,10 @@ METRIC_DEFINITIONS = {
     },
     "positive_to_order_10d": {
         "label": "Positiv dialog → order inom 10 dagar",
-        "definition": "Andelen avgjorda positiva besök och telefonsamtal med säker kundidentitet som följdes av en attribuerad order inom 0–10 dagar. Utfallet är avgjort när en order har attribuerats inom fönstret eller när hela 10-dagarsfönstret har passerat.",
+        "definition": "Andelen berättigade positiva besök och telefonsamtal med säker kundidentitet som hittills har följts av en attribuerad order inom 0–10 dagar. Alla berättigade positiva dialoger i perioden ingår direkt; måttet är preliminärt så länge något 10-dagarsutfall väntar.",
         "metric_type": "rate",
-        "numerator_label": "positiva dialoger följda av attribuerad order",
-        "denominator_label": "avgjorda positiva dialoger",
+        "numerator_label": "positiva dialoger som hittills följts av attribuerad order",
+        "denominator_label": "positiva dialoger har följts av order",
         "channels": ["visit", "phone"],
         "not_computable_text": "Positiv → order mäts endast för Besök och Telefon.",
         "window_days": ATTRIBUTION_WINDOW_DAYS,
@@ -71,10 +71,10 @@ METRIC_DEFINITIONS = {
     },
     "order_10d": {
         "label": "Kontakt – order inom 10 dagar",
-        "definition": "Andelen avgjorda nådda mänskliga kontakter med säker kundidentitet som följdes av en attribuerad order inom 0–10 dagar. Utfallet är avgjort när en order har attribuerats inom fönstret eller när hela 10-dagarsfönstret har passerat.",
+        "definition": "Andelen berättigade nådda mänskliga kontakter med säker kundidentitet som hittills har följts av en attribuerad order inom 0–10 dagar. Alla berättigade kontakter i perioden ingår direkt; måttet är preliminärt så länge något 10-dagarsutfall väntar.",
         "metric_type": "rate",
-        "numerator_label": "nådda kontakter följda av attribuerad order",
-        "denominator_label": "avgjorda kontakter",
+        "numerator_label": "nådda kontakter som hittills följts av attribuerad order",
+        "denominator_label": "kontakter har följts av order",
         "channels": ["visit", "phone", "email"],
         "window_days": ATTRIBUTION_WINDOW_DAYS,
         "drilldown_metric": "order_10d",
@@ -266,6 +266,8 @@ DRILLDOWN_METRICS = frozenset({
     "positive_to_order_10d",
     "mature_reached_sync",
     "order_10d",
+    "resolved_order_10d",
+    "converted_order_10d",
     "order_10d_sync",
     "waiting_outcome",
     "priority_focus",
@@ -935,7 +937,7 @@ def _aggregate_period(rows, attribution):
         in {"converted", "resolved_without_order"}
     ]
     sync_converted = [
-        row for row in sync_resolved
+        row for row in sync_attribution_eligible
         if attribution["outcome_status"].get(row["contact_id"]) == "converted"
     ]
     sync_positive_attribution_eligible = [
@@ -951,7 +953,7 @@ def _aggregate_period(rows, attribution):
         in {"converted", "resolved_without_order"}
     ]
     sync_converted_positive = [
-        row for row in sync_resolved_positive
+        row for row in sync_positive_attribution_eligible
         if attribution["outcome_status"].get(row["contact_id"]) == "converted"
     ]
     sync_waiting_positive = [
@@ -972,7 +974,7 @@ def _aggregate_period(rows, attribution):
         if attribution["outcome_status"].get(row["contact_id"]) == "pending"
     ]
     ordered_contacts = [
-        row for row in resolved
+        row for row in attribution_eligible
         if attribution["outcome_status"].get(row["contact_id"]) == "converted"
     ]
     visits = [row for row in human if row.get("contact_type_key") == "visit" and row.get("result_class") in ANALYSABLE_RESULTS]
@@ -1023,9 +1025,10 @@ def _aggregate_period(rows, attribution):
             ),
             "positive_dialogue": _rate(len(sync_positive), len(sync_reached)),
             "positive_to_order_10d": _rate(
-                len(sync_converted_positive), len(sync_resolved_positive)
+                len(sync_converted_positive),
+                len(sync_positive_attribution_eligible),
             ),
-            "order_10d": _rate(len(ordered_contacts), len(resolved)),
+            "order_10d": _rate(len(ordered_contacts), len(attribution_eligible)),
             "priority_focus": _rate(len(top_priority), len(percentile_rows)),
             "bom_ratio": _rate(len(boms), len(visits)),
         },
@@ -2080,9 +2083,11 @@ def build_drilldown(summary, metric, *, limit=100):
             "reach": row.get("is_human") and row.get("contact_type_key") in SYNCHRONOUS_CHANNELS and row.get("result_class") in ANALYSABLE_RESULTS,
             "positive_sync": _is_sync_reached(row) and row.get("result_class") in {"positive", "order"},
             "positive_dialogue": _is_sync_reached(row),
-            "positive_to_order_10d": _is_sync_reached(row) and row.get("result_class") in {"positive", "order"} and bool(row.get("customer_identity_key")) and resolved,
+            "positive_to_order_10d": _is_sync_reached(row) and row.get("result_class") in {"positive", "order"} and bool(row.get("customer_identity_key")),
             "mature_reached_sync": _is_sync_reached(row) and bool(row.get("customer_identity_key")) and maturity == "mature",
-            "order_10d": _is_attribution_eligible(row) and resolved,
+            "order_10d": _is_attribution_eligible(row),
+            "resolved_order_10d": _is_attribution_eligible(row) and resolved,
+            "converted_order_10d": _is_attribution_eligible(row) and outcome_status == "converted",
             "order_10d_sync": _is_sync_reached(row) and bool(row.get("customer_identity_key")) and outcome_status == "converted",
             "waiting_outcome": _is_attribution_eligible(row) and outcome_status == "pending",
             "priority_focus": row.get("is_human") and _is_comparable_priority_percentile(row),
@@ -2105,18 +2110,27 @@ def build_drilldown(summary, metric, *, limit=100):
             "positive_dialogue": row.get("result_class") in {"positive", "order"},
             "positive_to_order_10d": bool(orders),
             "order_10d": bool(orders),
+            "resolved_order_10d": bool(orders),
+            "converted_order_10d": bool(orders),
             "priority_focus": (row.get("priority_percentile_at_contact") or -1) >= 75,
             "bom_ratio": row.get("result_class") == "unreachable",
         }.get(metric, True)
-        cohort_role = (
-            "numerator" if numerator
-            else "missed_outcome"
-            if metric in {
-                "positive_to_order_10d", "order_10d",
-                "followup_gap", "followup_gap_10d",
-            }
-            else "denominator_only"
-        )
+        if metric in {
+            "positive_to_order_10d", "order_10d", "resolved_order_10d",
+            "converted_order_10d",
+        }:
+            cohort_role = (
+                "numerator" if numerator
+                else "pending" if outcome_status == "pending"
+                else "resolved_without_order"
+            )
+        else:
+            cohort_role = (
+                "missed_outcome"
+                if not numerator and metric in {"followup_gap", "followup_gap_10d"}
+                else "numerator" if numerator
+                else "denominator_only"
+            )
         selected.append({
             "contact_id": row.get("contact_id"),
             "date_time": row.get("date_time"),
@@ -2142,6 +2156,7 @@ def build_drilldown(summary, metric, *, limit=100):
             "order_reference": first_order["order"].get("reference") if first_order else "",
             "days_to_order": first_order.get("days_to_order") if first_order else None,
             "dfp": first_order["order"].get("dfp") if first_order else 0,
+            "outcome_status": outcome_status,
             "data_quality_flags": list(row.get("analysis_exclusions") or ()),
             "cohort_role": cohort_role,
         })

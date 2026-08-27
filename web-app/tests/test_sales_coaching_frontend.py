@@ -65,11 +65,11 @@ class SalesCoachingFrontendTests(TestCase):
         )
         self.assertEqual(
             METRIC_DEFINITIONS["positive_to_order_10d"]["denominator_label"],
-            "avgjorda positiva dialoger",
+            "positiva dialoger har följts av order",
         )
         self.assertEqual(
             METRIC_DEFINITIONS["order_10d"]["denominator_label"],
-            "avgjorda kontakter",
+            "kontakter har följts av order",
         )
         self.assertIn("definition.denominator_label", self.javascript)
         self.assertIn("sc-kpi-denominator", self.javascript)
@@ -229,7 +229,7 @@ class SalesCoachingFrontendTests(TestCase):
 
     def test_matrix_has_swedish_denominator_zero_reason(self):
         self.assertIn(
-            'positive_order_denominator_zero: "inga avgjorda positiva dialoger för positiv-till-order-måttet"',
+            'positive_order_denominator_zero: "inga berättigade positiva dialoger för positiv-till-order-måttet"',
             self.javascript,
         )
 
@@ -243,6 +243,8 @@ class SalesCoachingFrontendTests(TestCase):
             kpi_markup,
         )
         self.assertNotIn("väntar fortfarande på fullt 10-dagarsutfall", self.javascript)
+        self.assertIn('drilldownMetric: "resolved_order_10d"', self.javascript)
+        self.assertIn('drilldownMetric: "converted_order_10d"', self.javascript)
 
     def test_pr3_benchmark_and_signal_contract_is_presentational(self):
         self.assertIn("Median övriga säljare", self.javascript)
@@ -311,7 +313,9 @@ class SalesCoachingFrontendTests(TestCase):
 
     def test_drilldown_explains_each_rows_cohort_role(self):
         self.assertIn("cohortLabels", self.javascript)
-        self.assertIn('numerator: "Täljare"', self.javascript)
+        self.assertIn('numerator: "Konverterad"', self.javascript)
+        self.assertIn('resolved_without_order: "Avgjord utan order"', self.javascript)
+        self.assertIn('pending: "Väntar på utfall"', self.javascript)
         self.assertIn('denominator_only: "Endast nämnare"', self.javascript)
         self.assertIn('missed_outcome: "Missat utfall"', self.javascript)
 

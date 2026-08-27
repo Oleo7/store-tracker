@@ -291,10 +291,11 @@ class OutcomeResolutionTests(TestCase):
             "converted",
         )
 
-    def test_early_non_converted_remains_pending_and_outside_rate(self):
+    def test_early_non_converted_is_denominator_and_pending(self):
         summary = self.build_summary([("pending", "2026-08-16 10:00", {})])
 
-        self.assertEqual(summary["kpis"]["order_10d"]["denominator"], 0)
+        self.assertEqual(summary["kpis"]["order_10d"]["denominator"], 1)
+        self.assertEqual(summary["kpis"]["order_10d"]["numerator"], 0)
         self.assertEqual(summary["kpis"]["order_10d"]["waiting_outcome_count"], 1)
         self.assertEqual(
             summary["_analysis"]["attribution"]["outcome_status"]["pending"],
@@ -358,7 +359,26 @@ class OutcomeResolutionTests(TestCase):
             ["early-wait"],
         )
 
-    def test_sample_status_uses_resolved_denominator(self):
+    def test_denominator_is_stable_when_pending_contact_converts(self):
+        contacts = [("stable", "2026-08-16 10:00", {})]
+
+        pending = self.build_summary(contacts)
+        converted = self.build_summary(
+            contacts, [("STABLE", "2026-08-18", "stable")]
+        )
+
+        self.assertEqual(
+            (pending["kpis"]["order_10d"]["numerator"],
+             pending["kpis"]["order_10d"]["denominator"]),
+            (0, 1),
+        )
+        self.assertEqual(
+            (converted["kpis"]["order_10d"]["numerator"],
+             converted["kpis"]["order_10d"]["denominator"]),
+            (1, 1),
+        )
+
+    def test_sample_status_uses_total_eligible_denominator(self):
         contacts = []
         orders = []
         for index in range(7):
@@ -379,11 +399,11 @@ class OutcomeResolutionTests(TestCase):
         for metric_key in ("order_10d", "positive_to_order_10d"):
             with self.subTest(metric_key=metric_key):
                 metric = kpis[metric_key]
-                self.assertEqual((metric["numerator"], metric["denominator"]), (7, 12))
+                self.assertEqual((metric["numerator"], metric["denominator"]), (7, 32))
                 self.assertEqual(metric["status"], "sufficient")
                 self.assertEqual(metric["waiting_outcome_count"], 20)
 
-    def test_requested_twenty_of_seventy_example(self):
+    def test_requested_twenty_of_one_hundred_regression(self):
         contacts = []
         orders = []
         for index in range(20):
@@ -403,11 +423,15 @@ class OutcomeResolutionTests(TestCase):
 
         metric = self.build_summary(contacts, orders)["kpis"]["order_10d"]
 
-        self.assertEqual((metric["numerator"], metric["denominator"]), (20, 70))
-        self.assertEqual(metric["value"], .2857)
+        self.assertEqual((metric["numerator"], metric["denominator"]), (20, 100))
+        self.assertEqual(metric["value"], .2)
         self.assertEqual(metric["waiting_outcome_count"], 30)
+        self.assertEqual(
+            self.build_summary(contacts, orders)["outcome_10d"]["resolved_contact_count"],
+            70,
+        )
 
-    def test_positive_metric_uses_same_resolution_with_existing_population(self):
+    def test_positive_metric_uses_all_existing_eligible_positive_population(self):
         summary = self.build_summary(
             [
                 ("positive-hit", "2026-08-16 10:00", {"result": "Positiv", "channel": "Telefon"}),
@@ -423,9 +447,9 @@ class OutcomeResolutionTests(TestCase):
 
         positive = summary["kpis"]["positive_to_order_10d"]
         order_metric = summary["kpis"]["order_10d"]
-        self.assertEqual((positive["numerator"], positive["denominator"]), (1, 2))
+        self.assertEqual((positive["numerator"], positive["denominator"]), (1, 3))
         self.assertEqual(positive["waiting_outcome_count"], 1)
-        self.assertEqual((order_metric["numerator"], order_metric["denominator"]), (2, 3))
+        self.assertEqual((order_metric["numerator"], order_metric["denominator"]), (2, 4))
 
     def test_manual_email_still_affects_order_but_not_positive_to_order(self):
         summary = self.build_summary(
@@ -450,13 +474,14 @@ class OutcomeResolutionTests(TestCase):
             (1, 1),
         )
 
-    def test_seller_comparison_uses_resolved_rate(self):
+    def test_seller_comparison_uses_total_eligible_rate(self):
         contacts = []
         orders = []
         for index in range(10):
             alice_id = f"alice-hit-{index}"
             contacts.append((alice_id, "2026-08-16 10:00", {"seller": "alice"}))
             orders.append((f"ALICE-{index}", "2026-08-18", alice_id))
+            contacts.append((f"alice-pending-{index}", "2026-08-17 10:00", {"seller": "alice"}))
             contacts.append((f"bob-miss-{index}", "2026-08-01 10:00", {"seller": "bob"}))
 
         sellers = {
@@ -464,13 +489,37 @@ class OutcomeResolutionTests(TestCase):
             for item in self.build_summary(contacts, orders)["seller_comparison"]
         }
 
-        self.assertEqual(sellers["alice"]["order_10d"]["value"], 1)
-        self.assertEqual(sellers["alice"]["order_10d"]["denominator"], 10)
+        self.assertEqual(sellers["alice"]["order_10d"]["value"], .5)
+        self.assertEqual(sellers["alice"]["order_10d"]["denominator"], 20)
         self.assertEqual(sellers["bob"]["order_10d"]["value"], 0)
-        self.assertEqual(sellers["alice"]["positive_to_order_10d"]["value"], 1)
+        self.assertEqual(sellers["alice"]["positive_to_order_10d"]["value"], .5)
         self.assertEqual(sellers["bob"]["positive_to_order_10d"]["value"], 0)
 
-    def test_previous_period_comparison_uses_same_resolved_rate(self):
+    def test_peer_median_uses_total_eligible_rates(self):
+        contacts = []
+        orders = []
+        for index in range(10):
+            alice_hit = f"alice-hit-{index}"
+            contacts.append((alice_hit, "2026-08-16 10:00", {"seller": "alice"}))
+            orders.append((f"ALICE-{index}", "2026-08-18", alice_hit))
+            contacts.append((f"alice-pending-{index}", "2026-08-17 10:00", {"seller": "alice"}))
+            contacts.append((f"bob-miss-{index}", "2026-08-01 10:00", {"seller": "bob"}))
+            carol_hit = f"carol-hit-{index}"
+            contacts.append((carol_hit, "2026-08-16 10:00", {"seller": "carol"}))
+            orders.append((f"CAROL-{index}", "2026-08-18", carol_hit))
+
+        summary = self.build_summary(contacts, orders, seller="bob")
+
+        self.assertEqual(
+            summary["kpis"]["order_10d"]["comparisons"]["peer_median"],
+            .75,
+        )
+        self.assertEqual(
+            summary["kpis"]["positive_to_order_10d"]["comparisons"]["peer_median"],
+            .75,
+        )
+
+    def test_previous_period_comparison_uses_same_total_eligible_rate(self):
         contacts = []
         orders = []
         for index in range(10):
@@ -480,19 +529,21 @@ class OutcomeResolutionTests(TestCase):
             contacts.append((previous_id, "2026-07-20 10:00", {}))
             orders.append((f"CURRENT-{index}", "2026-08-18", current_id))
             orders.append((f"PREVIOUS-{index}", "2026-07-25", previous_id))
+            contacts.append((f"current-pending-{index}", "2026-08-17 10:00", {}))
+            contacts.append((f"previous-miss-{index}", "2026-07-19 10:00", {}))
 
         metric = self.build_summary(
             contacts, orders, seller="olle"
         )["kpis"]["order_10d"]
 
-        self.assertEqual(metric["value"], 1)
-        self.assertEqual(metric["comparisons"]["previous_period"], 1)
+        self.assertEqual(metric["value"], .5)
+        self.assertEqual(metric["comparisons"]["previous_period"], .5)
         self.assertEqual(metric["comparisons"]["previous_period_status"], "sufficient")
         positive = self.build_summary(
             contacts, orders, seller="olle"
         )["kpis"]["positive_to_order_10d"]
-        self.assertEqual(positive["value"], 1)
-        self.assertEqual(positive["comparisons"]["previous_period"], 1)
+        self.assertEqual(positive["value"], .5)
+        self.assertEqual(positive["comparisons"]["previous_period"], .5)
 
     def test_weekly_trend_uses_new_pending_definition(self):
         converted_only = self.build_summary(
@@ -514,9 +565,13 @@ class OutcomeResolutionTests(TestCase):
         self.assertTrue(complete_week["outcome_complete"])
         self.assertEqual(week["resolved_converted_contacts"], 1)
         self.assertEqual(week["waiting_outcome_count"], 1)
+        self.assertEqual(
+            (week["order_10d"]["numerator"], week["order_10d"]["denominator"]),
+            (1, 2),
+        )
         self.assertFalse(week["outcome_complete"])
 
-    def test_resolved_drilldowns_include_early_converted_and_exclude_pending(self):
+    def test_kpi_drilldowns_match_total_eligible_denominator_and_show_outcomes(self):
         summary = self.build_summary(
             [
                 ("early-hit", "2026-08-16 10:00", {"result": "Positiv"}),
@@ -533,12 +588,28 @@ class OutcomeResolutionTests(TestCase):
                 self.assertEqual(drilldown["total_count"], metric["denominator"])
                 self.assertEqual(
                     {row["contact_id"] for row in drilldown["rows"]},
-                    {"early-hit", "mature-miss"},
+                    {"early-hit", "early-wait", "mature-miss"},
                 )
                 self.assertEqual(
                     sum(row["cohort_role"] == "numerator" for row in drilldown["rows"]),
                     metric["numerator"],
                 )
+                self.assertEqual(
+                    {row["cohort_role"] for row in drilldown["rows"]},
+                    {"numerator", "pending", "resolved_without_order"},
+                )
+                self.assertEqual(
+                    next(row for row in drilldown["rows"] if row["contact_id"] == "early-wait")["outcome_status"],
+                    "pending",
+                )
+        self.assertEqual(
+            build_drilldown(summary, "resolved_order_10d")["total_count"],
+            summary["outcome_10d"]["resolved_contact_count"],
+        )
+        self.assertEqual(
+            build_drilldown(summary, "converted_order_10d")["total_count"],
+            summary["outcome_10d"]["attributed_order_contact_count"],
+        )
 
 
 class SnapshotAndAggregateTests(TestCase):
@@ -1269,8 +1340,8 @@ class SnapshotAndAggregateTests(TestCase):
         self.assertEqual(team["bob"]["mature_positive_dialogues_count"], 0)
         self.assertEqual(team["bob"]["converted_positive_contacts_count"], 0)
         self.assertEqual(team["bob"]["waiting_positive_dialogues_count"], 1)
-        self.assertEqual(team["bob"]["positive_to_order_10d"]["denominator"], 0)
-        self.assertEqual(team["bob"]["positive_to_order_10d"]["status"], "not_computable")
+        self.assertEqual(team["bob"]["positive_to_order_10d"]["denominator"], 1)
+        self.assertEqual(team["bob"]["positive_to_order_10d"]["status"], "small_sample")
         self.assertLessEqual(
             team["alice"]["converted_positive_contacts_count"],
             team["alice"]["mature_positive_dialogues_count"],
@@ -1449,7 +1520,8 @@ class SnapshotAndAggregateTests(TestCase):
 
         self.assertEqual(len(positive), 5)
         self.assertEqual({row["contact_id"]: row["cohort_role"] for row in closing}, {
-            "positive-order": "numerator", "positive-miss": "missed_outcome",
+            "positive-order": "numerator",
+            "positive-miss": "resolved_without_order",
         })
         self.assertEqual({row["contact_id"]: row["cohort_role"] for row in priority}, {
             "priority-top": "numerator", "priority-low": "denominator_only",

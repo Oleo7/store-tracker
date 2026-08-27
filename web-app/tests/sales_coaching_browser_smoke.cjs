@@ -25,6 +25,11 @@ const viewport = mode === "mobile"
       return { ok: response.ok, body: await response.text() };
     });
     if (!login.ok) throw new Error(`${mode}: harness login failed: ${login.body}`);
+    const browserErrors = [];
+    page.on("console", message => {
+      if (message.type() === "error") browserErrors.push(message.text());
+    });
+    page.on("pageerror", error => browserErrors.push(String(error)));
     await page.goto("http://127.0.0.1:5065/?sales_coaching=1&period=4&seller=olle", {
       waitUntil: "networkidle",
     });
@@ -35,8 +40,8 @@ const viewport = mode === "mobile"
     const expectedDenominators = [
       "analyserbara besök/telefonsamtal",
       "nådda besök/telefonsamtal",
-      "avgjorda positiva dialoger",
-      "avgjorda kontakter",
+      "positiva dialoger har följts av order",
+      "kontakter har följts av order",
     ];
     const denominatorText = await page.locator(".sc-kpi-denominator").allInnerTexts();
     for (const expected of expectedDenominators) {
@@ -78,34 +83,34 @@ const viewport = mode === "mobile"
     }
     const contactOrderCard = page.locator('.sc-kpi-card[data-kpi-key="order_10d"]');
     const contactOrderText = await contactOrderCard.innerText();
-    if (!contactOrderText.includes("50 %") || !contactOrderText.includes("1 av 2") || !contactOrderText.includes("avgjorda kontakter")) {
-      throw new Error(`${mode}: early conversion is missing from resolved contact KPI: ${contactOrderText}`);
+    if (!contactOrderText.includes("20 %") || !contactOrderText.includes("7 av 35") || !contactOrderText.includes("kontakter har följts av order")) {
+      throw new Error(`${mode}: provisional contact KPI does not use the full eligible cohort: ${contactOrderText}`);
     }
-    if (!contactOrderText.includes("Preliminärt · 8 väntar på slutligt 10-dagarsutfall")) {
+    if (!contactOrderText.includes("Preliminärt · 28 väntar på slutligt 10-dagarsutfall")) {
       throw new Error(`${mode}: contact pending copy/count is wrong: ${contactOrderText}`);
     }
     const positiveOrderCard = page.locator('.sc-kpi-card[data-kpi-key="positive_to_order_10d"]');
     const positiveOrderText = await positiveOrderCard.innerText();
-    if (!positiveOrderText.includes("100 %") || !positiveOrderText.includes("1 av 1") || !positiveOrderText.includes("avgjorda positiva dialoger")) {
-      throw new Error(`${mode}: early conversion is missing from resolved positive KPI: ${positiveOrderText}`);
+    if (!positiveOrderText.includes("25 %") || !positiveOrderText.includes("7 av 28") || !positiveOrderText.includes("positiva dialoger har följts av order")) {
+      throw new Error(`${mode}: provisional positive KPI does not use the full eligible cohort: ${positiveOrderText}`);
     }
-    if (!positiveOrderText.includes("Preliminärt · 1 väntar på slutligt 10-dagarsutfall")) {
+    if (!positiveOrderText.includes("Preliminärt · 21 väntar på slutligt 10-dagarsutfall")) {
       throw new Error(`${mode}: positive pending copy/count is wrong: ${positiveOrderText}`);
     }
     await contactOrderCard.locator(".sc-kpi-main").click();
     await page.locator("#sc-drawer-backdrop").waitFor();
     await page.locator("#sc-drawer-content .sc-drawer-meta").waitFor();
     const orderDrawerText = await page.locator("#sc-drawer-content").innerText();
-    if (!orderDrawerText.includes("Visar 2 av 2") || !orderDrawerText.includes("EARLY-ORDER")) {
-      throw new Error(`${mode}: resolved drilldown does not match KPI denominator: ${orderDrawerText}`);
+    if (!orderDrawerText.includes("Visar 35 av 35") || !orderDrawerText.includes("EARLY-ORDER-1") || !orderDrawerText.includes("Väntar på utfall")) {
+      throw new Error(`${mode}: eligible contact drilldown does not match KPI denominator/outcomes: ${orderDrawerText}`);
     }
     await page.locator("[data-sc-drawer-close]").click();
     await positiveOrderCard.locator(".sc-kpi-main").click();
     await page.locator("#sc-drawer-backdrop").waitFor();
     await page.locator("#sc-drawer-content .sc-drawer-meta").waitFor();
     const positiveDrawerText = await page.locator("#sc-drawer-content").innerText();
-    if (!positiveDrawerText.includes("Visar 1 av 1") || !positiveDrawerText.includes("EARLY-ORDER")) {
-      throw new Error(`${mode}: resolved positive drilldown does not match KPI denominator: ${positiveDrawerText}`);
+    if (!positiveDrawerText.includes("Visar 28 av 28") || !positiveDrawerText.includes("EARLY-ORDER-1") || !positiveDrawerText.includes("Väntar på utfall")) {
+      throw new Error(`${mode}: eligible positive drilldown does not match KPI denominator/outcomes: ${positiveDrawerText}`);
     }
     await page.locator("[data-sc-drawer-close]").click();
     const statusLabels = await page.locator(".sc-kpi-card .sc-status").allInnerTexts();
@@ -221,6 +226,9 @@ const viewport = mode === "mobile"
       const matrixScroller = page.locator(".sc-matrix-wrap").first();
       await matrixScroller.scrollIntoViewIfNeeded();
       if (!(await matrixScroller.isVisible())) throw new Error("mobile: matrix scroller missing");
+    }
+    if (browserErrors.length) {
+      throw new Error(`${mode}: browser errors: ${JSON.stringify(browserErrors)}`);
     }
     console.log(`${mode} sales-coaching smoke passed`);
   } finally {
