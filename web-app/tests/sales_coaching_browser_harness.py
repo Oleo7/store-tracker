@@ -34,8 +34,11 @@ if __name__ == "__main__":
         ])
 
     for index, customer in enumerate(olle_customers):
+        mature = index < 10
         row = {
-            "date_time": (now - timedelta(days=1, minutes=index)).isoformat(
+            "date_time": (
+                now - timedelta(days=12 if mature else 1, minutes=index)
+            ).isoformat(
                 timespec="minutes"
             ),
             "sales_person": "olle",
@@ -73,10 +76,15 @@ if __name__ == "__main__":
 
     order_sheet = spreadsheet.worksheet("order_rows")
     order_headers = order_sheet.values[0]
-    for index, customer in enumerate(olle_customers[:7], start=1):
+    converted_indexes = (0, 1, 2, 3, 10, 11, 12)
+    for sequence, index in enumerate(converted_indexes, start=1):
+        customer = olle_customers[index]
+        contact_date = now - timedelta(days=12 if index < 10 else 1)
         early_order = {
-            "Reference": f"EARLY-ORDER-{index}",
-            "Order date": now.date().isoformat(),
+            "Reference": f"SMOKE-ORDER-{sequence}",
+            "Order date": (
+                contact_date + timedelta(days=2 if index < 10 else 1)
+            ).date().isoformat(),
             "Customer": customer["customer"],
             "Customer number": customer["customer_number"],
             "Quantity": "1",

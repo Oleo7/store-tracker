@@ -220,6 +220,22 @@ body.user-admin .sales-coaching-dashboard:not([hidden]) { display: block; }
 .sc-kpi-denominator { font-weight: 700; }
 .sc-kpi-comparison { margin-top: 8px; }
 .sc-kpi-secondary { margin-top: 7px; color: #60424f; }
+.sc-kpi-card.has-comparable .sc-kpi-main { min-height: 0; padding-bottom: 7px; }
+.sc-kpi-comparable {
+  display: block;
+  width: calc(100% - 32px);
+  margin: 0 16px 16px;
+  padding: 8px 10px;
+  border: 1px solid #d7c5cd;
+  border-radius: 9px;
+  background: #f4edf0;
+  color: #51434a;
+  cursor: pointer;
+  font: inherit;
+  font-size: .78rem;
+  line-height: 1.45;
+  text-align: left;
+}
 .sc-metric-explanation { display: block; overflow-wrap: anywhere; margin: -2px 16px 16px; padding: 10px 12px; border-radius: 10px; background: #f4edf0; color: #51434a; font-size: .82rem; font-weight: 400; line-height: 1.5; white-space: normal; }
 .sc-metric-explanation[hidden] { display: none; }
 .sc-status { display: inline-flex; margin-top: 8px; padding: 4px 8px; border-radius: 999px; background: #f0eaed; color: #6e5f67; font-size: 0.72rem; font-weight: 800; }

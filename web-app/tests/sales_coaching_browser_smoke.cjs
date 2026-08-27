@@ -86,22 +86,28 @@ const viewport = mode === "mobile"
     if (!contactOrderText.includes("20 %") || !contactOrderText.includes("7 av 35") || !contactOrderText.includes("kontakter har följts av order")) {
       throw new Error(`${mode}: provisional contact KPI does not use the full eligible cohort: ${contactOrderText}`);
     }
-    if (!contactOrderText.includes("Preliminärt · 28 väntar på slutligt 10-dagarsutfall")) {
+    if (!contactOrderText.includes("Preliminärt · 22 väntar på slutligt 10-dagarsutfall")) {
       throw new Error(`${mode}: contact pending copy/count is wrong: ${contactOrderText}`);
+    }
+    if (!contactOrderText.includes("Jämförbart 10-dagarsutfall: 40 %") || !contactOrderText.includes("4 av 10 med fullständigt 10-dagarsutfall")) {
+      throw new Error(`${mode}: comparable contact outcome is missing or wrong: ${contactOrderText}`);
     }
     const positiveOrderCard = page.locator('.sc-kpi-card[data-kpi-key="positive_to_order_10d"]');
     const positiveOrderText = await positiveOrderCard.innerText();
     if (!positiveOrderText.includes("25 %") || !positiveOrderText.includes("7 av 28") || !positiveOrderText.includes("positiva dialoger har följts av order")) {
       throw new Error(`${mode}: provisional positive KPI does not use the full eligible cohort: ${positiveOrderText}`);
     }
-    if (!positiveOrderText.includes("Preliminärt · 21 väntar på slutligt 10-dagarsutfall")) {
+    if (!positiveOrderText.includes("Preliminärt · 15 väntar på slutligt 10-dagarsutfall")) {
       throw new Error(`${mode}: positive pending copy/count is wrong: ${positiveOrderText}`);
+    }
+    if (!positiveOrderText.includes("Jämförbart 10-dagarsutfall: 40 %") || !positiveOrderText.includes("4 av 10 med fullständigt 10-dagarsutfall")) {
+      throw new Error(`${mode}: comparable positive outcome is missing or wrong: ${positiveOrderText}`);
     }
     await contactOrderCard.locator(".sc-kpi-main").click();
     await page.locator("#sc-drawer-backdrop").waitFor();
     await page.locator("#sc-drawer-content .sc-drawer-meta").waitFor();
     const orderDrawerText = await page.locator("#sc-drawer-content").innerText();
-    if (!orderDrawerText.includes("Visar 35 av 35") || !orderDrawerText.includes("EARLY-ORDER-1") || !orderDrawerText.includes("Väntar på utfall")) {
+    if (!orderDrawerText.includes("Visar 35 av 35") || !orderDrawerText.includes("SMOKE-ORDER-1") || !orderDrawerText.includes("Väntar på utfall")) {
       throw new Error(`${mode}: eligible contact drilldown does not match KPI denominator/outcomes: ${orderDrawerText}`);
     }
     await page.locator("[data-sc-drawer-close]").click();
@@ -109,8 +115,24 @@ const viewport = mode === "mobile"
     await page.locator("#sc-drawer-backdrop").waitFor();
     await page.locator("#sc-drawer-content .sc-drawer-meta").waitFor();
     const positiveDrawerText = await page.locator("#sc-drawer-content").innerText();
-    if (!positiveDrawerText.includes("Visar 28 av 28") || !positiveDrawerText.includes("EARLY-ORDER-1") || !positiveDrawerText.includes("Väntar på utfall")) {
+    if (!positiveDrawerText.includes("Visar 28 av 28") || !positiveDrawerText.includes("SMOKE-ORDER-1") || !positiveDrawerText.includes("Väntar på utfall")) {
       throw new Error(`${mode}: eligible positive drilldown does not match KPI denominator/outcomes: ${positiveDrawerText}`);
+    }
+    await page.locator("[data-sc-drawer-close]").click();
+    await contactOrderCard.locator(".sc-kpi-comparable").click();
+    await page.locator("#sc-drawer-backdrop").waitFor();
+    await page.locator("#sc-drawer-content .sc-drawer-meta").waitFor();
+    const comparableOrderDrawerText = await page.locator("#sc-drawer-content").innerText();
+    if (!comparableOrderDrawerText.includes("Visar 10 av 10") || comparableOrderDrawerText.includes("Väntar på utfall")) {
+      throw new Error(`${mode}: comparable contact drilldown is not mature-only: ${comparableOrderDrawerText}`);
+    }
+    await page.locator("[data-sc-drawer-close]").click();
+    await positiveOrderCard.locator(".sc-kpi-comparable").click();
+    await page.locator("#sc-drawer-backdrop").waitFor();
+    await page.locator("#sc-drawer-content .sc-drawer-meta").waitFor();
+    const comparablePositiveDrawerText = await page.locator("#sc-drawer-content").innerText();
+    if (!comparablePositiveDrawerText.includes("Visar 10 av 10") || comparablePositiveDrawerText.includes("Väntar på utfall")) {
+      throw new Error(`${mode}: comparable positive drilldown is not mature-only: ${comparablePositiveDrawerText}`);
     }
     await page.locator("[data-sc-drawer-close]").click();
     const statusLabels = await page.locator(".sc-kpi-card .sc-status").allInnerTexts();
@@ -137,6 +159,11 @@ const viewport = mode === "mobile"
     const nextStepIndex = normalizedTeamHeaders.findIndex(text => text.startsWith("nästa-steg-täckning"));
     if (!(positiveOrderIndex + 1 === contactOrderIndex && contactOrderIndex + 1 === nextStepIndex)) {
       throw new Error(`${mode}: contact-order metric is in the wrong team-comparison position: ${JSON.stringify(teamHeaders)}`);
+    }
+    const olleTeamRow = page.locator(".sc-comparison-table tbody tr", { hasText: "Olle" });
+    const olleTeamText = await olleTeamRow.innerText();
+    if ((olleTeamText.match(/40 %/g) || []).length < 2 || olleTeamText.includes("20 %") || olleTeamText.includes("25 %")) {
+      throw new Error(`${mode}: team comparison does not use comparable 10-day outcomes: ${olleTeamText}`);
     }
     const diagnosticTabs = await page.locator(".sc-diagnostic-tabs [role=tab]").allInnerTexts();
     if (diagnosticTabs[0] !== "Besök" || diagnosticTabs[1] !== "Konvertering") {
@@ -196,7 +223,7 @@ const viewport = mode === "mobile"
     await page.locator('[data-diagnostic-tab="channels"]').click();
     const emailRow = page.locator('[data-channel-row="email"]');
     await emailRow.waitFor();
-    for (const metric of ["positive_dialogue", "positive_to_order_10d"]) {
+    for (const metric of ["positive_dialogue", "positive_to_order_10d_comparable"]) {
       const cell = await emailRow.locator(`[data-channel-metric="${metric}"]`).innerText();
       if (cell.trim() !== "Ej tillämpligt") {
         throw new Error(`${mode}: email row fabricated ${metric}: ${cell}`);

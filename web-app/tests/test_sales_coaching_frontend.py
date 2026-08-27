@@ -139,23 +139,35 @@ class SalesCoachingFrontendTests(TestCase):
             "teamComparisonMarkup", "human_activities_total",
             "visit_breakdown?.analysable", "visit_breakdown?.reached",
             "visit_breakdown?.boms", "channel_mix?.phone", "channel_mix?.email",
-            "positive_to_order_10d", "positive_next_step_coverage",
+            "positive_to_order_10d_comparable", "positive_next_step_coverage",
             "is-visit-stack", "is-visit-reached", "is-visit-bom",
             "is-email", "sc-comparison-table", "Nästa-steg-täckning",
-            "Kontakt – order inom 10 dagar",
+            "Kontakt – order inom 10 dagar – fullständigt utfall",
         ):
             with self.subTest(expected=expected):
                 self.assertIn(expected, self.javascript)
         self.assertNotIn("item.attributed_orders /", self.javascript)
         self.assertNotIn('class="sc-team-secondary"', self.javascript)
         self.assertIn(
-            "${rateCell(item.positive_to_order_10d)}</td><td>${rateCell(item.order_10d)}</td><td>${rateCell(item.positive_next_step_coverage)}",
+            "${rateCell(item.positive_to_order_10d_comparable)}</td><td>${rateCell(item.order_10d_comparable)}</td><td>${rateCell(item.positive_next_step_coverage)}",
             self.javascript,
         )
         self.assertIn(
-            'metricHeader("Kontakt – order inom 10 dagar", "order_10d", "team-order")',
+            'metricHeader("Kontakt – order inom 10 dagar – fullständigt utfall", "order_10d_comparable", "team-order")',
             self.javascript,
         )
+
+    def test_headline_outcomes_keep_live_value_and_show_separate_comparable_line(self):
+        self.assertIn("comparableOutcomeText", self.javascript)
+        self.assertIn(
+            "Jämförbart 10-dagarsutfall: inte tillräckligt underlag ännu",
+            self.javascript,
+        )
+        self.assertIn("med fullständigt 10-dagarsutfall", self.javascript)
+        self.assertIn('class="sc-kpi-comparable"', self.javascript)
+        self.assertIn('data-drilldown="${escapeHtml(comparable.drilldown_metric)}"', self.javascript)
+        self.assertIn('${comparable ? "" : escapeHtml(comparisonText(metric))}', self.javascript)
+        self.assertNotIn('metric.status === "sufficient"\n      ? \'<span class="sc-status"', self.javascript)
 
     def test_matrix_uses_fixed_points_offsets_ticks_and_separate_axes(self):
         for expected in (
@@ -259,8 +271,9 @@ class SalesCoachingFrontendTests(TestCase):
         required = {
             "bom_ratio", "high_priority_boms", "human_activities",
             "median_days_to_order", "positive_next_step_coverage",
-            "order_10d", "planned_completed_in_time", "positive_dialogue",
-            "positive_to_order_10d", "priority_focus", "strategic_coverage",
+            "order_10d", "order_10d_comparable", "planned_completed_in_time", "positive_dialogue",
+            "positive_to_order_10d", "positive_to_order_10d_comparable",
+            "priority_focus", "strategic_coverage",
             "reach",
         }
         self.assertTrue(required.issubset(METRIC_DEFINITIONS))
@@ -281,11 +294,15 @@ class SalesCoachingFrontendTests(TestCase):
             METRIC_DEFINITIONS["positive_to_order_10d"]["not_computable_text"],
             "Positiv → order mäts endast för Besök och Telefon.",
         )
+        self.assertEqual(
+            METRIC_DEFINITIONS["positive_to_order_10d_comparable"]["not_computable_text"],
+            "Jämförbart positiv → order mäts endast för Besök och Telefon.",
+        )
         self.assertIn("channelRate(key, \"positive_dialogue\"", self.javascript)
-        self.assertIn("channelRate(key, \"positive_to_order_10d\"", self.javascript)
+        self.assertIn("channelRate(key, \"positive_to_order_10d_comparable\"", self.javascript)
         self.assertIn('? "Ej tillämpligt"', self.javascript)
         self.assertIn('data-channel-row="${key}"', self.javascript)
-        self.assertIn('data-channel-metric="positive_to_order_10d"', self.javascript)
+        self.assertIn('data-channel-metric="positive_to_order_10d_comparable"', self.javascript)
         self.assertNotIn("Fördjupa analysen utan operativa kundlistor.", self.javascript)
 
     def test_metric_information_is_separate_from_drilldown_and_accessible(self):
