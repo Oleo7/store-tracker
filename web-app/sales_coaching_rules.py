@@ -285,7 +285,7 @@ def build_seller_signals(*, seller, metrics, repeat_boms, channel_effectiveness)
                 code="closing_gap", dimension="closing", polarity="attention",
                 metric_key="positive_to_order_10d",
                 title="Positiv dialog blir mer sällan order",
-                observation=f"{seller} når minst nivån för övriga säljares positiva dialoger men färre positiva dialoger med fullständigt 10-dagarsutfall följs av order.",
+                observation=f"{seller} når minst nivån för övriga säljares positiva dialoger men färre avgjorda positiva dialoger följs av order.",
                 evidence=closing, benchmark=_benchmark(closing),
                 next_action="Granska överenskommet nästa steg, erbjudande och uppföljning efter positiva dialoger.",
                 target="Minska gapet till övriga säljare med minst 10 procentenheter.",
@@ -297,10 +297,10 @@ def build_seller_signals(*, seller, metrics, repeat_boms, channel_effectiveness)
             signals.append(_signal(
                 code="positive_to_order_10d_strength", dimension="closing", polarity="strength",
                 metric_key="positive_to_order_10d", title="Stark positiv-till-order-konvertering",
-                observation=f"{seller} ligger tydligt över övriga säljare för positiva dialoger med fullständigt 10-dagarsutfall.",
+                observation=f"{seller} ligger tydligt över övriga säljare för avgjorda positiva dialoger.",
                 evidence=closing, benchmark=_benchmark(closing),
                 next_action="Identifiera vilka överenskommelser och uppföljningar som driver utfallet.",
-                target="Behåll nivån med minst 30 mogna positiva dialoger.",
+                target="Behåll nivån med minst 30 avgjorda positiva dialoger.",
                 drilldown_metric="positive_to_order_10d",
                 ranking_score=_rank("closing", closing, gap, RATE_GAP),
             ))

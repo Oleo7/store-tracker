@@ -35,8 +35,8 @@ const viewport = mode === "mobile"
     const expectedDenominators = [
       "analyserbara besök/telefonsamtal",
       "nådda besök/telefonsamtal",
-      "mogna positiva dialoger",
-      "mogna nådda kontakter",
+      "avgjorda positiva dialoger",
+      "avgjorda kontakter",
     ];
     const denominatorText = await page.locator(".sc-kpi-denominator").allInnerTexts();
     for (const expected of expectedDenominators) {
@@ -76,6 +76,38 @@ const viewport = mode === "mobile"
     if (contactOrderLabel.trim() !== "Kontakt – order inom 10 dagar") {
       throw new Error(`${mode}: contact-order KPI has the wrong label: ${contactOrderLabel}`);
     }
+    const contactOrderCard = page.locator('.sc-kpi-card[data-kpi-key="order_10d"]');
+    const contactOrderText = await contactOrderCard.innerText();
+    if (!contactOrderText.includes("50 %") || !contactOrderText.includes("1 av 2") || !contactOrderText.includes("avgjorda kontakter")) {
+      throw new Error(`${mode}: early conversion is missing from resolved contact KPI: ${contactOrderText}`);
+    }
+    if (!contactOrderText.includes("Preliminärt · 8 väntar på slutligt 10-dagarsutfall")) {
+      throw new Error(`${mode}: contact pending copy/count is wrong: ${contactOrderText}`);
+    }
+    const positiveOrderCard = page.locator('.sc-kpi-card[data-kpi-key="positive_to_order_10d"]');
+    const positiveOrderText = await positiveOrderCard.innerText();
+    if (!positiveOrderText.includes("100 %") || !positiveOrderText.includes("1 av 1") || !positiveOrderText.includes("avgjorda positiva dialoger")) {
+      throw new Error(`${mode}: early conversion is missing from resolved positive KPI: ${positiveOrderText}`);
+    }
+    if (!positiveOrderText.includes("Preliminärt · 1 väntar på slutligt 10-dagarsutfall")) {
+      throw new Error(`${mode}: positive pending copy/count is wrong: ${positiveOrderText}`);
+    }
+    await contactOrderCard.locator(".sc-kpi-main").click();
+    await page.locator("#sc-drawer-backdrop").waitFor();
+    await page.locator("#sc-drawer-content .sc-drawer-meta").waitFor();
+    const orderDrawerText = await page.locator("#sc-drawer-content").innerText();
+    if (!orderDrawerText.includes("Visar 2 av 2") || !orderDrawerText.includes("EARLY-ORDER")) {
+      throw new Error(`${mode}: resolved drilldown does not match KPI denominator: ${orderDrawerText}`);
+    }
+    await page.locator("[data-sc-drawer-close]").click();
+    await positiveOrderCard.locator(".sc-kpi-main").click();
+    await page.locator("#sc-drawer-backdrop").waitFor();
+    await page.locator("#sc-drawer-content .sc-drawer-meta").waitFor();
+    const positiveDrawerText = await page.locator("#sc-drawer-content").innerText();
+    if (!positiveDrawerText.includes("Visar 1 av 1") || !positiveDrawerText.includes("EARLY-ORDER")) {
+      throw new Error(`${mode}: resolved positive drilldown does not match KPI denominator: ${positiveDrawerText}`);
+    }
+    await page.locator("[data-sc-drawer-close]").click();
     const statusLabels = await page.locator(".sc-kpi-card .sc-status").allInnerTexts();
     if (statusLabels.some(label => label.trim() !== "Inte tillräckligt underlag")) {
       throw new Error(`${mode}: a sufficient KPI status badge is still visible`);
@@ -152,6 +184,9 @@ const viewport = mode === "mobile"
     const emailPositiveOrder = await page.locator('.sc-kpi-card[data-kpi-key="positive_to_order_10d"]').innerText();
     if (!emailPositiveOrder.includes("Positiv → order mäts endast för Besök och Telefon.")) {
       throw new Error(`${mode}: email filter fabricated a positive-to-order rate`);
+    }
+    if (await page.locator('.sc-kpi-card[data-kpi-key="order_10d"] .sc-kpi-secondary').count()) {
+      throw new Error(`${mode}: zero pending outcomes still render a pending line`);
     }
     await page.locator('[data-diagnostic-tab="channels"]').click();
     const emailRow = page.locator('[data-channel-row="email"]');
