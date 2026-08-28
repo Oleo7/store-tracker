@@ -32,6 +32,7 @@ class SalesCoachingFrontendTests(TestCase):
         for expected in (
             "Period", "Säljare", "Kanal", "Lifecycle", "Kundsegment",
             "Coachningsöversikt", "Coachningskort", "Teamjämförelse",
+            "Kontakt – order inom 10 dagar – trend",
             "Teamets coachningsmatriser", "Aktivitetstratt", "10-dagarsutfall",
             "Konvertering", "Besök", "Kanaler", "Uppföljning", "Prioritering",
             "Datakvalitet och definitioner",
@@ -168,6 +169,70 @@ class SalesCoachingFrontendTests(TestCase):
         self.assertIn('data-drilldown="${escapeHtml(comparable.drilldown_metric)}"', self.javascript)
         self.assertIn('${comparable ? "" : escapeHtml(comparisonText(metric))}', self.javascript)
         self.assertNotIn('metric.status === "sufficient"\n      ? \'<span class="sc-status"', self.javascript)
+
+    def test_long_term_team_trend_contract_is_accessible_and_independent(self):
+        trend = self.javascript.split("function teamOrderTrendMarkup", 1)[1].split(
+            "function matrixReasonLabel", 1
+        )[0]
+        render = self.javascript.split("function renderDashboard", 1)[1].split(
+            "function handleDashboardClick", 1
+        )[0]
+        for expected in (
+            "Fullständiga 10-dagarsutfall per kontaktvecka för de senaste 16 mogna veckorna",
+            "Varje punkt avser endast den aktuella kontaktveckan",
+            "Period-, säljar- och kanalfilter begränsar inte grafen",
+            "lifecycle och segment följer filtren",
+            'data-drilldown="order_10d_comparable"',
+            'data-channel="all"',
+            'data-seller="${escapeHtml(item.seller)}"',
+            'tabindex="0" role="button"',
+            "Litet underlag",
+            "teamTrendMarker",
+            "stroke-dasharray",
+            "segment.length > 1",
+            "point.value === null",
+        ):
+            with self.subTest(expected=expected):
+                self.assertIn(expected, trend)
+        self.assertIn("const ticks = [0, 0.25, 0.5, 0.75, 1]", trend)
+        self.assertIn("week_axis", trend)
+        self.assertIn("teamTrendWeekLabel", trend)
+        self.assertIn("previousYear !== match[1]", self.javascript)
+        self.assertIn('const period = `${point.period?.start || "—"}–${point.period?.end || "—"}`', trend)
+        self.assertIn("${teamTrendWeekLabel(point.week)} · ${period}", trend)
+        self.assertIn("function teamTrendStyle(seller)", self.javascript)
+        self.assertIn("TEAM_TREND_DASHES[styleIndex]", self.javascript)
+        self.assertIn('.normalize("NFKC").trim().toLocaleLowerCase("sv-SE")', self.javascript)
+        self.assertIn("hash = Math.imul(hash, 16777619)", self.javascript)
+        self.assertIn("const style = teamTrendStyle(item.seller)", trend)
+        self.assertIn("teamTrendMarker(style.marker", trend)
+        self.assertIn('data-series-style="${style.key}"', trend)
+        self.assertNotIn("TEAM_TREND_COLORS[seriesIndex", self.javascript)
+        self.assertNotIn("TEAM_TREND_DASHES[seriesIndex", self.javascript)
+        self.assertNotIn("rolling", trend.casefold())
+        point_title = trend.split("const title =", 1)[1].split(";", 1)[0]
+        self.assertNotIn("prelim", point_title.casefold())
+        self.assertLess(render.index("teamComparisonMarkup"), render.index("teamOrderTrendMarkup"))
+        self.assertLess(render.index("teamOrderTrendMarkup"), render.index("matricesMarkup"))
+        self.assertIn(".sc-team-order-trend { display: block; width: 100%; min-width: 1040px", self.css)
+        self.assertIn(".sc-team-order-trend-wrap { overflow-x: auto", self.css)
+        self.assertIn(".sc-team-order-point.is-small-sample", self.css)
+        self.assertIn(".sc-team-order-line.is-selected", self.css)
+        self.assertIn(".sc-team-order-line.is-unselected", self.css)
+
+    def test_team_trend_point_drilldown_overrides_seller_period_and_channel(self):
+        handler = self.javascript.split("function handleDashboardClick", 1)[1].split(
+            "function drawerMarkup", 1
+        )[0]
+        self.assertIn("if (drilldown.dataset.seller) extra.seller", handler)
+        self.assertIn("if (drilldown.dataset.channel) extra.channel", handler)
+        self.assertIn("if (drilldown.dataset.start) extra.start", handler)
+        self.assertIn("if (drilldown.dataset.end) extra.end", handler)
+        self.assertLess(
+            handler.index('event.target.closest("[data-drilldown]")'),
+            handler.index('event.target.closest("[data-seller]")'),
+        )
+        self.assertIn('const value = extra[key] ?? state.filters[key]', self.javascript)
 
     def test_matrix_uses_fixed_points_offsets_ticks_and_separate_axes(self):
         for expected in (

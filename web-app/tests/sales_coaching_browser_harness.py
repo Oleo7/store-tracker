@@ -74,6 +74,70 @@ if __name__ == "__main__":
             }
             activity_sheet.append_row([row.get(header, "") for header in headers])
 
+    maturity_cutoff = now.date() - timedelta(days=10)
+    latest_complete_sunday = maturity_cutoff - timedelta(
+        days=(maturity_cutoff.weekday() - 6) % 7
+    )
+    newer_trend_monday = latest_complete_sunday - timedelta(weeks=5, days=6)
+    trend_orders = []
+    trend_profiles = [
+        {
+            "week_start": newer_trend_monday - timedelta(weeks=1),
+            "conversions": {"olle": 3, "sofia": 6, "viewer": 2},
+        },
+        {
+            "week_start": newer_trend_monday,
+            "conversions": {"olle": 5, "sofia": 2, "viewer": 4},
+        },
+    ]
+    denominators = {"olle": 10, "sofia": 10, "viewer": 8}
+    trend_customer_sequence = 1000
+    for week_index, profile in enumerate(trend_profiles, start=1):
+        for seller, denominator in denominators.items():
+            for index in range(denominator):
+                trend_customer_sequence += 1
+                customer = {
+                    "customer": f"Trend-butik {week_index}-{seller}-{index + 1}",
+                    "customer_id": f"trend-{week_index}-{seller}-{index + 1}",
+                    "sales_person": seller,
+                    "customer_segment": "A",
+                    "customer_number": f"TREND-{trend_customer_sequence}",
+                }
+                customer_sheet.append_row([
+                    customer.get(header, "") for header in customer_headers
+                ])
+                contact_at = datetime.combine(
+                    profile["week_start"] + timedelta(days=index % 6),
+                    now.time(),
+                ) + timedelta(minutes=index)
+                contact_id = f"smoke-trend-{week_index}-{seller}-{index}"
+                activity_row = {
+                    "date_time": contact_at.isoformat(timespec="minutes"),
+                    "sales_person": seller,
+                    "sales_user_name": seller,
+                    "customer": customer["customer"],
+                    "customer_id": customer["customer_id"],
+                    "contact_channel": "Mejl" if seller == "olle" and index == 0 else "Telefon",
+                    "result": "Positiv",
+                    "activity_source": "manual",
+                    "contact_id": contact_id,
+                }
+                activity_sheet.append_row([
+                    activity_row.get(header, "") for header in headers
+                ])
+                if index < profile["conversions"][seller]:
+                    trend_orders.append({
+                        "Reference": f"TREND-ORDER-{week_index}-{seller}-{index + 1}",
+                        "Order date": (contact_at.date() + timedelta(days=2)).isoformat(),
+                        "Customer": customer["customer"],
+                        "Customer number": customer["customer_number"],
+                        "Quantity": "1",
+                        "Unit": "DFP",
+                        "Total": "100",
+                        "Currency": "SEK",
+                        "customer_id": customer["customer_id"],
+                    })
+
     order_sheet = spreadsheet.worksheet("order_rows")
     order_headers = order_sheet.values[0]
     converted_indexes = (0, 1, 2, 3, 10, 11, 12)
@@ -95,6 +159,10 @@ if __name__ == "__main__":
         }
         order_sheet.append_row([
             early_order.get(header, "") for header in order_headers
+        ])
+    for trend_order in trend_orders:
+        order_sheet.append_row([
+            trend_order.get(header, "") for header in order_headers
         ])
 
     app_module.app.config.update(
