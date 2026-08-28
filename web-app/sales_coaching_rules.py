@@ -26,8 +26,8 @@ MAX_CARDS = 3
 RATE_METRICS = (
     "reach",
     "positive_dialogue",
-    "positive_to_order_10d",
-    "order_10d",
+    "positive_to_order_10d_comparable",
+    "order_10d_comparable",
     "bom_ratio",
     "priority_focus",
     "positive_next_step_coverage",
@@ -269,7 +269,7 @@ def build_seller_signals(*, seller, metrics, repeat_boms, channel_effectiveness)
                 ))
 
     positive = metrics.get("positive_dialogue", {})
-    closing = metrics.get("positive_to_order_10d", {})
+    closing = metrics.get("positive_to_order_10d_comparable", {})
     if _is_sufficient(positive) and _is_sufficient(closing):
         pos_cmp, close_cmp = positive.get("comparisons", {}), closing.get("comparisons", {})
         if (
@@ -283,25 +283,25 @@ def build_seller_signals(*, seller, metrics, repeat_boms, channel_effectiveness)
             gap = closing["value"] - close_cmp["peer_median"]
             signals.append(_signal(
                 code="closing_gap", dimension="closing", polarity="attention",
-                metric_key="positive_to_order_10d",
+                metric_key="positive_to_order_10d_comparable",
                 title="Positiv dialog blir mer sällan order",
-                observation=f"{seller} når minst nivån för övriga säljares positiva dialoger men färre avgjorda positiva dialoger följs av order.",
+                observation=f"{seller} når minst nivån för övriga säljares positiva dialoger men färre positiva dialoger med fullständigt 10-dagarsutfall följs av order.",
                 evidence=closing, benchmark=_benchmark(closing),
                 next_action="Granska överenskommet nästa steg, erbjudande och uppföljning efter positiva dialoger.",
                 target="Minska gapet till övriga säljare med minst 10 procentenheter.",
-                drilldown_metric="positive_to_order_10d",
+                drilldown_metric="positive_to_order_10d_comparable",
                 ranking_score=_rank("closing", closing, gap, RATE_GAP),
             ))
         elif close_cmp.get("peer_median") is not None and close_cmp.get("peer_count", 0) >= MIN_PEERS and closing["value"] >= close_cmp["peer_median"] + RATE_GAP:
             gap = closing["value"] - close_cmp["peer_median"]
             signals.append(_signal(
                 code="positive_to_order_10d_strength", dimension="closing", polarity="strength",
-                metric_key="positive_to_order_10d", title="Stark positiv-till-order-konvertering",
-                observation=f"{seller} ligger tydligt över övriga säljare för avgjorda positiva dialoger.",
+                metric_key="positive_to_order_10d_comparable", title="Stark positiv-till-order-konvertering",
+                observation=f"{seller} ligger tydligt över övriga säljare för positiva dialoger med fullständigt 10-dagarsutfall.",
                 evidence=closing, benchmark=_benchmark(closing),
                 next_action="Identifiera vilka överenskommelser och uppföljningar som driver utfallet.",
-                target="Behåll nivån med minst 30 avgjorda positiva dialoger.",
-                drilldown_metric="positive_to_order_10d",
+                target="Behåll nivån med minst 30 positiva dialoger med fullständigt 10-dagarsutfall.",
+                drilldown_metric="positive_to_order_10d_comparable",
                 ranking_score=_rank("closing", closing, gap, RATE_GAP),
             ))
 
@@ -427,7 +427,9 @@ def build_seller_signals(*, seller, metrics, repeat_boms, channel_effectiveness)
 
     channel_metric_key = None
     channel_candidates = []
-    for candidate_key in ("positive_to_order_10d", "order_10d"):
+    for candidate_key in (
+        "positive_to_order_10d_comparable", "order_10d_comparable"
+    ):
         candidates = [
             (channel, values.get(candidate_key))
             for channel, values in (channel_effectiveness or {}).items()
@@ -445,7 +447,7 @@ def build_seller_signals(*, seller, metrics, repeat_boms, channel_effectiveness)
             signals.append(_signal(
                 code="channel_strength", dimension="channel", polarity="strength",
                 metric_key=channel_metric_key, title="En kanal visar ett starkare historiskt mönster",
-                observation=f"{strongest[0]} ligger {gap:.1%} högre än {weakest[0]} i analyserbar historisk konvertering; mönstret visar inte kausalitet.",
+                observation=f"{strongest[0]} ligger {gap:.1%} högre än {weakest[0]} bland kontakter med fullständigt 10-dagarsutfall; mönstret visar inte kausalitet.",
                 evidence=strongest[1], benchmark={"comparison_channel": weakest[0], "comparison_value": weakest[1]["value"]},
                 next_action="Identifiera vilka kundsituationer och arbetssätt från den starka kanalen som går att återanvända.",
                 target="Bekräfta mönstret över fler analyserbara kontakter.",

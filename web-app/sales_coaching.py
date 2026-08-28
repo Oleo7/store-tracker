@@ -21,7 +21,7 @@ from sales_coaching_rules import (
 )
 
 
-DEFINITIONS_VERSION = "sales_coaching_v5"
+DEFINITIONS_VERSION = "sales_coaching_v7"
 ANALYTICS_SNAPSHOT_VERSION = "sales_coaching_v2"
 PRIORITY_PERCENTILE_BASIS = "owner_active_scored_portfolio_midrank_v2"
 STOCKHOLM_ZONE = ZoneInfo("Europe/Stockholm")
@@ -60,24 +60,45 @@ METRIC_DEFINITIONS = {
     },
     "positive_to_order_10d": {
         "label": "Positiv dialog → order inom 10 dagar",
-        "definition": "Andelen avgjorda positiva besök och telefonsamtal med säker kundidentitet som följdes av en attribuerad order inom 0–10 dagar. Utfallet är avgjort när en order har attribuerats inom fönstret eller när hela 10-dagarsfönstret har passerat.",
+        "definition": "Andelen av alla berättigade positiva besök och telefonsamtal med säker kundidentitet i vald period som hittills har följts av en attribuerad order inom 0–10 dagar. Kontakter vars 10-dagarsfönster fortfarande är öppet ingår i nämnaren, därför är måttet preliminärt. Jämförelser mellan säljare och perioder använder endast positiva dialoger med fullständigt 10-dagarsutfall och kan därför visa ett annat värde.",
         "metric_type": "rate",
-        "numerator_label": "positiva dialoger följda av attribuerad order",
-        "denominator_label": "avgjorda positiva dialoger",
+        "numerator_label": "positiva dialoger som hittills följts av attribuerad order",
+        "denominator_label": "positiva dialoger har följts av order",
         "channels": ["visit", "phone"],
         "not_computable_text": "Positiv → order mäts endast för Besök och Telefon.",
         "window_days": ATTRIBUTION_WINDOW_DAYS,
         "drilldown_metric": "positive_to_order_10d",
     },
+    "positive_to_order_10d_comparable": {
+        "label": "Positiv dialog → order inom 10 dagar – fullständigt utfall",
+        "definition": "Andelen berättigade positiva besök och telefonsamtal med säker kundidentitet och fullständigt 10-dagarsutfall som följdes av en attribuerad order inom 0–10 dagar. En tidigt bekräftad order ingår först när kontaktens hela 10-dagarsfönster har passerat, så att perioder och säljare jämförs på samma grund.",
+        "metric_type": "rate",
+        "numerator_label": "mogna positiva dialoger som följdes av attribuerad order",
+        "denominator_label": "positiva dialoger med fullständigt 10-dagarsutfall",
+        "channels": ["visit", "phone"],
+        "not_computable_text": "Jämförbart positiv → order mäts endast för Besök och Telefon.",
+        "window_days": ATTRIBUTION_WINDOW_DAYS,
+        "drilldown_metric": "positive_to_order_10d_comparable",
+    },
     "order_10d": {
         "label": "Kontakt – order inom 10 dagar",
-        "definition": "Andelen avgjorda nådda mänskliga kontakter med säker kundidentitet som följdes av en attribuerad order inom 0–10 dagar. Utfallet är avgjort när en order har attribuerats inom fönstret eller när hela 10-dagarsfönstret har passerat.",
+        "definition": "Andelen av alla berättigade nådda mänskliga kontakter med säker kundidentitet i vald period som hittills har följts av en attribuerad order inom 0–10 dagar. Kontakter vars 10-dagarsfönster fortfarande är öppet ingår i nämnaren, därför är måttet preliminärt. Jämförelser mellan säljare och perioder använder endast kontakter med fullständigt 10-dagarsutfall och kan därför visa ett annat värde.",
         "metric_type": "rate",
-        "numerator_label": "nådda kontakter följda av attribuerad order",
-        "denominator_label": "avgjorda kontakter",
+        "numerator_label": "nådda kontakter som hittills följts av attribuerad order",
+        "denominator_label": "kontakter har följts av order",
         "channels": ["visit", "phone", "email"],
         "window_days": ATTRIBUTION_WINDOW_DAYS,
         "drilldown_metric": "order_10d",
+    },
+    "order_10d_comparable": {
+        "label": "Kontakt – order inom 10 dagar – fullständigt utfall",
+        "definition": "Andelen berättigade nådda mänskliga kontakter med säker kundidentitet och fullständigt 10-dagarsutfall som följdes av en attribuerad order inom 0–10 dagar. En tidigt bekräftad order ingår först när kontaktens hela 10-dagarsfönster har passerat, så att perioder och säljare jämförs på samma grund.",
+        "metric_type": "rate",
+        "numerator_label": "mogna kontakter som följdes av attribuerad order",
+        "denominator_label": "kontakter med fullständigt 10-dagarsutfall",
+        "channels": ["visit", "phone", "email"],
+        "window_days": ATTRIBUTION_WINDOW_DAYS,
+        "drilldown_metric": "order_10d_comparable",
     },
     "priority_focus": {
         "label": "Prioritetsfokus",
@@ -264,8 +285,12 @@ DRILLDOWN_METRICS = frozenset({
     "positive_sync",
     "positive_dialogue",
     "positive_to_order_10d",
+    "positive_to_order_10d_comparable",
     "mature_reached_sync",
     "order_10d",
+    "order_10d_comparable",
+    "resolved_order_10d",
+    "converted_order_10d",
     "order_10d_sync",
     "waiting_outcome",
     "priority_focus",
@@ -935,7 +960,7 @@ def _aggregate_period(rows, attribution):
         in {"converted", "resolved_without_order"}
     ]
     sync_converted = [
-        row for row in sync_resolved
+        row for row in sync_attribution_eligible
         if attribution["outcome_status"].get(row["contact_id"]) == "converted"
     ]
     sync_positive_attribution_eligible = [
@@ -945,13 +970,17 @@ def _aggregate_period(rows, attribution):
         row for row in sync_positive_attribution_eligible
         if attribution["maturity"].get(row["contact_id"]) == "mature"
     ]
+    sync_mature_positive_converted = [
+        row for row in sync_mature_positive
+        if attribution["outcome_status"].get(row["contact_id"]) == "converted"
+    ]
     sync_resolved_positive = [
         row for row in sync_positive_attribution_eligible
         if attribution["outcome_status"].get(row["contact_id"])
         in {"converted", "resolved_without_order"}
     ]
     sync_converted_positive = [
-        row for row in sync_resolved_positive
+        row for row in sync_positive_attribution_eligible
         if attribution["outcome_status"].get(row["contact_id"]) == "converted"
     ]
     sync_waiting_positive = [
@@ -962,6 +991,10 @@ def _aggregate_period(rows, attribution):
     attribution_eligible = [row for row in reached if row.get("customer_identity_key")]
     positive = [row for row in reached if row.get("result_class") in {"positive", "order"}]
     mature = [row for row in attribution_eligible if attribution["maturity"].get(row["contact_id"]) == "mature"]
+    mature_converted = [
+        row for row in mature
+        if attribution["outcome_status"].get(row["contact_id"]) == "converted"
+    ]
     resolved = [
         row for row in attribution_eligible
         if attribution["outcome_status"].get(row["contact_id"])
@@ -972,7 +1005,7 @@ def _aggregate_period(rows, attribution):
         if attribution["outcome_status"].get(row["contact_id"]) == "pending"
     ]
     ordered_contacts = [
-        row for row in resolved
+        row for row in attribution_eligible
         if attribution["outcome_status"].get(row["contact_id"]) == "converted"
     ]
     visits = [row for row in human if row.get("contact_type_key") == "visit" and row.get("result_class") in ANALYSABLE_RESULTS]
@@ -999,6 +1032,7 @@ def _aggregate_period(rows, attribution):
         "sync_converted": sync_converted,
         "sync_positive_attribution_eligible": sync_positive_attribution_eligible,
         "sync_mature_positive": sync_mature_positive,
+        "sync_mature_positive_converted": sync_mature_positive_converted,
         "sync_resolved_positive": sync_resolved_positive,
         "sync_converted_positive": sync_converted_positive,
         "sync_waiting_positive": sync_waiting_positive,
@@ -1006,6 +1040,7 @@ def _aggregate_period(rows, attribution):
         "attribution_eligible": attribution_eligible,
         "positive": positive,
         "mature": mature,
+        "mature_converted": mature_converted,
         "resolved": resolved,
         "waiting": waiting,
         "ordered_contacts": ordered_contacts,
@@ -1023,9 +1058,17 @@ def _aggregate_period(rows, attribution):
             ),
             "positive_dialogue": _rate(len(sync_positive), len(sync_reached)),
             "positive_to_order_10d": _rate(
-                len(sync_converted_positive), len(sync_resolved_positive)
+                len(sync_converted_positive),
+                len(sync_positive_attribution_eligible),
             ),
-            "order_10d": _rate(len(ordered_contacts), len(resolved)),
+            "positive_to_order_10d_comparable": _rate(
+                len(sync_mature_positive_converted),
+                len(sync_mature_positive),
+            ),
+            "order_10d": _rate(len(ordered_contacts), len(attribution_eligible)),
+            "order_10d_comparable": _rate(
+                len(mature_converted), len(mature)
+            ),
             "priority_focus": _rate(len(top_priority), len(percentile_rows)),
             "bom_ratio": _rate(len(boms), len(visits)),
         },
@@ -1260,7 +1303,27 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
     )
     current, previous = _aggregate_period(rows, attribution), _aggregate_period(comparison_rows, attribution)
     for key, rate in current["rates"].items():
-        rate["comparisons"]["previous_period"] = previous["rates"][key]
+        if key in {"positive_to_order_10d", "order_10d"}:
+            continue
+        previous_rate = previous["rates"][key]
+        if key in {
+            "positive_to_order_10d_comparable", "order_10d_comparable"
+        }:
+            previous_value = (
+                previous_rate["value"]
+                if previous_rate["status"] == "sufficient" else None
+            )
+            rate["comparisons"].update({
+                "previous_period": previous_value,
+                "previous_period_status": previous_rate["status"],
+                "delta_previous": (
+                    rate["value"] - previous_value
+                    if rate["value"] is not None
+                    and previous_value is not None else None
+                ),
+            })
+        else:
+            rate["comparisons"]["previous_period"] = previous_rate
 
     seller_options = coached_sellers
     seller_comparison = _seller_comparison(team_rows, attribution, coached_sellers)
@@ -1533,7 +1596,13 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
             "reach": aggregate["rates"]["reach"],
             "positive_dialogue": aggregate["rates"]["positive_dialogue"],
             "positive_to_order_10d": aggregate["rates"]["positive_to_order_10d"],
+            "positive_to_order_10d_comparable": aggregate["rates"][
+                "positive_to_order_10d_comparable"
+            ],
             "order_10d": aggregate["rates"]["order_10d"],
+            "order_10d_comparable": aggregate["rates"][
+                "order_10d_comparable"
+            ],
             "bom_ratio": aggregate["rates"]["bom_ratio"] if key == "visit" else None,
             "attributed_orders": len(aggregate["attributed"]),
             "dfp": aggregate["dfp"],
@@ -1705,7 +1774,8 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
     )
     if selected_seller_metrics and channel == "all":
         for metric_key in (
-            "reach", "positive_dialogue", "positive_to_order_10d", "order_10d",
+            "reach", "positive_dialogue",
+            "positive_to_order_10d_comparable", "order_10d_comparable",
             "bom_ratio", "priority_focus",
         ):
             current["rates"][metric_key]["comparisons"] = dict(
@@ -1756,10 +1826,18 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
         "positive_to_order_10d": {
             **current["rates"]["positive_to_order_10d"],
             "waiting_outcome_count": len(current["sync_waiting_positive"]),
+            "comparable": {
+                **current["rates"]["positive_to_order_10d_comparable"],
+                **METRIC_DEFINITIONS["positive_to_order_10d_comparable"],
+            },
         },
         "order_10d": {
             **current["rates"]["order_10d"],
             "waiting_outcome_count": len(current["waiting"]),
+            "comparable": {
+                **current["rates"]["order_10d_comparable"],
+                **METRIC_DEFINITIONS["order_10d_comparable"],
+            },
         },
     }
     for key in MAIN_KPI_KEYS:
@@ -1771,28 +1849,28 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
             "sample_status": (
                 "sufficient"
                 if item["positive_dialogue"]["status"] == "sufficient"
-                and item["positive_to_order_10d"]["status"] == "sufficient"
+                and item["positive_to_order_10d_comparable"]["status"] == "sufficient"
                 else "small_sample"
             ),
         }
         for item in seller_comparison
         if item["positive_dialogue"]["value"] is not None
-        and item["positive_to_order_10d"]["value"] is not None
+        and item["positive_to_order_10d_comparable"]["value"] is not None
     ]
     sales_positioned_names = {item["seller"] for item in sales_matrix_sellers}
     sales_matrix = {
         "type": "sales",
         "axes": {
             "x": {
-                "key": "positive_to_order_10d",
-                "label": "Positiv dialog → order inom 10 dagar",
+                "key": "positive_to_order_10d_comparable",
+                "label": "Positiv dialog → order inom 10 dagar – fullständigt utfall",
             },
             "y": {"key": "positive_dialogue", "label": "Positiv dialog"},
         },
         "sellers": sales_matrix_sellers,
         "medians": {
-            "positive_to_order_10d": _sufficient_median(
-                seller_comparison, "positive_to_order_10d"
+            "positive_to_order_10d_comparable": _sufficient_median(
+                seller_comparison, "positive_to_order_10d_comparable"
             ),
             "positive_dialogue": _sufficient_median(
                 seller_comparison, "positive_dialogue"
@@ -1805,7 +1883,7 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
                 "reasons": [
                     reason for reason, applies in (
                         ("positive_denominator_zero", item["positive_dialogue"]["denominator"] == 0),
-                        ("positive_order_denominator_zero", item["positive_to_order_10d"]["denominator"] == 0),
+                        ("positive_order_denominator_zero", item["positive_to_order_10d_comparable"]["denominator"] == 0),
                     ) if applies
                 ],
             }
@@ -1816,7 +1894,7 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
 
     comparable_sellers = [
         item for item in seller_comparison
-        if item["order_10d"]["status"] == "sufficient"
+        if item["order_10d_comparable"]["status"] == "sufficient"
         and item["priority_focus"]["status"] == "sufficient"
         and item["priority_percentile_coverage"]["value"] is not None
         and item["priority_percentile_coverage"]["value"] >= MIN_PRIORITY_COVERAGE
@@ -1846,12 +1924,18 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
         "type": "priority",
         "available": priority_matrix_available,
         "axes": {
-            "x": {"key": "order_10d", "label": "Kontakt – order inom 10 dagar"},
+            "x": {
+                "key": "order_10d_comparable",
+                "label": "Kontakt – order inom 10 dagar – fullständigt utfall",
+            },
             "y": {"key": "priority_focus", "label": "Historiskt prioritetsfokus"},
         },
         "sellers": priority_matrix_sellers,
         "medians": {
-            "order_10d": statistics.median(item["order_10d"]["value"] for item in comparable_sellers) if len(comparable_sellers) >= 2 else None,
+            "order_10d_comparable": statistics.median(
+                item["order_10d_comparable"]["value"]
+                for item in comparable_sellers
+            ) if len(comparable_sellers) >= 2 else None,
             "priority_focus": statistics.median(item["priority_focus"]["value"] for item in comparable_sellers) if len(comparable_sellers) >= 2 else None,
         },
         "build_up": {
@@ -1864,12 +1948,12 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
             {
                 "seller": item["seller"],
                 "human_activities": item["human_activities"],
-                "order_denominator": item["order_10d"]["denominator"],
+                "order_denominator": item["order_10d_comparable"]["denominator"],
                 "priority_percentile_coverage": item["priority_percentile_coverage"],
                 "reasons": [
                     reason for reason, applies in (
-                        ("order_denominator_zero", item["order_10d"]["denominator"] == 0),
-                        ("order_sample_below_10", 0 < item["order_10d"]["denominator"] < MIN_RATE_SAMPLE),
+                        ("order_denominator_zero", item["order_10d_comparable"]["denominator"] == 0),
+                        ("order_sample_below_10", 0 < item["order_10d_comparable"]["denominator"] < MIN_RATE_SAMPLE),
                         ("priority_denominator_zero", item["priority_focus"]["denominator"] == 0),
                         ("priority_sample_below_10", 0 < item["priority_focus"]["denominator"] < MIN_RATE_SAMPLE),
                         ("priority_percentile_coverage_below_70", item["priority_percentile_coverage"]["value"] is None or item["priority_percentile_coverage"]["value"] < MIN_PRIORITY_COVERAGE),
@@ -1942,7 +2026,9 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
             "benchmarks": {
                 "human_activities_median": statistics.median(active_activity_counts) if active_activity_counts else None,
                 "positive_dialogue_median": _sufficient_median(seller_comparison, "positive_dialogue"),
-                "order_10d_median": _sufficient_median(seller_comparison, "order_10d"),
+                "order_10d_comparable_median": _sufficient_median(
+                    seller_comparison, "order_10d_comparable"
+                ),
             },
         },
         "coaching_matrices": {"sales": sales_matrix, "priority": priority_matrix},
@@ -1965,6 +2051,10 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
             "waiting_outcome_count": len(current["waiting"]),
             "order_10d": current["rates"]["order_10d"],
             "positive_to_order_10d": current["rates"]["positive_to_order_10d"],
+            "order_10d_comparable": current["rates"]["order_10d_comparable"],
+            "positive_to_order_10d_comparable": current["rates"][
+                "positive_to_order_10d_comparable"
+            ],
         },
         "weekly_trend": weekly_trend,
         "visit_efficiency": visit_efficiency,
@@ -2080,9 +2170,13 @@ def build_drilldown(summary, metric, *, limit=100):
             "reach": row.get("is_human") and row.get("contact_type_key") in SYNCHRONOUS_CHANNELS and row.get("result_class") in ANALYSABLE_RESULTS,
             "positive_sync": _is_sync_reached(row) and row.get("result_class") in {"positive", "order"},
             "positive_dialogue": _is_sync_reached(row),
-            "positive_to_order_10d": _is_sync_reached(row) and row.get("result_class") in {"positive", "order"} and bool(row.get("customer_identity_key")) and resolved,
+            "positive_to_order_10d": _is_sync_reached(row) and row.get("result_class") in {"positive", "order"} and bool(row.get("customer_identity_key")),
+            "positive_to_order_10d_comparable": _is_sync_reached(row) and row.get("result_class") in {"positive", "order"} and bool(row.get("customer_identity_key")) and maturity == "mature",
             "mature_reached_sync": _is_sync_reached(row) and bool(row.get("customer_identity_key")) and maturity == "mature",
-            "order_10d": _is_attribution_eligible(row) and resolved,
+            "order_10d": _is_attribution_eligible(row),
+            "order_10d_comparable": _is_attribution_eligible(row) and maturity == "mature",
+            "resolved_order_10d": _is_attribution_eligible(row) and resolved,
+            "converted_order_10d": _is_attribution_eligible(row) and outcome_status == "converted",
             "order_10d_sync": _is_sync_reached(row) and bool(row.get("customer_identity_key")) and outcome_status == "converted",
             "waiting_outcome": _is_attribution_eligible(row) and outcome_status == "pending",
             "priority_focus": row.get("is_human") and _is_comparable_priority_percentile(row),
@@ -2104,19 +2198,31 @@ def build_drilldown(summary, metric, *, limit=100):
             "reach": _is_sync_reached(row),
             "positive_dialogue": row.get("result_class") in {"positive", "order"},
             "positive_to_order_10d": bool(orders),
+            "positive_to_order_10d_comparable": bool(orders),
             "order_10d": bool(orders),
+            "order_10d_comparable": bool(orders),
+            "resolved_order_10d": bool(orders),
+            "converted_order_10d": bool(orders),
             "priority_focus": (row.get("priority_percentile_at_contact") or -1) >= 75,
             "bom_ratio": row.get("result_class") == "unreachable",
         }.get(metric, True)
-        cohort_role = (
-            "numerator" if numerator
-            else "missed_outcome"
-            if metric in {
-                "positive_to_order_10d", "order_10d",
-                "followup_gap", "followup_gap_10d",
-            }
-            else "denominator_only"
-        )
+        if metric in {
+            "positive_to_order_10d", "positive_to_order_10d_comparable",
+            "order_10d", "order_10d_comparable", "resolved_order_10d",
+            "converted_order_10d",
+        }:
+            cohort_role = (
+                "numerator" if numerator
+                else "pending" if outcome_status == "pending"
+                else "resolved_without_order"
+            )
+        else:
+            cohort_role = (
+                "missed_outcome"
+                if not numerator and metric in {"followup_gap", "followup_gap_10d"}
+                else "numerator" if numerator
+                else "denominator_only"
+            )
         selected.append({
             "contact_id": row.get("contact_id"),
             "date_time": row.get("date_time"),
@@ -2142,6 +2248,7 @@ def build_drilldown(summary, metric, *, limit=100):
             "order_reference": first_order["order"].get("reference") if first_order else "",
             "days_to_order": first_order.get("days_to_order") if first_order else None,
             "dfp": first_order["order"].get("dfp") if first_order else 0,
+            "outcome_status": outcome_status,
             "data_quality_flags": list(row.get("analysis_exclusions") or ()),
             "cohort_role": cohort_role,
         })
