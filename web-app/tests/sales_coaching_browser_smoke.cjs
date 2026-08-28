@@ -201,19 +201,33 @@ const viewport = mode === "mobile"
     for (const [seller, point] of [["olle", olleTrendPoint], ["sofia", sofiaTrendPoint], ["viewer", viewerTrendPoint]]) {
       if (await point.count() !== 1) throw new Error(`${mode}: missing deterministic ${seller} trend point`);
     }
+    const seriesStyles = {};
+    for (const [seller, point] of [["olle", olleTrendPoint], ["sofia", sofiaTrendPoint], ["viewer", viewerTrendPoint]]) {
+      const pointStyle = await point.getAttribute("data-series-style");
+      const legendStyle = await trendSection.locator(`.sc-team-order-legend-item[data-seller="${seller}"]`).getAttribute("data-series-style");
+      const lineStyles = await trendSection.locator(`.sc-team-order-line[data-seller="${seller}"]`).evaluateAll(lines => lines.map(line => line.dataset.seriesStyle));
+      if (!pointStyle || legendStyle !== pointStyle || lineStyles.some(style => style !== pointStyle)) {
+        throw new Error(`${mode}: ${seller} does not keep one identity-derived style across points, lines, and legend`);
+      }
+      seriesStyles[seller] = pointStyle;
+    }
     if (!(await olleTrendPoint.getAttribute("class")).includes("is-selected")) {
       throw new Error(`${mode}: selected seller is not highlighted in the trend`);
     }
     if (!(await viewerTrendPoint.getAttribute("class")).includes("is-small-sample")) {
       throw new Error(`${mode}: small-sample trend point is not hollow/muted`);
     }
-    await viewerTrendPoint.hover();
-    const viewerTooltip = await viewerTrendPoint.locator("title").textContent();
-    if (!viewerTooltip.includes("viewer") || !viewerTooltip.includes("50 %") || !viewerTooltip.includes("4 av 8") || !viewerTooltip.includes("Litet underlag") || !viewerTooltip.match(/\d{4} v\.\d+/)) {
-      throw new Error(`${mode}: trend point tooltip lacks seller/week/value/evidence: ${viewerTooltip}`);
-    }
     const pointStart = await viewerTrendPoint.getAttribute("data-start");
     const pointEnd = await viewerTrendPoint.getAttribute("data-end");
+    await viewerTrendPoint.hover();
+    const viewerTooltip = await viewerTrendPoint.locator("title").textContent();
+    const viewerAriaLabel = await viewerTrendPoint.getAttribute("aria-label");
+    if (!viewerTooltip.includes("viewer") || !viewerTooltip.includes(`${pointStart}–${pointEnd}`) || !viewerTooltip.includes("50 %") || !viewerTooltip.includes("4 av 8") || !viewerTooltip.includes("Litet underlag") || !viewerTooltip.match(/\d{4} v\.\d+/)) {
+      throw new Error(`${mode}: trend point tooltip lacks seller/week/date/value/evidence: ${viewerTooltip}`);
+    }
+    if (viewerAriaLabel !== viewerTooltip) {
+      throw new Error(`${mode}: trend point aria-label does not match the complete tooltip`);
+    }
     const pointResponse = page.waitForResponse(response => {
       const url = new URL(response.url());
       return url.pathname.endsWith("/sales-coaching-insights/drilldown")
@@ -338,6 +352,9 @@ const viewport = mode === "mobile"
       const selectedViewerLegend = page.locator('.sc-team-order-legend-item[data-seller="viewer"].is-selected');
       await selectedViewerLegend.waitFor();
       if (!(await selectedViewerLegend.isVisible())) throw new Error("mobile: trend legend did not select viewer");
+      if (await selectedViewerLegend.getAttribute("data-series-style") !== seriesStyles.viewer) {
+        throw new Error("mobile: viewer series style changed after seller selection and rerender");
+      }
       const matrixScroller = page.locator(".sc-matrix-wrap").first();
       await matrixScroller.scrollIntoViewIfNeeded();
       if (!(await matrixScroller.isVisible())) throw new Error("mobile: matrix scroller missing");

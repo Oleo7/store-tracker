@@ -481,8 +481,24 @@
       : `v.${Number(match[2])}`;
   }
 
-  function teamTrendMarker(index, x, y) {
-    const marker = index % 4;
+  function teamTrendStyle(seller) {
+    const identity = String(seller || "").normalize("NFKC").trim().toLocaleLowerCase("sv-SE");
+    let hash = 2166136261;
+    for (const character of identity) {
+      hash ^= character.codePointAt(0);
+      hash = Math.imul(hash, 16777619);
+    }
+    const unsignedHash = hash >>> 0;
+    const styleIndex = unsignedHash % TEAM_TREND_COLORS.length;
+    return {
+      color: TEAM_TREND_COLORS[styleIndex],
+      dash: TEAM_TREND_DASHES[styleIndex],
+      marker: styleIndex % 4,
+      key: unsignedHash.toString(36),
+    };
+  }
+
+  function teamTrendMarker(marker, x, y) {
     if (marker === 1) return `<rect class="sc-team-order-point-shape" x="${x - 5}" y="${y - 5}" width="10" height="10" rx="1"></rect>`;
     if (marker === 2) return `<path class="sc-team-order-point-shape" d="M ${x} ${y - 7} L ${x + 7} ${y} L ${x} ${y + 7} L ${x - 7} ${y} Z"></path>`;
     if (marker === 3) return `<path class="sc-team-order-point-shape" d="M ${x} ${y - 7} L ${x + 7} ${y + 6} L ${x - 7} ${y + 6} Z"></path>`;
@@ -507,9 +523,8 @@
     const grid = ticks.map(value => `<g aria-hidden="true"><line class="sc-team-order-grid" x1="${pad.left}" x2="${width - pad.right}" y1="${y(value)}" y2="${y(value)}"></line><text class="sc-team-order-y-label" x="${pad.left - 10}" y="${y(value) + 4}" text-anchor="end">${value * 100} %</text></g>`).join("");
     const xLabels = slots.map((slot, index) => `<text class="sc-team-order-x-label" x="${x(index)}" y="${height - 18}" text-anchor="middle">${escapeHtml(teamTrendWeekLabel(slot.week, slots[index - 1]?.week || ""))}</text>`).join("");
 
-    const seriesMarkup = series.map((item, seriesIndex) => {
-      const color = TEAM_TREND_COLORS[seriesIndex % TEAM_TREND_COLORS.length];
-      const dash = TEAM_TREND_DASHES[seriesIndex % TEAM_TREND_DASHES.length];
+    const seriesMarkup = series.map(item => {
+      const style = teamTrendStyle(item.seller);
       const selected = isSelected(item.seller);
       const selectionClass = selected ? " is-selected" : hasSelection ? " is-unselected" : "";
       const pointByWeek = new Map((item.points || []).map(point => [point.week, point]));
@@ -525,23 +540,23 @@
         }
       });
       if (segment.length > 1) segments.push(segment);
-      const lines = segments.map(points => `<polyline class="sc-team-order-line${selectionClass}" style="stroke:${color}${dash ? `;stroke-dasharray:${dash}` : ""}" points="${points.join(" ")}"></polyline>`).join("");
+      const lines = segments.map(points => `<polyline class="sc-team-order-line${selectionClass}" style="stroke:${style.color}${style.dash ? `;stroke-dasharray:${style.dash}` : ""}" data-seller="${escapeHtml(item.seller)}" data-series-style="${style.key}" points="${points.join(" ")}"></polyline>`).join("");
       const points = slots.map((slot, index) => {
         const point = pointByWeek.get(slot.week);
         if (!point || point.value === null || !Number.isFinite(Number(point.value))) return "";
         const small = point.status === "small_sample";
         const evidence = `${number(point.numerator)} av ${number(point.denominator)} kontakter med fullständigt 10-dagarsutfall`;
-        const title = `${item.seller} · ${teamTrendWeekLabel(point.week)}: ${percent(point.value)} · ${evidence} · ${small ? "Litet underlag" : "Tillräckligt underlag"}`;
-        return `<g class="sc-team-order-point${small ? " is-small-sample" : ""}${selectionClass}" style="--series-color:${color}" tabindex="0" role="button" data-drilldown="order_10d_comparable" data-seller="${escapeHtml(item.seller)}" data-week="${escapeHtml(point.week)}" data-numerator="${number(point.numerator)}" data-denominator="${number(point.denominator)}" data-channel="all" data-start="${escapeHtml(point.period?.start || "")}" data-end="${escapeHtml(point.period?.end || "")}" aria-label="${escapeHtml(title)}"><title>${escapeHtml(title)}</title><circle class="sc-team-order-point-hit" cx="${x(index)}" cy="${y(point.value)}" r="22"></circle>${teamTrendMarker(seriesIndex, x(index), y(point.value))}</g>`;
+        const period = `${point.period?.start || "—"}–${point.period?.end || "—"}`;
+        const title = `${item.seller} · ${teamTrendWeekLabel(point.week)} · ${period}: ${percent(point.value)} · ${evidence} · ${small ? "Litet underlag" : "Tillräckligt underlag"}`;
+        return `<g class="sc-team-order-point${small ? " is-small-sample" : ""}${selectionClass}" style="--series-color:${style.color}" tabindex="0" role="button" data-drilldown="order_10d_comparable" data-seller="${escapeHtml(item.seller)}" data-series-style="${style.key}" data-week="${escapeHtml(point.week)}" data-numerator="${number(point.numerator)}" data-denominator="${number(point.denominator)}" data-channel="all" data-start="${escapeHtml(point.period?.start || "")}" data-end="${escapeHtml(point.period?.end || "")}" aria-label="${escapeHtml(title)}"><title>${escapeHtml(title)}</title><circle class="sc-team-order-point-hit" cx="${x(index)}" cy="${y(point.value)}" r="22"></circle>${teamTrendMarker(style.marker, x(index), y(point.value))}</g>`;
       }).join("");
       return `${lines}${points}`;
     }).join("");
 
-    const legend = series.map((item, index) => {
-      const color = TEAM_TREND_COLORS[index % TEAM_TREND_COLORS.length];
-      const dash = TEAM_TREND_DASHES[index % TEAM_TREND_DASHES.length];
+    const legend = series.map(item => {
+      const style = teamTrendStyle(item.seller);
       const selected = isSelected(item.seller);
-      return `<button type="button" class="sc-team-order-legend-item${selected ? " is-selected" : hasSelection ? " is-unselected" : ""}" style="--series-color:${color}" data-seller="${escapeHtml(item.seller)}" aria-label="Visa ${escapeHtml(item.seller)} som vald säljare"><svg viewBox="0 0 42 18" aria-hidden="true"><line x1="2" x2="40" y1="9" y2="9" style="stroke:${color}${dash ? `;stroke-dasharray:${dash}` : ""}"></line>${teamTrendMarker(index, 21, 9)}</svg><span>${escapeHtml(item.seller)}</span></button>`;
+      return `<button type="button" class="sc-team-order-legend-item${selected ? " is-selected" : hasSelection ? " is-unselected" : ""}" style="--series-color:${style.color}" data-seller="${escapeHtml(item.seller)}" data-series-style="${style.key}" aria-label="Visa ${escapeHtml(item.seller)} som vald säljare"><svg viewBox="0 0 42 18" aria-hidden="true"><line x1="2" x2="40" y1="9" y2="9" style="stroke:${style.color}${style.dash ? `;stroke-dasharray:${style.dash}` : ""}"></line>${teamTrendMarker(style.marker, 21, 9)}</svg><span>${escapeHtml(item.seller)}</span></button>`;
     }).join("");
 
     return `<section class="sc-section sc-team-order-trend-section" aria-labelledby="sc-team-order-trend-title"><div class="sc-section-heading"><div><h2 id="sc-team-order-trend-title">Kontakt – order inom 10 dagar – trend</h2><p>Fullständiga 10-dagarsutfall per kontaktvecka för de senaste 16 mogna veckorna. Varje punkt avser endast den aktuella kontaktveckan.</p></div></div><p class="sc-team-order-definition">Grafen använder endast kontakter som haft hela 10 dagar på sig att följas av order. Därför kan värdena skilja sig från den preliminära KPI:n högst upp på sidan.</p><p class="sc-team-order-filter-note">Period-, säljar- och kanalfilter begränsar inte grafen. Vald säljare markeras; lifecycle och segment följer filtren.</p><div class="sc-team-order-trend-wrap" tabindex="0" aria-label="Horisontellt rullningsbar trendgraf"><svg class="sc-team-order-trend" viewBox="0 0 ${width} ${height}" role="group" aria-label="Veckovis kontakt till order inom 10 dagar för aktiva säljare, fast skala 0 till 100 procent">${grid}${seriesMarkup}${xLabels}</svg></div><div class="sc-team-order-legend" aria-label="Säljarserier">${legend || `<span class="sc-empty">Inga aktiva säljare.</span>`}</div></section>`;

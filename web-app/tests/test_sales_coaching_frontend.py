@@ -187,7 +187,6 @@ class SalesCoachingFrontendTests(TestCase):
             'data-seller="${escapeHtml(item.seller)}"',
             'tabindex="0" role="button"',
             "Litet underlag",
-            "TEAM_TREND_DASHES",
             "teamTrendMarker",
             "stroke-dasharray",
             "segment.length > 1",
@@ -199,6 +198,17 @@ class SalesCoachingFrontendTests(TestCase):
         self.assertIn("week_axis", trend)
         self.assertIn("teamTrendWeekLabel", trend)
         self.assertIn("previousYear !== match[1]", self.javascript)
+        self.assertIn('const period = `${point.period?.start || "—"}–${point.period?.end || "—"}`', trend)
+        self.assertIn("${teamTrendWeekLabel(point.week)} · ${period}", trend)
+        self.assertIn("function teamTrendStyle(seller)", self.javascript)
+        self.assertIn("TEAM_TREND_DASHES[styleIndex]", self.javascript)
+        self.assertIn('.normalize("NFKC").trim().toLocaleLowerCase("sv-SE")', self.javascript)
+        self.assertIn("hash = Math.imul(hash, 16777619)", self.javascript)
+        self.assertIn("const style = teamTrendStyle(item.seller)", trend)
+        self.assertIn("teamTrendMarker(style.marker", trend)
+        self.assertIn('data-series-style="${style.key}"', trend)
+        self.assertNotIn("TEAM_TREND_COLORS[seriesIndex", self.javascript)
+        self.assertNotIn("TEAM_TREND_DASHES[seriesIndex", self.javascript)
         self.assertNotIn("rolling", trend.casefold())
         point_title = trend.split("const title =", 1)[1].split(";", 1)[0]
         self.assertNotIn("prelim", point_title.casefold())
