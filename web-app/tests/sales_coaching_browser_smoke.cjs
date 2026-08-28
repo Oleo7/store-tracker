@@ -26,10 +26,15 @@ const viewport = mode === "mobile"
     });
     if (!login.ok) throw new Error(`${mode}: harness login failed: ${login.body}`);
     const browserErrors = [];
+    let summaryRequestCount = 0;
     page.on("console", message => {
       if (message.type() === "error") browserErrors.push(message.text());
     });
     page.on("pageerror", error => browserErrors.push(String(error)));
+    page.on("request", request => {
+      const url = new URL(request.url());
+      if (url.pathname.endsWith("/sales-coaching-insights")) summaryRequestCount += 1;
+    });
     await page.goto("http://127.0.0.1:5065/?sales_coaching=1&period=4&seller=olle", {
       waitUntil: "networkidle",
     });
@@ -86,22 +91,22 @@ const viewport = mode === "mobile"
     if (!contactOrderText.includes("20 %") || !contactOrderText.includes("7 av 35") || !contactOrderText.includes("kontakter har följts av order")) {
       throw new Error(`${mode}: provisional contact KPI does not use the full eligible cohort: ${contactOrderText}`);
     }
-    if (!contactOrderText.includes("Preliminärt · 22 väntar på slutligt 10-dagarsutfall")) {
+    if (!contactOrderText.includes("Preliminärt · 22 väntar på 10-dagarsutfall")) {
       throw new Error(`${mode}: contact pending copy/count is wrong: ${contactOrderText}`);
     }
-    if (!contactOrderText.includes("Jämförbart 10-dagarsutfall: 40 %") || !contactOrderText.includes("4 av 10 med fullständigt 10-dagarsutfall")) {
-      throw new Error(`${mode}: comparable contact outcome is missing or wrong: ${contactOrderText}`);
+    if (contactOrderText.includes("40 %") || contactOrderText.includes("Jämförbart")) {
+      throw new Error(`${mode}: removed comparable contact outcome is still visible: ${contactOrderText}`);
     }
     const positiveOrderCard = page.locator('.sc-kpi-card[data-kpi-key="positive_to_order_10d"]');
     const positiveOrderText = await positiveOrderCard.innerText();
     if (!positiveOrderText.includes("25 %") || !positiveOrderText.includes("7 av 28") || !positiveOrderText.includes("positiva dialoger har följts av order")) {
       throw new Error(`${mode}: provisional positive KPI does not use the full eligible cohort: ${positiveOrderText}`);
     }
-    if (!positiveOrderText.includes("Preliminärt · 15 väntar på slutligt 10-dagarsutfall")) {
+    if (!positiveOrderText.includes("Preliminärt · 15 väntar på 10-dagarsutfall")) {
       throw new Error(`${mode}: positive pending copy/count is wrong: ${positiveOrderText}`);
     }
-    if (!positiveOrderText.includes("Jämförbart 10-dagarsutfall: 40 %") || !positiveOrderText.includes("4 av 10 med fullständigt 10-dagarsutfall")) {
-      throw new Error(`${mode}: comparable positive outcome is missing or wrong: ${positiveOrderText}`);
+    if (positiveOrderText.includes("40 %") || positiveOrderText.includes("Jämförbart")) {
+      throw new Error(`${mode}: removed comparable positive outcome is still visible: ${positiveOrderText}`);
     }
     await contactOrderCard.locator(".sc-kpi-main").click();
     await page.locator("#sc-drawer-backdrop").waitFor();
@@ -119,22 +124,9 @@ const viewport = mode === "mobile"
       throw new Error(`${mode}: eligible positive drilldown does not match KPI denominator/outcomes: ${positiveDrawerText}`);
     }
     await page.locator("[data-sc-drawer-close]").click();
-    await contactOrderCard.locator(".sc-kpi-comparable").click();
-    await page.locator("#sc-drawer-backdrop").waitFor();
-    await page.locator("#sc-drawer-content .sc-drawer-meta").waitFor();
-    const comparableOrderDrawerText = await page.locator("#sc-drawer-content").innerText();
-    if (!comparableOrderDrawerText.includes("Visar 10 av 10") || comparableOrderDrawerText.includes("Väntar på utfall")) {
-      throw new Error(`${mode}: comparable contact drilldown is not mature-only: ${comparableOrderDrawerText}`);
+    if (await page.locator(".sc-kpi-comparable").count()) {
+      throw new Error(`${mode}: removed comparable KPI row still renders`);
     }
-    await page.locator("[data-sc-drawer-close]").click();
-    await positiveOrderCard.locator(".sc-kpi-comparable").click();
-    await page.locator("#sc-drawer-backdrop").waitFor();
-    await page.locator("#sc-drawer-content .sc-drawer-meta").waitFor();
-    const comparablePositiveDrawerText = await page.locator("#sc-drawer-content").innerText();
-    if (!comparablePositiveDrawerText.includes("Visar 10 av 10") || comparablePositiveDrawerText.includes("Väntar på utfall")) {
-      throw new Error(`${mode}: comparable positive drilldown is not mature-only: ${comparablePositiveDrawerText}`);
-    }
-    await page.locator("[data-sc-drawer-close]").click();
     const statusLabels = await page.locator(".sc-kpi-card .sc-status").allInnerTexts();
     if (statusLabels.some(label => label.trim() !== "Inte tillräckligt underlag")) {
       throw new Error(`${mode}: a sufficient KPI status badge is still visible`);
@@ -154,7 +146,7 @@ const viewport = mode === "mobile"
 
     const teamHeaders = await page.locator(".sc-comparison-table thead th").allInnerTexts();
     const normalizedTeamHeaders = teamHeaders.map(text => text.toLocaleLowerCase("sv-SE"));
-    const positiveOrderIndex = normalizedTeamHeaders.findIndex(text => text.startsWith("positiv → order 10 dagar"));
+    const positiveOrderIndex = normalizedTeamHeaders.findIndex(text => text.startsWith("positiv dialog → order inom 10 dagar"));
     const contactOrderIndex = normalizedTeamHeaders.findIndex(text => text.startsWith("kontakt – order inom 10 dagar"));
     const nextStepIndex = normalizedTeamHeaders.findIndex(text => text.startsWith("nästa-steg-täckning"));
     if (!(positiveOrderIndex + 1 === contactOrderIndex && contactOrderIndex + 1 === nextStepIndex)) {
@@ -162,26 +154,40 @@ const viewport = mode === "mobile"
     }
     const olleTeamRow = page.locator(".sc-comparison-table tbody tr", { hasText: "Olle" });
     const olleTeamText = await olleTeamRow.innerText();
-    if ((olleTeamText.match(/40 %/g) || []).length < 2 || olleTeamText.includes("20 %") || olleTeamText.includes("25 %")) {
-      throw new Error(`${mode}: team comparison does not use comparable 10-day outcomes: ${olleTeamText}`);
+    const positiveOrderTeamText = await olleTeamRow.locator("td").nth(3).innerText();
+    const contactOrderTeamText = await olleTeamRow.locator("td").nth(4).innerText();
+    for (const expected of [
+      "20 %", "7 av 35", "Preliminärt · 22 väntar på 10-dagarsutfall",
+      "25 %", "7 av 28", "Preliminärt · 15 väntar på 10-dagarsutfall",
+    ]) {
+      if (!olleTeamText.includes(expected)) {
+        throw new Error(`${mode}: team comparison does not use the live 10-day KPI (${expected}): ${olleTeamText}`);
+      }
+    }
+    if (positiveOrderTeamText.includes("40 %") || contactOrderTeamText.includes("40 %") || olleTeamText.includes("fullständigt utfall")) {
+      throw new Error(`${mode}: comparable outcome leaked into team comparison: ${olleTeamText}`);
     }
 
     const sectionHeadings = await page.locator("#sc-dashboard-content > .sc-section > .sc-section-heading h2").allInnerTexts();
     const teamComparisonPosition = sectionHeadings.indexOf("Teamjämförelse");
-    const trendPosition = sectionHeadings.indexOf("Kontakt – order inom 10 dagar – trend");
-    const matricesPosition = sectionHeadings.indexOf("Teamets coachningsmatriser");
+    const trendPosition = sectionHeadings.indexOf("10-dagarskonvertering – trend");
+    const matricesPosition = sectionHeadings.indexOf("Teamets prioriteringsmatris");
     if (!(teamComparisonPosition >= 0 && teamComparisonPosition + 1 === trendPosition && trendPosition + 1 === matricesPosition)) {
       throw new Error(`${mode}: long-term trend is in the wrong section order: ${JSON.stringify(sectionHeadings)}`);
     }
-    const trendSection = page.locator(".sc-team-order-trend-section");
+    const trendSection = page.locator(".sc-team-10d-trend-section");
     await trendSection.scrollIntoViewIfNeeded();
     const trendCopy = await trendSection.innerText();
     for (const expected of [
-      "Fullständiga 10-dagarsutfall per kontaktvecka för de senaste 16 mogna veckorna",
-      "Varje punkt avser endast den aktuella kontaktveckan",
+      "Varje punkt avser en kontaktvecka",
+      "Endast veckor där hela 10-dagarsfönstret har passerat visas",
+      "Diagrammen använder samma KPI-definitioner som Coachningsöversikten",
       "Period-, säljar- och kanalfilter begränsar inte grafen",
     ]) {
       if (!trendCopy.includes(expected)) throw new Error(`${mode}: missing trend explanation: ${expected}`);
+    }
+    if (await page.locator(".sc-matrix-tabs").count()) {
+      throw new Error(`${mode}: removed sales/priority matrix tabs still render`);
     }
     const weekSlotCount = await trendSection.locator(".sc-team-order-x-label").count();
     if (weekSlotCount !== 16) throw new Error(`${mode}: expected 16 trend week slots, got ${weekSlotCount}`);
@@ -195,11 +201,23 @@ const viewport = mode === "mobile"
     if (await trendSection.locator(".sc-team-order-line").count() < 3) {
       throw new Error(`${mode}: expected at least three rendered seller trend lines`);
     }
-    const olleTrendPoint = trendSection.locator('.sc-team-order-point[data-seller="olle"][data-numerator="5"][data-denominator="10"]');
-    const sofiaTrendPoint = trendSection.locator('.sc-team-order-point[data-seller="sofia"][data-numerator="2"][data-denominator="10"]');
-    const viewerTrendPoint = trendSection.locator('.sc-team-order-point[data-seller="viewer"][data-numerator="4"][data-denominator="8"]');
+    const orderTab = trendSection.locator('[data-team-trend-view="order"]');
+    if (await orderTab.getAttribute("aria-selected") !== "true") {
+      throw new Error(`${mode}: contact-to-order is not the default trend tab`);
+    }
+    const olleTrendPoint = trendSection.locator('.sc-team-order-point[data-seller="olle"][data-numerator="4"][data-denominator="10"]').first();
+    const sofiaTrendPoint = trendSection.locator('.sc-team-order-point[data-seller="sofia"][data-numerator="2"][data-denominator="10"]').first();
+    const viewerTrendPoint = trendSection.locator('.sc-team-order-point[data-seller="viewer"][data-numerator="4"][data-denominator="8"]').first();
     for (const [seller, point] of [["olle", olleTrendPoint], ["sofia", sofiaTrendPoint], ["viewer", viewerTrendPoint]]) {
-      if (await point.count() !== 1) throw new Error(`${mode}: missing deterministic ${seller} trend point`);
+      if (await point.count() !== 1) {
+        const renderedPoints = await trendSection.locator(".sc-team-order-point").evaluateAll(points => points.map(point => ({
+          seller: point.dataset.seller,
+          numerator: point.dataset.numerator,
+          denominator: point.dataset.denominator,
+          week: point.dataset.week,
+        })));
+        throw new Error(`${mode}: missing deterministic ${seller} trend point: ${JSON.stringify(renderedPoints)}`);
+      }
     }
     const seriesStyles = {};
     for (const [seller, point] of [["olle", olleTrendPoint], ["sofia", sofiaTrendPoint], ["viewer", viewerTrendPoint]]) {
@@ -222,7 +240,7 @@ const viewport = mode === "mobile"
     await viewerTrendPoint.hover();
     const viewerTooltip = await viewerTrendPoint.locator("title").textContent();
     const viewerAriaLabel = await viewerTrendPoint.getAttribute("aria-label");
-    if (!viewerTooltip.includes("viewer") || !viewerTooltip.includes(`${pointStart}–${pointEnd}`) || !viewerTooltip.includes("50 %") || !viewerTooltip.includes("4 av 8") || !viewerTooltip.includes("Litet underlag") || !viewerTooltip.match(/\d{4} v\.\d+/)) {
+    if (!viewerTooltip.includes("viewer") || !viewerTooltip.includes(`${pointStart}–${pointEnd}`) || !viewerTooltip.includes("50 %") || !viewerTooltip.includes("4 av 8 kontakter har följts av order inom 10 dagar") || !viewerTooltip.includes("Litet underlag") || !viewerTooltip.match(/\d{4} v\.\d+/)) {
       throw new Error(`${mode}: trend point tooltip lacks seller/week/date/value/evidence: ${viewerTooltip}`);
     }
     if (viewerAriaLabel !== viewerTooltip) {
@@ -231,7 +249,7 @@ const viewport = mode === "mobile"
     const pointResponse = page.waitForResponse(response => {
       const url = new URL(response.url());
       return url.pathname.endsWith("/sales-coaching-insights/drilldown")
-        && url.searchParams.get("metric") === "order_10d_comparable"
+        && url.searchParams.get("metric") === "order_10d"
         && url.searchParams.get("seller") === "viewer"
         && url.searchParams.get("channel") === "all"
         && url.searchParams.get("start") === pointStart
@@ -246,6 +264,69 @@ const viewport = mode === "mobile"
       throw new Error(`${mode}: trend point drilldown does not reconcile numerator/denominator: ${pointDrawerText}`);
     }
     await page.locator("[data-sc-drawer-close]").click();
+
+    const summaryRequestsBeforeTrendToggle = summaryRequestCount;
+    await orderTab.focus();
+    await orderTab.press("ArrowRight");
+    const positiveTab = trendSection.locator('[data-team-trend-view="positive"]');
+    if (await positiveTab.getAttribute("aria-selected") !== "true") {
+      throw new Error(`${mode}: positive-dialogue trend was not activated by ArrowRight`);
+    }
+    const focusedTrendView = await page.evaluate(
+      () => document.activeElement?.dataset?.teamTrendView || "",
+    );
+    if (focusedTrendView !== "positive") {
+      throw new Error(`${mode}: activated positive trend tab did not receive focus`);
+    }
+    if (summaryRequestCount !== summaryRequestsBeforeTrendToggle) {
+      throw new Error(`${mode}: trend toggle triggered a new summary request`);
+    }
+    const positiveOllePoint = trendSection.locator('.sc-team-order-point[data-trend-view="positive"][data-seller="olle"][data-numerator="3"][data-denominator="6"]').first();
+    const positiveSofiaPoint = trendSection.locator('.sc-team-order-point[data-trend-view="positive"][data-seller="sofia"][data-numerator="2"][data-denominator="6"]').first();
+    const positiveViewerPoint = trendSection.locator('.sc-team-order-point[data-trend-view="positive"][data-seller="viewer"][data-numerator="3"][data-denominator="6"]').first();
+    for (const [seller, point] of [["olle", positiveOllePoint], ["sofia", positiveSofiaPoint], ["viewer", positiveViewerPoint]]) {
+      if (await point.count() !== 1) throw new Error(`${mode}: missing deterministic ${seller} positive trend point`);
+      if (await point.getAttribute("data-series-style") !== seriesStyles[seller]) {
+        throw new Error(`${mode}: ${seller} style differs between the two trend views`);
+      }
+    }
+    const positiveStart = await positiveOllePoint.getAttribute("data-start");
+    const positiveEnd = await positiveOllePoint.getAttribute("data-end");
+    const positiveTooltip = await positiveOllePoint.locator("title").textContent();
+    if (!positiveTooltip.includes(`${positiveStart}–${positiveEnd}`) || !positiveTooltip.includes("50 %") || !positiveTooltip.includes("3 av 6 positiva dialoger har följts av order inom 10 dagar")) {
+      throw new Error(`${mode}: positive trend tooltip is incomplete: ${positiveTooltip}`);
+    }
+    const positivePointResponse = page.waitForResponse(response => {
+      const url = new URL(response.url());
+      return url.pathname.endsWith("/sales-coaching-insights/drilldown")
+        && url.searchParams.get("metric") === "positive_to_order_10d"
+        && url.searchParams.get("seller") === "olle"
+        && url.searchParams.get("channel") === "all"
+        && url.searchParams.get("start") === positiveStart
+        && url.searchParams.get("end") === positiveEnd;
+    });
+    await positiveOllePoint.focus();
+    await positiveOllePoint.press("Enter");
+    await positivePointResponse;
+    await page.locator("#sc-drawer-content .sc-drawer-meta").waitFor();
+    const positivePointDrawerText = await page.locator("#sc-drawer-content").innerText();
+    if (!positivePointDrawerText.includes("Visar 6 av 6") || (positivePointDrawerText.match(/Konverterad/g) || []).length !== 3 || positivePointDrawerText.includes("Väntar på utfall")) {
+      throw new Error(`${mode}: positive trend drilldown does not reconcile: ${positivePointDrawerText}`);
+    }
+    await page.locator("[data-sc-drawer-close]").click();
+    await positiveTab.press("Home");
+    if (await trendSection.locator('[data-team-trend-view="order"]').getAttribute("aria-selected") !== "true") {
+      throw new Error(`${mode}: Home did not activate the first trend tab`);
+    }
+    await trendSection.locator('[data-team-trend-view="order"]').press("End");
+    if (await trendSection.locator('[data-team-trend-view="positive"]').getAttribute("aria-selected") !== "true") {
+      throw new Error(`${mode}: End did not activate the last trend tab`);
+    }
+    await trendSection.locator('[data-team-trend-view="positive"]').press("ArrowLeft");
+    await trendSection.locator('[data-team-trend-view="order"]').press("ArrowRight");
+    if (summaryRequestCount !== summaryRequestsBeforeTrendToggle) {
+      throw new Error(`${mode}: keyboard trend navigation triggered a summary request`);
+    }
 
     const diagnosticTabs = await page.locator(".sc-diagnostic-tabs [role=tab]").allInnerTexts();
     if (diagnosticTabs[0] !== "Besök" || diagnosticTabs[1] !== "Konvertering") {
@@ -285,6 +366,15 @@ const viewport = mode === "mobile"
     if (glossaryLabels.length < 12) {
       throw new Error(`${mode}: metric glossary is unexpectedly incomplete`);
     }
+    if (mode === "mobile") {
+      const matrixScroller = page.locator(".sc-matrix-wrap").first();
+      if (await matrixScroller.count()) {
+        await matrixScroller.scrollIntoViewIfNeeded();
+        if (!(await matrixScroller.isVisible())) throw new Error("mobile: matrix scroller missing");
+      } else if (!(await page.locator(".sc-priority-build-up").isVisible())) {
+        throw new Error("mobile: neither the priority matrix nor its documented build-up state renders");
+      }
+    }
 
     await Promise.all([
       page.waitForResponse(response => response.url().includes("/sales-coaching-insights?") && response.url().includes("channel=email")),
@@ -305,7 +395,7 @@ const viewport = mode === "mobile"
     await page.locator('[data-diagnostic-tab="channels"]').click();
     const emailRow = page.locator('[data-channel-row="email"]');
     await emailRow.waitFor();
-    for (const metric of ["positive_dialogue", "positive_to_order_10d_comparable"]) {
+    for (const metric of ["positive_dialogue", "positive_to_order_10d"]) {
       const cell = await emailRow.locator(`[data-channel-metric="${metric}"]`).innerText();
       if (cell.trim() !== "Ej tillämpligt") {
         throw new Error(`${mode}: email row fabricated ${metric}: ${cell}`);
@@ -313,6 +403,19 @@ const viewport = mode === "mobile"
     }
 
     const bodyText = await page.locator("body").innerText();
+    for (const removed of [
+      "Jämförbart 10-dagarsutfall",
+      "Positiv dialog → order inom 10 dagar – fullständigt utfall",
+      "Kontakt – order inom 10 dagar – fullständigt utfall",
+    ]) {
+      if (bodyText.includes(removed)) {
+        throw new Error(`${mode}: removed comparable UI copy is visible: ${removed}`);
+      }
+    }
+    const matrixSection = page.locator(".sc-section", { hasText: "Teamets prioriteringsmatris" }).first();
+    if (!(await matrixSection.isVisible()) || !(await matrixSection.innerText()).includes("Kontakt – order inom 10 dagar")) {
+      throw new Error(`${mode}: priority matrix is missing or uses the wrong x-axis`);
+    }
     if (bodyText.includes("Nästa bästa kunder")) {
       throw new Error(`${mode}: operational customer list leaked into sales coaching`);
     }
@@ -332,6 +435,12 @@ const viewport = mode === "mobile"
     );
     if (pageOverflows) throw new Error(`${mode}: page-level horizontal overflow`);
     if (mode === "mobile") {
+      const trendTabHeights = await page.locator(".sc-team-trend-tabs [role=tab]").evaluateAll(
+        tabs => tabs.map(tab => tab.getBoundingClientRect().height),
+      );
+      if (trendTabHeights.length !== 2 || trendTabHeights.some(height => height < 44)) {
+        throw new Error(`mobile: trend tabs are not usable touch targets: ${JSON.stringify(trendTabHeights)}`);
+      }
       const trendScroller = page.locator(".sc-team-order-trend-wrap");
       await trendScroller.scrollIntoViewIfNeeded();
       const trendDimensions = await trendScroller.evaluate(element => ({
@@ -355,9 +464,6 @@ const viewport = mode === "mobile"
       if (await selectedViewerLegend.getAttribute("data-series-style") !== seriesStyles.viewer) {
         throw new Error("mobile: viewer series style changed after seller selection and rerender");
       }
-      const matrixScroller = page.locator(".sc-matrix-wrap").first();
-      await matrixScroller.scrollIntoViewIfNeeded();
-      if (!(await matrixScroller.isVisible())) throw new Error("mobile: matrix scroller missing");
     }
     if (browserErrors.length) {
       throw new Error(`${mode}: browser errors: ${JSON.stringify(browserErrors)}`);

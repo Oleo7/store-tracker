@@ -38,9 +38,7 @@ def seller_metrics(**overrides):
         "reach": rate(None, 0, status="not_computable", peer=None, peers=0),
         "positive_dialogue": rate(None, 0, status="not_computable", peer=None, peers=0),
         "positive_to_order_10d": rate(None, 0, status="not_computable", peer=None, peers=0),
-        "positive_to_order_10d_comparable": rate(None, 0, status="not_computable", peer=None, peers=0),
         "order_10d": rate(None, 0, status="not_computable", peer=None, peers=0),
-        "order_10d_comparable": rate(None, 0, status="not_computable", peer=None, peers=0),
         "bom_ratio": rate(None, 0, status="not_computable", peer=None, peers=0),
         "priority_focus": rate(None, 0, status="not_computable", peer=None, peers=0),
         "priority_percentile_coverage": rate(1, 30, peer=None, peers=0),
@@ -97,18 +95,18 @@ class SignalRuleTests(TestCase):
             channel_effectiveness={},
         )
 
-    def test_closing_gap_uses_comparable_positive_to_order_cohort(self):
+    def test_closing_gap_uses_live_positive_to_order_cohort(self):
         signals = self.signals(seller_metrics(
             positive_dialogue=rate(.70, peer=.65),
-            positive_to_order_10d=rate(.95, peer=.20),
-            positive_to_order_10d_comparable=rate(.30, peer=.50),
-            order_10d_comparable=rate(.95, peer=.20),
+            positive_to_order_10d=rate(.30, peer=.50),
+            positive_to_order_10d_comparable=rate(.95, peer=.20),
         ))
 
         closing = next(item for item in signals if item["code"] == "closing_gap")
-        self.assertEqual(closing["metric_key"], "positive_to_order_10d_comparable")
-        self.assertEqual(closing["drilldown_metric"], "positive_to_order_10d_comparable")
-        self.assertIn("fullständigt 10-dagarsutfall", closing["observation"])
+        self.assertEqual(closing["metric_key"], "positive_to_order_10d")
+        self.assertEqual(closing["drilldown_metric"], "positive_to_order_10d")
+        self.assertIn("hittills följts av order inom 10 dagar", closing["observation"])
+        self.assertNotIn("fullständigt", closing["observation"])
 
     def test_priority_focus_requires_seventy_percent_v2_coverage_and_no_customer_list(self):
         metrics = seller_metrics(
@@ -218,16 +216,18 @@ class SignalRuleTests(TestCase):
         metrics = seller_metrics()
         channels = {
             "visit": {
-                "positive_to_order_10d_comparable": rate(.80),
-                "order_10d_comparable": rate(.20),
+                "positive_to_order_10d": rate(.80),
+                "order_10d": rate(.20),
+                "positive_to_order_10d_comparable": rate(.05),
             },
             "phone": {
-                "positive_to_order_10d_comparable": rate(.10, 5, status="small_sample"),
-                "order_10d_comparable": rate(.10),
+                "positive_to_order_10d": rate(.10, 5, status="small_sample"),
+                "order_10d": rate(.10),
+                "positive_to_order_10d_comparable": rate(.95),
             },
             "email": {
-                "positive_to_order_10d_comparable": rate(.50),
-                "order_10d_comparable": rate(.90),
+                "positive_to_order_10d": rate(.50),
+                "order_10d": rate(.90),
             },
         }
 
@@ -237,20 +237,21 @@ class SignalRuleTests(TestCase):
         )
         channel = next(item for item in cards if item["code"] == "channel_strength")
 
-        self.assertEqual(channel["metric_key"], "positive_to_order_10d_comparable")
-        self.assertEqual(channel["drilldown_metric"], "positive_to_order_10d_comparable")
+        self.assertEqual(channel["metric_key"], "positive_to_order_10d")
+        self.assertEqual(channel["drilldown_metric"], "positive_to_order_10d")
         self.assertEqual(channel["drilldown_filters"], {"channel": "visit"})
+        self.assertIn("Utfallet är preliminärt", channel["observation"])
 
     def test_channel_comparison_falls_back_to_order_metric_as_a_whole(self):
         metrics = seller_metrics()
         channels = {
             "visit": {
-                "positive_to_order_10d_comparable": rate(.80, 5, status="small_sample"),
-                "order_10d_comparable": rate(.80),
+                "positive_to_order_10d": rate(.80, 5, status="small_sample"),
+                "order_10d": rate(.80),
             },
             "phone": {
-                "positive_to_order_10d_comparable": rate(.10, 5, status="small_sample"),
-                "order_10d_comparable": rate(.40),
+                "positive_to_order_10d": rate(.10, 5, status="small_sample"),
+                "order_10d": rate(.40),
             },
         }
 
@@ -260,8 +261,8 @@ class SignalRuleTests(TestCase):
         )
         channel = next(item for item in cards if item["code"] == "channel_strength")
 
-        self.assertEqual(channel["metric_key"], "order_10d_comparable")
-        self.assertEqual(channel["drilldown_metric"], "order_10d_comparable")
+        self.assertEqual(channel["metric_key"], "order_10d")
+        self.assertEqual(channel["drilldown_metric"], "order_10d")
 
     def test_small_samples_create_no_positive_or_negative_signal(self):
         metrics = seller_metrics(

@@ -83,11 +83,21 @@ if __name__ == "__main__":
     trend_profiles = [
         {
             "week_start": newer_trend_monday - timedelta(weeks=1),
-            "conversions": {"olle": 3, "sofia": 6, "viewer": 2},
+            "positive_counts": {"olle": 6, "sofia": 7, "viewer": 6},
+            "converted_indexes": {
+                "olle": {0, 1, 6},
+                "sofia": {0, 1, 2, 3, 4, 5},
+                "viewer": {0, 1},
+            },
         },
         {
             "week_start": newer_trend_monday,
-            "conversions": {"olle": 5, "sofia": 2, "viewer": 4},
+            "positive_counts": {"olle": 6, "sofia": 6, "viewer": 6},
+            "converted_indexes": {
+                "olle": {0, 1, 2, 6},
+                "sofia": {0, 1},
+                "viewer": {0, 1, 2, 6},
+            },
         },
     ]
     denominators = {"olle": 10, "sofia": 10, "viewer": 8}
@@ -117,15 +127,19 @@ if __name__ == "__main__":
                     "sales_user_name": seller,
                     "customer": customer["customer"],
                     "customer_id": customer["customer_id"],
-                    "contact_channel": "Mejl" if seller == "olle" and index == 0 else "Telefon",
-                    "result": "Positiv",
+                    "contact_channel": "Mejl" if seller == "olle" and index == 6 else "Telefon",
+                    "result": (
+                        "Positiv"
+                        if index < profile["positive_counts"][seller]
+                        else "Neutral"
+                    ),
                     "activity_source": "manual",
                     "contact_id": contact_id,
                 }
                 activity_sheet.append_row([
                     activity_row.get(header, "") for header in headers
                 ])
-                if index < profile["conversions"][seller]:
+                if index in profile["converted_indexes"][seller]:
                     trend_orders.append({
                         "Reference": f"TREND-ORDER-{week_index}-{seller}-{index + 1}",
                         "Order date": (contact_at.date() + timedelta(days=2)).isoformat(),

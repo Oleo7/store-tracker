@@ -21,7 +21,7 @@ from sales_coaching_rules import (
 )
 
 
-DEFINITIONS_VERSION = "sales_coaching_v7"
+DEFINITIONS_VERSION = "sales_coaching_v8"
 ANALYTICS_SNAPSHOT_VERSION = "sales_coaching_v2"
 PRIORITY_PERCENTILE_BASIS = "owner_active_scored_portfolio_midrank_v2"
 STOCKHOLM_ZONE = ZoneInfo("Europe/Stockholm")
@@ -61,7 +61,7 @@ METRIC_DEFINITIONS = {
     },
     "positive_to_order_10d": {
         "label": "Positiv dialog → order inom 10 dagar",
-        "definition": "Andelen av alla berättigade positiva besök och telefonsamtal med säker kundidentitet i vald period som hittills har följts av en attribuerad order inom 0–10 dagar. Kontakter vars 10-dagarsfönster fortfarande är öppet ingår i nämnaren, därför är måttet preliminärt. Jämförelser mellan säljare och perioder använder endast positiva dialoger med fullständigt 10-dagarsutfall och kan därför visa ett annat värde.",
+        "definition": "Andelen av alla berättigade positiva besök och telefonsamtal med säker kundidentitet i vald period som hittills har följts av en attribuerad order inom 0–10 dagar. Kontakter vars 10-dagarsfönster fortfarande är öppet ingår i nämnaren, därför är måttet preliminärt. Samma definition används i Coachningsöversikt, Teamjämförelse och övriga jämförelser. När olika säljare eller perioder har olika många väntande utfall kan jämförelsen fortfarande förändras när fler order registreras.",
         "metric_type": "rate",
         "numerator_label": "positiva dialoger som hittills följts av attribuerad order",
         "denominator_label": "positiva dialoger har följts av order",
@@ -70,36 +70,15 @@ METRIC_DEFINITIONS = {
         "window_days": ATTRIBUTION_WINDOW_DAYS,
         "drilldown_metric": "positive_to_order_10d",
     },
-    "positive_to_order_10d_comparable": {
-        "label": "Positiv dialog → order inom 10 dagar – fullständigt utfall",
-        "definition": "Andelen berättigade positiva besök och telefonsamtal med säker kundidentitet och fullständigt 10-dagarsutfall som följdes av en attribuerad order inom 0–10 dagar. En tidigt bekräftad order ingår först när kontaktens hela 10-dagarsfönster har passerat, så att perioder och säljare jämförs på samma grund.",
-        "metric_type": "rate",
-        "numerator_label": "mogna positiva dialoger som följdes av attribuerad order",
-        "denominator_label": "positiva dialoger med fullständigt 10-dagarsutfall",
-        "channels": ["visit", "phone"],
-        "not_computable_text": "Jämförbart positiv → order mäts endast för Besök och Telefon.",
-        "window_days": ATTRIBUTION_WINDOW_DAYS,
-        "drilldown_metric": "positive_to_order_10d_comparable",
-    },
     "order_10d": {
         "label": "Kontakt – order inom 10 dagar",
-        "definition": "Andelen av alla berättigade nådda mänskliga kontakter med säker kundidentitet i vald period som hittills har följts av en attribuerad order inom 0–10 dagar. Kontakter vars 10-dagarsfönster fortfarande är öppet ingår i nämnaren, därför är måttet preliminärt. Jämförelser mellan säljare och perioder använder endast kontakter med fullständigt 10-dagarsutfall och kan därför visa ett annat värde.",
+        "definition": "Andelen av alla berättigade nådda mänskliga kontakter med säker kundidentitet i vald period som hittills har följts av en attribuerad order inom 0–10 dagar. Kontakter vars 10-dagarsfönster fortfarande är öppet ingår i nämnaren, därför är måttet preliminärt. Samma definition används i Coachningsöversikt, Teamjämförelse och övriga jämförelser. När olika säljare eller perioder har olika många väntande utfall kan jämförelsen fortfarande förändras när fler order registreras.",
         "metric_type": "rate",
         "numerator_label": "nådda kontakter som hittills följts av attribuerad order",
         "denominator_label": "kontakter har följts av order",
         "channels": ["visit", "phone", "email"],
         "window_days": ATTRIBUTION_WINDOW_DAYS,
         "drilldown_metric": "order_10d",
-    },
-    "order_10d_comparable": {
-        "label": "Kontakt – order inom 10 dagar – fullständigt utfall",
-        "definition": "Andelen berättigade nådda mänskliga kontakter med säker kundidentitet och fullständigt 10-dagarsutfall som följdes av en attribuerad order inom 0–10 dagar. En tidigt bekräftad order ingår först när kontaktens hela 10-dagarsfönster har passerat, så att perioder och säljare jämförs på samma grund.",
-        "metric_type": "rate",
-        "numerator_label": "mogna kontakter som följdes av attribuerad order",
-        "denominator_label": "kontakter med fullständigt 10-dagarsutfall",
-        "channels": ["visit", "phone", "email"],
-        "window_days": ATTRIBUTION_WINDOW_DAYS,
-        "drilldown_metric": "order_10d_comparable",
     },
     "priority_focus": {
         "label": "Prioritetsfokus",
@@ -174,7 +153,7 @@ METRIC_DEFINITIONS = {
     },
     "positive_without_order_or_follow_up_10d": {
         "label": "Positiv utan order eller uppföljning efter 10 dagar",
-        "definition": "Antal positiva kontakter med fullständigt 10-dagarsutfall som varken följdes av en attribuerad order eller har uppföljningsdatum eller giltig länkad planerad aktivitet.",
+        "definition": "Antal positiva kontakter vars 10-dagarsfönster har passerat och som varken följdes av en attribuerad order eller har uppföljningsdatum eller giltig länkad planerad aktivitet.",
         "metric_type": "count",
         "unit": "kontakter",
         "window_days": ATTRIBUTION_WINDOW_DAYS,
@@ -1083,11 +1062,11 @@ def _comparison_dates(start, end):
     return start - timedelta(days=days), start - timedelta(days=1)
 
 
-def _team_order_10d_trend(
+def _team_10d_trends(
     activities, attribution, sellers, *, generated_date, selected_seller="",
     segment="all", lifecycle="all", weeks=TEAM_ORDER_TREND_WEEKS,
 ):
-    """Build complete ISO-week cohorts from the shared comparable metric."""
+    """Build both live 10-day rates over complete ISO contact weeks."""
     maturity_cutoff = generated_date - timedelta(days=ATTRIBUTION_WINDOW_DAYS)
     latest_week_end = maturity_cutoff - timedelta(
         days=(maturity_cutoff.weekday() - 6) % 7
@@ -1121,28 +1100,33 @@ def _team_order_10d_trend(
             (normalize_key(row.get("sales_user_name")), row.get("contact_week"))
         ].append(row)
 
-    series = []
+    metric_keys = ("order_10d", "positive_to_order_10d")
+    series_by_metric = {metric_key: [] for metric_key in metric_keys}
     for seller in sellers:
         seller_key = normalize_key(seller)
-        points = []
+        points_by_metric = {metric_key: [] for metric_key in metric_keys}
         for slot in week_axis:
             aggregate = _aggregate_period(
                 rows_by_seller_week.get((seller_key, slot["week"]), []),
                 attribution,
             )
-            rate = aggregate["rates"]["order_10d_comparable"]
-            points.append({
-                "week": slot["week"],
-                "period": dict(slot["period"]),
-                "value": rate["value"],
-                "numerator": rate["numerator"],
-                "denominator": rate["denominator"],
-                "status": rate["status"],
+            for metric_key in metric_keys:
+                rate = aggregate["rates"][metric_key]
+                points_by_metric[metric_key].append({
+                    "week": slot["week"],
+                    "period": dict(slot["period"]),
+                    "value": rate["value"],
+                    "numerator": rate["numerator"],
+                    "denominator": rate["denominator"],
+                    "status": rate["status"],
+                })
+        for metric_key in metric_keys:
+            series_by_metric[metric_key].append({
+                "seller": seller,
+                "points": points_by_metric[metric_key],
             })
-        series.append({"seller": seller, "points": points})
 
     return {
-        "metric_key": "order_10d_comparable",
         "weeks": weeks,
         "period": {
             "start": trend_start.isoformat(),
@@ -1151,7 +1135,13 @@ def _team_order_10d_trend(
         "latest_complete_week": _iso_week(latest_week_start),
         "selected_seller": selected_seller,
         "week_axis": week_axis,
-        "series": series,
+        "metrics": {
+            metric_key: {
+                "metric_key": metric_key,
+                "series": series_by_metric[metric_key],
+            }
+            for metric_key in metric_keys
+        },
     }
 
 
@@ -1368,7 +1358,7 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
     aggregation_started = clock.perf_counter()
     rows = _filter_activities(coached_activities, start=start, end=end, seller=seller, channel=channel, segment=segment, lifecycle=lifecycle)
     team_rows = _filter_activities(coached_activities, start=start, end=end, seller="", channel="all", segment=segment, lifecycle=lifecycle)
-    team_order_10d_trend = _team_order_10d_trend(
+    team_10d_trends = _team_10d_trends(
         coached_activities,
         attribution,
         coached_sellers,
@@ -1385,11 +1375,10 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
     )
     current, previous = _aggregate_period(rows, attribution), _aggregate_period(comparison_rows, attribution)
     for key, rate in current["rates"].items():
-        if key in {"positive_to_order_10d", "order_10d"}:
-            continue
         previous_rate = previous["rates"][key]
         if key in {
-            "positive_to_order_10d_comparable", "order_10d_comparable"
+            "positive_to_order_10d", "order_10d",
+            "positive_to_order_10d_comparable", "order_10d_comparable",
         }:
             previous_value = (
                 previous_rate["value"]
@@ -1678,13 +1667,11 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
             "reach": aggregate["rates"]["reach"],
             "positive_dialogue": aggregate["rates"]["positive_dialogue"],
             "positive_to_order_10d": aggregate["rates"]["positive_to_order_10d"],
-            "positive_to_order_10d_comparable": aggregate["rates"][
-                "positive_to_order_10d_comparable"
-            ],
             "order_10d": aggregate["rates"]["order_10d"],
-            "order_10d_comparable": aggregate["rates"][
-                "order_10d_comparable"
-            ],
+            "waiting_positive_dialogues_count": len(
+                aggregate["sync_waiting_positive"]
+            ),
+            "waiting_outcome_count": len(aggregate["waiting"]),
             "bom_ratio": aggregate["rates"]["bom_ratio"] if key == "visit" else None,
             "attributed_orders": len(aggregate["attributed"]),
             "dfp": aggregate["dfp"],
@@ -1857,7 +1844,7 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
     if selected_seller_metrics and channel == "all":
         for metric_key in (
             "reach", "positive_dialogue",
-            "positive_to_order_10d_comparable", "order_10d_comparable",
+            "positive_to_order_10d", "order_10d",
             "bom_ratio", "priority_focus",
         ):
             current["rates"][metric_key]["comparisons"] = dict(
@@ -1908,75 +1895,18 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
         "positive_to_order_10d": {
             **current["rates"]["positive_to_order_10d"],
             "waiting_outcome_count": len(current["sync_waiting_positive"]),
-            "comparable": {
-                **current["rates"]["positive_to_order_10d_comparable"],
-                **METRIC_DEFINITIONS["positive_to_order_10d_comparable"],
-            },
         },
         "order_10d": {
             **current["rates"]["order_10d"],
             "waiting_outcome_count": len(current["waiting"]),
-            "comparable": {
-                **current["rates"]["order_10d_comparable"],
-                **METRIC_DEFINITIONS["order_10d_comparable"],
-            },
         },
     }
     for key in MAIN_KPI_KEYS:
         kpis[key].update(METRIC_DEFINITIONS[key])
     data_quality = _data_quality(rows, canonical_result, order_result, attribution)
-    sales_matrix_sellers = [
-        {
-            **item,
-            "sample_status": (
-                "sufficient"
-                if item["positive_dialogue"]["status"] == "sufficient"
-                and item["positive_to_order_10d_comparable"]["status"] == "sufficient"
-                else "small_sample"
-            ),
-        }
-        for item in seller_comparison
-        if item["positive_dialogue"]["value"] is not None
-        and item["positive_to_order_10d_comparable"]["value"] is not None
-    ]
-    sales_positioned_names = {item["seller"] for item in sales_matrix_sellers}
-    sales_matrix = {
-        "type": "sales",
-        "axes": {
-            "x": {
-                "key": "positive_to_order_10d_comparable",
-                "label": "Positiv dialog → order inom 10 dagar – fullständigt utfall",
-            },
-            "y": {"key": "positive_dialogue", "label": "Positiv dialog"},
-        },
-        "sellers": sales_matrix_sellers,
-        "medians": {
-            "positive_to_order_10d_comparable": _sufficient_median(
-                seller_comparison, "positive_to_order_10d_comparable"
-            ),
-            "positive_dialogue": _sufficient_median(
-                seller_comparison, "positive_dialogue"
-            ),
-        },
-        "insufficient_sample": [
-            {
-                "seller": item["seller"],
-                "human_activities": item["human_activities"],
-                "reasons": [
-                    reason for reason, applies in (
-                        ("positive_denominator_zero", item["positive_dialogue"]["denominator"] == 0),
-                        ("positive_order_denominator_zero", item["positive_to_order_10d_comparable"]["denominator"] == 0),
-                    ) if applies
-                ],
-            }
-            for item in seller_comparison
-            if item["seller"] not in sales_positioned_names
-        ],
-    }
-
     comparable_sellers = [
         item for item in seller_comparison
-        if item["order_10d_comparable"]["status"] == "sufficient"
+        if item["order_10d"]["status"] == "sufficient"
         and item["priority_focus"]["status"] == "sufficient"
         and item["priority_percentile_coverage"]["value"] is not None
         and item["priority_percentile_coverage"]["value"] >= MIN_PRIORITY_COVERAGE
@@ -2007,15 +1937,15 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
         "available": priority_matrix_available,
         "axes": {
             "x": {
-                "key": "order_10d_comparable",
-                "label": "Kontakt – order inom 10 dagar – fullständigt utfall",
+                "key": "order_10d",
+                "label": "Kontakt – order inom 10 dagar",
             },
             "y": {"key": "priority_focus", "label": "Historiskt prioritetsfokus"},
         },
         "sellers": priority_matrix_sellers,
         "medians": {
-            "order_10d_comparable": statistics.median(
-                item["order_10d_comparable"]["value"]
+            "order_10d": statistics.median(
+                item["order_10d"]["value"]
                 for item in comparable_sellers
             ) if len(comparable_sellers) >= 2 else None,
             "priority_focus": statistics.median(item["priority_focus"]["value"] for item in comparable_sellers) if len(comparable_sellers) >= 2 else None,
@@ -2030,12 +1960,12 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
             {
                 "seller": item["seller"],
                 "human_activities": item["human_activities"],
-                "order_denominator": item["order_10d_comparable"]["denominator"],
+                "order_denominator": item["order_10d"]["denominator"],
                 "priority_percentile_coverage": item["priority_percentile_coverage"],
                 "reasons": [
                     reason for reason, applies in (
-                        ("order_denominator_zero", item["order_10d_comparable"]["denominator"] == 0),
-                        ("order_sample_below_10", 0 < item["order_10d_comparable"]["denominator"] < MIN_RATE_SAMPLE),
+                        ("order_denominator_zero", item["order_10d"]["denominator"] == 0),
+                        ("order_sample_below_10", 0 < item["order_10d"]["denominator"] < MIN_RATE_SAMPLE),
                         ("priority_denominator_zero", item["priority_focus"]["denominator"] == 0),
                         ("priority_sample_below_10", 0 < item["priority_focus"]["denominator"] < MIN_RATE_SAMPLE),
                         ("priority_percentile_coverage_below_70", item["priority_percentile_coverage"]["value"] is None or item["priority_percentile_coverage"]["value"] < MIN_PRIORITY_COVERAGE),
@@ -2108,13 +2038,13 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
             "benchmarks": {
                 "human_activities_median": statistics.median(active_activity_counts) if active_activity_counts else None,
                 "positive_dialogue_median": _sufficient_median(seller_comparison, "positive_dialogue"),
-                "order_10d_comparable_median": _sufficient_median(
-                    seller_comparison, "order_10d_comparable"
+                "order_10d_median": _sufficient_median(
+                    seller_comparison, "order_10d"
                 ),
             },
         },
-        "team_order_10d_trend": team_order_10d_trend,
-        "coaching_matrices": {"sales": sales_matrix, "priority": priority_matrix},
+        "team_10d_trends": team_10d_trends,
+        "coaching_matrices": {"priority": priority_matrix},
         "coaching_matrix": coaching_matrix,
         "funnel": {
             "attempts": len(current["sync"]),
@@ -2134,10 +2064,6 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
             "waiting_outcome_count": len(current["waiting"]),
             "order_10d": current["rates"]["order_10d"],
             "positive_to_order_10d": current["rates"]["positive_to_order_10d"],
-            "order_10d_comparable": current["rates"]["order_10d_comparable"],
-            "positive_to_order_10d_comparable": current["rates"][
-                "positive_to_order_10d_comparable"
-            ],
         },
         "weekly_trend": weekly_trend,
         "visit_efficiency": visit_efficiency,
