@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from unittest import TestCase, main
 import sys
@@ -707,6 +707,254 @@ class OutcomeResolutionTests(TestCase):
         self.assertEqual(
             build_drilldown(summary, "converted_order_10d")["total_count"],
             summary["outcome_10d"]["attributed_order_contact_count"],
+        )
+
+
+class TeamOrderTrendTests(TestCase):
+    def build_summary(
+        self, specs=(), converted=(), *, generated="2026-08-31 12:00",
+        start="2026-08-24", end="2026-08-31", seller="olle",
+        channel="visit", segment="all", lifecycle="all",
+    ):
+        customers, rows, orders = [], [], []
+        customer_by_contact = {}
+        for index, spec in enumerate(specs, start=1):
+            contact_id, when = spec[:2]
+            options = dict(spec[2]) if len(spec) > 2 else {}
+            customer_id = f"trend-customer-{index}"
+            customer_name = f"Trend customer {index}"
+            customer_number = f"TREND-{index}"
+            contact_seller = options.pop("seller", "olle")
+            customer_segment = options.pop("segment", "A")
+            contact_lifecycle = options.pop("lifecycle", "prospect")
+            customers.append({
+                "customer": customer_name,
+                "customer_id": customer_id,
+                "customer_number": customer_number,
+                "sales_person": contact_seller,
+                "customer_segment": customer_segment,
+            })
+            rows.append(activity(
+                contact_id,
+                when,
+                customer_id=customer_id,
+                customer=customer_name,
+                seller=contact_seller,
+                priority_snapshot_quality="exact",
+                analytics_snapshot_version=ANALYTICS_SNAPSHOT_VERSION,
+                customer_segment_at_contact=customer_segment,
+                lifecycle_at_contact=contact_lifecycle,
+                **options,
+            ))
+            customer_by_contact[contact_id] = (
+                customer_id, customer_name, customer_number
+            )
+        for order_index, (contact_id, order_date) in enumerate(converted, start=1):
+            customer_id, customer_name, customer_number = customer_by_contact[
+                contact_id
+            ]
+            row = order(
+                f"TREND-ORDER-{order_index}",
+                order_date,
+                customer_id=customer_id,
+                customer=customer_name,
+            )
+            row["Customer number"] = customer_number
+            orders.append(row)
+        users = [
+            {"user_name": "olle", "name": "Olle", "active": "Y"},
+            {"user_name": "sofia", "name": "Sofia", "active": "Y"},
+            {"user_name": "viewer", "name": "Viewer", "active": "Y"},
+            {"user_name": "admin", "name": "Admin", "active": "Y", "admin": "Y"},
+            {"user_name": "inactive", "name": "Inactive", "active": "N"},
+        ]
+        return build_sales_coaching_summary(
+            activities=rows,
+            customers=customers,
+            users=users,
+            order_rows=orders,
+            start=start,
+            end=end,
+            generated_at=generated,
+            score_version="v2.1",
+            seller=seller,
+            channel=channel,
+            segment=segment,
+            lifecycle=lifecycle,
+        )
+
+    @staticmethod
+    def point(summary, seller, week):
+        seller_series = next(
+            item for item in summary["team_order_10d_trend"]["series"]
+            if item["seller"] == seller
+        )
+        return next(point for point in seller_series["points"] if point["week"] == week)
+
+    def test_cutoff_uses_only_whole_weeks_and_includes_exact_boundary(self):
+        exact = self.build_summary(
+            [("exact", "2027-01-10 10:00", {})],
+            generated="2027-01-20 12:00",
+            start="2027-01-18",
+            end="2027-01-20",
+        )
+        trend = exact["team_order_10d_trend"]
+
+        self.assertEqual(trend["weeks"], 16)
+        self.assertEqual(len(trend["week_axis"]), 16)
+        self.assertEqual(trend["latest_complete_week"], "2027-W01")
+        self.assertEqual(trend["period"]["end"], "2027-01-10")
+        self.assertEqual(
+            (self.point(exact, "olle", "2027-W01")["numerator"],
+             self.point(exact, "olle", "2027-W01")["denominator"]),
+            (0, 1),
+        )
+        starts = [date.fromisoformat(slot["period"]["start"]) for slot in trend["week_axis"]]
+        self.assertTrue(all(
+            right - left == timedelta(days=7)
+            for left, right in zip(starts, starts[1:])
+        ))
+        self.assertIn("2026-W53", [slot["week"] for slot in trend["week_axis"]])
+        self.assertIn("2027-W01", [slot["week"] for slot in trend["week_axis"]])
+
+        before_cutoff = self.build_summary(
+            [],
+            generated="2027-01-19 12:00",
+            start="2027-01-18",
+            end="2027-01-19",
+        )
+        self.assertEqual(
+            before_cutoff["team_order_10d_trend"]["latest_complete_week"],
+            "2026-W53",
+        )
+
+    def test_individually_mature_contact_does_not_open_partial_week(self):
+        summary = self.build_summary(
+            [("partial", "2027-01-11 09:00", {})],
+            generated="2027-01-21 12:00",
+            start="2027-01-18",
+            end="2027-01-21",
+        )
+
+        self.assertEqual(
+            summary["_analysis"]["attribution"]["maturity"]["partial"],
+            "mature",
+        )
+        trend = summary["team_order_10d_trend"]
+        self.assertEqual(trend["latest_complete_week"], "2027-W01")
+        self.assertNotIn("2027-W02", [slot["week"] for slot in trend["week_axis"]])
+
+    def test_points_are_exact_contact_weeks_reuse_comparable_rate_and_drilldown(self):
+        summary = self.build_summary(
+            [
+                ("phone-hit", "2026-08-02 10:00", {"channel": "Telefon"}),
+                ("manual-email", "2026-08-02 11:00", {"channel": "Mejl"}),
+            ],
+            [("phone-hit", "2026-08-03")],
+        )
+        point = self.point(summary, "olle", "2026-W31")
+        next_point = self.point(summary, "olle", "2026-W32")
+
+        self.assertEqual(
+            (point["numerator"], point["denominator"], point["value"], point["status"]),
+            (1, 2, 0.5, "small_sample"),
+        )
+        self.assertEqual(
+            (next_point["numerator"], next_point["denominator"],
+             next_point["value"], next_point["status"]),
+            (0, 0, None, "not_computable"),
+        )
+        self.assertNotIn("waiting_outcome_count", point)
+
+        week_summary = self.build_summary(
+            [
+                ("phone-hit", "2026-08-02 10:00", {"channel": "Telefon"}),
+                ("manual-email", "2026-08-02 11:00", {"channel": "Mejl"}),
+            ],
+            [("phone-hit", "2026-08-03")],
+            start=point["period"]["start"],
+            end=point["period"]["end"],
+            channel="all",
+        )
+        central = week_summary["outcome_10d"]["order_10d_comparable"]
+        self.assertEqual(
+            {key: point[key] for key in ("value", "numerator", "denominator", "status")},
+            {key: central[key] for key in ("value", "numerator", "denominator", "status")},
+        )
+        drilldown = build_drilldown(week_summary, "order_10d_comparable")
+        self.assertEqual(drilldown["total_count"], point["denominator"])
+        self.assertEqual(
+            sum(row["cohort_role"] == "numerator" for row in drilldown["rows"]),
+            point["numerator"],
+        )
+        self.assertNotIn("pending", {row["cohort_role"] for row in drilldown["rows"]})
+        self.assertEqual({row["channel"] for row in drilldown["rows"]}, {"phone", "email"})
+
+    def test_team_population_ignores_period_seller_channel_but_applies_dimensions(self):
+        specs, converted = [], []
+        for index in range(8):
+            contact_id = f"olle-{index}"
+            specs.append((contact_id, "2026-08-02 10:00", {
+                "seller": "olle",
+                "channel": "Mejl" if index == 0 else "Telefon",
+                "segment": "A",
+                "lifecycle": "prospect",
+            }))
+            if index < 4:
+                converted.append((contact_id, "2026-08-03"))
+        for index in range(10):
+            contact_id = f"sofia-{index}"
+            specs.append((contact_id, "2026-08-02 10:00", {
+                "seller": "sofia",
+                "channel": "Telefon",
+                "segment": "A",
+                "lifecycle": "prospect",
+            }))
+            if index < 3:
+                converted.append((contact_id, "2026-08-03"))
+        specs.extend([
+            ("wrong-segment", "2026-08-02 10:00", {
+                "seller": "olle", "segment": "B", "lifecycle": "prospect",
+            }),
+            ("wrong-lifecycle", "2026-08-02 10:00", {
+                "seller": "olle", "segment": "A", "lifecycle": "established",
+            }),
+        ])
+
+        summary = self.build_summary(
+            specs,
+            converted,
+            start="2026-08-30",
+            end="2026-08-31",
+            seller="olle",
+            channel="visit",
+            segment="A",
+            lifecycle="prospect",
+        )
+        trend = summary["team_order_10d_trend"]
+
+        self.assertEqual(trend["selected_seller"], "olle")
+        self.assertEqual(
+            [item["seller"] for item in trend["series"]],
+            ["olle", "sofia", "viewer"],
+        )
+        self.assertEqual(
+            (self.point(summary, "olle", "2026-W31")["numerator"],
+             self.point(summary, "olle", "2026-W31")["denominator"],
+             self.point(summary, "olle", "2026-W31")["status"]),
+            (4, 8, "small_sample"),
+        )
+        self.assertEqual(
+            (self.point(summary, "sofia", "2026-W31")["numerator"],
+             self.point(summary, "sofia", "2026-W31")["denominator"],
+             self.point(summary, "sofia", "2026-W31")["status"]),
+            (3, 10, "sufficient"),
+        )
+        self.assertEqual(
+            (self.point(summary, "viewer", "2026-W31")["value"],
+             self.point(summary, "viewer", "2026-W31")["denominator"],
+             self.point(summary, "viewer", "2026-W31")["status"]),
+            (None, 0, "not_computable"),
         )
 
 

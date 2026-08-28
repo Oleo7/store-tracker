@@ -28,6 +28,7 @@ STOCKHOLM_ZONE = ZoneInfo("Europe/Stockholm")
 ATTRIBUTION_WINDOW_DAYS = 10
 MIN_RATE_SAMPLE = 10
 MIN_PRIORITY_COVERAGE = 0.70
+TEAM_ORDER_TREND_WEEKS = 16
 
 METRIC_DEFINITIONS = {
     "human_activities": {
@@ -1082,6 +1083,78 @@ def _comparison_dates(start, end):
     return start - timedelta(days=days), start - timedelta(days=1)
 
 
+def _team_order_10d_trend(
+    activities, attribution, sellers, *, generated_date, selected_seller="",
+    segment="all", lifecycle="all", weeks=TEAM_ORDER_TREND_WEEKS,
+):
+    """Build complete ISO-week cohorts from the shared comparable metric."""
+    maturity_cutoff = generated_date - timedelta(days=ATTRIBUTION_WINDOW_DAYS)
+    latest_week_end = maturity_cutoff - timedelta(
+        days=(maturity_cutoff.weekday() - 6) % 7
+    )
+    latest_week_start = latest_week_end - timedelta(days=6)
+    trend_start = latest_week_start - timedelta(weeks=weeks - 1)
+    week_axis = []
+    for offset in range(weeks):
+        week_start = trend_start + timedelta(weeks=offset)
+        week_end = week_start + timedelta(days=6)
+        week_axis.append({
+            "week": _iso_week(week_start),
+            "period": {
+                "start": week_start.isoformat(),
+                "end": week_end.isoformat(),
+            },
+        })
+
+    trend_rows = _filter_activities(
+        activities,
+        start=trend_start,
+        end=latest_week_end,
+        seller="",
+        channel="all",
+        segment=segment,
+        lifecycle=lifecycle,
+    )
+    rows_by_seller_week = defaultdict(list)
+    for row in trend_rows:
+        rows_by_seller_week[
+            (normalize_key(row.get("sales_user_name")), row.get("contact_week"))
+        ].append(row)
+
+    series = []
+    for seller in sellers:
+        seller_key = normalize_key(seller)
+        points = []
+        for slot in week_axis:
+            aggregate = _aggregate_period(
+                rows_by_seller_week.get((seller_key, slot["week"]), []),
+                attribution,
+            )
+            rate = aggregate["rates"]["order_10d_comparable"]
+            points.append({
+                "week": slot["week"],
+                "period": dict(slot["period"]),
+                "value": rate["value"],
+                "numerator": rate["numerator"],
+                "denominator": rate["denominator"],
+                "status": rate["status"],
+            })
+        series.append({"seller": seller, "points": points})
+
+    return {
+        "metric_key": "order_10d_comparable",
+        "weeks": weeks,
+        "period": {
+            "start": trend_start.isoformat(),
+            "end": latest_week_end.isoformat(),
+        },
+        "latest_complete_week": _iso_week(latest_week_start),
+        "selected_seller": selected_seller,
+        "week_axis": week_axis,
+        "series": series,
+    }
+
+
 def _seller_comparison(rows, attribution, sellers):
     result = []
     for seller in sellers:
@@ -1295,6 +1368,15 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
     aggregation_started = clock.perf_counter()
     rows = _filter_activities(coached_activities, start=start, end=end, seller=seller, channel=channel, segment=segment, lifecycle=lifecycle)
     team_rows = _filter_activities(coached_activities, start=start, end=end, seller="", channel="all", segment=segment, lifecycle=lifecycle)
+    team_order_10d_trend = _team_order_10d_trend(
+        coached_activities,
+        attribution,
+        coached_sellers,
+        generated_date=generated.date(),
+        selected_seller=seller,
+        segment=segment,
+        lifecycle=lifecycle,
+    )
     comparison_start, comparison_end = _comparison_dates(start, end)
     comparison_rows = _filter_activities(coached_activities, start=comparison_start, end=comparison_end, seller=seller, channel=channel, segment=segment, lifecycle=lifecycle)
     previous_team_rows = _filter_activities(
@@ -2031,6 +2113,7 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
                 ),
             },
         },
+        "team_order_10d_trend": team_order_10d_trend,
         "coaching_matrices": {"sales": sales_matrix, "priority": priority_matrix},
         "coaching_matrix": coaching_matrix,
         "funnel": {

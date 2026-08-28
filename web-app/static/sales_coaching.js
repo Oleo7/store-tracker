@@ -16,6 +16,8 @@
     filters: defaultFilters(),
   };
   const MATRIX_TICKS = [0, 25, 50, 75, 100];
+  const TEAM_TREND_COLORS = ["#942a52", "#176b87", "#2f7a4f", "#a66012", "#6657a4", "#a23b32", "#39738f", "#6d6a25"];
+  const TEAM_TREND_DASHES = ["", "10 5", "3 4", "13 4 3 4", "7 3", "2 3 9 3", "15 5", "5 3 2 3"];
 
   const root = document.getElementById("sales-coaching-dashboard");
   const businessPanel = document.getElementById("business-overview-content");
@@ -470,6 +472,81 @@
     return `<section class="sc-section" aria-labelledby="sc-team-title"><div class="sc-section-heading"><div><h2 id="sc-team-title">Teamjämförelse</h2><p>För rättvis jämförelse använder 10-dagarsmåtten här endast kontakter som haft hela 10 dagar på sig att konvertera. Därför kan värdena skilja sig från de preliminära KPI:erna ovan. Jämförelsen gäller alla kanaler under vald period, lifecycle och segment; kanal- och säljarfilter påverkar inte teamblocken.</p></div></div><article class="sc-team-chart"><h3>Mänskliga aktiviteter</h3><p>Besök är stackade: <span class="sc-legend-key is-visit">nådda besök</span> + <span class="sc-legend-key is-bom">bom</span>. <span class="sc-legend-key is-phone">Telefon</span> och manuellt mejl visas separat.</p><div class="sc-team-plot">${activityGroups}</div></article><div class="sc-table-wrap"><table class="sc-table sc-comparison-table"><thead><tr><th>Säljare</th><th>Aktiviteter</th><th>${metricHeader("Träffgrad", "reach", "team-reach")}</th><th>${metricHeader("Positiv dialog", "positive_dialogue", "team-positive")}</th><th>${metricHeader("Positiv → order 10 dagar – fullständigt utfall", "positive_to_order_10d_comparable", "team-positive-order")}</th><th>${metricHeader("Kontakt – order inom 10 dagar – fullständigt utfall", "order_10d_comparable", "team-order")}</th><th>${metricHeader("Nästa-steg-täckning", "positive_next_step_coverage", "team-next-step")}</th><th>${metricHeader("Bom-ratio", "bom_ratio", "team-bom")}</th></tr></thead><tbody>${rows}</tbody></table></div></section>`;
   }
 
+  function teamTrendWeekLabel(week, previousWeek = "") {
+    const match = String(week || "").match(/^(\d{4})-W(\d{2})$/);
+    if (!match) return week || "";
+    const previousYear = String(previousWeek || "").slice(0, 4);
+    return !previousWeek || previousYear !== match[1]
+      ? `${match[1]} v.${Number(match[2])}`
+      : `v.${Number(match[2])}`;
+  }
+
+  function teamTrendMarker(index, x, y) {
+    const marker = index % 4;
+    if (marker === 1) return `<rect class="sc-team-order-point-shape" x="${x - 5}" y="${y - 5}" width="10" height="10" rx="1"></rect>`;
+    if (marker === 2) return `<path class="sc-team-order-point-shape" d="M ${x} ${y - 7} L ${x + 7} ${y} L ${x} ${y + 7} L ${x - 7} ${y} Z"></path>`;
+    if (marker === 3) return `<path class="sc-team-order-point-shape" d="M ${x} ${y - 7} L ${x + 7} ${y + 6} L ${x - 7} ${y + 6} Z"></path>`;
+    return `<circle class="sc-team-order-point-shape" cx="${x}" cy="${y}" r="5.5"></circle>`;
+  }
+
+  function teamOrderTrendMarkup(trend) {
+    const series = trend?.series || [];
+    const slots = trend?.week_axis?.length
+      ? trend.week_axis
+      : (series[0]?.points || []).map(point => ({ week: point.week, period: point.period }));
+    const width = 1120, height = 360;
+    const pad = { left: 62, right: 24, top: 24, bottom: 58 };
+    const plotWidth = width - pad.left - pad.right;
+    const plotHeight = height - pad.top - pad.bottom;
+    const x = index => pad.left + (slots.length <= 1 ? plotWidth / 2 : index * plotWidth / (slots.length - 1));
+    const y = value => pad.top + (1 - Number(value)) * plotHeight;
+    const selectedSeller = String(trend?.selected_seller || "");
+    const hasSelection = Boolean(selectedSeller);
+    const isSelected = seller => hasSelection && String(seller).localeCompare(selectedSeller, "sv-SE", { sensitivity: "base" }) === 0;
+    const ticks = [0, 0.25, 0.5, 0.75, 1];
+    const grid = ticks.map(value => `<g aria-hidden="true"><line class="sc-team-order-grid" x1="${pad.left}" x2="${width - pad.right}" y1="${y(value)}" y2="${y(value)}"></line><text class="sc-team-order-y-label" x="${pad.left - 10}" y="${y(value) + 4}" text-anchor="end">${value * 100} %</text></g>`).join("");
+    const xLabels = slots.map((slot, index) => `<text class="sc-team-order-x-label" x="${x(index)}" y="${height - 18}" text-anchor="middle">${escapeHtml(teamTrendWeekLabel(slot.week, slots[index - 1]?.week || ""))}</text>`).join("");
+
+    const seriesMarkup = series.map((item, seriesIndex) => {
+      const color = TEAM_TREND_COLORS[seriesIndex % TEAM_TREND_COLORS.length];
+      const dash = TEAM_TREND_DASHES[seriesIndex % TEAM_TREND_DASHES.length];
+      const selected = isSelected(item.seller);
+      const selectionClass = selected ? " is-selected" : hasSelection ? " is-unselected" : "";
+      const pointByWeek = new Map((item.points || []).map(point => [point.week, point]));
+      const segments = [];
+      let segment = [];
+      slots.forEach((slot, index) => {
+        const point = pointByWeek.get(slot.week);
+        if (point?.value !== null && Number.isFinite(Number(point.value))) {
+          segment.push(`${x(index)},${y(point.value)}`);
+        } else {
+          if (segment.length > 1) segments.push(segment);
+          segment = [];
+        }
+      });
+      if (segment.length > 1) segments.push(segment);
+      const lines = segments.map(points => `<polyline class="sc-team-order-line${selectionClass}" style="stroke:${color}${dash ? `;stroke-dasharray:${dash}` : ""}" points="${points.join(" ")}"></polyline>`).join("");
+      const points = slots.map((slot, index) => {
+        const point = pointByWeek.get(slot.week);
+        if (!point || point.value === null || !Number.isFinite(Number(point.value))) return "";
+        const small = point.status === "small_sample";
+        const evidence = `${number(point.numerator)} av ${number(point.denominator)} kontakter med fullständigt 10-dagarsutfall`;
+        const title = `${item.seller} · ${teamTrendWeekLabel(point.week)}: ${percent(point.value)} · ${evidence} · ${small ? "Litet underlag" : "Tillräckligt underlag"}`;
+        return `<g class="sc-team-order-point${small ? " is-small-sample" : ""}${selectionClass}" style="--series-color:${color}" tabindex="0" role="button" data-drilldown="order_10d_comparable" data-seller="${escapeHtml(item.seller)}" data-week="${escapeHtml(point.week)}" data-numerator="${number(point.numerator)}" data-denominator="${number(point.denominator)}" data-channel="all" data-start="${escapeHtml(point.period?.start || "")}" data-end="${escapeHtml(point.period?.end || "")}" aria-label="${escapeHtml(title)}"><title>${escapeHtml(title)}</title><circle class="sc-team-order-point-hit" cx="${x(index)}" cy="${y(point.value)}" r="22"></circle>${teamTrendMarker(seriesIndex, x(index), y(point.value))}</g>`;
+      }).join("");
+      return `${lines}${points}`;
+    }).join("");
+
+    const legend = series.map((item, index) => {
+      const color = TEAM_TREND_COLORS[index % TEAM_TREND_COLORS.length];
+      const dash = TEAM_TREND_DASHES[index % TEAM_TREND_DASHES.length];
+      const selected = isSelected(item.seller);
+      return `<button type="button" class="sc-team-order-legend-item${selected ? " is-selected" : hasSelection ? " is-unselected" : ""}" style="--series-color:${color}" data-seller="${escapeHtml(item.seller)}" aria-label="Visa ${escapeHtml(item.seller)} som vald säljare"><svg viewBox="0 0 42 18" aria-hidden="true"><line x1="2" x2="40" y1="9" y2="9" style="stroke:${color}${dash ? `;stroke-dasharray:${dash}` : ""}"></line>${teamTrendMarker(index, 21, 9)}</svg><span>${escapeHtml(item.seller)}</span></button>`;
+    }).join("");
+
+    return `<section class="sc-section sc-team-order-trend-section" aria-labelledby="sc-team-order-trend-title"><div class="sc-section-heading"><div><h2 id="sc-team-order-trend-title">Kontakt – order inom 10 dagar – trend</h2><p>Fullständiga 10-dagarsutfall per kontaktvecka för de senaste 16 mogna veckorna. Varje punkt avser endast den aktuella kontaktveckan.</p></div></div><p class="sc-team-order-definition">Grafen använder endast kontakter som haft hela 10 dagar på sig att följas av order. Därför kan värdena skilja sig från den preliminära KPI:n högst upp på sidan.</p><p class="sc-team-order-filter-note">Period-, säljar- och kanalfilter begränsar inte grafen. Vald säljare markeras; lifecycle och segment följer filtren.</p><div class="sc-team-order-trend-wrap" tabindex="0" aria-label="Horisontellt rullningsbar trendgraf"><svg class="sc-team-order-trend" viewBox="0 0 ${width} ${height}" role="group" aria-label="Veckovis kontakt till order inom 10 dagar för aktiva säljare, fast skala 0 till 100 procent">${grid}${seriesMarkup}${xLabels}</svg></div><div class="sc-team-order-legend" aria-label="Säljarserier">${legend || `<span class="sc-empty">Inga aktiva säljare.</span>`}</div></section>`;
+  }
+
   function matrixReasonLabel(reason) {
     return ({
       positive_denominator_zero: "inga nådda besök eller telefonsamtal för positiv dialog",
@@ -672,6 +749,7 @@
       kpisMarkup(data.kpis || {}),
       coachingMarkup(data.coaching_cards || []),
       teamComparisonMarkup(data.team_comparison || { sellers: [] }),
+      teamOrderTrendMarkup(data.team_order_10d_trend || { series: [] }),
       matricesMarkup(data.coaching_matrices || {}),
       diagnosticsMarkup(data),
       dataQualityDetailsMarkup(data.data_quality || {}, data.metric_definitions || {}),
@@ -721,24 +799,25 @@
       window.dispatchEvent(new CustomEvent("sales-coaching:open-customer", { detail: { customerId: customer.dataset.customerId } }));
       return;
     }
-    const seller = event.target.closest("[data-seller]");
-    if (seller) {
-      state.filters.seller = seller.dataset.seller;
-      setControlValues();
-      updateUrl();
-      loadSummary();
+    const drilldown = event.target.closest("[data-drilldown]");
+    if (drilldown) {
+      let extra = {};
+      if (drilldown.dataset.seller) extra.seller = drilldown.dataset.seller;
+      if (drilldown.dataset.channel) extra.channel = drilldown.dataset.channel;
+      if (drilldown.dataset.start) extra.start = drilldown.dataset.start;
+      if (drilldown.dataset.end) extra.end = drilldown.dataset.end;
+      if (drilldown.dataset.drilldownFilters) {
+        try { extra = { ...extra, ...JSON.parse(drilldown.dataset.drilldownFilters) }; } catch (_) {}
+      }
+      openDrilldown(drilldown.dataset.drilldown, extra, drilldown);
       return;
     }
-    const drilldown = event.target.closest("[data-drilldown]");
-    if (!drilldown) return;
-    let extra = {};
-    if (drilldown.dataset.channel) extra.channel = drilldown.dataset.channel;
-    if (drilldown.dataset.start) extra.start = drilldown.dataset.start;
-    if (drilldown.dataset.end) extra.end = drilldown.dataset.end;
-    if (drilldown.dataset.drilldownFilters) {
-      try { extra = { ...extra, ...JSON.parse(drilldown.dataset.drilldownFilters) }; } catch (_) {}
-    }
-    openDrilldown(drilldown.dataset.drilldown, extra, drilldown);
+    const seller = event.target.closest("[data-seller]");
+    if (!seller) return;
+    state.filters.seller = seller.dataset.seller;
+    setControlValues();
+    updateUrl();
+    loadSummary();
   }
 
   function drawerMarkup(metric) {

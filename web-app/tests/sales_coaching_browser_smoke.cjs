@@ -14,7 +14,7 @@ const viewport = mode === "mobile"
     browser = await chromium.launch({ headless: true, channel: "chrome" });
   }
   try {
-    const page = await browser.newPage({ viewportSize: viewport });
+    const page = await browser.newPage({ viewport });
     await page.goto("http://127.0.0.1:5065/", { waitUntil: "domcontentloaded" });
     const login = await page.evaluate(async () => {
       const response = await fetch("/login", {
@@ -165,6 +165,74 @@ const viewport = mode === "mobile"
     if ((olleTeamText.match(/40 %/g) || []).length < 2 || olleTeamText.includes("20 %") || olleTeamText.includes("25 %")) {
       throw new Error(`${mode}: team comparison does not use comparable 10-day outcomes: ${olleTeamText}`);
     }
+
+    const sectionHeadings = await page.locator("#sc-dashboard-content > .sc-section > .sc-section-heading h2").allInnerTexts();
+    const teamComparisonPosition = sectionHeadings.indexOf("Teamjämförelse");
+    const trendPosition = sectionHeadings.indexOf("Kontakt – order inom 10 dagar – trend");
+    const matricesPosition = sectionHeadings.indexOf("Teamets coachningsmatriser");
+    if (!(teamComparisonPosition >= 0 && teamComparisonPosition + 1 === trendPosition && trendPosition + 1 === matricesPosition)) {
+      throw new Error(`${mode}: long-term trend is in the wrong section order: ${JSON.stringify(sectionHeadings)}`);
+    }
+    const trendSection = page.locator(".sc-team-order-trend-section");
+    await trendSection.scrollIntoViewIfNeeded();
+    const trendCopy = await trendSection.innerText();
+    for (const expected of [
+      "Fullständiga 10-dagarsutfall per kontaktvecka för de senaste 16 mogna veckorna",
+      "Varje punkt avser endast den aktuella kontaktveckan",
+      "Period-, säljar- och kanalfilter begränsar inte grafen",
+    ]) {
+      if (!trendCopy.includes(expected)) throw new Error(`${mode}: missing trend explanation: ${expected}`);
+    }
+    const weekSlotCount = await trendSection.locator(".sc-team-order-x-label").count();
+    if (weekSlotCount !== 16) throw new Error(`${mode}: expected 16 trend week slots, got ${weekSlotCount}`);
+    const yLabels = await trendSection.locator(".sc-team-order-y-label").allTextContents();
+    if (JSON.stringify(yLabels) !== JSON.stringify(["0 %", "25 %", "50 %", "75 %", "100 %"])) {
+      throw new Error(`${mode}: trend scale is not fixed at 0/25/50/75/100: ${JSON.stringify(yLabels)}`);
+    }
+    if (await trendSection.locator(".sc-team-order-legend-item").count() !== 3) {
+      throw new Error(`${mode}: expected one trend series for each of three active sellers`);
+    }
+    if (await trendSection.locator(".sc-team-order-line").count() < 3) {
+      throw new Error(`${mode}: expected at least three rendered seller trend lines`);
+    }
+    const olleTrendPoint = trendSection.locator('.sc-team-order-point[data-seller="olle"][data-numerator="5"][data-denominator="10"]');
+    const sofiaTrendPoint = trendSection.locator('.sc-team-order-point[data-seller="sofia"][data-numerator="2"][data-denominator="10"]');
+    const viewerTrendPoint = trendSection.locator('.sc-team-order-point[data-seller="viewer"][data-numerator="4"][data-denominator="8"]');
+    for (const [seller, point] of [["olle", olleTrendPoint], ["sofia", sofiaTrendPoint], ["viewer", viewerTrendPoint]]) {
+      if (await point.count() !== 1) throw new Error(`${mode}: missing deterministic ${seller} trend point`);
+    }
+    if (!(await olleTrendPoint.getAttribute("class")).includes("is-selected")) {
+      throw new Error(`${mode}: selected seller is not highlighted in the trend`);
+    }
+    if (!(await viewerTrendPoint.getAttribute("class")).includes("is-small-sample")) {
+      throw new Error(`${mode}: small-sample trend point is not hollow/muted`);
+    }
+    await viewerTrendPoint.hover();
+    const viewerTooltip = await viewerTrendPoint.locator("title").textContent();
+    if (!viewerTooltip.includes("viewer") || !viewerTooltip.includes("50 %") || !viewerTooltip.includes("4 av 8") || !viewerTooltip.includes("Litet underlag") || !viewerTooltip.match(/\d{4} v\.\d+/)) {
+      throw new Error(`${mode}: trend point tooltip lacks seller/week/value/evidence: ${viewerTooltip}`);
+    }
+    const pointStart = await viewerTrendPoint.getAttribute("data-start");
+    const pointEnd = await viewerTrendPoint.getAttribute("data-end");
+    const pointResponse = page.waitForResponse(response => {
+      const url = new URL(response.url());
+      return url.pathname.endsWith("/sales-coaching-insights/drilldown")
+        && url.searchParams.get("metric") === "order_10d_comparable"
+        && url.searchParams.get("seller") === "viewer"
+        && url.searchParams.get("channel") === "all"
+        && url.searchParams.get("start") === pointStart
+        && url.searchParams.get("end") === pointEnd;
+    });
+    await viewerTrendPoint.focus();
+    await viewerTrendPoint.press("Enter");
+    await pointResponse;
+    await page.locator("#sc-drawer-content .sc-drawer-meta").waitFor();
+    const pointDrawerText = await page.locator("#sc-drawer-content").innerText();
+    if (!pointDrawerText.includes("Visar 8 av 8") || (pointDrawerText.match(/Konverterad/g) || []).length !== 4 || pointDrawerText.includes("Väntar på utfall")) {
+      throw new Error(`${mode}: trend point drilldown does not reconcile numerator/denominator: ${pointDrawerText}`);
+    }
+    await page.locator("[data-sc-drawer-close]").click();
+
     const diagnosticTabs = await page.locator(".sc-diagnostic-tabs [role=tab]").allInnerTexts();
     if (diagnosticTabs[0] !== "Besök" || diagnosticTabs[1] !== "Konvertering") {
       throw new Error(`${mode}: diagnostic tabs are in the wrong order`);
@@ -250,6 +318,26 @@ const viewport = mode === "mobile"
     );
     if (pageOverflows) throw new Error(`${mode}: page-level horizontal overflow`);
     if (mode === "mobile") {
+      const trendScroller = page.locator(".sc-team-order-trend-wrap");
+      await trendScroller.scrollIntoViewIfNeeded();
+      const trendDimensions = await trendScroller.evaluate(element => ({
+        scrollWidth: element.scrollWidth,
+        clientWidth: element.clientWidth,
+        graphWidth: element.querySelector("svg")?.getBoundingClientRect().width || 0,
+      }));
+      if (!(trendDimensions.scrollWidth > trendDimensions.clientWidth)) {
+        throw new Error(`mobile: trend graph is not horizontally scrollable: ${JSON.stringify(trendDimensions)}`);
+      }
+      const viewerLegend = page.locator('.sc-team-order-legend-item[data-seller="viewer"]');
+      const legendHeight = await viewerLegend.evaluate(element => element.getBoundingClientRect().height);
+      if (legendHeight < 44) throw new Error(`mobile: trend legend touch target is only ${legendHeight}px high`);
+      await Promise.all([
+        page.waitForResponse(response => response.url().includes("/sales-coaching-insights?") && response.url().includes("seller=viewer")),
+        viewerLegend.click(),
+      ]);
+      const selectedViewerLegend = page.locator('.sc-team-order-legend-item[data-seller="viewer"].is-selected');
+      await selectedViewerLegend.waitFor();
+      if (!(await selectedViewerLegend.isVisible())) throw new Error("mobile: trend legend did not select viewer");
       const matrixScroller = page.locator(".sc-matrix-wrap").first();
       await matrixScroller.scrollIntoViewIfNeeded();
       if (!(await matrixScroller.isVisible())) throw new Error("mobile: matrix scroller missing");
