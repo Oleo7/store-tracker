@@ -189,28 +189,69 @@ const viewport = mode === "mobile"
     if (await page.locator(".sc-matrix-tabs").count()) {
       throw new Error(`${mode}: removed sales/priority matrix tabs still render`);
     }
-    const weekSlotCount = await trendSection.locator(".sc-team-order-x-label").count();
+    const orderPanel = trendSection.locator("#sc-team-trend-panel-order");
+    const positivePanel = trendSection.locator("#sc-team-trend-panel-positive");
+    const assertTrendPanelState = async expectedView => {
+      const panelState = await trendSection.evaluate(section => {
+        const panels = [...section.querySelectorAll('[role="tabpanel"]')];
+        const tabs = [...section.querySelectorAll('[role="tab"]')];
+        return {
+          panels: panels.map(panel => ({
+            id: panel.id,
+            labelledBy: panel.getAttribute("aria-labelledby"),
+            hidden: panel.hidden,
+          })),
+          tabs: tabs.map(tab => ({
+            id: tab.id,
+            controls: tab.getAttribute("aria-controls"),
+            controlsExists: Boolean(document.getElementById(tab.getAttribute("aria-controls"))),
+            selected: tab.getAttribute("aria-selected"),
+            tabIndex: tab.getAttribute("tabindex"),
+          })),
+        };
+      });
+      if (panelState.panels.length !== 2) {
+        throw new Error(`${mode}: both permanent trend tabpanels are not in the DOM: ${JSON.stringify(panelState)}`);
+      }
+      for (const view of ["order", "positive"]) {
+        const panel = panelState.panels.find(item => item.id === `sc-team-trend-panel-${view}`);
+        const tab = panelState.tabs.find(item => item.id === `sc-team-trend-tab-${view}`);
+        if (!panel || !tab || !tab.controlsExists || tab.controls !== panel.id || panel.labelledBy !== tab.id) {
+          throw new Error(`${mode}: broken trend tab/panel ARIA relationship for ${view}: ${JSON.stringify(panelState)}`);
+        }
+        const active = view === expectedView;
+        if (panel.hidden === active || tab.selected !== String(active) || tab.tabIndex !== (active ? "0" : "-1")) {
+          throw new Error(`${mode}: wrong hidden/selected/tabindex state for ${view}: ${JSON.stringify(panelState)}`);
+        }
+      }
+      if (panelState.panels.filter(panel => !panel.hidden).length !== 1) {
+        throw new Error(`${mode}: expected exactly one visible trend panel: ${JSON.stringify(panelState)}`);
+      }
+    };
+    await assertTrendPanelState("order");
+    const weekSlotCount = await orderPanel.locator(".sc-team-order-x-label").count();
     if (weekSlotCount !== 16) throw new Error(`${mode}: expected 16 trend week slots, got ${weekSlotCount}`);
-    const yLabels = await trendSection.locator(".sc-team-order-y-label").allTextContents();
+    const yLabels = await orderPanel.locator(".sc-team-order-y-label").allTextContents();
     if (JSON.stringify(yLabels) !== JSON.stringify(["0 %", "25 %", "50 %", "75 %", "100 %"])) {
       throw new Error(`${mode}: trend scale is not fixed at 0/25/50/75/100: ${JSON.stringify(yLabels)}`);
     }
-    if (await trendSection.locator(".sc-team-order-legend-item").count() !== 3) {
+    if (await orderPanel.locator(".sc-team-order-legend-item").count() !== 3) {
       throw new Error(`${mode}: expected one trend series for each of three active sellers`);
     }
-    if (await trendSection.locator(".sc-team-order-line").count() < 3) {
+    if (await orderPanel.locator(".sc-team-order-line").count() < 3) {
       throw new Error(`${mode}: expected at least three rendered seller trend lines`);
     }
     const orderTab = trendSection.locator('[data-team-trend-view="order"]');
+    const positiveTab = trendSection.locator('[data-team-trend-view="positive"]');
     if (await orderTab.getAttribute("aria-selected") !== "true") {
       throw new Error(`${mode}: contact-to-order is not the default trend tab`);
     }
-    const olleTrendPoint = trendSection.locator('.sc-team-order-point[data-seller="olle"][data-numerator="4"][data-denominator="10"]').first();
-    const sofiaTrendPoint = trendSection.locator('.sc-team-order-point[data-seller="sofia"][data-numerator="2"][data-denominator="10"]').first();
-    const viewerTrendPoint = trendSection.locator('.sc-team-order-point[data-seller="viewer"][data-numerator="4"][data-denominator="8"]').first();
+    const olleTrendPoint = orderPanel.locator('.sc-team-order-point[data-seller="olle"][data-numerator="4"][data-denominator="10"]').first();
+    const sofiaTrendPoint = orderPanel.locator('.sc-team-order-point[data-seller="sofia"][data-numerator="2"][data-denominator="10"]').first();
+    const viewerTrendPoint = orderPanel.locator('.sc-team-order-point[data-seller="viewer"][data-numerator="4"][data-denominator="8"]').first();
     for (const [seller, point] of [["olle", olleTrendPoint], ["sofia", sofiaTrendPoint], ["viewer", viewerTrendPoint]]) {
       if (await point.count() !== 1) {
-        const renderedPoints = await trendSection.locator(".sc-team-order-point").evaluateAll(points => points.map(point => ({
+        const renderedPoints = await orderPanel.locator(".sc-team-order-point").evaluateAll(points => points.map(point => ({
           seller: point.dataset.seller,
           numerator: point.dataset.numerator,
           denominator: point.dataset.denominator,
@@ -222,8 +263,8 @@ const viewport = mode === "mobile"
     const seriesStyles = {};
     for (const [seller, point] of [["olle", olleTrendPoint], ["sofia", sofiaTrendPoint], ["viewer", viewerTrendPoint]]) {
       const pointStyle = await point.getAttribute("data-series-style");
-      const legendStyle = await trendSection.locator(`.sc-team-order-legend-item[data-seller="${seller}"]`).getAttribute("data-series-style");
-      const lineStyles = await trendSection.locator(`.sc-team-order-line[data-seller="${seller}"]`).evaluateAll(lines => lines.map(line => line.dataset.seriesStyle));
+      const legendStyle = await orderPanel.locator(`.sc-team-order-legend-item[data-seller="${seller}"]`).getAttribute("data-series-style");
+      const lineStyles = await orderPanel.locator(`.sc-team-order-line[data-seller="${seller}"]`).evaluateAll(lines => lines.map(line => line.dataset.seriesStyle));
       if (!pointStyle || legendStyle !== pointStyle || lineStyles.some(style => style !== pointStyle)) {
         throw new Error(`${mode}: ${seller} does not keep one identity-derived style across points, lines, and legend`);
       }
@@ -266,9 +307,13 @@ const viewport = mode === "mobile"
     await page.locator("[data-sc-drawer-close]").click();
 
     const summaryRequestsBeforeTrendToggle = summaryRequestCount;
+    await positiveTab.click();
+    await assertTrendPanelState("positive");
+    await orderTab.click();
+    await assertTrendPanelState("order");
     await orderTab.focus();
     await orderTab.press("ArrowRight");
-    const positiveTab = trendSection.locator('[data-team-trend-view="positive"]');
+    await assertTrendPanelState("positive");
     if (await positiveTab.getAttribute("aria-selected") !== "true") {
       throw new Error(`${mode}: positive-dialogue trend was not activated by ArrowRight`);
     }
@@ -281,9 +326,9 @@ const viewport = mode === "mobile"
     if (summaryRequestCount !== summaryRequestsBeforeTrendToggle) {
       throw new Error(`${mode}: trend toggle triggered a new summary request`);
     }
-    const positiveOllePoint = trendSection.locator('.sc-team-order-point[data-trend-view="positive"][data-seller="olle"][data-numerator="3"][data-denominator="6"]').first();
-    const positiveSofiaPoint = trendSection.locator('.sc-team-order-point[data-trend-view="positive"][data-seller="sofia"][data-numerator="2"][data-denominator="6"]').first();
-    const positiveViewerPoint = trendSection.locator('.sc-team-order-point[data-trend-view="positive"][data-seller="viewer"][data-numerator="3"][data-denominator="6"]').first();
+    const positiveOllePoint = positivePanel.locator('.sc-team-order-point[data-trend-view="positive"][data-seller="olle"][data-numerator="3"][data-denominator="6"]').first();
+    const positiveSofiaPoint = positivePanel.locator('.sc-team-order-point[data-trend-view="positive"][data-seller="sofia"][data-numerator="2"][data-denominator="6"]').first();
+    const positiveViewerPoint = positivePanel.locator('.sc-team-order-point[data-trend-view="positive"][data-seller="viewer"][data-numerator="3"][data-denominator="6"]').first();
     for (const [seller, point] of [["olle", positiveOllePoint], ["sofia", positiveSofiaPoint], ["viewer", positiveViewerPoint]]) {
       if (await point.count() !== 1) throw new Error(`${mode}: missing deterministic ${seller} positive trend point`);
       if (await point.getAttribute("data-series-style") !== seriesStyles[seller]) {
@@ -315,15 +360,19 @@ const viewport = mode === "mobile"
     }
     await page.locator("[data-sc-drawer-close]").click();
     await positiveTab.press("Home");
+    await assertTrendPanelState("order");
     if (await trendSection.locator('[data-team-trend-view="order"]').getAttribute("aria-selected") !== "true") {
       throw new Error(`${mode}: Home did not activate the first trend tab`);
     }
     await trendSection.locator('[data-team-trend-view="order"]').press("End");
+    await assertTrendPanelState("positive");
     if (await trendSection.locator('[data-team-trend-view="positive"]').getAttribute("aria-selected") !== "true") {
       throw new Error(`${mode}: End did not activate the last trend tab`);
     }
     await trendSection.locator('[data-team-trend-view="positive"]').press("ArrowLeft");
+    await assertTrendPanelState("order");
     await trendSection.locator('[data-team-trend-view="order"]').press("ArrowRight");
+    await assertTrendPanelState("positive");
     if (summaryRequestCount !== summaryRequestsBeforeTrendToggle) {
       throw new Error(`${mode}: keyboard trend navigation triggered a summary request`);
     }
@@ -441,7 +490,8 @@ const viewport = mode === "mobile"
       if (trendTabHeights.length !== 2 || trendTabHeights.some(height => height < 44)) {
         throw new Error(`mobile: trend tabs are not usable touch targets: ${JSON.stringify(trendTabHeights)}`);
       }
-      const trendScroller = page.locator(".sc-team-order-trend-wrap");
+      const activeTrendPanel = trendSection.locator(".sc-team-trend-panel:not([hidden])");
+      const trendScroller = activeTrendPanel.locator(".sc-team-order-trend-wrap");
       await trendScroller.scrollIntoViewIfNeeded();
       const trendDimensions = await trendScroller.evaluate(element => ({
         scrollWidth: element.scrollWidth,
@@ -451,14 +501,14 @@ const viewport = mode === "mobile"
       if (!(trendDimensions.scrollWidth > trendDimensions.clientWidth)) {
         throw new Error(`mobile: trend graph is not horizontally scrollable: ${JSON.stringify(trendDimensions)}`);
       }
-      const viewerLegend = page.locator('.sc-team-order-legend-item[data-seller="viewer"]');
+      const viewerLegend = activeTrendPanel.locator('.sc-team-order-legend-item[data-seller="viewer"]');
       const legendHeight = await viewerLegend.evaluate(element => element.getBoundingClientRect().height);
       if (legendHeight < 44) throw new Error(`mobile: trend legend touch target is only ${legendHeight}px high`);
       await Promise.all([
         page.waitForResponse(response => response.url().includes("/sales-coaching-insights?") && response.url().includes("seller=viewer")),
         viewerLegend.click(),
       ]);
-      const selectedViewerLegend = page.locator('.sc-team-order-legend-item[data-seller="viewer"].is-selected');
+      const selectedViewerLegend = trendSection.locator('.sc-team-trend-panel:not([hidden]) .sc-team-order-legend-item[data-seller="viewer"].is-selected');
       await selectedViewerLegend.waitFor();
       if (!(await selectedViewerLegend.isVisible())) throw new Error("mobile: trend legend did not select viewer");
       if (await selectedViewerLegend.getAttribute("data-series-style") !== seriesStyles.viewer) {

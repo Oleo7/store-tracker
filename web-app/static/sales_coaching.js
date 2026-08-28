@@ -504,19 +504,7 @@
     return `<circle class="sc-team-order-point-shape" cx="${x}" cy="${y}" r="5.5"></circle>`;
   }
 
-  function teamTrendsMarkup(trends) {
-    const view = state.teamTrendView === "positive" ? "positive" : "order";
-    const config = view === "positive"
-      ? {
-          metricKey: "positive_to_order_10d",
-          title: "Positiv dialog → order inom 10 dagar",
-          evidenceLabel: "positiva dialoger har följts av order inom 10 dagar",
-        }
-      : {
-          metricKey: "order_10d",
-          title: "Kontakt – order inom 10 dagar",
-          evidenceLabel: "kontakter har följts av order inom 10 dagar",
-        };
+  function teamTrendPanelMarkup(trends, view, config, activeView) {
     const trend = trends?.metrics?.[config.metricKey] || {};
     const series = trend?.series || [];
     const slots = trends?.week_axis?.length
@@ -568,14 +556,29 @@
     const legend = series.map(item => {
       const style = teamTrendStyle(item.seller);
       const selected = isSelected(item.seller);
-      return `<button type="button" class="sc-team-order-legend-item${selected ? " is-selected" : hasSelection ? " is-unselected" : ""}" style="--series-color:${style.color}" data-seller="${escapeHtml(item.seller)}" data-series-style="${style.key}" aria-label="Visa ${escapeHtml(item.seller)} som vald säljare"><svg viewBox="0 0 42 18" aria-hidden="true"><line x1="2" x2="40" y1="9" y2="9" style="stroke:${style.color}${style.dash ? `;stroke-dasharray:${style.dash}` : ""}"></line>${teamTrendMarker(style.marker, 21, 9)}</svg><span>${escapeHtml(item.seller)}</span></button>`;
+      return `<button type="button" class="sc-team-order-legend-item${selected ? " is-selected" : hasSelection ? " is-unselected" : ""}" style="--series-color:${style.color}" data-trend-view="${view}" data-seller="${escapeHtml(item.seller)}" data-series-style="${style.key}" aria-label="Visa ${escapeHtml(item.seller)} som vald säljare"><svg viewBox="0 0 42 18" aria-hidden="true"><line x1="2" x2="40" y1="9" y2="9" style="stroke:${style.color}${style.dash ? `;stroke-dasharray:${style.dash}` : ""}"></line>${teamTrendMarker(style.marker, 21, 9)}</svg><span>${escapeHtml(item.seller)}</span></button>`;
     }).join("");
 
+    return `<div class="sc-team-trend-panel" id="sc-team-trend-panel-${view}" role="tabpanel" aria-labelledby="sc-team-trend-tab-${view}"${activeView === view ? "" : " hidden"}><h3>${escapeHtml(config.title)}</h3><div class="sc-team-order-trend-wrap" tabindex="0" aria-label="Horisontellt rullningsbar trendgraf"><svg class="sc-team-order-trend" viewBox="0 0 ${width} ${height}" role="group" aria-label="Veckovis ${escapeHtml(config.title)} för aktiva säljare, fast skala 0 till 100 procent">${grid}${seriesMarkup}${xLabels}</svg></div><div class="sc-team-order-legend" aria-label="Säljarserier">${legend || `<span class="sc-empty">Inga aktiva säljare.</span>`}</div></div>`;
+  }
+
+  function teamTrendsMarkup(trends) {
+    const view = state.teamTrendView === "positive" ? "positive" : "order";
     const tabs = [
-      ["order", "Kontakt → order"],
-      ["positive", "Positiv dialog → order"],
+      ["order", "Kontakt → order", {
+        metricKey: "order_10d",
+        title: "Kontakt – order inom 10 dagar",
+        evidenceLabel: "kontakter har följts av order inom 10 dagar",
+      }],
+      ["positive", "Positiv dialog → order", {
+        metricKey: "positive_to_order_10d",
+        title: "Positiv dialog → order inom 10 dagar",
+        evidenceLabel: "positiva dialoger har följts av order inom 10 dagar",
+      }],
     ];
-    return `<section class="sc-section sc-team-10d-trend-section" aria-labelledby="sc-team-trend-title"><div class="sc-section-heading"><div><h2 id="sc-team-trend-title">10-dagarskonvertering – trend</h2><p>Varje punkt avser en kontaktvecka. Endast veckor där hela 10-dagarsfönstret har passerat visas, så historiska veckopunkter förändras inte när tiden går. Diagrammen använder samma KPI-definitioner som Coachningsöversikten.</p></div></div><p class="sc-team-order-filter-note">Period-, säljar- och kanalfilter begränsar inte grafen. Vald säljare markeras; lifecycle och segment följer filtren.</p><div class="sc-team-trend-tabs" role="tablist" aria-label="Välj 10-dagarstrend">${tabs.map(([key, label]) => `<button type="button" role="tab" id="sc-team-trend-tab-${key}" data-team-trend-view="${key}" aria-selected="${view === key}" aria-controls="sc-team-trend-panel-${key}" tabindex="${view === key ? "0" : "-1"}">${label}</button>`).join("")}</div><div class="sc-team-trend-panel" id="sc-team-trend-panel-${view}" role="tabpanel" aria-labelledby="sc-team-trend-tab-${view}"><h3>${escapeHtml(config.title)}</h3><div class="sc-team-order-trend-wrap" tabindex="0" aria-label="Horisontellt rullningsbar trendgraf"><svg class="sc-team-order-trend" viewBox="0 0 ${width} ${height}" role="group" aria-label="Veckovis ${escapeHtml(config.title)} för aktiva säljare, fast skala 0 till 100 procent">${grid}${seriesMarkup}${xLabels}</svg></div><div class="sc-team-order-legend" aria-label="Säljarserier">${legend || `<span class="sc-empty">Inga aktiva säljare.</span>`}</div></div></section>`;
+    const tabList = tabs.map(([key, label]) => `<button type="button" role="tab" id="sc-team-trend-tab-${key}" data-team-trend-view="${key}" aria-selected="${view === key}" aria-controls="sc-team-trend-panel-${key}" tabindex="${view === key ? "0" : "-1"}">${label}</button>`).join("");
+    const panels = tabs.map(([key, _label, config]) => teamTrendPanelMarkup(trends, key, config, view)).join("");
+    return `<section class="sc-section sc-team-10d-trend-section" aria-labelledby="sc-team-trend-title"><div class="sc-section-heading"><div><h2 id="sc-team-trend-title">10-dagarskonvertering – trend</h2><p>Varje punkt avser en kontaktvecka. Endast veckor där hela 10-dagarsfönstret har passerat visas, så historiska veckopunkter förändras inte när tiden går. Diagrammen använder samma KPI-definitioner som Coachningsöversikten.</p></div></div><p class="sc-team-order-filter-note">Period-, säljar- och kanalfilter begränsar inte grafen. Vald säljare markeras; lifecycle och segment följer filtren.</p><div class="sc-team-trend-tabs" role="tablist" aria-label="Välj 10-dagarstrend">${tabList}</div>${panels}</section>`;
   }
 
   function matrixReasonLabel(reason) {

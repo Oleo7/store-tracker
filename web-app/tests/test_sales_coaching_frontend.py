@@ -168,7 +168,7 @@ class SalesCoachingFrontendTests(TestCase):
         self.assertNotIn('metric.status === "sufficient"\n      ? \'<span class="sc-status"', self.javascript)
 
     def test_two_live_team_trends_are_accessible_and_independent(self):
-        trend = self.javascript.split("function teamTrendsMarkup", 1)[1].split(
+        trend = self.javascript.split("function teamTrendPanelMarkup", 1)[1].split(
             "function matrixReasonLabel", 1
         )[0]
         render = self.javascript.split("function renderDashboard", 1)[1].split(
@@ -213,8 +213,16 @@ class SalesCoachingFrontendTests(TestCase):
         self.assertIn('role="tablist" aria-label="Välj 10-dagarstrend"', trend)
         self.assertIn('data-team-trend-view="${key}"', trend)
         self.assertIn('role="tabpanel"', trend)
+        self.assertIn('id="sc-team-trend-panel-${view}"', trend)
+        self.assertIn('aria-labelledby="sc-team-trend-tab-${view}"', trend)
+        self.assertIn('${activeView === view ? "" : " hidden"}', trend)
+        self.assertIn('aria-controls="sc-team-trend-panel-${key}"', trend)
         self.assertIn('aria-selected="${view === key}"', trend)
         self.assertIn('tabindex="${view === key ? "0" : "-1"}"', trend)
+        self.assertIn(
+            "tabs.map(([key, _label, config]) => teamTrendPanelMarkup(trends, key, config, view))",
+            trend,
+        )
         point_title = trend.split("const title =", 1)[1].split(";", 1)[0]
         self.assertNotIn("prelim", point_title.casefold())
         self.assertLess(render.index("teamComparisonMarkup"), render.index("teamTrendsMarkup"))
