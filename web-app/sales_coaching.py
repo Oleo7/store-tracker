@@ -21,7 +21,7 @@ from sales_coaching_rules import (
 )
 
 
-DEFINITIONS_VERSION = "sales_coaching_v8"
+DEFINITIONS_VERSION = "sales_coaching_v9"
 ANALYTICS_SNAPSHOT_VERSION = "sales_coaching_v2"
 PRIORITY_PERCENTILE_BASIS = "owner_active_scored_portfolio_midrank_v2"
 STOCKHOLM_ZONE = ZoneInfo("Europe/Stockholm")
@@ -161,7 +161,7 @@ METRIC_DEFINITIONS = {
     },
     "planned_completed_in_time": {
         "label": "Planerade genomförda i tid",
-        "definition": "Av de planerade aktiviteter som har förfallit eller redan avslutats: andelen som genomfördes senast på planerat datum. Avbrutna aktiviteter exkluderas.",
+        "definition": "Av de planerade aktiviteter som har förfallit eller redan avslutats: andelen som genomfördes senast vid planerat datum och klockslag. Avbrutna aktiviteter exkluderas. För äldre rader där exakt klockslag saknas används kalenderdatum som fallback.",
         "metric_type": "rate",
         "numerator_label": "planerade aktiviteter genomförda i tid",
         "denominator_label": "ansvariga planerade aktiviteter",
@@ -392,6 +392,50 @@ def _stockholm_datetime(value):
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=STOCKHOLM_ZONE)
     return parsed.astimezone(STOCKHOLM_ZONE)
+
+
+def _has_explicit_time(value):
+    """Distinguish a source timestamp from a legacy date-only value."""
+    if isinstance(value, datetime):
+        return True
+    if isinstance(value, date):
+        return False
+    text = _text(value)
+    if not text:
+        return False
+    return (
+        len(text) > 11
+        and text[10] in {"T", "t", " "}
+        and ":" in text[11:]
+    )
+
+
+def _planned_completion_timing(planned, completed_contact):
+    """Assess one completed plan using exact instants or date-only fallback."""
+    if not completed_contact:
+        return {"status": "missing_completion", "on_time": False}
+    scheduled_source = planned.get("scheduled_at")
+    completion_source = completed_contact.get("date_time")
+    scheduled_at = _stockholm_datetime(scheduled_source)
+    completed_at = _stockholm_datetime(completion_source)
+    if scheduled_at is None or completed_at is None:
+        return {"status": "missing_completion", "on_time": False}
+    if (
+        _has_explicit_time(scheduled_source)
+        and _has_explicit_time(completion_source)
+    ):
+        on_time = completed_at <= scheduled_at
+        return {
+            "status": "on_time" if on_time else "late",
+            "on_time": on_time,
+            "comparison_basis": "exact_timestamp",
+        }
+    on_time = completed_at.date() <= scheduled_at.date()
+    return {
+        "status": "date_fallback_on_time" if on_time else "date_fallback_late",
+        "on_time": on_time,
+        "comparison_basis": "date_fallback",
+    }
 
 
 def _is_v2_contact(row):
@@ -1631,25 +1675,55 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
             return True
         return row["scheduled_datetime"] <= generated
 
-    accountable_planned = [
-        row for row in planned_period
-        if is_accountable_planned(row)
-    ]
-    completed_planned = [
-        row for row in accountable_planned
-        if normalize_key(row.get("status")) == "completed"
-    ]
-    completed_in_time = []
-    for planned in completed_planned:
-        completed_contact = contact_by_id.get(_text(planned.get("completed_contact_id")))
-        if completed_contact and completed_contact.get("contact_date") and completed_contact["contact_date"] <= planned["scheduled_datetime"].date():
-            completed_in_time.append(planned)
+    def assess_planning_period(period_rows):
+        accountable = [
+            row for row in period_rows
+            if is_accountable_planned(row)
+        ]
+        completed = [
+            row for row in accountable
+            if normalize_key(row.get("status")) == "completed"
+        ]
+        on_time = []
+        exact_timestamp_count = 0
+        date_fallback_count = 0
+        missing_completion_count = 0
+        for planned in completed:
+            timing = _planned_completion_timing(
+                planned,
+                contact_by_id.get(_text(planned.get("completed_contact_id"))),
+            )
+            if timing.get("comparison_basis") == "exact_timestamp":
+                exact_timestamp_count += 1
+            elif timing.get("comparison_basis") == "date_fallback":
+                date_fallback_count += 1
+            else:
+                missing_completion_count += 1
+            if timing["on_time"]:
+                on_time.append(planned)
+        rate = _rate(len(on_time), len(accountable))
+        rate.update({
+            "exact_timestamp_count": exact_timestamp_count,
+            "date_fallback_count": date_fallback_count,
+            "missing_completion_count": missing_completion_count,
+        })
+        overdue = [
+            row for row in accountable
+            if normalize_key(row.get("status") or "planned") == "planned"
+            and row["scheduled_datetime"] < generated
+        ]
+        return {
+            "accountable": accountable,
+            "on_time": on_time,
+            "planned_completed_in_time": rate,
+            "overdue": overdue,
+        }
+
+    selected_planning = assess_planning_period(planned_period)
+    accountable_planned = selected_planning["accountable"]
+    completed_in_time = selected_planning["on_time"]
     skipped_planned = [row for row in accountable_planned if normalize_key(row.get("status")) == "skipped"]
-    overdue_planned = [
-        row for row in accountable_planned
-        if normalize_key(row.get("status") or "planned") == "planned"
-        and row["scheduled_datetime"] < generated
-    ]
+    overdue_planned = selected_planning["overdue"]
     positive_three_days_old = [
         row for row in current["positive"]
         if row.get("contact_date") and (generated.date() - row["contact_date"]).days >= 3
@@ -1800,9 +1874,9 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
         "positive_without_next_step": (
             len(positive_three_days_old) - len(positive_with_next_step)
         ),
-        "planned_completed_in_time": _rate(
-            len(completed_in_time), len(accountable_planned)
-        ),
+        "planned_completed_in_time": selected_planning[
+            "planned_completed_in_time"
+        ],
         "accountable_planned": len(accountable_planned),
         "overdue_rate": _rate(
             len(overdue_planned), len(accountable_planned)
@@ -1819,34 +1893,14 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
     }
 
     def planning_metrics(period_rows):
-        accountable = [
-            row for row in period_rows
-            if is_accountable_planned(row)
-        ]
-        completed = [
-            row for row in accountable
-            if normalize_key(row.get("status")) == "completed"
-        ]
-        on_time = []
-        for planned in completed:
-            completed_contact = contact_by_id.get(
-                _text(planned.get("completed_contact_id"))
-            )
-            if (
-                completed_contact
-                and completed_contact.get("contact_date")
-                and completed_contact["contact_date"]
-                <= planned["scheduled_datetime"].date()
-            ):
-                on_time.append(planned)
-        overdue = [
-            row for row in accountable
-            if normalize_key(row.get("status") or "planned") == "planned"
-            and row["scheduled_datetime"] < generated
-        ]
+        assessment = assess_planning_period(period_rows)
         return {
-            "planned_completed_in_time": _rate(len(on_time), len(accountable)),
-            "overdue_rate": _rate(len(overdue), len(accountable)),
+            "planned_completed_in_time": assessment[
+                "planned_completed_in_time"
+            ],
+            "overdue_rate": _rate(
+                len(assessment["overdue"]), len(assessment["accountable"])
+            ),
         }
 
     def next_step_metrics(aggregate):

@@ -1593,7 +1593,7 @@ class SnapshotAndAggregateTests(TestCase):
         summary = self.summary([])
 
         self.assertTrue(required.issubset(METRIC_DEFINITIONS))
-        self.assertEqual(summary["meta"]["definitions_version"], "sales_coaching_v8")
+        self.assertEqual(summary["meta"]["definitions_version"], "sales_coaching_v9")
         self.assertNotIn("positive_to_order_10d_comparable", METRIC_DEFINITIONS)
         self.assertNotIn("order_10d_comparable", METRIC_DEFINITIONS)
         self.assertNotIn("comparable", summary["kpis"]["positive_to_order_10d"])
@@ -2610,6 +2610,208 @@ class SnapshotAndAggregateTests(TestCase):
         self.assertEqual(discipline["overdue_planned"], 1)
         self.assertEqual(discipline["skipped"], 1)
         self.assertEqual(discipline["cancelled_excluded"], 1)
+
+    def test_planned_completion_uses_exact_instants_and_date_only_fallback(self):
+        completion_times = {
+            "before": "2026-08-10T09:59:00",
+            "boundary": "2026-08-10T10:00:00",
+            "minute-late": "2026-08-10T10:01:00",
+            "same-day-late": "2026-08-10T17:00:00",
+            "previous-day": "2026-08-10T17:00:00",
+            "next-day": "2026-08-12T08:00:00",
+            "fallback-same-day": "2026-08-12",
+            "fallback-next-day": "2026-08-14",
+            "explicit-midnight-late": "2026-08-14T00:01:00",
+            "offset-boundary": "2026-08-10T08:00:00Z",
+            "offset-minute-late": "2026-08-10T08:01:00Z",
+        }
+        scheduled_times = {
+            "before": "2026-08-10T10:00:00",
+            "boundary": "2026-08-10T10:00:00",
+            "minute-late": "2026-08-10T10:00:00",
+            "same-day-late": "2026-08-10T10:00:00",
+            "previous-day": "2026-08-11T10:00:00",
+            "next-day": "2026-08-11T10:00:00",
+            "fallback-same-day": "2026-08-12",
+            "fallback-next-day": "2026-08-13",
+            "explicit-midnight-late": "2026-08-14T00:00:00",
+            "offset-boundary": "2026-08-10T10:00:00+02:00",
+            "offset-minute-late": "2026-08-10T10:00:00+02:00",
+        }
+        rows = [
+            activity(
+                contact_id, when, result="Neutral",
+                email_id=f"mail-{contact_id}", activity_source="crm_email",
+            )
+            for contact_id, when in completion_times.items()
+        ]
+        planned = [
+            {
+                "planned_activity_id": f"plan-{contact_id}",
+                "scheduled_at": scheduled_times[contact_id],
+                "status": "completed",
+                "completed_contact_id": contact_id,
+                "user_name": "olle",
+                "customer_id": "customer-1",
+            }
+            for contact_id in completion_times
+        ] + [
+            {
+                "planned_activity_id": "missing-completion",
+                "scheduled_at": "2026-08-15T10:00:00",
+                "status": "completed",
+                "completed_contact_id": "does-not-exist",
+                "user_name": "olle",
+                "customer_id": "customer-1",
+            },
+            {
+                "planned_activity_id": "skipped",
+                "scheduled_at": "2026-08-15T10:00:00",
+                "status": "skipped",
+                "user_name": "olle",
+                "customer_id": "customer-1",
+            },
+            {
+                "planned_activity_id": "overdue",
+                "scheduled_at": "2026-08-15T10:00:00",
+                "status": "planned",
+                "user_name": "olle",
+                "customer_id": "customer-1",
+            },
+            {
+                "planned_activity_id": "future-open",
+                "scheduled_at": "2026-08-20T18:00:00",
+                "status": "planned",
+                "user_name": "olle",
+                "customer_id": "customer-1",
+            },
+            {
+                "planned_activity_id": "cancelled",
+                "scheduled_at": "2026-08-15T10:00:00",
+                "status": "cancelled",
+                "user_name": "olle",
+                "customer_id": "customer-1",
+            },
+        ]
+
+        summary = self.summary(rows, planned_activities=planned)
+        discipline = summary["follow_up_discipline"]
+        metric = discipline["planned_completed_in_time"]
+        drilldown = build_drilldown(summary, "planned_on_time")
+        roles = {row["contact_id"]: row["cohort_role"] for row in drilldown["rows"]}
+
+        self.assertEqual((metric["numerator"], metric["denominator"]), (5, 14))
+        self.assertEqual(metric["exact_timestamp_count"], 9)
+        self.assertEqual(metric["date_fallback_count"], 2)
+        self.assertEqual(metric["missing_completion_count"], 1)
+        self.assertEqual(discipline["overdue_planned"], 1)
+        self.assertEqual(discipline["skipped"], 1)
+        self.assertEqual(discipline["cancelled_excluded"], 1)
+        self.assertEqual(drilldown["total_count"], metric["denominator"])
+        self.assertEqual(
+            sum(row["cohort_role"] == "numerator" for row in drilldown["rows"]),
+            metric["numerator"],
+        )
+        self.assertEqual(
+            {contact_id for contact_id, role in roles.items() if role == "numerator"},
+            {
+                "before", "boundary", "previous-day", "fallback-same-day",
+                "offset-boundary",
+            },
+        )
+        for contact_id in (
+            "minute-late", "same-day-late", "next-day",
+            "fallback-next-day", "explicit-midnight-late",
+            "offset-minute-late",
+        ):
+            self.assertEqual(roles[contact_id], "missed_outcome")
+
+    def test_planned_completion_benchmarks_use_the_same_exact_timing(self):
+        users = [
+            {"user_name": seller, "active": "Y", "admin": "N"}
+            for seller in ("olle", "sofia", "maja")
+        ]
+        rows = []
+        planned = []
+        for seller, on_time_count in (("olle", 7), ("sofia", 9), ("maja", 8)):
+            for index in range(10):
+                contact_id = f"{seller}-{index}"
+                rows.append(activity(
+                    contact_id,
+                    "2026-08-10T09:59:00"
+                    if index < on_time_count else "2026-08-10T10:01:00",
+                    seller=seller, result="Neutral",
+                    email_id=f"mail-{contact_id}", activity_source="crm_email",
+                ))
+                planned.append({
+                    "planned_activity_id": f"plan-{contact_id}",
+                    "scheduled_at": "2026-08-10T10:00:00",
+                    "status": "completed",
+                    "completed_contact_id": contact_id,
+                    "user_name": seller,
+                    "customer_id": "customer-1",
+                })
+
+        summary = self.summary(
+            rows, users=users, planned_activities=planned, seller="olle",
+        )
+        comparisons = {item["seller"]: item for item in summary["seller_comparison"]}
+
+        self.assertEqual(
+            comparisons["olle"]["planned_completed_in_time"]["value"], .7
+        )
+        self.assertEqual(
+            comparisons["olle"]["planned_completed_in_time"]["exact_timestamp_count"],
+            10,
+        )
+        self.assertEqual(
+            comparisons["sofia"]["planned_completed_in_time"]["value"], .9
+        )
+        self.assertEqual(
+            comparisons["maja"]["planned_completed_in_time"]["value"], .8
+        )
+        self.assertAlmostEqual(
+            comparisons["olle"]["planned_completed_in_time"]["comparisons"]["peer_median"],
+            .85,
+        )
+        self.assertEqual(
+            summary["follow_up_discipline"]["planned_completed_in_time"]["value"],
+            .7,
+        )
+
+    def test_exact_timing_drives_planning_card_and_previous_period(self):
+        rows = []
+        planned = []
+        for period, day, on_time_count in (("current", "2026-08-10", 6), ("previous", "2026-07-20", 8)):
+            for index in range(10):
+                contact_id = f"{period}-{index}"
+                rows.append(activity(
+                    contact_id,
+                    f"{day}T09:59:00" if index < on_time_count else f"{day}T17:00:00",
+                    result="Neutral", email_id=f"mail-{contact_id}",
+                    activity_source="crm_email",
+                ))
+                planned.append({
+                    "planned_activity_id": f"plan-{contact_id}",
+                    "scheduled_at": f"{day}T10:00:00",
+                    "status": "completed",
+                    "completed_contact_id": contact_id,
+                    "user_name": "olle",
+                    "customer_id": "customer-1",
+                })
+
+        summary = self.summary(
+            rows, planned_activities=planned, seller="olle",
+        )
+        metric = summary["follow_up_discipline"]["planned_completed_in_time"]
+        card = next(
+            card for card in summary["coaching_cards"]
+            if card["code"] == "planning_discipline"
+        )
+
+        self.assertEqual((metric["numerator"], metric["denominator"]), (6, 10))
+        self.assertEqual(metric["comparisons"]["previous_period"], .8)
+        self.assertEqual((card["evidence"]["numerator"], card["evidence"]["denominator"]), (6, 10))
 
     def test_only_planned_or_completed_linked_followups_are_valid_next_steps(self):
         statuses = ("planned", "completed", "skipped", "cancelled")
