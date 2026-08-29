@@ -422,6 +422,9 @@ class SalesCoachingFrontendTests(TestCase):
         self.assertIn("definitionParts(card.metric_key", self.javascript)
         self.assertIn("metricHeader(", self.javascript)
         self.assertIn("sc-metric-info", self.css)
+        planning_definition = METRIC_DEFINITIONS["planned_completed_in_time"]["definition"]
+        self.assertIn("planerat datum och klockslag", planning_definition)
+        self.assertIn("kalenderdatum som fallback", planning_definition)
 
     def test_synchronous_dialogue_metrics_are_not_applicable_for_email(self):
         self.assertEqual(
