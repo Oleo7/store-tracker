@@ -61,7 +61,7 @@ METRIC_DEFINITIONS = {
     },
     "positive_to_order_10d": {
         "label": "Positiv dialog → order inom 10 dagar",
-        "definition": "Andelen av alla berättigade positiva besök och telefonsamtal med säker kundidentitet i vald period som hittills har följts av en attribuerad order inom 0–10 dagar. Kontakter vars 10-dagarsfönster fortfarande är öppet ingår i nämnaren, därför är måttet preliminärt. Samma definition används i Coachningsöversikt, Teamjämförelse och övriga jämförelser. När olika säljare eller perioder har olika många väntande utfall kan jämförelsen fortfarande förändras när fler order registreras.",
+        "definition": "Andelen av alla berättigade positiva besök och telefonsamtal med säker kundidentitet i vald period som hittills har följts av en attribuerad order inom 0–10 dagar. Kontakter vars 10-dagarsfönster fortfarande är öppet ingår i nämnaren, därför är måttet preliminärt. Samma definition används i Coachningsöversikt, Teamjämförelse och övriga jämförelser. Jämförelser mellan säljare kan förändras medan utfall fortfarande väntar. Jämförelse med föregående period visas först när båda perioderna saknar väntande 10-dagarsutfall.",
         "metric_type": "rate",
         "numerator_label": "positiva dialoger som hittills följts av attribuerad order",
         "denominator_label": "positiva dialoger har följts av order",
@@ -72,7 +72,7 @@ METRIC_DEFINITIONS = {
     },
     "order_10d": {
         "label": "Kontakt – order inom 10 dagar",
-        "definition": "Andelen av alla berättigade nådda mänskliga kontakter med säker kundidentitet i vald period som hittills har följts av en attribuerad order inom 0–10 dagar. Kontakter vars 10-dagarsfönster fortfarande är öppet ingår i nämnaren, därför är måttet preliminärt. Samma definition används i Coachningsöversikt, Teamjämförelse och övriga jämförelser. När olika säljare eller perioder har olika många väntande utfall kan jämförelsen fortfarande förändras när fler order registreras.",
+        "definition": "Andelen av alla berättigade nådda mänskliga kontakter med säker kundidentitet i vald period som hittills har följts av en attribuerad order inom 0–10 dagar. Kontakter vars 10-dagarsfönster fortfarande är öppet ingår i nämnaren, därför är måttet preliminärt. Samma definition används i Coachningsöversikt, Teamjämförelse och övriga jämförelser. Jämförelser mellan säljare kan förändras medan utfall fortfarande väntar. Jämförelse med föregående period visas först när båda perioderna saknar väntande 10-dagarsutfall.",
         "metric_type": "rate",
         "numerator_label": "nådda kontakter som hittills följts av attribuerad order",
         "denominator_label": "kontakter har följts av order",

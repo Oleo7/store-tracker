@@ -90,6 +90,18 @@ class SalesCoachingFrontendTests(TestCase):
         self.assertIn('aria-expanded="false"', self.javascript)
         self.assertIn("explanation.hidden = expanded", self.javascript)
 
+    def test_live_10_day_definitions_explain_pending_comparisons(self):
+        expected = {
+            "positive_to_order_10d": "Andelen av alla berättigade positiva besök och telefonsamtal med säker kundidentitet i vald period som hittills har följts av en attribuerad order inom 0–10 dagar. Kontakter vars 10-dagarsfönster fortfarande är öppet ingår i nämnaren, därför är måttet preliminärt. Samma definition används i Coachningsöversikt, Teamjämförelse och övriga jämförelser. Jämförelser mellan säljare kan förändras medan utfall fortfarande väntar. Jämförelse med föregående period visas först när båda perioderna saknar väntande 10-dagarsutfall.",
+            "order_10d": "Andelen av alla berättigade nådda mänskliga kontakter med säker kundidentitet i vald period som hittills har följts av en attribuerad order inom 0–10 dagar. Kontakter vars 10-dagarsfönster fortfarande är öppet ingår i nämnaren, därför är måttet preliminärt. Samma definition används i Coachningsöversikt, Teamjämförelse och övriga jämförelser. Jämförelser mellan säljare kan förändras medan utfall fortfarande väntar. Jämförelse med föregående period visas först när båda perioderna saknar väntande 10-dagarsutfall.",
+        }
+
+        for metric_key, definition in expected.items():
+            with self.subTest(metric_key=metric_key):
+                self.assertEqual(
+                    METRIC_DEFINITIONS[metric_key]["definition"], definition
+                )
+
     def test_frontend_uses_backend_rate_contract_without_recalculating_kpis(self):
         self.assertIn("percent(metric.value)", self.javascript)
         self.assertIn("rateEvidence(metric)", self.javascript)
