@@ -56,7 +56,7 @@ if __name__ == "__main__":
         "sofia": ("Butik B", "22222222-2222-4222-8222-222222222222"),
         "viewer": ("Butik C", "33333333-3333-4333-8333-333333333333"),
     }
-    for seller, positive_count in (("sofia", 6), ("viewer", 8)):
+    for seller, positive_count in (("sofia", 10), ("viewer", 10)):
         customer, customer_id = seller_customers[seller]
         for index in range(10):
             row = {

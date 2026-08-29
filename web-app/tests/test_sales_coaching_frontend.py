@@ -177,6 +177,7 @@ class SalesCoachingFrontendTests(TestCase):
         for expected in (
             "Varje punkt avser en kontaktvecka",
             "hela 10-dagarsfönstret har passerat",
+            "veckopunkterna förändras inte enbart för att fler dagar passerar",
             "Diagrammen använder samma KPI-definitioner som Coachningsöversikten",
             "Period-, säljar- och kanalfilter begränsar inte grafen",
             "lifecycle och segment följer filtren",
@@ -331,6 +332,12 @@ class SalesCoachingFrontendTests(TestCase):
         self.assertIn('`${value >= 0 ? "+" : ""}${number(value, 1)} aktiviteter`', self.javascript)
         self.assertIn("formatValue(comparisons.peer_median)", self.javascript)
         self.assertIn("formatValue(previousValue)", self.javascript)
+        self.assertIn(
+            'comparisons.previous_period_suppressed_reason === "pending_10d_outcomes"',
+            self.javascript,
+        )
+        self.assertIn("!previousSuppressed && previousValue", self.javascript)
+        self.assertIn("!previousSuppressed && comparisons.previous_period_status", self.javascript)
 
     def test_priority_matrix_has_swedish_denominator_zero_reason(self):
         self.assertIn(
@@ -349,6 +356,29 @@ class SalesCoachingFrontendTests(TestCase):
             kpi_markup,
         )
         self.assertNotIn("väntar fortfarande på fullt 10-dagarsutfall", self.javascript)
+        coaching_markup = self.javascript.split(
+            "function coachingMarkup", 1
+        )[1].split("function conversionMarkup", 1)[0]
+        self.assertIn(
+            '["order_10d", "positive_to_order_10d"].includes(card.metric_key)',
+            coaching_markup,
+        )
+        self.assertIn("Number(card.evidence?.waiting_outcome_count) > 0", coaching_markup)
+        self.assertIn(
+            "Preliminärt · ${number(card.evidence.waiting_outcome_count)} väntar på 10-dagarsutfall",
+            coaching_markup,
+        )
+        matrix_markup = self.javascript.split(
+            "function priorityMatrixPanelMarkup", 1
+        )[1].split("function priorityMatrixMarkup", 1)[0]
+        self.assertIn("Number(xRate.waiting_outcome_count) > 0", matrix_markup)
+        self.assertIn(
+            "preliminärt: ${number(xRate.waiting_outcome_count)} väntar på 10-dagarsutfall",
+            matrix_markup,
+        )
+        self.assertIn('label: "Väntar på 10-dagarsutfall"', self.javascript)
+        self.assertNotIn("väntar på slutligt 10-dagarsutfall", self.javascript)
+        self.assertNotIn("Väntar på slutligt utfall", self.javascript)
         self.assertIn('drilldownMetric: "resolved_order_10d"', self.javascript)
         self.assertIn('drilldownMetric: "converted_order_10d"', self.javascript)
 

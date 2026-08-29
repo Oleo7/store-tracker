@@ -94,6 +94,9 @@ const viewport = mode === "mobile"
     if (!contactOrderText.includes("Preliminärt · 22 väntar på 10-dagarsutfall")) {
       throw new Error(`${mode}: contact pending copy/count is wrong: ${contactOrderText}`);
     }
+    if (contactOrderText.includes("Föregående period") || !contactOrderText.includes("Median övriga säljare")) {
+      throw new Error(`${mode}: pending contact KPI must suppress previous period but keep peer median: ${contactOrderText}`);
+    }
     if (contactOrderText.includes("40 %") || contactOrderText.includes("Jämförbart")) {
       throw new Error(`${mode}: removed comparable contact outcome is still visible: ${contactOrderText}`);
     }
@@ -104,6 +107,12 @@ const viewport = mode === "mobile"
     }
     if (!positiveOrderText.includes("Preliminärt · 15 väntar på 10-dagarsutfall")) {
       throw new Error(`${mode}: positive pending copy/count is wrong: ${positiveOrderText}`);
+    }
+    if (positiveOrderText.includes("Föregående period")) {
+      throw new Error(`${mode}: pending positive KPI still shows previous period: ${positiveOrderText}`);
+    }
+    if (!positiveOrderText.includes("Median övriga säljare")) {
+      throw new Error(`${mode}: pending positive KPI lost its peer median: ${positiveOrderText}`);
     }
     if (positiveOrderText.includes("40 %") || positiveOrderText.includes("Jämförbart")) {
       throw new Error(`${mode}: removed comparable positive outcome is still visible: ${positiveOrderText}`);
@@ -127,6 +136,23 @@ const viewport = mode === "mobile"
     if (await page.locator(".sc-kpi-comparable").count()) {
       throw new Error(`${mode}: removed comparable KPI row still renders`);
     }
+    const closingStrength = page.locator(".sc-coaching-card", {
+      hasText: "Stark positiv-till-order-konvertering",
+    });
+    if (await closingStrength.count() !== 1) {
+      throw new Error(`${mode}: deterministic live 10-day strength card is missing`);
+    }
+    const closingStrengthText = await closingStrength.innerText();
+    if (!closingStrengthText.includes("7 av 28 · 25 %") || !closingStrengthText.includes("Preliminärt · 15 väntar på 10-dagarsutfall")) {
+      throw new Error(`${mode}: live strength card evidence/pending copy is wrong: ${closingStrengthText}`);
+    }
+    await closingStrength.locator('[data-drilldown="positive_to_order_10d"]').click();
+    await page.locator("#sc-drawer-content .sc-drawer-meta").waitFor();
+    const closingDrawerText = await page.locator("#sc-drawer-content").innerText();
+    if (!closingDrawerText.includes("Visar 28 av 28") || (closingDrawerText.match(/Konverterad/g) || []).length !== 7) {
+      throw new Error(`${mode}: strength card drilldown does not reconcile 7/28: ${closingDrawerText}`);
+    }
+    await page.locator("[data-sc-drawer-close]").click();
     const statusLabels = await page.locator(".sc-kpi-card .sc-status").allInnerTexts();
     if (statusLabels.some(label => label.trim() !== "Inte tillräckligt underlag")) {
       throw new Error(`${mode}: a sufficient KPI status badge is still visible`);
@@ -440,6 +466,13 @@ const viewport = mode === "mobile"
     }
     if (await page.locator('.sc-kpi-card[data-kpi-key="order_10d"] .sc-kpi-secondary').count()) {
       throw new Error(`${mode}: zero pending outcomes still render a pending line`);
+    }
+    if (await page.locator(".sc-coaching-card .sc-rate-pending").count()) {
+      throw new Error(`${mode}: zero pending outcomes still render on a coaching card`);
+    }
+    const filteredTeamOlle = await page.locator(".sc-comparison-table tbody tr", { hasText: "Olle" }).innerText();
+    if (!filteredTeamOlle.includes("7 av 35") || !filteredTeamOlle.includes("7 av 28")) {
+      throw new Error(`${mode}: channel filter incorrectly changed all-channel team comparison: ${filteredTeamOlle}`);
     }
     await page.locator('[data-diagnostic-tab="channels"]').click();
     const emailRow = page.locator('[data-channel-row="email"]');

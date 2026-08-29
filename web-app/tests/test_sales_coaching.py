@@ -623,7 +623,93 @@ class OutcomeResolutionTests(TestCase):
             .66665,
         )
 
-    def test_previous_period_comparison_uses_same_live_rate(self):
+    def test_current_pending_suppresses_live_previous_period_comparisons(self):
+        contacts = []
+        orders = []
+        for index in range(10):
+            current_id = f"current-{index}"
+            previous_id = f"previous-{index}"
+            contacts.append((current_id, "2026-08-16 10:00", {}))
+            contacts.append((previous_id, "2026-08-01 10:00", {}))
+            if index < 2:
+                orders.append((f"CURRENT-{index}", "2026-08-18", current_id))
+            if index < 4:
+                orders.append((f"PREVIOUS-{index}", "2026-08-03", previous_id))
+
+        metric = self.build_summary(
+            contacts,
+            orders,
+            start="2026-08-11",
+            end="2026-08-20",
+            seller="olle",
+        )["kpis"]["order_10d"]
+
+        self.assertEqual(
+            (
+                metric["numerator"], metric["denominator"],
+                metric["waiting_outcome_count"], metric["value"],
+            ),
+            (2, 10, 8, .2),
+        )
+        self.assertIsNone(metric["comparisons"]["previous_period"])
+        self.assertIsNone(metric["comparisons"]["delta_previous"])
+        self.assertEqual(
+            metric["comparisons"]["previous_period_status"], "sufficient"
+        )
+        self.assertEqual(
+            metric["comparisons"]["previous_period_suppressed_reason"],
+            "pending_10d_outcomes",
+        )
+        self.assertNotIn("comparable", metric)
+        positive = self.build_summary(
+            contacts,
+            orders,
+            start="2026-08-11",
+            end="2026-08-20",
+            seller="olle",
+        )["kpis"]["positive_to_order_10d"]
+        self.assertEqual(
+            (
+                positive["numerator"], positive["denominator"],
+                positive["waiting_outcome_count"], positive["value"],
+            ),
+            (2, 10, 8, .2),
+        )
+        self.assertIsNone(positive["comparisons"]["previous_period"])
+        self.assertIsNone(positive["comparisons"]["delta_previous"])
+        self.assertEqual(
+            positive["comparisons"]["previous_period_suppressed_reason"],
+            "pending_10d_outcomes",
+        )
+
+    def test_previous_pending_suppresses_both_live_metrics(self):
+        contacts = []
+        orders = []
+        for index in range(10):
+            current_id = f"current-converted-{index}"
+            contacts.append((current_id, "2026-08-18 10:00", {}))
+            orders.append((f"CURRENT-{index}", "2026-08-19", current_id))
+            contacts.append((f"previous-pending-{index}", "2026-08-16 10:00", {}))
+
+        summary = self.build_summary(
+            contacts,
+            orders,
+            start="2026-08-18",
+            end="2026-08-20",
+            seller="olle",
+        )
+
+        for metric_key in ("order_10d", "positive_to_order_10d"):
+            with self.subTest(metric_key=metric_key):
+                comparison = summary["kpis"][metric_key]["comparisons"]
+                self.assertIsNone(comparison["previous_period"])
+                self.assertIsNone(comparison["delta_previous"])
+                self.assertEqual(
+                    comparison["previous_period_suppressed_reason"],
+                    "pending_10d_outcomes",
+                )
+
+    def test_complete_live_periods_keep_previous_comparisons(self):
         contacts = []
         orders = []
         for index in range(10):
@@ -631,26 +717,30 @@ class OutcomeResolutionTests(TestCase):
             previous_id = f"previous-{index}"
             contacts.append((current_id, "2026-08-01 10:00", {}))
             contacts.append((previous_id, "2026-07-20 10:00", {}))
-            orders.append((f"CURRENT-{index}", "2026-08-03", current_id))
-            orders.append((f"PREVIOUS-{index}", "2026-07-25", previous_id))
-            contacts.append((f"current-pending-{index}", "2026-08-17 10:00", {}))
-            contacts.append((f"previous-miss-{index}", "2026-07-19 10:00", {}))
+            if index < 4:
+                orders.append((f"CURRENT-{index}", "2026-08-03", current_id))
+            if index < 6:
+                orders.append((f"PREVIOUS-{index}", "2026-07-22", previous_id))
 
-        metric = self.build_summary(
-            contacts, orders, seller="olle"
-        )["kpis"]["order_10d"]
+        summary = self.build_summary(contacts, orders, seller="olle")
 
-        self.assertEqual(metric["value"], .5)
-        self.assertEqual(metric["comparisons"]["previous_period"], .5)
+        for metric_key in ("order_10d", "positive_to_order_10d"):
+            with self.subTest(metric_key=metric_key):
+                metric = summary["kpis"][metric_key]
+                self.assertEqual(metric["waiting_outcome_count"], 0)
+                self.assertEqual(metric["comparisons"]["previous_period"], .6)
+                self.assertAlmostEqual(
+                    metric["comparisons"]["delta_previous"], -.2
+                )
+                self.assertNotIn(
+                    "previous_period_suppressed_reason", metric["comparisons"]
+                )
         self.assertEqual(
-            metric["comparisons"]["previous_period_status"], "sufficient"
+            summary["kpis"]["positive_dialogue"]["comparisons"][
+                "previous_period"
+            ],
+            1,
         )
-        self.assertNotIn("comparable", metric)
-        positive = self.build_summary(
-            contacts, orders, seller="olle"
-        )["kpis"]["positive_to_order_10d"]
-        self.assertEqual(positive["value"], .5)
-        self.assertEqual(positive["comparisons"]["previous_period"], .5)
 
     def test_live_previous_period_keeps_small_sample_status_without_value(self):
         contacts = [
@@ -1681,6 +1771,109 @@ class SnapshotAndAggregateTests(TestCase):
         self.assertEqual(comparison["previous_period"], .6)
         self.assertAlmostEqual(comparison["delta_previous"], .2)
 
+    def test_channel_filtered_seller_coaching_uses_same_channel_peers_and_drilldown(self):
+        users = [
+            {"user_name": name, "active": "Y", "admin": "N"}
+            for name in ("olle", "sofia", "maja")
+        ]
+        customers = []
+        rows = []
+        orders = []
+
+        def add_contacts(seller, channel, count, converted, prefix):
+            for index in range(count):
+                customer_id = f"{prefix}-customer-{index}"
+                customer_name = f"{prefix.title()} customer {index}"
+                customer_number = f"{prefix[:2]}{index:03d}"
+                customers.append({
+                    "customer": customer_name,
+                    "customer_id": customer_id,
+                    "customer_number": customer_number,
+                    "sales_person": seller.title(),
+                    "customer_segment": "A",
+                })
+                rows.append(activity(
+                    f"{prefix}-contact-{index}",
+                    f"2026-08-{index + 1:02d} 10:00",
+                    seller=seller,
+                    channel=channel,
+                    result="Positiv",
+                    customer_id=customer_id,
+                    customer=customer_name,
+                ))
+                if index < converted:
+                    order_row = order(
+                        f"{prefix.upper()}-{index}",
+                        f"2026-08-{index + 2:02d}",
+                        customer_id=customer_id,
+                        customer=customer_name,
+                    )
+                    order_row["Customer number"] = customer_number
+                    orders.append(order_row)
+
+        add_contacts("olle", "Besök", 10, 2, "olle-visit")
+        add_contacts("olle", "Telefon", 10, 8, "olle-phone")
+        add_contacts("sofia", "Besök", 10, 5, "sofia-visit")
+        add_contacts("maja", "Besök", 10, 5, "maja-visit")
+
+        summary = self.summary(
+            rows,
+            orders,
+            users=users,
+            customers=customers,
+            seller="olle",
+            channel="visit",
+        )
+        all_channel = self.summary(
+            rows,
+            orders,
+            users=users,
+            customers=customers,
+            seller="olle",
+            channel="all",
+        )
+
+        metric = summary["kpis"]["positive_to_order_10d"]
+        self.assertEqual(
+            (metric["numerator"], metric["denominator"], metric["value"]),
+            (2, 10, .2),
+        )
+        self.assertEqual(metric["comparisons"]["peer_median"], .5)
+        self.assertEqual(metric["comparisons"]["peer_count"], 2)
+        self.assertNotEqual(metric["value"], .5, "must not use Olle's all-channel rate")
+
+        closing = next(
+            card for card in summary["coaching_cards"]
+            if card["code"] == "closing_gap"
+        )
+        self.assertEqual(
+            (
+                closing["evidence"]["numerator"],
+                closing["evidence"]["denominator"],
+                closing["evidence"]["value"],
+            ),
+            (2, 10, .2),
+        )
+        self.assertEqual(closing["evidence"]["comparisons"]["peer_median"], .5)
+
+        drilldown = build_drilldown(
+            summary, closing["drilldown_metric"]
+        )
+        self.assertEqual(drilldown["total_count"], closing["evidence"]["denominator"])
+        self.assertEqual(
+            sum(row["cohort_role"] == "numerator" for row in drilldown["rows"]),
+            closing["evidence"]["numerator"],
+        )
+        self.assertEqual({row["channel"] for row in drilldown["rows"]}, {"visit"})
+
+        team_olle = next(
+            item for item in summary["seller_comparison"]
+            if item["seller"] == "olle"
+        )
+        self.assertEqual(team_olle["positive_to_order_10d"]["value"], .5)
+        self.assertEqual(summary["seller_comparison"], all_channel["seller_comparison"])
+        self.assertEqual(summary["team_10d_trends"], all_channel["team_10d_trends"])
+
     def test_channel_filtered_activity_count_uses_only_filtered_previous_period(self):
         rows = [
             activity(f"phone-current-{index}", f"2026-08-0{index + 1} 10:00")
@@ -2049,6 +2242,13 @@ class SnapshotAndAggregateTests(TestCase):
         self.assertEqual(matrix["axes"]["x"]["key"], "order_10d")
         self.assertEqual(
             {item["order_10d"]["denominator"] for item in matrix["sellers"]},
+            {10},
+        )
+        self.assertEqual(
+            {
+                item["order_10d"]["waiting_outcome_count"]
+                for item in matrix["sellers"]
+            },
             {10},
         )
         self.assertEqual(

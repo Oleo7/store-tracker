@@ -1037,15 +1037,21 @@ def _aggregate_period(rows, attribution):
                 len(sync),
             ),
             "positive_dialogue": _rate(len(sync_positive), len(sync_reached)),
-            "positive_to_order_10d": _rate(
-                len(sync_converted_positive),
-                len(sync_positive_attribution_eligible),
-            ),
+            "positive_to_order_10d": {
+                **_rate(
+                    len(sync_converted_positive),
+                    len(sync_positive_attribution_eligible),
+                ),
+                "waiting_outcome_count": len(sync_waiting_positive),
+            },
             "positive_to_order_10d_comparable": _rate(
                 len(sync_mature_positive_converted),
                 len(sync_mature_positive),
             ),
-            "order_10d": _rate(len(ordered_contacts), len(attribution_eligible)),
+            "order_10d": {
+                **_rate(len(ordered_contacts), len(attribution_eligible)),
+                "waiting_outcome_count": len(waiting),
+            },
             "order_10d_comparable": _rate(
                 len(mature_converted), len(mature)
             ),
@@ -1376,8 +1382,30 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
     current, previous = _aggregate_period(rows, attribution), _aggregate_period(comparison_rows, attribution)
     for key, rate in current["rates"].items():
         previous_rate = previous["rates"][key]
-        if key in {
-            "positive_to_order_10d", "order_10d",
+        if key in {"positive_to_order_10d", "order_10d"}:
+            suppress_previous = (
+                rate.get("waiting_outcome_count", 0) > 0
+                or previous_rate.get("waiting_outcome_count", 0) > 0
+            )
+            previous_value = (
+                previous_rate["value"]
+                if not suppress_previous
+                and previous_rate["status"] == "sufficient" else None
+            )
+            rate["comparisons"].update({
+                "previous_period": previous_value,
+                "previous_period_status": previous_rate["status"],
+                "delta_previous": (
+                    rate["value"] - previous_value
+                    if rate["value"] is not None
+                    and previous_value is not None else None
+                ),
+            })
+            if suppress_previous:
+                rate["comparisons"]["previous_period_suppressed_reason"] = (
+                    "pending_10d_outcomes"
+                )
+        elif key in {
             "positive_to_order_10d_comparable", "order_10d_comparable",
         }:
             previous_value = (
@@ -1401,6 +1429,35 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
     previous_seller_comparison = _seller_comparison(
         previous_team_rows, attribution, coached_sellers
     )
+    coaching_team_rows = team_rows
+    previous_coaching_team_rows = previous_team_rows
+    coaching_seller_comparison = seller_comparison
+    previous_coaching_seller_comparison = previous_seller_comparison
+    if seller and channel != "all":
+        coaching_team_rows = _filter_activities(
+            coached_activities,
+            start=start,
+            end=end,
+            seller="",
+            channel=channel,
+            segment=segment,
+            lifecycle=lifecycle,
+        )
+        previous_coaching_team_rows = _filter_activities(
+            coached_activities,
+            start=comparison_start,
+            end=comparison_end,
+            seller="",
+            channel=channel,
+            segment=segment,
+            lifecycle=lifecycle,
+        )
+        coaching_seller_comparison = _seller_comparison(
+            coaching_team_rows, attribution, coached_sellers
+        )
+        previous_coaching_seller_comparison = _seller_comparison(
+            previous_coaching_team_rows, attribution, coached_sellers
+        )
     repeat_customers = defaultdict(list)
     for row in current["boms"]:
         if row.get("customer_identity_key"):
@@ -1833,15 +1890,32 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
     seller_comparison = add_seller_benchmarks(
         seller_comparison, previous_seller_comparison
     )
+    if seller and channel != "all":
+        enrich_seller_metrics(
+            coaching_seller_comparison,
+            coaching_team_rows,
+            team_planned_period,
+        )
+        enrich_seller_metrics(
+            previous_coaching_seller_comparison,
+            previous_coaching_team_rows,
+            previous_team_planned_period,
+        )
+        coaching_seller_comparison = add_seller_benchmarks(
+            coaching_seller_comparison,
+            previous_coaching_seller_comparison,
+        )
+    else:
+        coaching_seller_comparison = seller_comparison
 
     selected_seller_metrics = next(
         (
-            item for item in seller_comparison
+            item for item in coaching_seller_comparison
             if normalize_key(item["seller"]) == normalize_key(seller)
         ),
         None,
     )
-    if selected_seller_metrics and channel == "all":
+    if selected_seller_metrics:
         for metric_key in (
             "reach", "positive_dialogue",
             "positive_to_order_10d", "order_10d",
@@ -1883,10 +1957,15 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
             "comparisons": {
                 **filtered_activity_comparison,
                 **(
-                    selected_seller_metrics["human_activities_metric"][
-                        "comparisons"
-                    ]
-                    if selected_seller_metrics and channel == "all" else {}
+                    {
+                        key: selected_seller_metrics[
+                            "human_activities_metric"
+                        ]["comparisons"].get(key)
+                        for key in (
+                            "peer_median", "peer_count", "delta_peer",
+                        )
+                    }
+                    if selected_seller_metrics else {}
                 ),
             },
         },

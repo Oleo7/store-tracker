@@ -12,6 +12,7 @@ import statistics
 
 MIN_SAMPLE = 10
 MIN_PEERS = 2
+LIVE_10D_METRICS = {"positive_to_order_10d", "order_10d"}
 RATE_GAP = 0.10
 ACTIVITY_SHARE_GAP = 0.25
 CHANNEL_GAP = 0.15
@@ -81,8 +82,20 @@ def add_seller_benchmarks(current_sellers, previous_sellers):
             ]
             peer_median = statistics.median(peers) if len(peers) >= MIN_PEERS else None
             previous_metric = previous_row.get(metric_key)
+            suppress_previous = (
+                metric_key in LIVE_10D_METRICS
+                and (
+                    (metric.get("waiting_outcome_count") or 0) > 0
+                    or (
+                        previous_metric.get("waiting_outcome_count") or 0
+                        if isinstance(previous_metric, dict) else 0
+                    ) > 0
+                )
+            )
             previous_value = (
-                _metric_value(previous_metric) if _is_sufficient(previous_metric) else None
+                _metric_value(previous_metric)
+                if not suppress_previous and _is_sufficient(previous_metric)
+                else None
             )
             value = _metric_value(metric)
             comparisons = {
@@ -102,6 +115,10 @@ def add_seller_benchmarks(current_sellers, previous_sellers):
                     if value is not None and previous_value is not None else None
                 ),
             }
+            if suppress_previous:
+                comparisons["previous_period_suppressed_reason"] = (
+                    "pending_10d_outcomes"
+                )
             metric["comparisons"] = comparisons
     return result
 

@@ -128,6 +128,7 @@
   function comparisonText(metric) {
     const comparisons = metric?.comparisons || {};
     const countMetric = metric?.metric_type === "count";
+    const previousSuppressed = comparisons.previous_period_suppressed_reason === "pending_10d_outcomes";
     const previous = comparisons.previous_period;
     const previousValue = previous && typeof previous === "object" ? previous.value : previous?.value ?? previous;
     const formatValue = value => countMetric ? `${number(value, 1)} aktiviteter` : percent(value);
@@ -139,10 +140,10 @@
       const delta = comparisons.delta_peer;
       parts.push(`Median övriga säljare ${formatValue(comparisons.peer_median)}${delta === null || delta === undefined ? "" : ` · ${formatDelta(delta)}`}`);
     }
-    if (previousValue !== null && previousValue !== undefined) {
+    if (!previousSuppressed && previousValue !== null && previousValue !== undefined) {
       const delta = comparisons.delta_previous;
       parts.push(`Föregående period ${formatValue(previousValue)}${delta === null || delta === undefined ? "" : ` · ${formatDelta(delta)}`}`);
-    } else if (comparisons.previous_period_status && comparisons.previous_period_status !== "sufficient") {
+    } else if (!previousSuppressed && comparisons.previous_period_status && comparisons.previous_period_status !== "sufficient") {
       parts.push(`Föregående period: ${statusLabel(comparisons.previous_period_status)}`);
     }
     return parts.join(" · ");
@@ -391,7 +392,7 @@
       <button type="button" class="sc-quality-status" data-sc-action="quality-details" data-status="${escapeHtml(core.status || quality.status)}">
         <span><strong>Kärndata ${percent(identity)}</strong></span>
         <span>Jämförbar historisk prioritet ${number(history.comparable_percentile_count)} av ${number(history.v2_contact_count)} nya kontakter</span>
-        <span>${number(quality.waiting_outcome_count)} kontakter väntar på slutligt 10-dagarsutfall</span>
+        <span>${number(quality.waiting_outcome_count)} kontakter väntar på 10-dagarsutfall</span>
         <span aria-hidden="true">Visa detaljer ↓</span>
       </button>`;
   }
@@ -578,7 +579,7 @@
     ];
     const tabList = tabs.map(([key, label]) => `<button type="button" role="tab" id="sc-team-trend-tab-${key}" data-team-trend-view="${key}" aria-selected="${view === key}" aria-controls="sc-team-trend-panel-${key}" tabindex="${view === key ? "0" : "-1"}">${label}</button>`).join("");
     const panels = tabs.map(([key, _label, config]) => teamTrendPanelMarkup(trends, key, config, view)).join("");
-    return `<section class="sc-section sc-team-10d-trend-section" aria-labelledby="sc-team-trend-title"><div class="sc-section-heading"><div><h2 id="sc-team-trend-title">10-dagarskonvertering – trend</h2><p>Varje punkt avser en kontaktvecka. Endast veckor där hela 10-dagarsfönstret har passerat visas, så historiska veckopunkter förändras inte när tiden går. Diagrammen använder samma KPI-definitioner som Coachningsöversikten.</p></div></div><p class="sc-team-order-filter-note">Period-, säljar- och kanalfilter begränsar inte grafen. Vald säljare markeras; lifecycle och segment följer filtren.</p><div class="sc-team-trend-tabs" role="tablist" aria-label="Välj 10-dagarstrend">${tabList}</div>${panels}</section>`;
+    return `<section class="sc-section sc-team-10d-trend-section" aria-labelledby="sc-team-trend-title"><div class="sc-section-heading"><div><h2 id="sc-team-trend-title">10-dagarskonvertering – trend</h2><p>Varje punkt avser en kontaktvecka. Endast veckor där hela 10-dagarsfönstret har passerat visas, så veckopunkterna förändras inte enbart för att fler dagar passerar. Diagrammen använder samma KPI-definitioner som Coachningsöversikten.</p></div></div><p class="sc-team-order-filter-note">Period-, säljar- och kanalfilter begränsar inte grafen. Vald säljare markeras; lifecycle och segment följer filtren.</p><div class="sc-team-trend-tabs" role="tablist" aria-label="Välj 10-dagarstrend">${tabList}</div>${panels}</section>`;
   }
 
   function matrixReasonLabel(reason) {
@@ -619,7 +620,10 @@
       const offsetX = collisionOffset[0] * (collisionRing + 1);
       const offsetY = collisionOffset[1] * (collisionRing + 1);
       const coverage = `, historisk prioritetstäckning ${percent(item.priority_percentile_coverage?.value)}`;
-      const title = `${item.seller}: ${xLabel} ${percent(xRate.value)} (${rateEvidence(xRate)}, ${statusLabel(xRate.status)}), ${yLabel} ${percent(yRate.value)} (${rateEvidence(yRate)}, ${statusLabel(yRate.status)}), ${item.human_activities} mänskliga aktiviteter${coverage}`;
+      const pending = Number(xRate.waiting_outcome_count) > 0
+        ? `, preliminärt: ${number(xRate.waiting_outcome_count)} väntar på 10-dagarsutfall`
+        : "";
+      const title = `${item.seller}: ${xLabel} ${percent(xRate.value)} (${rateEvidence(xRate)}, ${statusLabel(xRate.status)}${pending}), ${yLabel} ${percent(yRate.value)} (${rateEvidence(yRate)}, ${statusLabel(yRate.status)}), ${item.human_activities} mänskliga aktiviteter${coverage}`;
       return `<button type="button" class="sc-bubble${item.sample_status === "small_sample" ? " is-small-sample" : ""}${sellerSelected(item.seller) ? " is-selected" : ""}" style="left:${x}%;bottom:${y}%;--offset-x:${offsetX}px;--offset-y:${offsetY}px" data-seller="${escapeHtml(item.seller)}" title="${escapeHtml(title)}" aria-label="${escapeHtml(title)}">${escapeHtml(String(item.seller).slice(0, 2).toUpperCase())}</button>`;
     }).join("");
     const medianNotice = xMedian === null || xMedian === undefined || yMedian === null || yMedian === undefined
@@ -630,7 +634,7 @@
 
   function priorityMatrixMarkup(matrix) {
     const safeMatrix = matrix || { sellers: [], medians: {}, insufficient_sample: [] };
-    return `<section class="sc-section" aria-labelledby="sc-matrix-title"><div class="sc-section-heading"><div><h2 id="sc-matrix-title">Teamets prioriteringsmatris</h2><p>Matrisen visar sambandet mellan historiskt prioritetsfokus och Kontakt – order inom 10 dagar för vald period. Ordermåttet använder samma preliminära definition som Coachningsöversikten; kontakter som fortfarande väntar på 10-dagarsutfall ingår i nämnaren. Medianlinjer kräver tillräckligt underlag och minst 70 % jämförbar historisk prioritetstäckning.</p></div></div>${priorityMatrixPanelMarkup(safeMatrix)}</section>`;
+    return `<section class="sc-section" aria-labelledby="sc-matrix-title"><div class="sc-section-heading"><div><h2 id="sc-matrix-title">Teamets prioriteringsmatris</h2><p>Matrisen visar sambandet mellan historiskt prioritetsfokus och Kontakt – order inom 10 dagar för vald period. Ordermåttet använder samma preliminära definition som Coachningsöversikten; kontakter som väntar på 10-dagarsutfall ingår i nämnaren. Medianlinjer kräver tillräckligt underlag och minst 70 % jämförbar historisk prioritetstäckning.</p></div></div>${priorityMatrixPanelMarkup(safeMatrix)}</section>`;
   }
 
   function funnelMarkup(funnel, outcome) {
@@ -638,7 +642,7 @@
     const outcomeCards = [
       miniMetricCard({ context: "outcome-complete", label: "Avgjorda kontakter", value: number(outcome.resolved_contact_count), drilldownMetric: "resolved_order_10d" }),
       miniMetricCard({ context: "outcome-attributed", label: "Följdes av attribuerad order", value: number(outcome.attributed_order_contact_count), drilldownMetric: "converted_order_10d" }),
-      miniMetricCard({ context: "outcome-waiting", label: "Väntar på slutligt utfall", value: number(outcome.waiting_outcome_count), drilldownMetric: "waiting_outcome" }),
+      miniMetricCard({ context: "outcome-waiting", label: "Väntar på 10-dagarsutfall", value: number(outcome.waiting_outcome_count), drilldownMetric: "waiting_outcome" }),
     ];
     const cohort = `<div class="sc-outcome-block"><div class="sc-section-heading"><div><h2>10-dagarsutfall</h2><p>Kontakter ingår när en attribuerad order redan finns inom fönstret eller när hela 10-dagarsfönstret har passerat.</p></div></div><div class="sc-card-grid">${outcomeCards.join("")}</div></div>`;
     return `<div class="sc-two-column">${activity}${cohort}</div>`;
@@ -660,7 +664,7 @@
       const points = rows.map((row, index) => `${x(index)},${y(row[key])}`).join(" ");
       const circles = rows.map((row, index) => {
         const preliminary = isOutcome && row.outcome_complete === false;
-        return `<circle class="sc-trend-point${preliminary ? " is-preliminary" : ""}" cx="${x(index)}" cy="${y(row[key])}" r="5" fill="${color}" tabindex="0" role="button" data-drilldown="${metric}" data-start="${escapeHtml(row.period?.start || "")}" data-end="${escapeHtml(row.period?.end || "")}"><title>${escapeHtml(row.week)} ${label}: ${number(row[key])}${preliminary ? ` (preliminär, ${number(row.waiting_outcome_count)} väntar)` : ""}</title></circle>`;
+        return `<circle class="sc-trend-point${preliminary ? " is-preliminary" : ""}" cx="${x(index)}" cy="${y(row[key])}" r="5" fill="${color}" tabindex="0" role="button" data-drilldown="${metric}" data-start="${escapeHtml(row.period?.start || "")}" data-end="${escapeHtml(row.period?.end || "")}"><title>${escapeHtml(row.week)} ${label}: ${number(row[key])}${preliminary ? ` (preliminär, ${number(row.waiting_outcome_count)} väntar på 10-dagarsutfall)` : ""}</title></circle>`;
       }).join("");
       return `<polyline class="sc-trend-line" stroke="${color}" points="${points}"></polyline>${circles}`;
     }).join("");
@@ -722,6 +726,12 @@
   }
 
   function coachingMarkup(cards) {
+    const pendingEvidence = card => (
+      ["order_10d", "positive_to_order_10d"].includes(card.metric_key)
+      && Number(card.evidence?.waiting_outcome_count) > 0
+        ? `<br><span class="sc-rate-pending">Preliminärt · ${number(card.evidence.waiting_outcome_count)} väntar på 10-dagarsutfall</span>`
+        : ""
+    );
     const evidence = card => {
       const item = card.evidence || {};
       if (item.metric_type === "count") {
@@ -738,7 +748,7 @@
     const comparison = card => card.benchmark?.label || card.comparison?.label || comparisonText({ comparisons: card.comparison || card.benchmark || {} });
     const cardMarkup = (cards || []).map((card, index) => {
       const info = definitionParts(card.metric_key, `coaching-${index}`);
-      return `<article class="sc-coaching-card" data-severity="${escapeHtml(card.polarity || card.severity)}"><span class="sc-coaching-label">${(card.polarity || card.severity) === "strength" ? "STYRKA" : "FOKUSOMRÅDE"}</span>${info.button}${info.explanation}<h3>${escapeHtml(card.title)}</h3><p><strong>Observation:</strong> ${escapeHtml(card.observation || card.diagnosis || "")}</p><p><strong>Bevis:</strong> ${evidence(card)}</p>${comparison(card) ? `<p><strong>Jämförelse:</strong> ${escapeHtml(comparison(card))}</p>` : ""}<p><strong>Nästa steg:</strong> ${escapeHtml(card.next_action || card.recommendation || "")}</p>${card.target ? `<p><strong>Mål:</strong> ${escapeHtml(card.target)}</p>` : ""}<button type="button" data-drilldown="${escapeHtml(card.drilldown_metric)}" data-drilldown-filters="${escapeHtml(JSON.stringify(card.drilldown_filters || {}))}">Visa underlag</button></article>`;
+      return `<article class="sc-coaching-card" data-severity="${escapeHtml(card.polarity || card.severity)}"><span class="sc-coaching-label">${(card.polarity || card.severity) === "strength" ? "STYRKA" : "FOKUSOMRÅDE"}</span>${info.button}${info.explanation}<h3>${escapeHtml(card.title)}</h3><p><strong>Observation:</strong> ${escapeHtml(card.observation || card.diagnosis || "")}</p><p><strong>Bevis:</strong> ${evidence(card)}${pendingEvidence(card)}</p>${comparison(card) ? `<p><strong>Jämförelse:</strong> ${escapeHtml(comparison(card))}</p>` : ""}<p><strong>Nästa steg:</strong> ${escapeHtml(card.next_action || card.recommendation || "")}</p>${card.target ? `<p><strong>Mål:</strong> ${escapeHtml(card.target)}</p>` : ""}<button type="button" data-drilldown="${escapeHtml(card.drilldown_metric)}" data-drilldown-filters="${escapeHtml(JSON.stringify(card.drilldown_filters || {}))}">Visa underlag</button></article>`;
     }).join("");
     return `<section class="sc-section" aria-labelledby="sc-coaching-title"><div class="sc-section-heading"><div><h2 id="sc-coaching-title">Coachningskort</h2><p>Prioriterade observationer med tydligt underlag.</p></div></div>${cardMarkup ? `<div class="sc-coaching-grid">${cardMarkup}</div>` : `<div class="sc-empty">Inget coachningskort aktiveras med tillräckligt underlag i valt filter.</div>`}</section>`;
   }

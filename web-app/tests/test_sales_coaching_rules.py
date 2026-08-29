@@ -15,9 +15,9 @@ from sales_coaching_rules import (  # noqa: E402
 
 
 def rate(value, denominator=30, *, peer=None, peers=2, previous=None,
-         status="sufficient"):
+         status="sufficient", waiting=None):
     numerator = round((value or 0) * denominator)
-    return {
+    result = {
         "value": value,
         "numerator": numerator,
         "denominator": denominator,
@@ -31,6 +31,9 @@ def rate(value, denominator=30, *, peer=None, peers=2, previous=None,
             "delta_previous": value - previous if value is not None and previous is not None else None,
         },
     }
+    if waiting is not None:
+        result["waiting_outcome_count"] = waiting
+    return result
 
 
 def seller_metrics(**overrides):
@@ -87,6 +90,54 @@ class BenchmarkTests(TestCase):
         self.assertIsNone(comparison["peer_median"])
         self.assertEqual(comparison["peer_count"], 1)
 
+    def test_live_previous_is_suppressed_for_current_or_previous_pending_but_peer_remains(self):
+        for metric_key in ("order_10d", "positive_to_order_10d"):
+            for current_waiting, previous_waiting in ((2, 0), (0, 3)):
+                with self.subTest(
+                    metric_key=metric_key,
+                    current_waiting=current_waiting,
+                    previous_waiting=previous_waiting,
+                ):
+                    current = [
+                        {"seller": "Sofia", metric_key: rate(.4, waiting=current_waiting)},
+                        {"seller": "Olle", metric_key: rate(.5, waiting=0)},
+                        {"seller": "Maja", metric_key: rate(.7, waiting=0)},
+                    ]
+                    previous = [
+                        {"seller": "Sofia", metric_key: rate(.3, waiting=previous_waiting)},
+                    ]
+
+                    comparison = add_seller_benchmarks(
+                        current, previous
+                    )[0][metric_key]["comparisons"]
+
+                    self.assertEqual(comparison["peer_median"], .6)
+                    self.assertEqual(comparison["peer_count"], 2)
+                    self.assertIsNone(comparison["previous_period"])
+                    self.assertIsNone(comparison["delta_previous"])
+                    self.assertEqual(
+                        comparison["previous_period_suppressed_reason"],
+                        "pending_10d_outcomes",
+                    )
+
+    def test_complete_live_periods_and_other_metrics_keep_previous_comparisons(self):
+        for metric_key in (
+            "order_10d", "positive_to_order_10d", "reach",
+            "positive_dialogue", "bom_ratio", "positive_next_step_coverage",
+            "planned_completed_in_time",
+        ):
+            with self.subTest(metric_key=metric_key):
+                current_metric = rate(.6, waiting=0) if metric_key != "reach" else rate(.6)
+                previous_metric = rate(.4, waiting=0) if metric_key != "reach" else rate(.4)
+                comparison = add_seller_benchmarks(
+                    [{"seller": "Sofia", metric_key: current_metric}],
+                    [{"seller": "Sofia", metric_key: previous_metric}],
+                )[0][metric_key]["comparisons"]
+
+                self.assertEqual(comparison["previous_period"], .4)
+                self.assertAlmostEqual(comparison["delta_previous"], .2)
+                self.assertNotIn("previous_period_suppressed_reason", comparison)
+
 
 class SignalRuleTests(TestCase):
     def signals(self, metrics):
@@ -98,7 +149,7 @@ class SignalRuleTests(TestCase):
     def test_closing_gap_uses_live_positive_to_order_cohort(self):
         signals = self.signals(seller_metrics(
             positive_dialogue=rate(.70, peer=.65),
-            positive_to_order_10d=rate(.30, peer=.50),
+            positive_to_order_10d=rate(.30, peer=.50, waiting=4),
             positive_to_order_10d_comparable=rate(.95, peer=.20),
         ))
 
@@ -107,6 +158,19 @@ class SignalRuleTests(TestCase):
         self.assertEqual(closing["drilldown_metric"], "positive_to_order_10d")
         self.assertIn("hittills följts av order inom 10 dagar", closing["observation"])
         self.assertNotIn("fullständigt", closing["observation"])
+        self.assertEqual(closing["evidence"]["waiting_outcome_count"], 4)
+
+    def test_closing_strength_keeps_pending_evidence(self):
+        signals = self.signals(seller_metrics(
+            positive_dialogue=rate(.70, peer=.65),
+            positive_to_order_10d=rate(.70, peer=.50, waiting=2),
+        ))
+
+        strength = next(
+            item for item in signals
+            if item["code"] == "positive_to_order_10d_strength"
+        )
+        self.assertEqual(strength["evidence"]["waiting_outcome_count"], 2)
 
     def test_priority_focus_requires_seventy_percent_v2_coverage_and_no_customer_list(self):
         metrics = seller_metrics(
@@ -216,7 +280,7 @@ class SignalRuleTests(TestCase):
         metrics = seller_metrics()
         channels = {
             "visit": {
-                "positive_to_order_10d": rate(.80),
+                "positive_to_order_10d": rate(.80, waiting=3),
                 "order_10d": rate(.20),
                 "positive_to_order_10d_comparable": rate(.05),
             },
@@ -241,6 +305,7 @@ class SignalRuleTests(TestCase):
         self.assertEqual(channel["drilldown_metric"], "positive_to_order_10d")
         self.assertEqual(channel["drilldown_filters"], {"channel": "visit"})
         self.assertIn("Utfallet är preliminärt", channel["observation"])
+        self.assertEqual(channel["evidence"]["waiting_outcome_count"], 3)
 
     def test_channel_comparison_falls_back_to_order_metric_as_a_whole(self):
         metrics = seller_metrics()
