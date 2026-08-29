@@ -12,6 +12,7 @@ import statistics
 
 MIN_SAMPLE = 10
 MIN_PEERS = 2
+LIVE_10D_METRICS = {"positive_to_order_10d", "order_10d"}
 RATE_GAP = 0.10
 ACTIVITY_SHARE_GAP = 0.25
 CHANNEL_GAP = 0.15
@@ -26,8 +27,8 @@ MAX_CARDS = 3
 RATE_METRICS = (
     "reach",
     "positive_dialogue",
-    "positive_to_order_10d_comparable",
-    "order_10d_comparable",
+    "positive_to_order_10d",
+    "order_10d",
     "bom_ratio",
     "priority_focus",
     "positive_next_step_coverage",
@@ -81,8 +82,20 @@ def add_seller_benchmarks(current_sellers, previous_sellers):
             ]
             peer_median = statistics.median(peers) if len(peers) >= MIN_PEERS else None
             previous_metric = previous_row.get(metric_key)
+            suppress_previous = (
+                metric_key in LIVE_10D_METRICS
+                and (
+                    (metric.get("waiting_outcome_count") or 0) > 0
+                    or (
+                        previous_metric.get("waiting_outcome_count") or 0
+                        if isinstance(previous_metric, dict) else 0
+                    ) > 0
+                )
+            )
             previous_value = (
-                _metric_value(previous_metric) if _is_sufficient(previous_metric) else None
+                _metric_value(previous_metric)
+                if not suppress_previous and _is_sufficient(previous_metric)
+                else None
             )
             value = _metric_value(metric)
             comparisons = {
@@ -102,6 +115,10 @@ def add_seller_benchmarks(current_sellers, previous_sellers):
                     if value is not None and previous_value is not None else None
                 ),
             }
+            if suppress_previous:
+                comparisons["previous_period_suppressed_reason"] = (
+                    "pending_10d_outcomes"
+                )
             metric["comparisons"] = comparisons
     return result
 
@@ -269,7 +286,7 @@ def build_seller_signals(*, seller, metrics, repeat_boms, channel_effectiveness)
                 ))
 
     positive = metrics.get("positive_dialogue", {})
-    closing = metrics.get("positive_to_order_10d_comparable", {})
+    closing = metrics.get("positive_to_order_10d", {})
     if _is_sufficient(positive) and _is_sufficient(closing):
         pos_cmp, close_cmp = positive.get("comparisons", {}), closing.get("comparisons", {})
         if (
@@ -283,25 +300,25 @@ def build_seller_signals(*, seller, metrics, repeat_boms, channel_effectiveness)
             gap = closing["value"] - close_cmp["peer_median"]
             signals.append(_signal(
                 code="closing_gap", dimension="closing", polarity="attention",
-                metric_key="positive_to_order_10d_comparable",
+                metric_key="positive_to_order_10d",
                 title="Positiv dialog blir mer sällan order",
-                observation=f"{seller} når minst nivån för övriga säljares positiva dialoger men färre positiva dialoger med fullständigt 10-dagarsutfall följs av order.",
+                observation=f"{seller} når minst nivån för övriga säljares positiva dialoger men en lägre andel av de positiva dialogerna har hittills följts av order inom 10 dagar.",
                 evidence=closing, benchmark=_benchmark(closing),
                 next_action="Granska överenskommet nästa steg, erbjudande och uppföljning efter positiva dialoger.",
                 target="Minska gapet till övriga säljare med minst 10 procentenheter.",
-                drilldown_metric="positive_to_order_10d_comparable",
+                drilldown_metric="positive_to_order_10d",
                 ranking_score=_rank("closing", closing, gap, RATE_GAP),
             ))
         elif close_cmp.get("peer_median") is not None and close_cmp.get("peer_count", 0) >= MIN_PEERS and closing["value"] >= close_cmp["peer_median"] + RATE_GAP:
             gap = closing["value"] - close_cmp["peer_median"]
             signals.append(_signal(
                 code="positive_to_order_10d_strength", dimension="closing", polarity="strength",
-                metric_key="positive_to_order_10d_comparable", title="Stark positiv-till-order-konvertering",
-                observation=f"{seller} ligger tydligt över övriga säljare för positiva dialoger med fullständigt 10-dagarsutfall.",
+                metric_key="positive_to_order_10d", title="Stark positiv-till-order-konvertering",
+                observation=f"{seller} ligger tydligt över övriga säljare för andelen positiva dialoger som hittills har följts av order inom 10 dagar.",
                 evidence=closing, benchmark=_benchmark(closing),
                 next_action="Identifiera vilka överenskommelser och uppföljningar som driver utfallet.",
-                target="Behåll nivån med minst 30 positiva dialoger med fullständigt 10-dagarsutfall.",
-                drilldown_metric="positive_to_order_10d_comparable",
+                target="Behåll nivån med minst 30 berättigade positiva dialoger.",
+                drilldown_metric="positive_to_order_10d",
                 ranking_score=_rank("closing", closing, gap, RATE_GAP),
             ))
 
@@ -428,7 +445,7 @@ def build_seller_signals(*, seller, metrics, repeat_boms, channel_effectiveness)
     channel_metric_key = None
     channel_candidates = []
     for candidate_key in (
-        "positive_to_order_10d_comparable", "order_10d_comparable"
+        "positive_to_order_10d", "order_10d"
     ):
         candidates = [
             (channel, values.get(candidate_key))
@@ -447,7 +464,7 @@ def build_seller_signals(*, seller, metrics, repeat_boms, channel_effectiveness)
             signals.append(_signal(
                 code="channel_strength", dimension="channel", polarity="strength",
                 metric_key=channel_metric_key, title="En kanal visar ett starkare historiskt mönster",
-                observation=f"{strongest[0]} ligger {gap:.1%} högre än {weakest[0]} bland kontakter med fullständigt 10-dagarsutfall; mönstret visar inte kausalitet.",
+                observation=f"{strongest[0]} ligger {gap:.1%} högre än {weakest[0]} i 10-dagarskonvertering under vald period. Utfallet är preliminärt om kontakter fortfarande väntar och visar inte kausalitet.",
                 evidence=strongest[1], benchmark={"comparison_channel": weakest[0], "comparison_value": weakest[1]["value"]},
                 next_action="Identifiera vilka kundsituationer och arbetssätt från den starka kanalen som går att återanvända.",
                 target="Bekräfta mönstret över fler analyserbara kontakter.",

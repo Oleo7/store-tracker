@@ -307,10 +307,7 @@ class OutcomeResolutionTests(TestCase):
 
         metric = summary["kpis"]["order_10d"]
         self.assertEqual((metric["numerator"], metric["denominator"]), (0, 1))
-        self.assertEqual(
-            (metric["comparable"]["numerator"], metric["comparable"]["denominator"]),
-            (0, 1),
-        )
+        self.assertNotIn("comparable", metric)
         self.assertEqual(
             summary["_analysis"]["attribution"]["outcome_status"]["mature-miss"],
             "resolved_without_order",
@@ -324,10 +321,7 @@ class OutcomeResolutionTests(TestCase):
 
         metric = summary["kpis"]["order_10d"]
         self.assertEqual((metric["numerator"], metric["denominator"]), (1, 1))
-        self.assertEqual(
-            (metric["comparable"]["numerator"], metric["comparable"]["denominator"]),
-            (1, 1),
-        )
+        self.assertNotIn("comparable", metric)
 
     def test_order_on_day_ten_is_converted_by_existing_inclusive_window(self):
         summary = self.build_summary(
@@ -337,10 +331,7 @@ class OutcomeResolutionTests(TestCase):
 
         metric = summary["kpis"]["order_10d"]
         self.assertEqual((metric["numerator"], metric["denominator"]), (1, 1))
-        self.assertEqual(
-            (metric["comparable"]["numerator"], metric["comparable"]["denominator"]),
-            (1, 1),
-        )
+        self.assertNotIn("comparable", metric)
 
     def test_order_outside_window_does_not_convert_resolved_contact(self):
         summary = self.build_summary(
@@ -414,8 +405,36 @@ class OutcomeResolutionTests(TestCase):
                 self.assertEqual((metric["numerator"], metric["denominator"]), (7, 32))
                 self.assertEqual(metric["status"], "sufficient")
                 self.assertEqual(metric["waiting_outcome_count"], 20)
-                self.assertEqual(metric["comparable"]["denominator"], 5)
-                self.assertEqual(metric["comparable"]["status"], "small_sample")
+                self.assertNotIn("comparable", metric)
+
+    def test_team_comparison_uses_live_rates_and_pending_counts(self):
+        contacts = [
+            (f"team-{index}", "2026-08-16 10:00", {"result": "Positiv"})
+            for index in range(10)
+        ]
+        orders = [
+            (f"TEAM-ORDER-{index}", "2026-08-18", f"team-{index}")
+            for index in range(2)
+        ]
+
+        summary = self.build_summary(contacts, orders)
+        team = summary["team_comparison"]["sellers"][0]
+
+        for metric_key in ("order_10d", "positive_to_order_10d"):
+            with self.subTest(metric_key=metric_key):
+                self.assertEqual(
+                    (team[metric_key]["numerator"],
+                     team[metric_key]["denominator"],
+                     team[metric_key]["value"]),
+                    (2, 10, .2),
+                )
+        self.assertEqual(team["waiting_outcome_count"], 8)
+        self.assertEqual(team["waiting_positive_dialogues_count"], 8)
+        self.assertIn("order_10d_median", summary["team_comparison"]["benchmarks"])
+        self.assertNotIn(
+            "order_10d_comparable_median",
+            summary["team_comparison"]["benchmarks"],
+        )
 
     def test_requested_twenty_of_one_hundred_regression(self):
         contacts = []
@@ -445,7 +464,7 @@ class OutcomeResolutionTests(TestCase):
             70,
         )
 
-    def test_live_and_comparable_rates_are_distinct_central_cohorts(self):
+    def test_live_kpi_is_the_only_public_ten_day_performance_rate(self):
         contacts = []
         orders = []
         for index in range(4):
@@ -467,32 +486,24 @@ class OutcomeResolutionTests(TestCase):
 
         summary = self.build_summary(contacts, orders)
         live = summary["kpis"]["order_10d"]
-        comparable = live["comparable"]
 
         self.assertEqual((live["numerator"], live["denominator"]), (7, 35))
         self.assertEqual(live["waiting_outcome_count"], 22)
+        self.assertNotIn("comparable", live)
+        self.assertNotIn("order_10d_comparable", summary["outcome_10d"])
+        drilldown = build_drilldown(summary, "order_10d")
+        self.assertEqual(drilldown["total_count"], 35)
         self.assertEqual(
-            (comparable["numerator"], comparable["denominator"]), (4, 10)
-        )
-        self.assertEqual(
-            summary["outcome_10d"]["order_10d_comparable"]["value"], .4
-        )
-        drilldown = build_drilldown(summary, "order_10d_comparable")
-        self.assertEqual(drilldown["total_count"], 10)
-        self.assertNotIn("pending", {row["cohort_role"] for row in drilldown["rows"]})
-        self.assertFalse(
-            {f"early-hit-{index}" for index in range(3)}
-            & {row["contact_id"] for row in drilldown["rows"]}
+            sum(row["cohort_role"] == "pending" for row in drilldown["rows"]),
+            22,
         )
 
         later = self.build_summary(
             contacts, orders, end="2026-08-31", generated="2026-08-31 12:00"
         )
         self.assertEqual(
-            (
-                later["kpis"]["order_10d"]["comparable"]["numerator"],
-                later["kpis"]["order_10d"]["comparable"]["denominator"],
-            ),
+            (later["kpis"]["order_10d"]["numerator"],
+             later["kpis"]["order_10d"]["denominator"]),
             (7, 35),
         )
 
@@ -539,7 +550,7 @@ class OutcomeResolutionTests(TestCase):
             (1, 1),
         )
 
-    def test_manual_email_affects_broad_comparable_but_not_positive_comparable(self):
+    def test_manual_email_affects_live_order_but_not_live_positive_to_order(self):
         summary = self.build_summary(
             [
                 ("phone", "2026-08-01 10:00", {"result": "Positiv", "channel": "Telefon"}),
@@ -553,15 +564,15 @@ class OutcomeResolutionTests(TestCase):
 
         self.assertEqual(
             (
-                summary["kpis"]["order_10d"]["comparable"]["numerator"],
-                summary["kpis"]["order_10d"]["comparable"]["denominator"],
+                summary["kpis"]["order_10d"]["numerator"],
+                summary["kpis"]["order_10d"]["denominator"],
             ),
             (2, 2),
         )
         self.assertEqual(
             (
-                summary["kpis"]["positive_to_order_10d"]["comparable"]["numerator"],
-                summary["kpis"]["positive_to_order_10d"]["comparable"]["denominator"],
+                summary["kpis"]["positive_to_order_10d"]["numerator"],
+                summary["kpis"]["positive_to_order_10d"]["denominator"],
             ),
             (1, 1),
         )
@@ -587,7 +598,7 @@ class OutcomeResolutionTests(TestCase):
         self.assertEqual(sellers["alice"]["positive_to_order_10d"]["value"], .5)
         self.assertEqual(sellers["bob"]["positive_to_order_10d"]["value"], 0)
 
-    def test_peer_median_uses_only_mature_comparable_rates(self):
+    def test_peer_median_uses_live_rates_with_pending_in_denominator(self):
         contacts = []
         orders = []
         for index in range(10):
@@ -603,17 +614,102 @@ class OutcomeResolutionTests(TestCase):
 
         summary = self.build_summary(contacts, orders, seller="bob")
 
-        self.assertNotIn("peer_median", summary["kpis"]["order_10d"]["comparisons"])
-        self.assertEqual(
-            summary["kpis"]["order_10d"]["comparable"]["comparisons"]["peer_median"],
-            .75,
+        self.assertAlmostEqual(
+            summary["kpis"]["order_10d"]["comparisons"]["peer_median"],
+            .66665,
         )
-        self.assertEqual(
-            summary["kpis"]["positive_to_order_10d"]["comparable"]["comparisons"]["peer_median"],
-            .75,
+        self.assertAlmostEqual(
+            summary["kpis"]["positive_to_order_10d"]["comparisons"]["peer_median"],
+            .66665,
         )
 
-    def test_previous_period_comparison_uses_mature_comparable_rate(self):
+    def test_current_pending_suppresses_live_previous_period_comparisons(self):
+        contacts = []
+        orders = []
+        for index in range(10):
+            current_id = f"current-{index}"
+            previous_id = f"previous-{index}"
+            contacts.append((current_id, "2026-08-16 10:00", {}))
+            contacts.append((previous_id, "2026-08-01 10:00", {}))
+            if index < 2:
+                orders.append((f"CURRENT-{index}", "2026-08-18", current_id))
+            if index < 4:
+                orders.append((f"PREVIOUS-{index}", "2026-08-03", previous_id))
+
+        metric = self.build_summary(
+            contacts,
+            orders,
+            start="2026-08-11",
+            end="2026-08-20",
+            seller="olle",
+        )["kpis"]["order_10d"]
+
+        self.assertEqual(
+            (
+                metric["numerator"], metric["denominator"],
+                metric["waiting_outcome_count"], metric["value"],
+            ),
+            (2, 10, 8, .2),
+        )
+        self.assertIsNone(metric["comparisons"]["previous_period"])
+        self.assertIsNone(metric["comparisons"]["delta_previous"])
+        self.assertEqual(
+            metric["comparisons"]["previous_period_status"], "sufficient"
+        )
+        self.assertEqual(
+            metric["comparisons"]["previous_period_suppressed_reason"],
+            "pending_10d_outcomes",
+        )
+        self.assertNotIn("comparable", metric)
+        positive = self.build_summary(
+            contacts,
+            orders,
+            start="2026-08-11",
+            end="2026-08-20",
+            seller="olle",
+        )["kpis"]["positive_to_order_10d"]
+        self.assertEqual(
+            (
+                positive["numerator"], positive["denominator"],
+                positive["waiting_outcome_count"], positive["value"],
+            ),
+            (2, 10, 8, .2),
+        )
+        self.assertIsNone(positive["comparisons"]["previous_period"])
+        self.assertIsNone(positive["comparisons"]["delta_previous"])
+        self.assertEqual(
+            positive["comparisons"]["previous_period_suppressed_reason"],
+            "pending_10d_outcomes",
+        )
+
+    def test_previous_pending_suppresses_both_live_metrics(self):
+        contacts = []
+        orders = []
+        for index in range(10):
+            current_id = f"current-converted-{index}"
+            contacts.append((current_id, "2026-08-18 10:00", {}))
+            orders.append((f"CURRENT-{index}", "2026-08-19", current_id))
+            contacts.append((f"previous-pending-{index}", "2026-08-16 10:00", {}))
+
+        summary = self.build_summary(
+            contacts,
+            orders,
+            start="2026-08-18",
+            end="2026-08-20",
+            seller="olle",
+        )
+
+        for metric_key in ("order_10d", "positive_to_order_10d"):
+            with self.subTest(metric_key=metric_key):
+                comparison = summary["kpis"][metric_key]["comparisons"]
+                self.assertIsNone(comparison["previous_period"])
+                self.assertIsNone(comparison["delta_previous"])
+                self.assertEqual(
+                    comparison["previous_period_suppressed_reason"],
+                    "pending_10d_outcomes",
+                )
+
+    def test_complete_live_periods_keep_previous_comparisons(self):
         contacts = []
         orders = []
         for index in range(10):
@@ -621,27 +717,48 @@ class OutcomeResolutionTests(TestCase):
             previous_id = f"previous-{index}"
             contacts.append((current_id, "2026-08-01 10:00", {}))
             contacts.append((previous_id, "2026-07-20 10:00", {}))
-            orders.append((f"CURRENT-{index}", "2026-08-03", current_id))
-            orders.append((f"PREVIOUS-{index}", "2026-07-25", previous_id))
-            contacts.append((f"current-pending-{index}", "2026-08-17 10:00", {}))
-            contacts.append((f"previous-miss-{index}", "2026-07-19 10:00", {}))
+            if index < 4:
+                orders.append((f"CURRENT-{index}", "2026-08-03", current_id))
+            if index < 6:
+                orders.append((f"PREVIOUS-{index}", "2026-07-22", previous_id))
+
+        summary = self.build_summary(contacts, orders, seller="olle")
+
+        for metric_key in ("order_10d", "positive_to_order_10d"):
+            with self.subTest(metric_key=metric_key):
+                metric = summary["kpis"][metric_key]
+                self.assertEqual(metric["waiting_outcome_count"], 0)
+                self.assertEqual(metric["comparisons"]["previous_period"], .6)
+                self.assertAlmostEqual(
+                    metric["comparisons"]["delta_previous"], -.2
+                )
+                self.assertNotIn(
+                    "previous_period_suppressed_reason", metric["comparisons"]
+                )
+        self.assertEqual(
+            summary["kpis"]["positive_dialogue"]["comparisons"][
+                "previous_period"
+            ],
+            1,
+        )
+
+    def test_live_previous_period_keeps_small_sample_status_without_value(self):
+        contacts = [
+            (f"current-{index}", "2026-08-01 10:00", {})
+            for index in range(10)
+        ] + [
+            (f"previous-{index}", "2026-07-20 10:00", {})
+            for index in range(5)
+        ]
 
         metric = self.build_summary(
-            contacts, orders, seller="olle"
+            contacts, seller="olle"
         )["kpis"]["order_10d"]
 
-        self.assertEqual(metric["value"], .5)
-        self.assertNotIn("previous_period", metric["comparisons"])
-        comparable = metric["comparable"]
-        self.assertEqual(comparable["value"], 1)
-        self.assertEqual(comparable["comparisons"]["previous_period"], .5)
-        self.assertEqual(comparable["comparisons"]["previous_period_status"], "sufficient")
-        positive = self.build_summary(
-            contacts, orders, seller="olle"
-        )["kpis"]["positive_to_order_10d"]
-        self.assertEqual(positive["value"], .5)
-        self.assertEqual(positive["comparable"]["value"], 1)
-        self.assertEqual(positive["comparable"]["comparisons"]["previous_period"], .5)
+        self.assertIsNone(metric["comparisons"]["previous_period"])
+        self.assertEqual(
+            metric["comparisons"]["previous_period_status"], "small_sample"
+        )
 
     def test_weekly_trend_uses_new_pending_definition(self):
         converted_only = self.build_summary(
@@ -710,7 +827,7 @@ class OutcomeResolutionTests(TestCase):
         )
 
 
-class TeamOrderTrendTests(TestCase):
+class Team10dTrendTests(TestCase):
     def build_summary(
         self, specs=(), converted=(), *, generated="2026-08-31 12:00",
         start="2026-08-24", end="2026-08-31", seller="olle",
@@ -784,9 +901,9 @@ class TeamOrderTrendTests(TestCase):
         )
 
     @staticmethod
-    def point(summary, seller, week):
+    def point(summary, metric, seller, week):
         seller_series = next(
-            item for item in summary["team_order_10d_trend"]["series"]
+            item for item in summary["team_10d_trends"]["metrics"][metric]["series"]
             if item["seller"] == seller
         )
         return next(point for point in seller_series["points"] if point["week"] == week)
@@ -798,15 +915,15 @@ class TeamOrderTrendTests(TestCase):
             start="2027-01-18",
             end="2027-01-20",
         )
-        trend = exact["team_order_10d_trend"]
+        trend = exact["team_10d_trends"]
 
         self.assertEqual(trend["weeks"], 16)
         self.assertEqual(len(trend["week_axis"]), 16)
         self.assertEqual(trend["latest_complete_week"], "2027-W01")
         self.assertEqual(trend["period"]["end"], "2027-01-10")
         self.assertEqual(
-            (self.point(exact, "olle", "2027-W01")["numerator"],
-             self.point(exact, "olle", "2027-W01")["denominator"]),
+            (self.point(exact, "order_10d", "olle", "2027-W01")["numerator"],
+             self.point(exact, "order_10d", "olle", "2027-W01")["denominator"]),
             (0, 1),
         )
         starts = [date.fromisoformat(slot["period"]["start"]) for slot in trend["week_axis"]]
@@ -824,7 +941,7 @@ class TeamOrderTrendTests(TestCase):
             end="2027-01-19",
         )
         self.assertEqual(
-            before_cutoff["team_order_10d_trend"]["latest_complete_week"],
+            before_cutoff["team_10d_trends"]["latest_complete_week"],
             "2026-W53",
         )
 
@@ -840,11 +957,11 @@ class TeamOrderTrendTests(TestCase):
             summary["_analysis"]["attribution"]["maturity"]["partial"],
             "mature",
         )
-        trend = summary["team_order_10d_trend"]
+        trend = summary["team_10d_trends"]
         self.assertEqual(trend["latest_complete_week"], "2027-W01")
         self.assertNotIn("2027-W02", [slot["week"] for slot in trend["week_axis"]])
 
-    def test_points_are_exact_contact_weeks_reuse_comparable_rate_and_drilldown(self):
+    def test_points_are_exact_weeks_and_live_metrics_reconcile_with_drilldowns(self):
         summary = self.build_summary(
             [
                 ("phone-hit", "2026-08-02 10:00", {"channel": "Telefon"}),
@@ -852,19 +969,28 @@ class TeamOrderTrendTests(TestCase):
             ],
             [("phone-hit", "2026-08-03")],
         )
-        point = self.point(summary, "olle", "2026-W31")
-        next_point = self.point(summary, "olle", "2026-W32")
+        order_point = self.point(summary, "order_10d", "olle", "2026-W31")
+        positive_point = self.point(
+            summary, "positive_to_order_10d", "olle", "2026-W31"
+        )
+        next_point = self.point(summary, "order_10d", "olle", "2026-W32")
 
         self.assertEqual(
-            (point["numerator"], point["denominator"], point["value"], point["status"]),
+            (order_point["numerator"], order_point["denominator"],
+             order_point["value"], order_point["status"]),
             (1, 2, 0.5, "small_sample"),
+        )
+        self.assertEqual(
+            (positive_point["numerator"], positive_point["denominator"],
+             positive_point["value"], positive_point["status"]),
+            (1, 1, 1, "small_sample"),
         )
         self.assertEqual(
             (next_point["numerator"], next_point["denominator"],
              next_point["value"], next_point["status"]),
             (0, 0, None, "not_computable"),
         )
-        self.assertNotIn("waiting_outcome_count", point)
+        self.assertNotIn("waiting_outcome_count", order_point)
 
         week_summary = self.build_summary(
             [
@@ -872,22 +998,41 @@ class TeamOrderTrendTests(TestCase):
                 ("manual-email", "2026-08-02 11:00", {"channel": "Mejl"}),
             ],
             [("phone-hit", "2026-08-03")],
-            start=point["period"]["start"],
-            end=point["period"]["end"],
+            start=order_point["period"]["start"],
+            end=order_point["period"]["end"],
             channel="all",
         )
-        central = week_summary["outcome_10d"]["order_10d_comparable"]
-        self.assertEqual(
-            {key: point[key] for key in ("value", "numerator", "denominator", "status")},
-            {key: central[key] for key in ("value", "numerator", "denominator", "status")},
-        )
-        drilldown = build_drilldown(week_summary, "order_10d_comparable")
-        self.assertEqual(drilldown["total_count"], point["denominator"])
+        for metric, point in (
+            ("order_10d", order_point),
+            ("positive_to_order_10d", positive_point),
+        ):
+            with self.subTest(metric=metric):
+                central = week_summary["outcome_10d"][metric]
+                self.assertEqual(
+                    {key: point[key] for key in (
+                        "value", "numerator", "denominator", "status"
+                    )},
+                    {key: central[key] for key in (
+                        "value", "numerator", "denominator", "status"
+                    )},
+                )
+                drilldown = build_drilldown(week_summary, metric)
+                self.assertEqual(drilldown["total_count"], point["denominator"])
+                self.assertEqual(
+                    sum(
+                        row["cohort_role"] == "numerator"
+                        for row in drilldown["rows"]
+                    ),
+                    point["numerator"],
+                )
+                self.assertNotIn(
+                    "pending", {row["cohort_role"] for row in drilldown["rows"]}
+                )
+        drilldown = build_drilldown(week_summary, "order_10d")
         self.assertEqual(
             sum(row["cohort_role"] == "numerator" for row in drilldown["rows"]),
-            point["numerator"],
+            order_point["numerator"],
         )
-        self.assertNotIn("pending", {row["cohort_role"] for row in drilldown["rows"]})
         self.assertEqual({row["channel"] for row in drilldown["rows"]}, {"phone", "email"})
 
     def test_team_population_ignores_period_seller_channel_but_applies_dimensions(self):
@@ -931,31 +1076,73 @@ class TeamOrderTrendTests(TestCase):
             segment="A",
             lifecycle="prospect",
         )
-        trend = summary["team_order_10d_trend"]
+        trend = summary["team_10d_trends"]
 
         self.assertEqual(trend["selected_seller"], "olle")
         self.assertEqual(
-            [item["seller"] for item in trend["series"]],
+            [
+                item["seller"]
+                for item in trend["metrics"]["order_10d"]["series"]
+            ],
             ["olle", "sofia", "viewer"],
         )
         self.assertEqual(
-            (self.point(summary, "olle", "2026-W31")["numerator"],
-             self.point(summary, "olle", "2026-W31")["denominator"],
-             self.point(summary, "olle", "2026-W31")["status"]),
+            (self.point(summary, "order_10d", "olle", "2026-W31")["numerator"],
+             self.point(summary, "order_10d", "olle", "2026-W31")["denominator"],
+             self.point(summary, "order_10d", "olle", "2026-W31")["status"]),
             (4, 8, "small_sample"),
         )
         self.assertEqual(
-            (self.point(summary, "sofia", "2026-W31")["numerator"],
-             self.point(summary, "sofia", "2026-W31")["denominator"],
-             self.point(summary, "sofia", "2026-W31")["status"]),
+            (self.point(summary, "order_10d", "sofia", "2026-W31")["numerator"],
+             self.point(summary, "order_10d", "sofia", "2026-W31")["denominator"],
+             self.point(summary, "order_10d", "sofia", "2026-W31")["status"]),
             (3, 10, "sufficient"),
         )
         self.assertEqual(
-            (self.point(summary, "viewer", "2026-W31")["value"],
-             self.point(summary, "viewer", "2026-W31")["denominator"],
-             self.point(summary, "viewer", "2026-W31")["status"]),
+            (self.point(summary, "order_10d", "viewer", "2026-W31")["value"],
+             self.point(summary, "order_10d", "viewer", "2026-W31")["denominator"],
+             self.point(summary, "order_10d", "viewer", "2026-W31")["status"]),
             (None, 0, "not_computable"),
         )
+
+    def test_both_live_trends_share_axis_but_keep_distinct_populations(self):
+        specs = []
+        converted = []
+        for index in range(10):
+            contact_id = f"deterministic-{index}"
+            specs.append((contact_id, "2026-07-20 10:00", {
+                "result": "Positiv" if index < 6 else "Neutral",
+                "channel": "Telefon",
+            }))
+            if index < 3 or index == 6:
+                converted.append((contact_id, "2026-07-22"))
+
+        summary = self.build_summary(specs, converted)
+        trends = summary["team_10d_trends"]
+        order_point = self.point(summary, "order_10d", "olle", "2026-W30")
+        positive_point = self.point(
+            summary, "positive_to_order_10d", "olle", "2026-W30"
+        )
+
+        self.assertEqual(set(trends["metrics"]), {
+            "order_10d", "positive_to_order_10d",
+        })
+        self.assertEqual(
+            (order_point["numerator"], order_point["denominator"], order_point["value"]),
+            (4, 10, .4),
+        )
+        self.assertEqual(
+            (positive_point["numerator"], positive_point["denominator"],
+             positive_point["value"]),
+            (3, 6, .5),
+        )
+        axis = [slot["week"] for slot in trends["week_axis"]]
+        for metric in trends["metrics"].values():
+            self.assertEqual(
+                [point["week"] for point in metric["series"][0]["points"]],
+                axis,
+            )
+        self.assertNotIn("comparable", repr(trends))
 
 
 class SnapshotAndAggregateTests(TestCase):
@@ -1212,7 +1399,7 @@ class SnapshotAndAggregateTests(TestCase):
                 channel_metric = summary["channel_effectiveness"]["email"][key]
                 self.assertEqual(channel_metric["status"], "not_computable")
 
-    def test_positive_dialogue_contract_propagates_to_comparison_matrix_previous_and_rules(self):
+    def test_positive_dialogue_contract_propagates_to_comparison_previous_and_rules(self):
         rows = []
         users = [
             {"user_name": seller, "active": "Y", "admin": "N"}
@@ -1249,10 +1436,6 @@ class SnapshotAndAggregateTests(TestCase):
         comparison = {
             item["seller"]: item for item in summary["seller_comparison"]
         }
-        matrix_seller = next(
-            item for item in summary["coaching_matrices"]["sales"]["sellers"]
-            if item["seller"] == "sofia"
-        )
         positive_card = next(
             card for card in summary["coaching_cards"]
             if card["metric_key"] == "positive_dialogue"
@@ -1260,7 +1443,6 @@ class SnapshotAndAggregateTests(TestCase):
 
         self.assertEqual(comparison["sofia"]["positive_dialogue"]["value"], .2)
         self.assertEqual(comparison["sofia"]["positive_dialogues_count"], 2)
-        self.assertEqual(matrix_seller["positive_dialogue"]["value"], .2)
         self.assertEqual(summary["kpis"]["positive_dialogue"]["value"], .2)
         self.assertEqual(
             summary["kpis"]["positive_dialogue"]["comparisons"]["previous_period"],
@@ -1273,7 +1455,7 @@ class SnapshotAndAggregateTests(TestCase):
         self.assertEqual(positive_card["evidence"]["value"], .2)
         self.assertEqual(positive_card["code"], "positive_dialogue_low")
 
-    def test_sync_positive_to_order_cohort_propagates_to_matrix_weekly_previous_and_coaching(self):
+    def test_sync_positive_to_order_live_cohort_propagates_everywhere(self):
         users = [
             {"user_name": seller, "active": "Y", "admin": "N"}
             for seller in ("sofia", "olle", "maja")
@@ -1359,10 +1541,6 @@ class SnapshotAndAggregateTests(TestCase):
             rows, orders, users=users, customers=customers, seller="sofia",
         )
         comparison = {item["seller"]: item for item in summary["seller_comparison"]}
-        matrix_seller = next(
-            item for item in summary["coaching_matrices"]["sales"]["sellers"]
-            if item["seller"] == "sofia"
-        )
         closing_card = next(
             card for card in summary["coaching_cards"]
             if card["code"] == "closing_gap"
@@ -1380,18 +1558,15 @@ class SnapshotAndAggregateTests(TestCase):
             expected,
         )
         self.assertEqual(
-            (matrix_seller["positive_to_order_10d_comparable"]["numerator"],
-             matrix_seller["positive_to_order_10d_comparable"]["denominator"]),
-            expected,
-        )
-        self.assertEqual(
             (closing_card["evidence"]["numerator"], closing_card["evidence"]["denominator"]),
             expected,
         )
         self.assertEqual(
-            summary["kpis"]["positive_to_order_10d"]["comparable"]["comparisons"]["previous_period"],
+            summary["kpis"]["positive_to_order_10d"]["comparisons"]["previous_period"],
             0,
         )
+        self.assertEqual(closing_card["metric_key"], "positive_to_order_10d")
+        self.assertEqual(closing_card["drilldown_metric"], "positive_to_order_10d")
         self.assertEqual(
             sum(week["positive_to_order_10d"]["denominator"] for week in summary["weekly_trend"]),
             10,
@@ -1410,8 +1585,7 @@ class SnapshotAndAggregateTests(TestCase):
     def test_metric_registry_is_public_complete_and_shared_with_main_kpis(self):
         required = {
             "human_activities", "reach", "positive_dialogue",
-            "positive_to_order_10d", "positive_to_order_10d_comparable",
-            "order_10d", "order_10d_comparable", "bom_ratio",
+            "positive_to_order_10d", "order_10d", "bom_ratio",
             "high_priority_boms", "median_days_to_order",
             "positive_next_step_coverage", "planned_completed_in_time",
             "priority_focus", "strategic_coverage",
@@ -1419,7 +1593,11 @@ class SnapshotAndAggregateTests(TestCase):
         summary = self.summary([])
 
         self.assertTrue(required.issubset(METRIC_DEFINITIONS))
-        self.assertEqual(summary["meta"]["definitions_version"], "sales_coaching_v7")
+        self.assertEqual(summary["meta"]["definitions_version"], "sales_coaching_v8")
+        self.assertNotIn("positive_to_order_10d_comparable", METRIC_DEFINITIONS)
+        self.assertNotIn("order_10d_comparable", METRIC_DEFINITIONS)
+        self.assertNotIn("comparable", summary["kpis"]["positive_to_order_10d"])
+        self.assertNotIn("comparable", summary["kpis"]["order_10d"])
         self.assertEqual(
             MAIN_KPI_KEYS,
             (
@@ -1593,6 +1771,109 @@ class SnapshotAndAggregateTests(TestCase):
         self.assertEqual(comparison["previous_period"], .6)
         self.assertAlmostEqual(comparison["delta_previous"], .2)
 
+    def test_channel_filtered_seller_coaching_uses_same_channel_peers_and_drilldown(self):
+        users = [
+            {"user_name": name, "active": "Y", "admin": "N"}
+            for name in ("olle", "sofia", "maja")
+        ]
+        customers = []
+        rows = []
+        orders = []
+
+        def add_contacts(seller, channel, count, converted, prefix):
+            for index in range(count):
+                customer_id = f"{prefix}-customer-{index}"
+                customer_name = f"{prefix.title()} customer {index}"
+                customer_number = f"{prefix[:2]}{index:03d}"
+                customers.append({
+                    "customer": customer_name,
+                    "customer_id": customer_id,
+                    "customer_number": customer_number,
+                    "sales_person": seller.title(),
+                    "customer_segment": "A",
+                })
+                rows.append(activity(
+                    f"{prefix}-contact-{index}",
+                    f"2026-08-{index + 1:02d} 10:00",
+                    seller=seller,
+                    channel=channel,
+                    result="Positiv",
+                    customer_id=customer_id,
+                    customer=customer_name,
+                ))
+                if index < converted:
+                    order_row = order(
+                        f"{prefix.upper()}-{index}",
+                        f"2026-08-{index + 2:02d}",
+                        customer_id=customer_id,
+                        customer=customer_name,
+                    )
+                    order_row["Customer number"] = customer_number
+                    orders.append(order_row)
+
+        add_contacts("olle", "Besök", 10, 2, "olle-visit")
+        add_contacts("olle", "Telefon", 10, 8, "olle-phone")
+        add_contacts("sofia", "Besök", 10, 5, "sofia-visit")
+        add_contacts("maja", "Besök", 10, 5, "maja-visit")
+
+        summary = self.summary(
+            rows,
+            orders,
+            users=users,
+            customers=customers,
+            seller="olle",
+            channel="visit",
+        )
+        all_channel = self.summary(
+            rows,
+            orders,
+            users=users,
+            customers=customers,
+            seller="olle",
+            channel="all",
+        )
+
+        metric = summary["kpis"]["positive_to_order_10d"]
+        self.assertEqual(
+            (metric["numerator"], metric["denominator"], metric["value"]),
+            (2, 10, .2),
+        )
+        self.assertEqual(metric["comparisons"]["peer_median"], .5)
+        self.assertEqual(metric["comparisons"]["peer_count"], 2)
+        self.assertNotEqual(metric["value"], .5, "must not use Olle's all-channel rate")
+
+        closing = next(
+            card for card in summary["coaching_cards"]
+            if card["code"] == "closing_gap"
+        )
+        self.assertEqual(
+            (
+                closing["evidence"]["numerator"],
+                closing["evidence"]["denominator"],
+                closing["evidence"]["value"],
+            ),
+            (2, 10, .2),
+        )
+        self.assertEqual(closing["evidence"]["comparisons"]["peer_median"], .5)
+
+        drilldown = build_drilldown(
+            summary, closing["drilldown_metric"]
+        )
+        self.assertEqual(drilldown["total_count"], closing["evidence"]["denominator"])
+        self.assertEqual(
+            sum(row["cohort_role"] == "numerator" for row in drilldown["rows"]),
+            closing["evidence"]["numerator"],
+        )
+        self.assertEqual({row["channel"] for row in drilldown["rows"]}, {"visit"})
+
+        team_olle = next(
+            item for item in summary["seller_comparison"]
+            if item["seller"] == "olle"
+        )
+        self.assertEqual(team_olle["positive_to_order_10d"]["value"], .5)
+        self.assertEqual(summary["seller_comparison"], all_channel["seller_comparison"])
+        self.assertEqual(summary["team_10d_trends"], all_channel["team_10d_trends"])
+
     def test_channel_filtered_activity_count_uses_only_filtered_previous_period(self):
         rows = [
             activity(f"phone-current-{index}", f"2026-08-0{index + 1} 10:00")
@@ -1696,29 +1977,12 @@ class SnapshotAndAggregateTests(TestCase):
         )
         self.assertEqual(team["zero"]["human_activities_total"], 0)
 
-    def test_sales_matrix_keeps_small_samples_but_excludes_them_from_medians(self):
-        users = [
-            {"user_name": name, "active": "Y", "admin": "N"}
-            for name in ("alice", "bob", "tiny", "zero")
-        ]
-        rows = []
-        for seller, positives, total in (("alice", 10, 20), ("bob", 14, 20), ("tiny", 1, 1)):
-            for index in range(total):
-                rows.append(activity(
-                    f"{seller}-{index}", f"2026-08-{index + 1:02d} 10:00",
-                    seller=seller,
-                    result="Positiv" if index < positives else "Neutral",
-                ))
+    def test_only_priority_matrix_is_built(self):
+        summary = self.summary([])
 
-        matrix = self.summary(rows, users=users)["coaching_matrices"]["sales"]
-        sellers = {item["seller"]: item for item in matrix["sellers"]}
-
-        self.assertEqual(set(sellers), {"alice", "bob", "tiny"})
-        self.assertEqual(sellers["tiny"]["sample_status"], "small_sample")
-        self.assertEqual(matrix["medians"]["positive_dialogue"], 0.6)
-        self.assertEqual(matrix["medians"]["positive_to_order_10d_comparable"], 0)
-        self.assertEqual(matrix["insufficient_sample"][0]["seller"], "zero")
-        self.assertIn("positive_denominator_zero", matrix["insufficient_sample"][0]["reasons"])
+        self.assertEqual(set(summary["coaching_matrices"]), {"priority"})
+        self.assertEqual(summary["coaching_matrix"]["type"], "priority")
+        self.assertNotIn("sales", repr(summary["coaching_matrices"]))
 
     def test_tie_aware_value_percentile_does_not_make_zero_values_strategic(self):
         priorities = [
@@ -1947,11 +2211,49 @@ class SnapshotAndAggregateTests(TestCase):
         )
         self.assertEqual(
             summary["coaching_matrices"]["priority"]["axes"]["x"]["key"],
-            "order_10d_comparable",
+            "order_10d",
         )
         self.assertIn(
             "priority_percentile_coverage_below_70",
             summary["coaching_matrix"]["insufficient_sample"][0]["reasons"],
+        )
+
+    def test_priority_matrix_sample_uses_live_order_denominator(self):
+        users = [
+            {"user_name": seller, "active": "Y", "admin": "N"}
+            for seller in ("alice", "bob")
+        ]
+        rows = [
+            activity(
+                f"{seller}-{index}", "2026-08-16 10:00",
+                seller=seller,
+                analytics_snapshot_version=ANALYTICS_SNAPSHOT_VERSION,
+                priority_snapshot_quality="exact",
+                priority_percentile_at_contact="80",
+                priority_percentile_basis_at_contact=PRIORITY_PERCENTILE_BASIS,
+            )
+            for seller in ("alice", "bob")
+            for index in range(10)
+        ]
+
+        matrix = self.summary(rows, users=users)["coaching_matrix"]
+
+        self.assertTrue(matrix["available"])
+        self.assertEqual(matrix["axes"]["x"]["key"], "order_10d")
+        self.assertEqual(
+            {item["order_10d"]["denominator"] for item in matrix["sellers"]},
+            {10},
+        )
+        self.assertEqual(
+            {
+                item["order_10d"]["waiting_outcome_count"]
+                for item in matrix["sellers"]
+            },
+            {10},
+        )
+        self.assertEqual(
+            {item["order_10d_comparable"]["denominator"] for item in matrix["sellers"]},
+            {0},
         )
 
     def test_api_model_exposes_definitions_and_deterministic_coaching_cards(self):

@@ -32,8 +32,8 @@ class SalesCoachingFrontendTests(TestCase):
         for expected in (
             "Period", "Säljare", "Kanal", "Lifecycle", "Kundsegment",
             "Coachningsöversikt", "Coachningskort", "Teamjämförelse",
-            "Kontakt – order inom 10 dagar – trend",
-            "Teamets coachningsmatriser", "Aktivitetstratt", "10-dagarsutfall",
+            "10-dagarskonvertering – trend",
+            "Teamets prioriteringsmatris", "Aktivitetstratt", "10-dagarsutfall",
             "Konvertering", "Besök", "Kanaler", "Uppföljning", "Prioritering",
             "Datakvalitet och definitioner",
         ):
@@ -90,6 +90,18 @@ class SalesCoachingFrontendTests(TestCase):
         self.assertIn('aria-expanded="false"', self.javascript)
         self.assertIn("explanation.hidden = expanded", self.javascript)
 
+    def test_live_10_day_definitions_explain_pending_comparisons(self):
+        expected = {
+            "positive_to_order_10d": "Andelen av alla berättigade positiva besök och telefonsamtal med säker kundidentitet i vald period som hittills har följts av en attribuerad order inom 0–10 dagar. Kontakter vars 10-dagarsfönster fortfarande är öppet ingår i nämnaren, därför är måttet preliminärt. Samma definition används i Coachningsöversikt, Teamjämförelse och övriga jämförelser. Jämförelser mellan säljare kan förändras medan utfall fortfarande väntar. Jämförelse med föregående period visas först när båda perioderna saknar väntande 10-dagarsutfall.",
+            "order_10d": "Andelen av alla berättigade nådda mänskliga kontakter med säker kundidentitet i vald period som hittills har följts av en attribuerad order inom 0–10 dagar. Kontakter vars 10-dagarsfönster fortfarande är öppet ingår i nämnaren, därför är måttet preliminärt. Samma definition används i Coachningsöversikt, Teamjämförelse och övriga jämförelser. Jämförelser mellan säljare kan förändras medan utfall fortfarande väntar. Jämförelse med föregående period visas först när båda perioderna saknar väntande 10-dagarsutfall.",
+        }
+
+        for metric_key, definition in expected.items():
+            with self.subTest(metric_key=metric_key):
+                self.assertEqual(
+                    METRIC_DEFINITIONS[metric_key]["definition"], definition
+                )
+
     def test_frontend_uses_backend_rate_contract_without_recalculating_kpis(self):
         self.assertIn("percent(metric.value)", self.javascript)
         self.assertIn("rateEvidence(metric)", self.javascript)
@@ -140,49 +152,50 @@ class SalesCoachingFrontendTests(TestCase):
             "teamComparisonMarkup", "human_activities_total",
             "visit_breakdown?.analysable", "visit_breakdown?.reached",
             "visit_breakdown?.boms", "channel_mix?.phone", "channel_mix?.email",
-            "positive_to_order_10d_comparable", "positive_next_step_coverage",
+            "positive_to_order_10d", "positive_next_step_coverage",
             "is-visit-stack", "is-visit-reached", "is-visit-bom",
             "is-email", "sc-comparison-table", "Nästa-steg-täckning",
-            "Kontakt – order inom 10 dagar – fullständigt utfall",
+            "Kontakt – order inom 10 dagar",
+            "waiting_positive_dialogues_count", "waiting_outcome_count",
         ):
             with self.subTest(expected=expected):
                 self.assertIn(expected, self.javascript)
         self.assertNotIn("item.attributed_orders /", self.javascript)
         self.assertNotIn('class="sc-team-secondary"', self.javascript)
         self.assertIn(
-            "${rateCell(item.positive_to_order_10d_comparable)}</td><td>${rateCell(item.order_10d_comparable)}</td><td>${rateCell(item.positive_next_step_coverage)}",
+            "${rateCell(item.positive_to_order_10d, item.waiting_positive_dialogues_count)}</td><td>${rateCell(item.order_10d, item.waiting_outcome_count)}</td><td>${rateCell(item.positive_next_step_coverage)}",
             self.javascript,
         )
         self.assertIn(
-            'metricHeader("Kontakt – order inom 10 dagar – fullständigt utfall", "order_10d_comparable", "team-order")',
+            'metricLabel("order_10d", "Kontakt – order inom 10 dagar")',
             self.javascript,
         )
 
-    def test_headline_outcomes_keep_live_value_and_show_separate_comparable_line(self):
-        self.assertIn("comparableOutcomeText", self.javascript)
-        self.assertIn(
-            "Jämförbart 10-dagarsutfall: inte tillräckligt underlag ännu",
-            self.javascript,
-        )
-        self.assertIn("med fullständigt 10-dagarsutfall", self.javascript)
-        self.assertIn('class="sc-kpi-comparable"', self.javascript)
-        self.assertIn('data-drilldown="${escapeHtml(comparable.drilldown_metric)}"', self.javascript)
-        self.assertIn('${comparable ? "" : escapeHtml(comparisonText(metric))}', self.javascript)
+    def test_headline_outcomes_render_only_live_value_and_live_comparisons(self):
+        self.assertNotIn("comparableOutcomeText", self.javascript)
+        self.assertNotIn("Jämförbart 10-dagarsutfall", self.javascript)
+        self.assertNotIn('class="sc-kpi-comparable"', self.javascript)
+        self.assertNotIn(".sc-kpi-comparable", self.css)
+        self.assertIn('${escapeHtml(comparisonText(metric))}', self.javascript)
         self.assertNotIn('metric.status === "sufficient"\n      ? \'<span class="sc-status"', self.javascript)
 
-    def test_long_term_team_trend_contract_is_accessible_and_independent(self):
-        trend = self.javascript.split("function teamOrderTrendMarkup", 1)[1].split(
+    def test_two_live_team_trends_are_accessible_and_independent(self):
+        trend = self.javascript.split("function teamTrendPanelMarkup", 1)[1].split(
             "function matrixReasonLabel", 1
         )[0]
         render = self.javascript.split("function renderDashboard", 1)[1].split(
             "function handleDashboardClick", 1
         )[0]
         for expected in (
-            "Fullständiga 10-dagarsutfall per kontaktvecka för de senaste 16 mogna veckorna",
-            "Varje punkt avser endast den aktuella kontaktveckan",
+            "Varje punkt avser en kontaktvecka",
+            "hela 10-dagarsfönstret har passerat",
+            "veckopunkterna förändras inte enbart för att fler dagar passerar",
+            "Diagrammen använder samma KPI-definitioner som Coachningsöversikten",
             "Period-, säljar- och kanalfilter begränsar inte grafen",
             "lifecycle och segment följer filtren",
-            'data-drilldown="order_10d_comparable"',
+            'metricKey: "order_10d"',
+            'metricKey: "positive_to_order_10d"',
+            'data-drilldown="${config.metricKey}"',
             'data-channel="all"',
             'data-seller="${escapeHtml(item.seller)}"',
             'tabindex="0" role="button"',
@@ -210,15 +223,40 @@ class SalesCoachingFrontendTests(TestCase):
         self.assertNotIn("TEAM_TREND_COLORS[seriesIndex", self.javascript)
         self.assertNotIn("TEAM_TREND_DASHES[seriesIndex", self.javascript)
         self.assertNotIn("rolling", trend.casefold())
+        self.assertIn('role="tablist" aria-label="Välj 10-dagarstrend"', trend)
+        self.assertIn('data-team-trend-view="${key}"', trend)
+        self.assertIn('role="tabpanel"', trend)
+        self.assertIn('id="sc-team-trend-panel-${view}"', trend)
+        self.assertIn('aria-labelledby="sc-team-trend-tab-${view}"', trend)
+        self.assertIn('${activeView === view ? "" : " hidden"}', trend)
+        self.assertIn('aria-controls="sc-team-trend-panel-${key}"', trend)
+        self.assertIn('aria-selected="${view === key}"', trend)
+        self.assertIn('tabindex="${view === key ? "0" : "-1"}"', trend)
+        self.assertIn(
+            "tabs.map(([key, _label, config]) => teamTrendPanelMarkup(trends, key, config, view))",
+            trend,
+        )
         point_title = trend.split("const title =", 1)[1].split(";", 1)[0]
         self.assertNotIn("prelim", point_title.casefold())
-        self.assertLess(render.index("teamComparisonMarkup"), render.index("teamOrderTrendMarkup"))
-        self.assertLess(render.index("teamOrderTrendMarkup"), render.index("matricesMarkup"))
+        self.assertLess(render.index("teamComparisonMarkup"), render.index("teamTrendsMarkup"))
+        self.assertLess(render.index("teamTrendsMarkup"), render.index("priorityMatrixMarkup"))
         self.assertIn(".sc-team-order-trend { display: block; width: 100%; min-width: 1040px", self.css)
         self.assertIn(".sc-team-order-trend-wrap { overflow-x: auto", self.css)
         self.assertIn(".sc-team-order-point.is-small-sample", self.css)
         self.assertIn(".sc-team-order-line.is-selected", self.css)
         self.assertIn(".sc-team-order-line.is-unselected", self.css)
+
+    def test_team_trend_tabs_switch_client_side_with_full_keyboard_navigation(self):
+        click_handler = self.javascript.split(
+            'const teamTrendTab = event.target.closest("[data-team-trend-view]")',
+            2,
+        )[2].split('const diagnosticTab =', 1)[0]
+        self.assertIn('teamTrendView: "order"', self.javascript)
+        self.assertIn('const keys = ["order", "positive"]', self.javascript)
+        for key in ("ArrowLeft", "ArrowRight", "Home", "End"):
+            self.assertIn(key, self.javascript)
+        self.assertIn("renderDashboard(state.data)", click_handler)
+        self.assertNotIn("loadSummary", click_handler)
 
     def test_team_trend_point_drilldown_overrides_seller_period_and_channel(self):
         handler = self.javascript.split("function handleDashboardClick", 1)[1].split(
@@ -251,13 +289,16 @@ class SalesCoachingFrontendTests(TestCase):
         self.assertIn(".sc-matrix { position: relative; height: 410px; overflow: hidden", self.css)
         self.assertIn("writing-mode: vertical-rl", self.css)
 
-    def test_both_matrix_views_small_samples_and_seller_highlight_are_present(self):
-        self.assertIn('data-matrix-view="sales"', self.javascript)
-        self.assertIn('data-matrix-view="priority"', self.javascript)
-        self.assertIn('state.matrixView === "priority"', self.javascript)
-        self.assertIn('item.sample_status === "small_sample"', self.javascript)
+    def test_only_priority_matrix_and_seller_highlight_are_present(self):
+        self.assertIn("function priorityMatrixPanelMarkup", self.javascript)
+        self.assertIn("Teamets prioriteringsmatris", self.javascript)
+        self.assertIn("Kontakt – order inom 10 dagar", self.javascript)
+        self.assertNotIn('data-matrix-view="sales"', self.javascript)
+        self.assertNotIn('data-matrix-view="priority"', self.javascript)
+        self.assertNotIn("matrixView", self.javascript)
+        self.assertNotIn("Försäljning</button>", self.javascript)
+        self.assertNotIn("sc-matrix-tabs", self.css)
         self.assertIn("sellerSelected(item.seller)", self.javascript)
-        self.assertIn("is-small-sample", self.css)
         self.assertIn("is-selected", self.css)
 
     def test_funnel_outcome_and_aggregate_priority_are_separate(self):
@@ -303,12 +344,19 @@ class SalesCoachingFrontendTests(TestCase):
         self.assertIn('`${value >= 0 ? "+" : ""}${number(value, 1)} aktiviteter`', self.javascript)
         self.assertIn("formatValue(comparisons.peer_median)", self.javascript)
         self.assertIn("formatValue(previousValue)", self.javascript)
-
-    def test_matrix_has_swedish_denominator_zero_reason(self):
         self.assertIn(
-            'positive_order_denominator_zero: "inga berättigade positiva dialoger för positiv-till-order-måttet"',
+            'comparisons.previous_period_suppressed_reason === "pending_10d_outcomes"',
             self.javascript,
         )
+        self.assertIn("!previousSuppressed && previousValue", self.javascript)
+        self.assertIn("!previousSuppressed && comparisons.previous_period_status", self.javascript)
+
+    def test_priority_matrix_has_swedish_denominator_zero_reason(self):
+        self.assertIn(
+            'order_denominator_zero: "inga berättigade kontakter för ordermåttet"',
+            self.javascript,
+        )
+        self.assertNotIn("positive_order_denominator_zero", self.javascript)
 
     def test_pending_outcome_copy_is_preliminary_and_hidden_at_zero(self):
         kpi_markup = self.javascript.split("function kpiMarkup", 1)[1].split(
@@ -316,10 +364,33 @@ class SalesCoachingFrontendTests(TestCase):
         )[0]
         self.assertIn("Number(metric.waiting_outcome_count) > 0", kpi_markup)
         self.assertIn(
-            "Preliminärt · ${number(metric.waiting_outcome_count)} väntar på slutligt 10-dagarsutfall",
+            "Preliminärt · ${number(metric.waiting_outcome_count)} väntar på 10-dagarsutfall",
             kpi_markup,
         )
         self.assertNotIn("väntar fortfarande på fullt 10-dagarsutfall", self.javascript)
+        coaching_markup = self.javascript.split(
+            "function coachingMarkup", 1
+        )[1].split("function conversionMarkup", 1)[0]
+        self.assertIn(
+            '["order_10d", "positive_to_order_10d"].includes(card.metric_key)',
+            coaching_markup,
+        )
+        self.assertIn("Number(card.evidence?.waiting_outcome_count) > 0", coaching_markup)
+        self.assertIn(
+            "Preliminärt · ${number(card.evidence.waiting_outcome_count)} väntar på 10-dagarsutfall",
+            coaching_markup,
+        )
+        matrix_markup = self.javascript.split(
+            "function priorityMatrixPanelMarkup", 1
+        )[1].split("function priorityMatrixMarkup", 1)[0]
+        self.assertIn("Number(xRate.waiting_outcome_count) > 0", matrix_markup)
+        self.assertIn(
+            "preliminärt: ${number(xRate.waiting_outcome_count)} väntar på 10-dagarsutfall",
+            matrix_markup,
+        )
+        self.assertIn('label: "Väntar på 10-dagarsutfall"', self.javascript)
+        self.assertNotIn("väntar på slutligt 10-dagarsutfall", self.javascript)
+        self.assertNotIn("Väntar på slutligt utfall", self.javascript)
         self.assertIn('drilldownMetric: "resolved_order_10d"', self.javascript)
         self.assertIn('drilldownMetric: "converted_order_10d"', self.javascript)
 
@@ -336,12 +407,14 @@ class SalesCoachingFrontendTests(TestCase):
         required = {
             "bom_ratio", "high_priority_boms", "human_activities",
             "median_days_to_order", "positive_next_step_coverage",
-            "order_10d", "order_10d_comparable", "planned_completed_in_time", "positive_dialogue",
-            "positive_to_order_10d", "positive_to_order_10d_comparable",
+            "order_10d", "planned_completed_in_time", "positive_dialogue",
+            "positive_to_order_10d",
             "priority_focus", "strategic_coverage",
             "reach",
         }
         self.assertTrue(required.issubset(METRIC_DEFINITIONS))
+        self.assertNotIn("positive_to_order_10d_comparable", METRIC_DEFINITIONS)
+        self.assertNotIn("order_10d_comparable", METRIC_DEFINITIONS)
         self.assertIn('new Intl.Collator("sv-SE"', self.javascript)
         self.assertIn("collator.compare(left.label, right.label)", self.javascript)
         self.assertIn('data-definition-key="${escapeHtml(key)}"', self.javascript)
@@ -359,15 +432,11 @@ class SalesCoachingFrontendTests(TestCase):
             METRIC_DEFINITIONS["positive_to_order_10d"]["not_computable_text"],
             "Positiv → order mäts endast för Besök och Telefon.",
         )
-        self.assertEqual(
-            METRIC_DEFINITIONS["positive_to_order_10d_comparable"]["not_computable_text"],
-            "Jämförbart positiv → order mäts endast för Besök och Telefon.",
-        )
         self.assertIn("channelRate(key, \"positive_dialogue\"", self.javascript)
-        self.assertIn("channelRate(key, \"positive_to_order_10d_comparable\"", self.javascript)
+        self.assertIn("channelRate(key, \"positive_to_order_10d\"", self.javascript)
         self.assertIn('? "Ej tillämpligt"', self.javascript)
         self.assertIn('data-channel-row="${key}"', self.javascript)
-        self.assertIn('data-channel-metric="positive_to_order_10d_comparable"', self.javascript)
+        self.assertIn('data-channel-metric="positive_to_order_10d"', self.javascript)
         self.assertNotIn("Fördjupa analysen utan operativa kundlistor.", self.javascript)
 
     def test_metric_information_is_separate_from_drilldown_and_accessible(self):
