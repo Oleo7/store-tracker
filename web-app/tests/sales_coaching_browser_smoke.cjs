@@ -40,6 +40,40 @@ const viewport = mode === "mobile"
     });
     await page.locator("#sales-coaching-dashboard:not([hidden])").waitFor();
     await page.locator(".sc-kpi-card").first().waitFor();
+    if (await page.locator(".sc-filter-primary .sc-field:visible").count() !== 2) {
+      throw new Error(`${mode}: Period and Säljare are not the only initially visible filter fields`);
+    }
+    if (await page.locator("#sc-more-filters-panel:visible").count()) {
+      throw new Error(`${mode}: additional filters are open on first load`);
+    }
+    if (await page.locator("#sc-custom-dates:visible").count()) {
+      throw new Error(`${mode}: custom date fields are visible for a standard period`);
+    }
+    if (await page.locator('#sc-period option[value="2"]').count() !== 1) {
+      throw new Error(`${mode}: the two-week period option is missing`);
+    }
+    const moreFilters = page.locator("#sc-more-filters-toggle");
+    if (await moreFilters.getAttribute("aria-expanded") !== "false") {
+      throw new Error(`${mode}: additional-filter control has the wrong initial state`);
+    }
+    await moreFilters.press("Enter");
+    if (await moreFilters.getAttribute("aria-expanded") !== "true" || !(await page.locator("#sc-more-filters-panel").isVisible())) {
+      throw new Error(`${mode}: additional filters did not open from the keyboard`);
+    }
+    for (const filter of ["#sc-channel", "#sc-lifecycle", "#sc-segment"]) {
+      if (!(await page.locator(filter).isVisible())) throw new Error(`${mode}: hidden filter ${filter} did not become visible`);
+    }
+    await moreFilters.press("Space");
+    if (await page.locator("#sc-more-filters-panel").isVisible()) {
+      throw new Error(`${mode}: additional filters did not close from the keyboard`);
+    }
+    if (await page.locator(".sc-quality-status").count()) {
+      throw new Error(`${mode}: removed top data-quality row still renders`);
+    }
+    const coachingIntro = await page.locator("#sc-kpi-title + p").innerText();
+    if (coachingIntro.trim() !== "Procentsatser bedöms först när underlaget är minst 10.") {
+      throw new Error(`${mode}: coaching overview uses the wrong sample-size copy: ${coachingIntro}`);
+    }
     const kpiCount = await page.locator(".sc-kpi-card").count();
     if (kpiCount !== 5) throw new Error(`${mode}: expected 5 KPI cards, got ${kpiCount}`);
     const expectedDenominators = [
@@ -403,9 +437,14 @@ const viewport = mode === "mobile"
       throw new Error(`${mode}: keyboard trend navigation triggered a summary request`);
     }
 
+    const advancedAnalysis = page.locator("#sc-advanced-analysis");
+    if (await advancedAnalysis.getAttribute("open") !== null) {
+      throw new Error(`${mode}: advanced analysis is open on first render or after a drilldown`);
+    }
+    await advancedAnalysis.locator(":scope > summary").click();
     const diagnosticTabs = await page.locator(".sc-diagnostic-tabs [role=tab]").allInnerTexts();
-    if (diagnosticTabs[0] !== "Besök" || diagnosticTabs[1] !== "Konvertering") {
-      throw new Error(`${mode}: diagnostic tabs are in the wrong order`);
+    if (JSON.stringify(diagnosticTabs) !== JSON.stringify(["Besök", "Uppföljning", "Kanaler"])) {
+      throw new Error(`${mode}: advanced-analysis tabs are wrong: ${JSON.stringify(diagnosticTabs)}`);
     }
     if (await page.locator('[data-diagnostic-tab="visits"]').getAttribute("aria-selected") !== "true") {
       throw new Error(`${mode}: visits is not the initial diagnostic tab`);
@@ -422,24 +461,46 @@ const viewport = mode === "mobile"
     };
     await page.locator('[data-diagnostic-tab="visits"]').focus();
     await page.locator('[data-diagnostic-tab="visits"]').press("ArrowRight");
-    await assertKeyboardTab("conversion", "Konvertering after ArrowRight from Besök");
-    await page.locator('[data-diagnostic-tab="conversion"]').press("Home");
+    await assertKeyboardTab("followup", "Uppföljning after ArrowRight from Besök");
+    await page.locator('[data-diagnostic-tab="followup"]').press("Home");
     await assertKeyboardTab("visits", "Besök after Home");
     await page.locator('[data-diagnostic-tab="visits"]').press("ArrowLeft");
-    await assertKeyboardTab("priority", "Prioritering after ArrowLeft from Besök");
-    await page.locator('[data-diagnostic-tab="priority"]').press("Home");
-    await assertKeyboardTab("visits", "Besök after Home from Prioritering");
+    await assertKeyboardTab("channels", "Kanaler after ArrowLeft from Besök");
+    await page.locator('[data-diagnostic-tab="channels"]').press("Home");
+    await assertKeyboardTab("visits", "Besök after Home from Kanaler");
     await page.locator('[data-diagnostic-tab="visits"]').press("End");
-    await assertKeyboardTab("priority", "Prioritering after End");
+    await assertKeyboardTab("channels", "Kanaler after End");
 
+    if (await page.locator("#sc-quality-details").getAttribute("open") !== null) {
+      throw new Error(`${mode}: data quality and definitions is open on first render`);
+    }
     await page.locator("#sc-quality-details > summary").click();
     const glossaryLabels = await page.locator(".sc-glossary dt").allInnerTexts();
-    const sortedLabels = [...glossaryLabels].sort(new Intl.Collator("sv-SE", { sensitivity: "base" }).compare);
-    if (JSON.stringify(glossaryLabels) !== JSON.stringify(sortedLabels)) {
-      throw new Error(`${mode}: metric glossary is not sorted in Swedish order`);
-    }
-    if (glossaryLabels.length < 12) {
+    if (glossaryLabels.length < 40) {
       throw new Error(`${mode}: metric glossary is unexpectedly incomplete`);
+    }
+    const definitionAudit = await page.evaluate(() => {
+      const used = [...document.querySelectorAll("[data-metric-definition], [data-secondary-metric-definition]")]
+        .flatMap(element => [
+          element.getAttribute("data-metric-definition"),
+          element.getAttribute("data-secondary-metric-definition"),
+        ])
+        .filter(Boolean);
+      const defined = new Set(
+        [...document.querySelectorAll(".sc-definition[data-metric-definition]")]
+          .filter(element => element.querySelector("dt")?.textContent.trim() && element.querySelector("dd")?.textContent.trim())
+          .map(element => element.getAttribute("data-metric-definition")),
+      );
+      return { used: [...new Set(used)], missing: [...new Set(used)].filter(key => !defined.has(key)) };
+    });
+    if (definitionAudit.missing.length) {
+      throw new Error(`${mode}: missing metric definitions: ${definitionAudit.missing.join(", ")}`);
+    }
+    for (const key of ["reach", "positive_dialogue", "order_10d", "bom_ratio", "positive_next_step_coverage", "priority_focus"]) {
+      const definition = await page.locator(`.sc-definition[data-metric-definition="${key}"] dd`).innerText();
+      if (!definition.includes("Täljaren är") || !definition.includes("nämnaren är")) {
+        throw new Error(`${mode}: ${key} does not explain its numerator and denominator`);
+      }
     }
     if (mode === "mobile") {
       const matrixScroller = page.locator(".sc-matrix-wrap").first();
@@ -451,10 +512,18 @@ const viewport = mode === "mobile"
       }
     }
 
+    await moreFilters.click();
+    if (!(await page.locator("#sc-more-filters-panel").isVisible())) {
+      throw new Error(`${mode}: additional filters did not reopen before changing channel`);
+    }
     await Promise.all([
       page.waitForResponse(response => response.url().includes("/sales-coaching-insights?") && response.url().includes("channel=email")),
       page.locator("#sc-channel").selectOption("email"),
     ]);
+    await moreFilters.click();
+    if (await page.locator("#sc-more-filters-panel").isVisible()) {
+      throw new Error(`${mode}: additional filters did not close after changing channel`);
+    }
     await page.locator('.sc-kpi-card[data-kpi-key="positive_dialogue"] .sc-kpi-evidence').waitFor();
     const emailPositive = await page.locator('.sc-kpi-card[data-kpi-key="positive_dialogue"]').innerText();
     if (!emailPositive.includes("Positiv dialog mäts endast för Besök och Telefon.")) {
@@ -470,10 +539,14 @@ const viewport = mode === "mobile"
     if (await page.locator(".sc-coaching-card .sc-rate-pending").count()) {
       throw new Error(`${mode}: zero pending outcomes still render on a coaching card`);
     }
+    if (!(await moreFilters.innerText()).includes("1 aktiva") || !(await moreFilters.evaluate(element => element.classList.contains("is-active")))) {
+      throw new Error(`${mode}: active hidden filters are not indicated while the filter block is closed`);
+    }
     const filteredTeamOlle = await page.locator(".sc-comparison-table tbody tr", { hasText: "Olle" }).innerText();
     if (!filteredTeamOlle.includes("7 av 35") || !filteredTeamOlle.includes("7 av 28")) {
       throw new Error(`${mode}: channel filter incorrectly changed all-channel team comparison: ${filteredTeamOlle}`);
     }
+    await page.locator("#sc-advanced-analysis > summary").click();
     await page.locator('[data-diagnostic-tab="channels"]').click();
     const emailRow = page.locator('[data-channel-row="email"]');
     await emailRow.waitFor();
@@ -550,6 +623,12 @@ const viewport = mode === "mobile"
     }
     if (browserErrors.length) {
       throw new Error(`${mode}: browser errors: ${JSON.stringify(browserErrors)}`);
+    }
+    await page.goto("http://127.0.0.1:5065/?sales_coaching=1&period=4&start=2026-07-01&end=2026-07-28", {
+      waitUntil: "networkidle",
+    });
+    if (await page.locator("#sc-period").inputValue() !== "custom" || !(await page.locator("#sc-custom-dates").isVisible())) {
+      throw new Error(`${mode}: custom direct-link period was not restored`);
     }
     console.log(`${mode} sales-coaching smoke passed`);
   } finally {

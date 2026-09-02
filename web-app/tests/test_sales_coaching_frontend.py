@@ -1,5 +1,6 @@
 from pathlib import Path
 from unittest import TestCase, main
+import re
 import sys
 
 
@@ -28,18 +29,71 @@ class SalesCoachingFrontendTests(TestCase):
         self.assertIn(".sales-coaching-admin { display: none; }", self.css)
         self.assertIn("body.user-admin .sales-coaching-dashboard:not([hidden])", self.css)
 
-    def test_dashboard_has_all_specified_sections_and_filters(self):
+    def test_dashboard_has_all_specified_sections(self):
         for expected in (
             "Period", "Säljare", "Kanal", "Lifecycle", "Kundsegment",
             "Coachningsöversikt", "Coachningskort", "Teamjämförelse",
             "10-dagarskonvertering – trend",
-            "Teamets prioriteringsmatris", "Aktivitetstratt", "10-dagarsutfall",
-            "Konvertering", "Besök", "Kanaler", "Uppföljning", "Prioritering",
+            "Teamets prioriteringsmatris", "Fördjupad analys",
+            "Besök", "Kanaler", "Uppföljning",
             "Datakvalitet och definitioner",
         ):
             with self.subTest(expected=expected):
                 self.assertIn(expected, self.javascript)
         self.assertNotIn('id="sc-comparison"', self.javascript)
+
+    def test_filters_are_progressively_disclosed_and_include_two_weeks(self):
+        markup = self.javascript[
+            self.javascript.index("function filterMarkup"):
+            self.javascript.index("function hydrateFiltersFromUrl")
+        ]
+        primary = markup[
+            markup.index('class="sc-filter-primary"'):
+            markup.index('class="sc-custom-dates"')
+        ]
+        self.assertIn('for="sc-period">Period', primary)
+        self.assertIn('for="sc-seller">Säljare', primary)
+        self.assertIn("Fler filter", primary)
+        self.assertNotIn('for="sc-channel"', primary)
+        self.assertNotIn('for="sc-lifecycle"', primary)
+        self.assertNotIn('for="sc-segment"', primary)
+        self.assertIn(
+            'id="sc-more-filters-toggle" aria-expanded="false" '
+            'aria-controls="sc-more-filters-panel"',
+            markup,
+        )
+        self.assertIn(
+            'class="sc-more-filters-panel" id="sc-more-filters-panel" hidden',
+            markup,
+        )
+        self.assertIn('class="sc-custom-dates" id="sc-custom-dates" hidden', markup)
+        self.assertIn('<option value="2">2 veckor</option>', markup)
+        self.assertIn('<option value="custom">Anpassad period</option>', markup)
+        self.assertIn("rangeMatchesPeriod", self.javascript)
+        self.assertIn("updateMoreFiltersControl", self.javascript)
+        self.assertIn(".sc-custom-dates[hidden]", self.css)
+
+    def test_removed_status_row_is_absent_from_markup_and_styles(self):
+        for removed in (
+            "qualityMarkup", "sc-quality-status", "sc-sticky-summary",
+            'data-sc-action="quality-details"', 'data-sc-action="edit-filters"',
+        ):
+            with self.subTest(removed=removed):
+                self.assertNotIn(removed, self.javascript)
+                self.assertNotIn(removed, self.css)
+
+    def test_dashboard_order_matches_the_simplified_page(self):
+        render = self.javascript[
+            self.javascript.index("function renderDashboard"):
+            self.javascript.index("function handleDashboardClick")
+        ]
+        ordered = (
+            "kpisMarkup", "coachingMarkup", "teamComparisonMarkup",
+            "teamTrendsMarkup", "priorityMatrixMarkup", "diagnosticsMarkup",
+            "dataQualityDetailsMarkup",
+        )
+        positions = [render.index(name) for name in ordered]
+        self.assertEqual(positions, sorted(positions))
 
     def test_exactly_five_main_kpis_are_rendered_in_requested_order(self):
         self.assertIn(
@@ -137,15 +191,27 @@ class SalesCoachingFrontendTests(TestCase):
             with self.subTest(metric=metric):
                 self.assertIn(f'"{metric}"', self.javascript)
 
-    def test_compact_data_quality_is_folded_and_separates_history(self):
+    def test_data_quality_is_folded_last_and_uses_the_shared_glossary(self):
         self.assertIn("order_attribution_identity_coverage", self.javascript)
         self.assertIn("core_flagged_activity_rows", self.javascript)
         self.assertIn("quality_issue_count", self.javascript)
         self.assertIn('details id="sc-quality-details"', self.javascript)
-        self.assertIn("Ett operativt undantag är inte i sig ett kvalitetsfel", self.javascript)
+        self.assertNotIn('details id="sc-quality-details" open', self.javascript)
+        self.assertIn("Operativa undantag är inte i sig datakvalitetsfel", self.javascript)
         self.assertIn("Datakvalitet och täckning", self.javascript)
         self.assertIn("Ordlista över mått", self.javascript)
+        self.assertIn("metricDefinitionsMarkup", self.javascript)
+        self.assertIn("VISIBLE_METRIC_DEFINITION_KEYS", self.javascript)
+        self.assertIn('class="sc-definition" data-metric-definition=', self.javascript)
         self.assertNotIn("sc-quality-debug", self.javascript)
+
+    def test_frontend_visible_metric_inventory_matches_api_registry(self):
+        inventory = self.javascript[
+            self.javascript.index("const VISIBLE_METRIC_DEFINITION_KEYS"):
+            self.javascript.index("const DRILLDOWN_DEFINITION_KEYS")
+        ]
+        frontend_keys = set(re.findall(r'"([a-z0-9_]+)"', inventory))
+        self.assertEqual(frontend_keys, set(METRIC_DEFINITIONS) - {"strategic_coverage"})
 
     def test_team_comparison_has_three_activity_bars_and_exact_table(self):
         for expected in (
@@ -162,10 +228,9 @@ class SalesCoachingFrontendTests(TestCase):
                 self.assertIn(expected, self.javascript)
         self.assertNotIn("item.attributed_orders /", self.javascript)
         self.assertNotIn('class="sc-team-secondary"', self.javascript)
-        self.assertIn(
-            "${rateCell(item.positive_to_order_10d, item.waiting_positive_dialogues_count)}</td><td>${rateCell(item.order_10d, item.waiting_outcome_count)}</td><td>${rateCell(item.positive_next_step_coverage)}",
-            self.javascript,
-        )
+        self.assertIn("rateCell(item.positive_to_order_10d, item.waiting_positive_dialogues_count)", self.javascript)
+        self.assertIn("rateCell(item.order_10d, item.waiting_outcome_count)", self.javascript)
+        self.assertIn("rateCell(item.positive_next_step_coverage)", self.javascript)
         self.assertIn(
             'metricLabel("order_10d", "Kontakt – order inom 10 dagar")',
             self.javascript,
@@ -301,38 +366,45 @@ class SalesCoachingFrontendTests(TestCase):
         self.assertIn("sellerSelected(item.seller)", self.javascript)
         self.assertIn("is-selected", self.css)
 
-    def test_funnel_outcome_and_aggregate_priority_are_separate(self):
+    def test_advanced_analysis_is_closed_and_has_exactly_three_tabs(self):
+        diagnostics = self.javascript[
+            self.javascript.index("function diagnosticsMarkup"):
+            self.javascript.index("function renderDashboard")
+        ]
+        self.assertIn('details id="sc-advanced-analysis"', diagnostics)
+        self.assertNotIn('details id="sc-advanced-analysis" open', diagnostics)
+        self.assertIn(
+            'const ADVANCED_TABS = ["visits", "followup", "channels"]',
+            self.javascript,
+        )
+        self.assertIn(
+            'const labels = { visits: "Besök", followup: "Uppföljning", '
+            'channels: "Kanaler" }',
+            diagnostics,
+        )
+        self.assertNotIn('"conversion"', diagnostics)
+        self.assertNotIn('"priority"', diagnostics)
+        self.assertNotIn("conversionMarkup", self.javascript)
+        self.assertNotIn("priorityDiagnosticsMarkup", self.javascript)
+        self.assertNotIn("funnelMarkup", self.javascript)
         self.assertIn("Bom-ratio – planerade besök", self.javascript)
         self.assertIn("Bom-ratio – oplanerade besök", self.javascript)
-        self.assertIn("funnel.steps", self.javascript)
-        self.assertIn("när en attribuerad order redan finns inom fönstret", self.javascript)
-        self.assertIn("Avgjorda kontakter", self.javascript)
-        self.assertIn("Följdes av attribuerad order", self.javascript)
-        self.assertIn("priorityDiagnosticsMarkup", self.javascript)
         self.assertNotIn("priority_gap", self.javascript)
         self.assertNotIn("Nästa bästa kunder", self.javascript)
         self.assertNotIn("Aktuella högprioriterade kunder", self.javascript)
         self.assertIn("Kan inte beräknas · jämförbar historisk prioritet saknas", self.javascript)
         self.assertNotIn("high_priority_score_fallback", self.javascript)
 
-    def test_tabs_are_keyboard_accessible_and_only_outcomes_can_be_preliminary(self):
-        self.assertIn('role="tablist" aria-label="Diagnostikflikar"', self.javascript)
+    def test_advanced_tabs_are_keyboard_accessible(self):
+        self.assertIn('role="tablist" aria-label="Fördjupad analys"', self.javascript)
         self.assertIn('role="tab"', self.javascript)
+        self.assertIn('role="tabpanel"', self.javascript)
+        self.assertIn('aria-selected="${active === key}"', self.javascript)
+        self.assertIn('aria-controls="sc-diagnostic-panel-${key}"', self.javascript)
         self.assertIn("ArrowLeft", self.javascript)
         self.assertIn("ArrowRight", self.javascript)
-        self.assertIn(
-            'const keys = ["visits", "conversion", "channels", "followup", "priority"]',
-            self.javascript,
-        )
-        self.assertIn("const preliminary = isOutcome && row.outcome_complete === false", self.javascript)
-        self.assertIn('["resolved_converted_contacts", "Konverterade", "#b7791f", "order_10d_sync", true]', self.javascript)
-        self.assertIn('["human_activities", "Aktiviteter", "#942a52", "human_activities", false]', self.javascript)
-        self.assertIn("aktivitet, nådda och positiva är slutliga", self.javascript)
+        self.assertIn("ADVANCED_TABS.indexOf", self.javascript)
         self.assertIn('diagnosticTab: "visits"', self.javascript)
-        self.assertLess(
-            self.javascript.index('["visits", "Besök"]'),
-            self.javascript.index('["conversion", "Konvertering"]'),
-        )
 
     def test_visible_sales_coaching_copy_does_not_use_synchronous_wording(self):
         self.assertNotIn("synkrona", self.javascript.casefold())
@@ -370,7 +442,7 @@ class SalesCoachingFrontendTests(TestCase):
         self.assertNotIn("väntar fortfarande på fullt 10-dagarsutfall", self.javascript)
         coaching_markup = self.javascript.split(
             "function coachingMarkup", 1
-        )[1].split("function conversionMarkup", 1)[0]
+        )[1].split("function diagnosticsMarkup", 1)[0]
         self.assertIn(
             '["order_10d", "positive_to_order_10d"].includes(card.metric_key)',
             coaching_markup,
@@ -388,11 +460,20 @@ class SalesCoachingFrontendTests(TestCase):
             "preliminärt: ${number(xRate.waiting_outcome_count)} väntar på 10-dagarsutfall",
             matrix_markup,
         )
-        self.assertIn('label: "Väntar på 10-dagarsutfall"', self.javascript)
+        self.assertIn('waiting_outcome: "waiting_outcome"', self.javascript)
         self.assertNotIn("väntar på slutligt 10-dagarsutfall", self.javascript)
         self.assertNotIn("Väntar på slutligt utfall", self.javascript)
-        self.assertIn('drilldownMetric: "resolved_order_10d"', self.javascript)
-        self.assertIn('drilldownMetric: "converted_order_10d"', self.javascript)
+
+    def test_drilldowns_do_not_open_advanced_analysis(self):
+        handler = self.javascript[
+            self.javascript.index("function handleDashboardClick"):
+            self.javascript.index("function drawerMarkup")
+        ]
+        drilldown_handler = handler[handler.index('const drilldown = event.target.closest("[data-drilldown]")'):]
+        self.assertIn("openDrilldown", drilldown_handler)
+        self.assertNotIn("advanced.open", drilldown_handler)
+        self.assertIn("data-metric-definition", self.javascript)
+        self.assertIn("DRILLDOWN_DEFINITION_KEYS", self.javascript)
 
     def test_pr3_benchmark_and_signal_contract_is_presentational(self):
         self.assertIn("Median övriga säljare", self.javascript)
@@ -409,15 +490,15 @@ class SalesCoachingFrontendTests(TestCase):
             "median_days_to_order", "positive_next_step_coverage",
             "order_10d", "planned_completed_in_time", "positive_dialogue",
             "positive_to_order_10d",
-            "priority_focus", "strategic_coverage",
+            "priority_focus", "unique_customers", "visit_reach",
             "reach",
         }
         self.assertTrue(required.issubset(METRIC_DEFINITIONS))
         self.assertNotIn("positive_to_order_10d_comparable", METRIC_DEFINITIONS)
         self.assertNotIn("order_10d_comparable", METRIC_DEFINITIONS)
-        self.assertIn('new Intl.Collator("sv-SE"', self.javascript)
-        self.assertIn("collator.compare(left.label, right.label)", self.javascript)
-        self.assertIn('data-definition-key="${escapeHtml(key)}"', self.javascript)
+        self.assertIn("VISIBLE_METRIC_DEFINITION_KEYS.map", self.javascript)
+        self.assertIn('class="sc-definition" data-metric-definition=', self.javascript)
+        self.assertIn("metricDefinitionText", self.javascript)
         self.assertIn("definitionParts(definitionKey, context)", self.javascript)
         self.assertIn("definitionParts(card.metric_key", self.javascript)
         self.assertIn("metricHeader(", self.javascript)
@@ -496,6 +577,7 @@ class SalesCoachingFrontendTests(TestCase):
         self.assertIn("width: calc(100% - 20px)", self.css)
         self.assertIn(".sc-drawer { width: 100vw; }", self.css)
         self.assertIn(".sc-team-charts { grid-template-columns: 1fr; }", self.css)
+        self.assertIn(".sc-more-filters-panel { grid-template-columns: 1fr; }", self.css)
 
     def test_static_assets_are_served_by_flask(self):
         app_module.app.config.update(TESTING=True)

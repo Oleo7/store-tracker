@@ -1593,7 +1593,7 @@ class SnapshotAndAggregateTests(TestCase):
         summary = self.summary([])
 
         self.assertTrue(required.issubset(METRIC_DEFINITIONS))
-        self.assertEqual(summary["meta"]["definitions_version"], "sales_coaching_v9")
+        self.assertEqual(summary["meta"]["definitions_version"], "sales_coaching_v10")
         self.assertNotIn("positive_to_order_10d_comparable", METRIC_DEFINITIONS)
         self.assertNotIn("order_10d_comparable", METRIC_DEFINITIONS)
         self.assertNotIn("comparable", summary["kpis"]["positive_to_order_10d"])
@@ -2278,10 +2278,66 @@ class SnapshotAndAggregateTests(TestCase):
             with self.subTest(kpi=key):
                 self.assertTrue(kpi["definition"])
                 self.assertTrue(kpi["drilldown_metric"])
+                self.assertEqual(
+                    kpi["definition"], first["metric_definitions"][key]["definition"]
+                )
         self.assertEqual(
             [step["drilldown_metric"] for step in first["funnel"]["steps"]],
             ["attempts", "reach", "positive_sync"],
         )
+
+    def test_metric_definition_registry_covers_every_visible_metric(self):
+        required = {
+            "human_activities", "unique_customers", "visits", "reached_visits",
+            "bom_visits", "phone", "manual_email", "reach", "visit_reach",
+            "positive_dialogue", "positive_to_order_10d", "order_10d",
+            "bom_ratio", "planned_bom_ratio", "unplanned_bom_ratio", "repeat_boms",
+            "high_priority_boms",
+            "positive_next_step_coverage",
+            "positive_without_next_step",
+            "positive_without_order_or_follow_up_10d",
+            "planned_completed_in_time", "overdue_planned", "skipped_planned",
+            "cancelled_excluded", "priority_focus",
+            "priority_percentile_coverage", "historical_priority_at_contact",
+            "attributed_orders", "median_days_to_order", "days_to_order",
+            "attributed_order_dfp",
+            "attributed_order_value", "waiting_outcome",
+            "secure_customer_identity", "order_attribution_identity_coverage",
+            "standardized_activity", "flagged_activity_rows",
+            "quality_issue_count", "exact_snapshots", "late_snapshots",
+            "operationally_suppressed",
+        }
+        self.assertTrue(required.issubset(METRIC_DEFINITIONS))
+        summary = self.summary([])
+        self.assertEqual(summary["metric_definitions"], METRIC_DEFINITIONS)
+        for key, item in summary["metric_definitions"].items():
+            with self.subTest(metric=key):
+                self.assertTrue(item["label"].strip())
+                self.assertTrue(item["definition"].strip())
+                definition = item["definition"].casefold()
+                for internal_name in (
+                    "v2_contacts", "result_class", "priority_percentile_at_contact",
+                    "historical_snapshot", "current_customer_state",
+                ):
+                    self.assertNotIn(internal_name, definition)
+
+        for rate_key in (
+            "reach", "visit_reach", "positive_dialogue",
+            "positive_to_order_10d", "order_10d", "bom_ratio",
+            "planned_bom_ratio", "unplanned_bom_ratio", "positive_next_step_coverage",
+            "planned_completed_in_time", "priority_focus",
+        ):
+            definition = summary["metric_definitions"][rate_key]["definition"]
+            self.assertTrue(definition)
+            self.assertTrue(summary["metric_definitions"][rate_key]["numerator_label"])
+            self.assertTrue(summary["metric_definitions"][rate_key]["denominator_label"])
+
+        for example_key in (
+            "bom_ratio", "positive_next_step_coverage", "priority_focus",
+        ):
+            self.assertGreater(
+                len(summary["metric_definitions"][example_key]["definition"]), 30
+            )
 
     def test_snapshot_quality_exact_approximate_and_missing(self):
         rows = [
