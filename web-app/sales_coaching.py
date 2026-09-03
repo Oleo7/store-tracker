@@ -21,7 +21,7 @@ from sales_coaching_rules import (
 )
 
 
-DEFINITIONS_VERSION = "sales_coaching_v9"
+DEFINITIONS_VERSION = "sales_coaching_v11"
 ANALYTICS_SNAPSHOT_VERSION = "sales_coaching_v2"
 PRIORITY_PERCENTILE_BASIS = "owner_active_scored_portfolio_midrank_v2"
 STOCKHOLM_ZONE = ZoneInfo("Europe/Stockholm")
@@ -39,15 +39,67 @@ METRIC_DEFINITIONS = {
         "channels": ["visit", "phone", "email"],
         "drilldown_metric": "human_activities",
     },
+    "unique_customers": {
+        "label": "Unika kunder",
+        "definition": "Antal olika säkert identifierade kunder som hade minst en mänsklig aktivitet under vald period.",
+        "metric_type": "count",
+        "unit": "kunder",
+    },
+    "visits": {
+        "label": "Besök",
+        "definition": "Antal analyserbara butiksbesök under vald period. Besök utan ett tolkningsbart resultat ingår inte.",
+        "metric_type": "count",
+        "unit": "besök",
+        "channels": ["visit"],
+    },
+    "reached_visits": {
+        "label": "Nådda besök",
+        "definition": "Antal analyserbara butiksbesök där säljaren nådde rätt person och fick ett dialogresultat.",
+        "metric_type": "count",
+        "unit": "besök",
+        "channels": ["visit"],
+    },
+    "bom_visits": {
+        "label": "Bom/bom-besök",
+        "definition": "Antal analyserbara butiksbesök där rätt person inte kunde nås.",
+        "metric_type": "count",
+        "unit": "besök",
+        "channels": ["visit"],
+    },
+    "phone": {
+        "label": "Telefon",
+        "definition": "Antal manuella eller planerade telefonsamtal under vald period.",
+        "metric_type": "count",
+        "unit": "samtal",
+        "channels": ["phone"],
+    },
+    "manual_email": {
+        "label": "Manuellt mejl",
+        "definition": "Antal manuellt skickade mejl under vald period. Automatiserade CRM-mejl ingår inte.",
+        "metric_type": "count",
+        "unit": "mejl",
+        "channels": ["email"],
+    },
     "reach": {
         "label": "Träffgrad",
         "definition": "Andelen analyserbara besök och telefonsamtal där säljaren nådde kunden. Manuella mejl ingår inte.",
         "metric_type": "rate",
         "numerator_label": "nådda besök/telefonsamtal",
         "denominator_label": "analyserbara besök/telefonsamtal",
+        "assessment_minimum": MIN_RATE_SAMPLE,
         "channels": ["visit", "phone"],
         "drilldown_metric": "reach",
         "denominator_drilldown_metric": "attempts",
+    },
+    "visit_reach": {
+        "label": "Träffgrad för besök",
+        "definition": "Andelen analyserbara butiksbesök där säljaren nådde rätt person.",
+        "metric_type": "rate",
+        "numerator_label": "nådda besök",
+        "denominator_label": "analyserbara besök",
+        "assessment_minimum": MIN_RATE_SAMPLE,
+        "channels": ["visit"],
+        "drilldown_metric": "reach",
     },
     "positive_dialogue": {
         "label": "Positiv dialog",
@@ -55,6 +107,7 @@ METRIC_DEFINITIONS = {
         "metric_type": "rate",
         "numerator_label": "positiva nådda besök/telefonsamtal",
         "denominator_label": "nådda besök/telefonsamtal",
+        "assessment_minimum": MIN_RATE_SAMPLE,
         "channels": ["visit", "phone"],
         "not_computable_text": "Positiv dialog mäts endast för Besök och Telefon.",
         "drilldown_metric": "positive_dialogue",
@@ -64,7 +117,8 @@ METRIC_DEFINITIONS = {
         "definition": "Andelen av alla berättigade positiva besök och telefonsamtal med säker kundidentitet i vald period som hittills har följts av en attribuerad order inom 0–10 dagar. Kontakter vars 10-dagarsfönster fortfarande är öppet ingår i nämnaren, därför är måttet preliminärt. Samma definition används i Coachningsöversikt, Teamjämförelse och övriga jämförelser. Jämförelser mellan säljare kan förändras medan utfall fortfarande väntar. Jämförelse med föregående period visas först när båda perioderna saknar väntande 10-dagarsutfall.",
         "metric_type": "rate",
         "numerator_label": "positiva dialoger som hittills följts av attribuerad order",
-        "denominator_label": "positiva dialoger har följts av order",
+        "denominator_label": "alla berättigade positiva dialoger med säker kundidentitet",
+        "assessment_minimum": MIN_RATE_SAMPLE,
         "channels": ["visit", "phone"],
         "not_computable_text": "Positiv → order mäts endast för Besök och Telefon.",
         "window_days": ATTRIBUTION_WINDOW_DAYS,
@@ -75,7 +129,8 @@ METRIC_DEFINITIONS = {
         "definition": "Andelen av alla berättigade nådda mänskliga kontakter med säker kundidentitet i vald period som hittills har följts av en attribuerad order inom 0–10 dagar. Kontakter vars 10-dagarsfönster fortfarande är öppet ingår i nämnaren, därför är måttet preliminärt. Samma definition används i Coachningsöversikt, Teamjämförelse och övriga jämförelser. Jämförelser mellan säljare kan förändras medan utfall fortfarande väntar. Jämförelse med föregående period visas först när båda perioderna saknar väntande 10-dagarsutfall.",
         "metric_type": "rate",
         "numerator_label": "nådda kontakter som hittills följts av attribuerad order",
-        "denominator_label": "kontakter har följts av order",
+        "denominator_label": "alla berättigade nådda mänskliga kontakter med säker kundidentitet",
+        "assessment_minimum": MIN_RATE_SAMPLE,
         "channels": ["visit", "phone", "email"],
         "window_days": ATTRIBUTION_WINDOW_DAYS,
         "drilldown_metric": "order_10d",
@@ -86,6 +141,7 @@ METRIC_DEFINITIONS = {
         "metric_type": "rate",
         "numerator_label": "kontakter i högsta prioritetskvartilen",
         "denominator_label": "kontakter med jämförbar historisk prioritet",
+        "assessment_minimum": MIN_RATE_SAMPLE,
         "drilldown_metric": "priority_focus",
     },
     "bom_ratio": {
@@ -94,6 +150,7 @@ METRIC_DEFINITIONS = {
         "metric_type": "rate",
         "numerator_label": "besök där kunden inte nåddes",
         "denominator_label": "analyserbara besök",
+        "assessment_minimum": MIN_RATE_SAMPLE,
         "channels": ["visit"],
         "drilldown_metric": "bom_ratio",
     },
@@ -103,6 +160,7 @@ METRIC_DEFINITIONS = {
         "metric_type": "rate",
         "numerator_label": "planerade besök där kunden inte nåddes",
         "denominator_label": "analyserbara planerade besök",
+        "assessment_minimum": MIN_RATE_SAMPLE,
         "channels": ["visit"],
         "drilldown_metric": "planned_boms",
     },
@@ -112,6 +170,7 @@ METRIC_DEFINITIONS = {
         "metric_type": "rate",
         "numerator_label": "oplanerade besök där kunden inte nåddes",
         "denominator_label": "analyserbara oplanerade besök",
+        "assessment_minimum": MIN_RATE_SAMPLE,
         "channels": ["visit"],
         "drilldown_metric": "unplanned_boms",
     },
@@ -142,6 +201,7 @@ METRIC_DEFINITIONS = {
         "metric_type": "rate",
         "numerator_label": "positiva kontakter med nästa steg eller order",
         "denominator_label": "positiva kontakter minst tre dagar gamla",
+        "assessment_minimum": MIN_RATE_SAMPLE,
         "drilldown_metric": "followup_success",
     },
     "positive_without_next_step": {
@@ -165,6 +225,7 @@ METRIC_DEFINITIONS = {
         "metric_type": "rate",
         "numerator_label": "planerade aktiviteter genomförda i tid",
         "denominator_label": "ansvariga planerade aktiviteter",
+        "assessment_minimum": MIN_RATE_SAMPLE,
         "drilldown_metric": "planned_on_time",
     },
     "overdue_planned": {
@@ -181,6 +242,12 @@ METRIC_DEFINITIONS = {
         "unit": "aktiviteter",
         "drilldown_metric": "planned_skipped",
     },
+    "cancelled_excluded": {
+        "label": "Avbrutna planerade aktiviteter",
+        "definition": "Antal planerade aktiviteter som avbrutits och därför inte ingår i måtten för genomförande, försening eller överhoppning.",
+        "metric_type": "count",
+        "unit": "aktiviteter",
+    },
     "priority_percentile_coverage": {
         "label": "Jämförbar historisk prioritetstäckning",
         "definition": "Andelen kontakter från den nuvarande analysmodellen som har en jämförbar historisk prioritetspercentil.",
@@ -188,12 +255,18 @@ METRIC_DEFINITIONS = {
         "numerator_label": "kontakter med jämförbar historisk prioritet",
         "denominator_label": "kontakter från nuvarande analysmodell",
     },
+    "historical_priority_at_contact": {
+        "label": "Historisk prioritet vid kontakt",
+        "definition": "Kundens sparade relativa prioriteringsplacering när kontakten registrerades, visad från 0 till 100. Om värdet saknas visas inget tal.",
+        "metric_type": "percentile",
+    },
     "strategic_coverage": {
         "label": "Strategisk täckning",
         "definition": "Andelen kunder i säljarens aktuella strategiska portfölj som hade minst en mänsklig aktivitet under vald period. Strategisk innebär segment A eller den högsta värdekvartilen.",
         "metric_type": "rate",
         "numerator_label": "strategiska kunder med mänsklig aktivitet",
         "denominator_label": "kunder i aktuell strategisk portfölj",
+        "assessment_minimum": MIN_RATE_SAMPLE,
     },
     "secure_customer_identity": {
         "label": "Säker kundidentitet",
@@ -222,6 +295,60 @@ METRIC_DEFINITIONS = {
         "metric_type": "count",
         "unit": "order",
         "window_days": ATTRIBUTION_WINDOW_DAYS,
+    },
+    "days_to_order": {
+        "label": "Dagar till order",
+        "definition": "Antal kalenderdagar från den attribuerade kontakten till den kopplade ordern, inom intervallet 0–10 dagar.",
+        "metric_type": "duration",
+        "unit": "dagar",
+    },
+    "attributed_order_dfp": {
+        "label": "DFP för attribuerade order",
+        "definition": "Summan av DFP för de order som har attribuerats till kontakter under vald period.",
+        "metric_type": "sum",
+        "unit": "DFP",
+    },
+    "attributed_order_value": {
+        "label": "Ordervärde för attribuerade order",
+        "definition": "Det sammanlagda ordervärdet, uppdelat per valuta, för de order som har attribuerats till kontakter under vald period.",
+        "metric_type": "sum",
+        "unit": "valuta",
+    },
+    "waiting_outcome": {
+        "label": "Väntar på 10-dagarsutfall",
+        "definition": "Antal nådda kontakter med säker kundidentitet vars 10-dagarsfönster ännu inte har stängt. Utfallet kan därför fortfarande ändras.",
+        "metric_type": "count",
+        "unit": "kontakter",
+    },
+    "flagged_activity_rows": {
+        "label": "Flaggade aktivitetsrader",
+        "definition": "Antal aktivitetsrader med minst ett problem som kan begränsa analysen, till exempel okänd kanal, okänt resultat eller saknad säker kundidentitet.",
+        "metric_type": "count",
+        "unit": "rader",
+    },
+    "quality_issue_count": {
+        "label": "Registrerade kvalitetsorsaker",
+        "definition": "Det sammanlagda antalet registrerade datakvalitetsorsaker. En aktivitetsrad kan ha flera orsaker och därför räknas mer än en gång här.",
+        "metric_type": "count",
+        "unit": "orsaker",
+    },
+    "exact_snapshots": {
+        "label": "Fullständiga sparade kontaktvärden",
+        "definition": "Antal kontakter i den historiska mätperioden som har en fullständig kopia av de kundvärden som gällde när kontakten registrerades.",
+        "metric_type": "count",
+        "unit": "kontakter",
+    },
+    "late_snapshots": {
+        "label": "Sent sparade kontaktvärden",
+        "definition": "Antal kontakter där de historiska kundvärdena sparades mer än 24 timmar efter kontakten och därför kan vara mindre tillförlitliga.",
+        "metric_type": "count",
+        "unit": "kontakter",
+    },
+    "operationally_suppressed": {
+        "label": "Operativt undantagna kontakter",
+        "definition": "Antal kontakter som var undantagna från operativa rekommendationer vid kontakttillfället. Ett sådant undantag är inte i sig ett datakvalitetsfel.",
+        "metric_type": "count",
+        "unit": "kontakter",
     },
 }
 
