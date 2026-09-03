@@ -219,6 +219,63 @@ class PlanningFrontendContractTests(TestCase):
         self.assertNotIn("planning-activity-note", card.group(1))
         self.assertNotIn("planning-activity-time", card.group(1))
 
+    def test_planning_appointment_editor_normalizes_resets_and_sends_boolean(self):
+        normalizer = re.search(
+            r"function normalizePlanningActivity\(activity\) \{(.*?)\n  \}",
+            self.html,
+            flags=re.DOTALL,
+        )
+        self.assertIsNotNone(normalizer)
+        self.assertIn("planningTruthy(source.appointment_confirmed)", normalizer.group(1))
+        self.assertIn('contactType === "visit"', normalizer.group(1))
+        self.assertIn('id="planning-editor-appointment"', self.html)
+        self.assertIn("planningEditorActivity?.appointment_confirmed", self.html)
+        sync = re.search(
+            r"function syncPlanningEditorAppointment\(contactType\) \{(.*?)\n  \}",
+            self.html,
+            flags=re.DOTALL,
+        )
+        self.assertIsNotNone(sync)
+        self.assertIn('contactType === "visit"', sync.group(1))
+        self.assertIn("checkbox.checked = false", sync.group(1))
+        self.assertIn("syncPlanningEditorAppointment(event.target.value)", self.html)
+        self.assertIn(
+            'appointment_confirmed: contactType === "visit" && document.getElementById("planning-editor-appointment").checked',
+            self.html,
+        )
+
+    def test_followup_calendar_accessibility_and_detail_show_appointments(self):
+        self.assertIn('id="f-followup-appointment"', self.html)
+        self.assertIn(
+            'document.getElementById("f-followup-type").addEventListener("change", updateFollowupAppointmentField)',
+            self.html,
+        )
+        followup_sync = re.search(
+            r"function updateFollowupAppointmentField\(\) \{(.*?)\n  \}",
+            self.html,
+            flags=re.DOTALL,
+        )
+        self.assertIsNotNone(followup_sync)
+        self.assertIn('value === "visit"', followup_sync.group(1))
+        self.assertIn("checkbox.checked = false", followup_sync.group(1))
+        self.assertIn(
+            'appointment_confirmed: followupType === "visit" && document.getElementById("f-followup-appointment").checked',
+            self.html,
+        )
+        card = re.search(
+            r"function renderPlanningCalendarActivity\(item\) \{(.*?)\n  \}",
+            self.html,
+            flags=re.DOTALL,
+        )
+        self.assertIsNotNone(card)
+        self.assertIn('" appointment-confirmed"', card.group(1))
+        self.assertIn('"Tidsbokat med butiken"', card.group(1))
+        self.assertIn(".planning-activity-card.appointment-confirmed", self.html)
+        self.assertIn(
+            '<div class="planning-appointment-badge">Tidsbokat med butiken</div>',
+            self.html,
+        )
+
     def test_planning_week_omits_legacy_followup_payload(self):
         self.assertIn('include_followups: "0"', self.html)
 
