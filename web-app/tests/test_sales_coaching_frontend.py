@@ -125,11 +125,11 @@ class SalesCoachingFrontendTests(TestCase):
         )
         self.assertEqual(
             METRIC_DEFINITIONS["positive_to_order_10d"]["denominator_label"],
-            "positiva dialoger har följts av order",
+            "alla berättigade positiva dialoger med säker kundidentitet",
         )
         self.assertEqual(
             METRIC_DEFINITIONS["order_10d"]["denominator_label"],
-            "kontakter har följts av order",
+            "alla berättigade nådda mänskliga kontakter med säker kundidentitet",
         )
         self.assertIn("definition.denominator_label", self.javascript)
         self.assertIn("sc-kpi-denominator", self.javascript)

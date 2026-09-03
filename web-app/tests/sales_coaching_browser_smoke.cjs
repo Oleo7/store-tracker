@@ -79,8 +79,8 @@ const viewport = mode === "mobile"
     const expectedDenominators = [
       "analyserbara besök/telefonsamtal",
       "nådda besök/telefonsamtal",
-      "positiva dialoger har följts av order",
-      "kontakter har följts av order",
+      "alla berättigade positiva dialoger med säker kundidentitet",
+      "alla berättigade nådda mänskliga kontakter med säker kundidentitet",
     ];
     const denominatorText = await page.locator(".sc-kpi-denominator").allInnerTexts();
     for (const expected of expectedDenominators) {
@@ -122,7 +122,7 @@ const viewport = mode === "mobile"
     }
     const contactOrderCard = page.locator('.sc-kpi-card[data-kpi-key="order_10d"]');
     const contactOrderText = await contactOrderCard.innerText();
-    if (!contactOrderText.includes("20 %") || !contactOrderText.includes("7 av 35") || !contactOrderText.includes("kontakter har följts av order")) {
+    if (!contactOrderText.includes("20 %") || !contactOrderText.includes("7 av 35") || !contactOrderText.includes("alla berättigade nådda mänskliga kontakter med säker kundidentitet")) {
       throw new Error(`${mode}: provisional contact KPI does not use the full eligible cohort: ${contactOrderText}`);
     }
     if (!contactOrderText.includes("Preliminärt · 22 väntar på 10-dagarsutfall")) {
@@ -136,7 +136,7 @@ const viewport = mode === "mobile"
     }
     const positiveOrderCard = page.locator('.sc-kpi-card[data-kpi-key="positive_to_order_10d"]');
     const positiveOrderText = await positiveOrderCard.innerText();
-    if (!positiveOrderText.includes("25 %") || !positiveOrderText.includes("7 av 28") || !positiveOrderText.includes("positiva dialoger har följts av order")) {
+    if (!positiveOrderText.includes("25 %") || !positiveOrderText.includes("7 av 28") || !positiveOrderText.includes("alla berättigade positiva dialoger med säker kundidentitet")) {
       throw new Error(`${mode}: provisional positive KPI does not use the full eligible cohort: ${positiveOrderText}`);
     }
     if (!positiveOrderText.includes("Preliminärt · 15 väntar på 10-dagarsutfall")) {
