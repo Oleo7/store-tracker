@@ -657,6 +657,7 @@ PLANNED_ACTIVITY_COLUMNS = [
     "source_suggestion_id",
     "source_trigger_key",
     "recommended_contact_type",
+    "appointment_confirmed",
 ]
 PLANNING_CONTACT_TYPES = {"visit", "phone", "email"}
 PLANNING_CONTACT_TYPE_LABELS = {
@@ -2219,7 +2220,7 @@ def planning_revision(row):
 
 def planning_create_fingerprint(*, actor, owner, customer_id, contact_type,
                                 scheduled_at, duration_minutes, note, source,
-                                source_contact_id):
+                                source_contact_id, appointment_confirmed=False):
     return canonical_payload_fingerprint({
         "operation": "planned_activity.create.v1",
         "actor": normalize_key((actor or {}).get("user_name")),
@@ -2231,6 +2232,10 @@ def planning_create_fingerprint(*, actor, owner, customer_id, contact_type,
         "note": str(note or "").strip(),
         "source": str(source or "").strip().casefold(),
         "source_contact_id": str(source_contact_id or "").strip(),
+        "appointment_confirmed": normalize_planning_appointment_confirmed(
+            appointment_confirmed,
+            contact_type,
+        ),
     })
 
 
@@ -2260,6 +2265,13 @@ def normalize_planning_contact_type(value):
         "mejl": "email",
     }
     return aliases.get(normalized, "")
+
+
+def normalize_planning_appointment_confirmed(value, contact_type):
+    return bool(
+        normalize_planning_contact_type(contact_type) == "visit"
+        and is_yes(value)
+    )
 
 
 def planning_contact_label(value):
@@ -2517,6 +2529,10 @@ def public_planned_activity(row, *, now=None):
         ),
         "duration_minutes": duration_minutes,
         "time_is_estimated": is_yes(row.get("time_is_estimated")),
+        "appointment_confirmed": normalize_planning_appointment_confirmed(
+            row.get("appointment_confirmed"),
+            row.get("contact_type"),
+        ),
         "note": str(row.get("note") or "").strip(),
         "status": status,
         "display_status": "overdue" if overdue else status,
@@ -3610,6 +3626,7 @@ def build_planned_activity_row(
     source_suggestion_id="",
     source_trigger_key="",
     recommended_contact_type="",
+    appointment_confirmed=False,
 ):
     contact_type = normalize_planning_contact_type(contact_type)
     source = str(source or "manual").strip().casefold()
@@ -3652,6 +3669,12 @@ def build_planned_activity_row(
         "recommended_contact_type": normalize_planning_contact_type(
             recommended_contact_type
         ),
+        "appointment_confirmed": (
+            "Y" if normalize_planning_appointment_confirmed(
+                appointment_confirmed,
+                contact_type,
+            ) else "N"
+        ),
     }
 
 
@@ -3676,6 +3699,7 @@ def planned_contact_id_for_payload(
     follow_up_type,
     follow_up_at,
     follow_up_note,
+    follow_up_appointment_confirmed,
     mirrored_follow_up_date,
 ):
     canonical = json.dumps(
@@ -3710,6 +3734,9 @@ def planned_contact_id_for_payload(
                     if follow_up_at else ""
                 ),
                 "note": str(follow_up_note or "").strip(),
+                "appointment_confirmed": bool(
+                    follow_up_appointment_confirmed
+                ),
                 "mirrored_date": str(
                     mirrored_follow_up_date or ""
                 ).strip(),
@@ -7019,7 +7046,8 @@ def suggestion_candidates_by_id(owner, candidates):
 
 
 def planned_suggestion_payload_matches(
-    activity, *, customer_id, contact_type, scheduled_at, note
+    activity, *, customer_id, contact_type, scheduled_at, note,
+    appointment_confirmed=False,
 ):
     return all((
         str(activity.get("customer_id") or "").strip()
@@ -7031,6 +7059,13 @@ def planned_suggestion_payload_matches(
         str(activity.get("note") or "").strip() == str(note or "").strip(),
         str(activity.get("source") or "").strip().casefold()
         == "system_suggestion",
+        normalize_planning_appointment_confirmed(
+            activity.get("appointment_confirmed"),
+            activity.get("contact_type"),
+        ) == normalize_planning_appointment_confirmed(
+            appointment_confirmed,
+            contact_type,
+        ),
     ))
 
 
@@ -7240,6 +7275,10 @@ def plan_planning_suggestion(suggestion_id):
             "invalid_contact_type", "Välj Besök, Telefon eller Mejl.", 400,
             field="contact_type"
         )
+    appointment_confirmed = normalize_planning_appointment_confirmed(
+        data.get("appointment_confirmed"),
+        contact_type,
+    )
     scheduled_at = parse_planning_datetime(data.get("scheduled_at"))
     if scheduled_at is None:
         return planning_error(
@@ -7342,6 +7381,7 @@ def plan_planning_suggestion(suggestion_id):
                 note=note,
                 source="system_suggestion",
                 source_contact_id="",
+                appointment_confirmed=appointment_confirmed,
             )
             active_suggestion_activities = [
                 row for row in activity_rows
@@ -7380,6 +7420,7 @@ def plan_planning_suggestion(suggestion_id):
                     contact_type=contact_type,
                     scheduled_at=scheduled_at,
                     note=note,
+                    appointment_confirmed=appointment_confirmed,
                 )
                 if not same_payload:
                     return planning_error(
@@ -7446,6 +7487,7 @@ def plan_planning_suggestion(suggestion_id):
                     recommended_contact_type=live_candidate.get(
                         "recommended_contact_type"
                     ),
+                    appointment_confirmed=appointment_confirmed,
                 )
                 append_dict_row(
                     _activity_sheet, PLANNED_ACTIVITY_COLUMNS, activity
@@ -7457,6 +7499,7 @@ def plan_planning_suggestion(suggestion_id):
                     "scheduled_at": planning_datetime_text(scheduled_at),
                     "duration_minutes": PLANNING_CONTACT_DURATIONS[contact_type],
                     "note": note,
+                    "appointment_confirmed": appointment_confirmed,
                 }
             )
             updated, duplicate = service.transition(
@@ -7541,6 +7584,10 @@ def planning_activities():
                 400,
                 field="contact_type",
             )
+        appointment_confirmed = normalize_planning_appointment_confirmed(
+            data.get("appointment_confirmed"),
+            contact_type,
+        )
         scheduled_at = parse_planning_datetime(data.get("scheduled_at"))
         if scheduled_at is None:
             return planning_error(
@@ -7650,6 +7697,7 @@ def planning_activities():
                 note=note,
                 source=source,
                 source_contact_id=source_contact_id_for_fingerprint,
+                appointment_confirmed=appointment_confirmed,
             )
             for _row_index, existing in existing_rows:
                 if (
@@ -7727,7 +7775,9 @@ def planning_activities():
                     note=note,
                     source=source,
                     source_contact_id=source_contact_id,
+                    appointment_confirmed=appointment_confirmed,
                 ),
+                appointment_confirmed=appointment_confirmed,
                 revision=1,
             )
             append_dict_row(
@@ -8079,7 +8129,8 @@ def update_planning_activity(activity_id):
         )
 
     mutable_fields = {
-        "contact_type", "scheduled_at", "note", "status", "customer_id"
+        "contact_type", "scheduled_at", "note", "status", "customer_id",
+        "appointment_confirmed",
     }
     requested_fields = mutable_fields.intersection(data)
     if not requested_fields:
@@ -8207,6 +8258,13 @@ def update_planning_activity(activity_id):
             mutation_changes["customer_id"] = str(
                 data.get("customer_id") or ""
             ).strip()
+        if "appointment_confirmed" in data:
+            mutation_changes["appointment_confirmed"] = (
+                normalize_planning_appointment_confirmed(
+                    data.get("appointment_confirmed"),
+                    data.get("contact_type", current.get("contact_type")),
+                )
+            )
         mutation_fingerprint = planning_update_fingerprint(
             actor=caller,
             activity_id=activity_id,
@@ -8340,6 +8398,19 @@ def update_planning_activity(activity_id):
             updates["duration_minutes"] = PLANNING_CONTACT_DURATIONS[
                 contact_type
             ]
+        effective_contact_type = updates.get(
+            "contact_type",
+            normalize_planning_contact_type(current.get("contact_type")),
+        )
+        if "appointment_confirmed" in data:
+            updates["appointment_confirmed"] = (
+                "Y" if normalize_planning_appointment_confirmed(
+                    data.get("appointment_confirmed"),
+                    effective_contact_type,
+                ) else "N"
+            )
+        if effective_contact_type != "visit":
+            updates["appointment_confirmed"] = "N"
         if "scheduled_at" in data:
             scheduled_at = parse_planning_datetime(data.get("scheduled_at"))
             if scheduled_at is None:
@@ -8381,9 +8452,23 @@ def update_planning_activity(activity_id):
         route_content_fields = {
             "contact_type", "scheduled_at", "note", "customer_id"
         }
+        route_appointment_confirmed = bool(
+            "appointment_confirmed" in data
+            and not normalize_planning_appointment_confirmed(
+                current.get("appointment_confirmed"),
+                current.get("contact_type"),
+            )
+            and normalize_planning_appointment_confirmed(
+                data.get("appointment_confirmed"),
+                effective_contact_type,
+            )
+        )
         if (
             str(current.get("source") or "").strip().casefold() == "route"
-            and route_content_fields.intersection(data)
+            and (
+                route_content_fields.intersection(data)
+                or route_appointment_confirmed
+            )
         ):
             updates.update({
                 "source": "manual",
@@ -9886,7 +9971,14 @@ def build_route_optimization_inputs(
     for customer_id, rows in mandatory_by_customer.items():
         row = rows[0]
         scheduled = parse_planning_datetime(row.get("scheduled_at"))
-        fixed_at = None if is_yes(row.get("time_is_estimated")) else scheduled
+        fixed_at = (
+            scheduled
+            if normalize_planning_appointment_confirmed(
+                row.get("appointment_confirmed"),
+                row.get("contact_type"),
+            ) or not is_yes(row.get("time_is_estimated"))
+            else None
+        )
         if fixed_at is not None:
             if fixed_at < route_start_at or fixed_at + timedelta(seconds=ROUTE_OPTIMIZATION_SERVICE_SECONDS) > global_end:
                 return None, planning_error(
@@ -11318,7 +11410,13 @@ def build_planning_route_preview(
             normalize_planning_contact_type(row.get("contact_type")) == "visit"
             and str(row.get("source") or "").strip().casefold()
             in {"manual", "follow_up"}
-            and not is_yes(row.get("time_is_estimated"))
+            and (
+                normalize_planning_appointment_confirmed(
+                    row.get("appointment_confirmed"),
+                    row.get("contact_type"),
+                )
+                or not is_yes(row.get("time_is_estimated"))
+            )
         )
     ]
     changed_owner_activity_ids = sorted({
@@ -12002,6 +12100,7 @@ def apply_planning_route(
                 route_sequence=sequence,
                 client_request_id=client_request_id,
                 time_is_estimated=True,
+                appointment_confirmed=False,
                 create_fingerprint=planning_create_fingerprint(
                     actor=current_user(),
                     owner=owner,
@@ -12330,7 +12429,13 @@ def planning_route_import():
             normalize_planning_contact_type(row.get("contact_type")) == "visit"
             and str(row.get("source") or "").strip().casefold()
             in {"manual", "follow_up"}
-            and not is_yes(row.get("time_is_estimated"))
+            and (
+                normalize_planning_appointment_confirmed(
+                    row.get("appointment_confirmed"),
+                    row.get("contact_type"),
+                )
+                or not is_yes(row.get("time_is_estimated"))
+            )
             and not customer_owned_by_user(
                 related_row_customer(
                     row,
@@ -12383,7 +12488,10 @@ def planning_route_import():
         if (
             public_row.get("contact_type") == "visit"
             and public_row.get("source") in {"manual", "follow_up"}
-            and not public_row.get("time_is_estimated")
+            and (
+                public_row.get("appointment_confirmed")
+                or not public_row.get("time_is_estimated")
+            )
         ):
             if public_row.get("customer_row"):
                 required_by_customer_row[public_row["customer_row"]].append(
@@ -13437,6 +13545,7 @@ def add_contact(customer_name):
     follow_up_type = ""
     follow_up_at = None
     follow_up_note = ""
+    follow_up_appointment_confirmed = False
     if follow_up_enabled:
         follow_up_type = normalize_planning_contact_type(
             follow_up.get("contact_type")
@@ -13457,6 +13566,12 @@ def add_contact(customer_name):
                 field="follow_up.scheduled_at",
             )
         follow_up_note = str(follow_up.get("note") or "").strip()
+        follow_up_appointment_confirmed = (
+            normalize_planning_appointment_confirmed(
+                follow_up.get("appointment_confirmed"),
+                follow_up_type,
+            )
+        )
         if len(follow_up_note) > 300:
             return planning_error(
                 "follow_up_note_too_long",
@@ -13805,6 +13920,9 @@ def add_contact(customer_name):
             follow_up_type=follow_up_type,
             follow_up_at=follow_up_at,
             follow_up_note=follow_up_note,
+            follow_up_appointment_confirmed=(
+                follow_up_appointment_confirmed
+            ),
             mirrored_follow_up_date=mirrored_follow_up_date,
         )
     elif client_request_id:
@@ -14140,6 +14258,9 @@ def add_contact(customer_name):
                         note=follow_up_note,
                         source="follow_up",
                         source_contact_id=contact_id,
+                        appointment_confirmed=(
+                            follow_up_appointment_confirmed
+                        ),
                         client_request_id=planning_request_scope(
                             caller,
                             "create_follow_up",
@@ -14158,6 +14279,9 @@ def add_contact(customer_name):
                             note=follow_up_note,
                             source="follow_up",
                             source_contact_id=contact_id,
+                            appointment_confirmed=(
+                                follow_up_appointment_confirmed
+                            ),
                         ),
                         revision=1,
                     )

@@ -3168,6 +3168,9 @@
     .planning-activity-card.status-cancelled { --planning-status: #aaa1a8; opacity: 0.68; }
     .planning-activity-card.status-planned.contact-phone { --planning-status: #7597bd; background: #fbfdff; }
     .planning-activity-card.status-planned.contact-email { --planning-status: #c98aa8; background: #fffafd; }
+    .planning-activity-card.appointment-confirmed {
+      box-shadow: inset 0 0 0 2px var(--pb-pink-strong);
+    }
     .planning-activity-shell.is-saving { opacity: 0.62; }
     .planning-activity-shell.is-dragging { opacity: 0.28; }
     .planning-drag-handle {
@@ -3597,6 +3600,16 @@
       font-size: 0.8rem;
       line-height: 1.5;
       white-space: pre-wrap;
+    }
+    .planning-appointment-badge {
+      grid-column: 1 / -1;
+      width: fit-content;
+      padding: 6px 9px;
+      border-radius: 999px;
+      background: var(--pb-pink-soft);
+      color: #8c214c;
+      font-size: 0.76rem;
+      font-weight: 850;
     }
     .planning-activity-actions {
       align-items: stretch;
@@ -4352,6 +4365,12 @@
             <label for="f-followup-note">Anteckning</label>
             <input type="text" id="f-followup-note" maxlength="300" placeholder="Vad ska följas upp?" />
           </div>
+        </div>
+        <div class="form-field" id="f-followup-appointment-field">
+          <label class="planning-followup-toggle" for="f-followup-appointment">
+            <input type="checkbox" id="f-followup-appointment" />
+            Tidsbokat med butiken
+          </label>
         </div>
       </div>
 
@@ -7004,6 +7023,7 @@
   async function updateFollowupFields() {
     const enabled = document.getElementById("f-followup-enabled").checked;
     document.getElementById("followup-fields").classList.toggle("visible", enabled);
+    updateFollowupAppointmentField();
     if (enabled && !document.getElementById("f-nextFollowUp").value) {
       document.getElementById("f-nextFollowUp").value = planningAddDays(planningTodayKey(), 7);
       document.getElementById("f-nextFollowUpTime").value = "09:00";
@@ -7019,6 +7039,14 @@
         );
       }
     }
+  }
+
+  function updateFollowupAppointmentField() {
+    const field = document.getElementById("f-followup-appointment-field");
+    const checkbox = document.getElementById("f-followup-appointment");
+    const visible = document.getElementById("f-followup-type").value === "visit";
+    field.hidden = !visible;
+    if (!visible) checkbox.checked = false;
   }
 
   function setContactFormRetryMode(enabled) {
@@ -7062,6 +7090,7 @@
     document.getElementById("f-nextFollowUp").value = "";
     document.getElementById("f-nextFollowUpTime").value = "";
     document.getElementById("f-followup-note").value = "";
+    document.getElementById("f-followup-appointment").checked = false;
     syncVisitCompetitorButtons({});
     setFreezerSectionInvalid(false);
     setContactFormRetryMode(false);
@@ -7077,6 +7106,7 @@
 
   document.getElementById("f-channel").addEventListener("change", updateContactChannelFields);
   document.getElementById("f-followup-enabled").addEventListener("change", updateFollowupFields);
+  document.getElementById("f-followup-type").addEventListener("change", updateFollowupAppointmentField);
 
   // ── Back (form → origin) ──
   document.getElementById("form-back-btn").addEventListener("click", () => showView(formReturnView));
@@ -7108,6 +7138,7 @@
         contact_type: followupType,
         scheduled_at: followupScheduledAt,
         note: followupNote,
+        appointment_confirmed: followupType === "visit" && document.getElementById("f-followup-appointment").checked,
       } : { enabled: false },
       planned_activity_id: activePlannedActivityId || undefined,
       client_request_id: contactClientRequestId || document.getElementById("f-client-request-id").value,
@@ -7371,13 +7402,14 @@
 
   function normalizePlanningActivity(activity) {
     const source = activity && typeof activity === "object" ? activity : {};
+    const contactType = PLANNING_CONTACT_TYPES[source.contact_type] ? source.contact_type : "visit";
     return {
       ...source,
       planned_activity_id: planningActivityId(source),
       customer_id: String(source.customer_id || "").trim(),
       customer_row: Number(source.customer_row ?? source.row) || null,
       customer: String(source.customer ?? source.customer_name ?? "").trim(),
-      contact_type: PLANNING_CONTACT_TYPES[source.contact_type] ? source.contact_type : "visit",
+      contact_type: contactType,
       scheduled_at: String(source.scheduled_at ?? source.start_at ?? source.estimated_at ?? "").trim(),
       note: String(source.note ?? source.comment ?? "").trim(),
       status: ["planned", "completed", "skipped", "cancelled"].includes(source.status)
@@ -7385,6 +7417,7 @@
         : "planned",
       source: ["manual", "follow_up", "route"].includes(source.source) ? source.source : "manual",
       time_is_estimated: planningTruthy(source.time_is_estimated ?? source.is_estimated ?? source.approximate_time),
+      appointment_confirmed: contactType === "visit" && planningTruthy(source.appointment_confirmed),
     };
   }
 
@@ -7975,7 +8008,14 @@
     const width = 100 / item.laneCount;
     const style = `top:${item.top}px;height:${item.height}px;left:calc(${item.lane * width}% + ${gap}px);width:calc(${width}% - ${gap * 2}px)`;
     const content = `<span class="planning-activity-customer">${esc(activity.customer || "Okänd kund")}</span>`;
-    const aria = `${time}, ${type.label}, ${activity.customer}, ${PLANNING_STATUS_LABELS[status]}`;
+    const appointmentConfirmed = activity.contact_type === "visit" && activity.appointment_confirmed;
+    const aria = [
+      time,
+      type.label,
+      activity.customer,
+      PLANNING_STATUS_LABELS[status],
+      appointmentConfirmed ? "Tidsbokat med butiken" : "",
+    ].filter(Boolean).join(", ");
     if (activity.unplanned) {
       return `<div class="planning-activity-shell" style="${style}">
         <div class="planning-activity-card contact-${activity.contact_type} status-completed unplanned" aria-label="${escAttr(aria)}">${content}</div>
@@ -7986,7 +8026,7 @@
     const saving = planningDragSavingIds.has(activityId);
     return `<div class="planning-activity-shell${draggable ? " is-draggable" : ""}${saving ? " is-saving" : ""}" style="${style}"
       data-planning-shell-id="${escAttr(activityId)}">
-      <button class="planning-activity-card contact-${activity.contact_type} status-${status}" type="button"
+      <button class="planning-activity-card contact-${activity.contact_type} status-${status}${appointmentConfirmed ? " appointment-confirmed" : ""}" type="button"
         data-planning-open-id="${escAttr(activityId)}" aria-label="${escAttr(aria)}">${content}</button>
       ${draggable && !saving ? `<button class="planning-drag-handle" type="button" data-planning-drag-handle="${escAttr(activityId)}" aria-label="Flytta ${escAttr(activity.customer || "aktivitet")}"></button>` : ""}
     </div>`;
@@ -8741,6 +8781,12 @@
             </label>`
           ).join("")}
         </fieldset>
+        <div class="planning-appointment-field" id="planning-editor-appointment-field" ${selectedType === "visit" ? "" : "hidden"}>
+          <label class="planning-followup-toggle" for="planning-editor-appointment">
+            <input id="planning-editor-appointment" type="checkbox" ${selectedType === "visit" && planningEditorActivity?.appointment_confirmed ? "checked" : ""} />
+            Tidsbokat med butiken
+          </label>
+        </div>
         <div class="planning-form-row">
           <div class="planning-field">
             <label for="planning-editor-date">Datum</label>
@@ -8775,6 +8821,7 @@
       input.addEventListener("change", event => {
         document.getElementById("planning-editor-duration").textContent =
           `Beräknad längd: ${PLANNING_CONTACT_TYPES[event.target.value]?.duration || 10} minuter`;
+        syncPlanningEditorAppointment(event.target.value);
       });
     });
     document.getElementById("planning-editor-note").addEventListener("input", event => {
@@ -8782,6 +8829,15 @@
         `${event.target.value.length}/${PLANNING_NOTE_MAX_LENGTH}`;
     });
     document.getElementById("planning-editor-form").addEventListener("submit", savePlanningEditor);
+  }
+
+  function syncPlanningEditorAppointment(contactType) {
+    const field = document.getElementById("planning-editor-appointment-field");
+    const checkbox = document.getElementById("planning-editor-appointment");
+    if (!field || !checkbox) return;
+    const visible = contactType === "visit";
+    field.hidden = !visible;
+    if (!visible) checkbox.checked = false;
   }
 
   function showPlanningEditorError(message) {
@@ -8825,6 +8881,7 @@
       contact_type: contactType,
       scheduled_at: scheduledAt,
       note,
+      appointment_confirmed: contactType === "visit" && document.getElementById("planning-editor-appointment").checked,
       client_request_id: planningEditorRequestId,
     };
     if (editing) {
@@ -8963,6 +9020,7 @@
           <span class="planning-detail-label">Säljare</span>
           <div class="planning-detail-value">${esc(activity.sales_person || activity.user_name || "—")}</div>
         </div>
+        ${activity.contact_type === "visit" && activity.appointment_confirmed ? '<div class="planning-appointment-badge">Tidsbokat med butiken</div>' : ""}
         ${activity.note ? `<div class="planning-detail-note">${esc(activity.note)}</div>` : ""}
         ${activity.source === "route" ? '<div class="planning-route-origin-note" style="grid-column:1/-1;margin:0">Planen beräknades från din position vid skapandet.</div>' : ""}
       </div>
