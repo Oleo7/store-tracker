@@ -11,6 +11,7 @@ from sales_coaching import (  # noqa: E402
     ANALYTICS_SNAPSHOT_VERSION,
     MAIN_KPI_KEYS,
     METRIC_DEFINITIONS,
+    MIN_RATE_SAMPLE,
     PRIORITY_PERCENTILE_BASIS,
     CustomerIdentityIndex,
     attribute_orders_to_contacts,
@@ -1593,7 +1594,7 @@ class SnapshotAndAggregateTests(TestCase):
         summary = self.summary([])
 
         self.assertTrue(required.issubset(METRIC_DEFINITIONS))
-        self.assertEqual(summary["meta"]["definitions_version"], "sales_coaching_v10")
+        self.assertEqual(summary["meta"]["definitions_version"], "sales_coaching_v11")
         self.assertNotIn("positive_to_order_10d_comparable", METRIC_DEFINITIONS)
         self.assertNotIn("order_10d_comparable", METRIC_DEFINITIONS)
         self.assertNotIn("comparable", summary["kpis"]["positive_to_order_10d"])
@@ -1651,6 +1652,21 @@ class SnapshotAndAggregateTests(TestCase):
             with self.subTest(key=key):
                 self.assertTrue(definition.get("numerator_label"))
                 self.assertTrue(definition.get("denominator_label"))
+
+        assessment_minimum_keys = {
+            key for key, definition in METRIC_DEFINITIONS.items()
+            if definition.get("assessment_minimum") == MIN_RATE_SAMPLE
+        }
+        self.assertEqual(
+            assessment_minimum_keys,
+            {
+                "reach", "visit_reach", "positive_dialogue",
+                "positive_to_order_10d", "order_10d", "priority_focus",
+                "bom_ratio", "planned_bom_ratio", "unplanned_bom_ratio",
+                "positive_next_step_coverage", "planned_completed_in_time",
+                "strategic_coverage",
+            },
+        )
 
     def test_registry_user_copy_contains_no_internal_analysis_names(self):
         forbidden = {

@@ -21,7 +21,7 @@ from sales_coaching_rules import (
 )
 
 
-DEFINITIONS_VERSION = "sales_coaching_v10"
+DEFINITIONS_VERSION = "sales_coaching_v11"
 ANALYTICS_SNAPSHOT_VERSION = "sales_coaching_v2"
 PRIORITY_PERCENTILE_BASIS = "owner_active_scored_portfolio_midrank_v2"
 STOCKHOLM_ZONE = ZoneInfo("Europe/Stockholm")
@@ -86,6 +86,7 @@ METRIC_DEFINITIONS = {
         "metric_type": "rate",
         "numerator_label": "nådda besök/telefonsamtal",
         "denominator_label": "analyserbara besök/telefonsamtal",
+        "assessment_minimum": MIN_RATE_SAMPLE,
         "channels": ["visit", "phone"],
         "drilldown_metric": "reach",
         "denominator_drilldown_metric": "attempts",
@@ -96,6 +97,7 @@ METRIC_DEFINITIONS = {
         "metric_type": "rate",
         "numerator_label": "nådda besök",
         "denominator_label": "analyserbara besök",
+        "assessment_minimum": MIN_RATE_SAMPLE,
         "channels": ["visit"],
         "drilldown_metric": "reach",
     },
@@ -105,6 +107,7 @@ METRIC_DEFINITIONS = {
         "metric_type": "rate",
         "numerator_label": "positiva nådda besök/telefonsamtal",
         "denominator_label": "nådda besök/telefonsamtal",
+        "assessment_minimum": MIN_RATE_SAMPLE,
         "channels": ["visit", "phone"],
         "not_computable_text": "Positiv dialog mäts endast för Besök och Telefon.",
         "drilldown_metric": "positive_dialogue",
@@ -115,6 +118,7 @@ METRIC_DEFINITIONS = {
         "metric_type": "rate",
         "numerator_label": "positiva dialoger som hittills följts av attribuerad order",
         "denominator_label": "positiva dialoger har följts av order",
+        "assessment_minimum": MIN_RATE_SAMPLE,
         "channels": ["visit", "phone"],
         "not_computable_text": "Positiv → order mäts endast för Besök och Telefon.",
         "window_days": ATTRIBUTION_WINDOW_DAYS,
@@ -126,6 +130,7 @@ METRIC_DEFINITIONS = {
         "metric_type": "rate",
         "numerator_label": "nådda kontakter som hittills följts av attribuerad order",
         "denominator_label": "kontakter har följts av order",
+        "assessment_minimum": MIN_RATE_SAMPLE,
         "channels": ["visit", "phone", "email"],
         "window_days": ATTRIBUTION_WINDOW_DAYS,
         "drilldown_metric": "order_10d",
@@ -136,6 +141,7 @@ METRIC_DEFINITIONS = {
         "metric_type": "rate",
         "numerator_label": "kontakter i högsta prioritetskvartilen",
         "denominator_label": "kontakter med jämförbar historisk prioritet",
+        "assessment_minimum": MIN_RATE_SAMPLE,
         "drilldown_metric": "priority_focus",
     },
     "bom_ratio": {
@@ -144,6 +150,7 @@ METRIC_DEFINITIONS = {
         "metric_type": "rate",
         "numerator_label": "besök där kunden inte nåddes",
         "denominator_label": "analyserbara besök",
+        "assessment_minimum": MIN_RATE_SAMPLE,
         "channels": ["visit"],
         "drilldown_metric": "bom_ratio",
     },
@@ -153,6 +160,7 @@ METRIC_DEFINITIONS = {
         "metric_type": "rate",
         "numerator_label": "planerade besök där kunden inte nåddes",
         "denominator_label": "analyserbara planerade besök",
+        "assessment_minimum": MIN_RATE_SAMPLE,
         "channels": ["visit"],
         "drilldown_metric": "planned_boms",
     },
@@ -162,6 +170,7 @@ METRIC_DEFINITIONS = {
         "metric_type": "rate",
         "numerator_label": "oplanerade besök där kunden inte nåddes",
         "denominator_label": "analyserbara oplanerade besök",
+        "assessment_minimum": MIN_RATE_SAMPLE,
         "channels": ["visit"],
         "drilldown_metric": "unplanned_boms",
     },
@@ -192,6 +201,7 @@ METRIC_DEFINITIONS = {
         "metric_type": "rate",
         "numerator_label": "positiva kontakter med nästa steg eller order",
         "denominator_label": "positiva kontakter minst tre dagar gamla",
+        "assessment_minimum": MIN_RATE_SAMPLE,
         "drilldown_metric": "followup_success",
     },
     "positive_without_next_step": {
@@ -215,6 +225,7 @@ METRIC_DEFINITIONS = {
         "metric_type": "rate",
         "numerator_label": "planerade aktiviteter genomförda i tid",
         "denominator_label": "ansvariga planerade aktiviteter",
+        "assessment_minimum": MIN_RATE_SAMPLE,
         "drilldown_metric": "planned_on_time",
     },
     "overdue_planned": {
@@ -255,6 +266,7 @@ METRIC_DEFINITIONS = {
         "metric_type": "rate",
         "numerator_label": "strategiska kunder med mänsklig aktivitet",
         "denominator_label": "kunder i aktuell strategisk portfölj",
+        "assessment_minimum": MIN_RATE_SAMPLE,
     },
     "secure_customer_identity": {
         "label": "Säker kundidentitet",

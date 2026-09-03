@@ -212,6 +212,26 @@ const viewport = mode === "mobile"
     if (!(positiveOrderIndex + 1 === contactOrderIndex && contactOrderIndex + 1 === nextStepIndex)) {
       throw new Error(`${mode}: contact-order metric is in the wrong team-comparison position: ${JSON.stringify(teamHeaders)}`);
     }
+    const visibleTeamHeaders = await page.locator(".sc-comparison-table thead th").evaluateAll(headers => headers.map(header => {
+      const copy = header.cloneNode(true);
+      copy.querySelectorAll("button, [hidden]").forEach(element => element.remove());
+      return copy.textContent.trim();
+    }));
+    const expectedTeamHeaders = [
+      "Säljare", "Aktiviteter", "Träffgrad", "Positiv dialog",
+      "Positiv dialog → order inom 10 dagar", "Kontakt – order inom 10 dagar",
+      "Nästa-steg-täckning", "Bom-ratio",
+    ];
+    if (JSON.stringify(visibleTeamHeaders) !== JSON.stringify(expectedTeamHeaders)) {
+      throw new Error(`${mode}: protected team-comparison columns changed: ${JSON.stringify(visibleTeamHeaders)}`);
+    }
+    if (await page.locator(".sc-team-chart [data-metric-definition], .sc-comparison-table [data-metric-definition]").count()) {
+      throw new Error(`${mode}: protected team-comparison markup contains definition metadata`);
+    }
+    if (await page.locator(".sc-team-chart .sc-team-group[data-seller]").count() !== 3
+        || await page.locator(".sc-comparison-table tbody button[data-seller]").count() !== 3) {
+      throw new Error(`${mode}: protected team-comparison seller interactions changed`);
+    }
     const olleTeamRow = page.locator(".sc-comparison-table tbody tr", { hasText: "Olle" });
     const olleTeamText = await olleTeamRow.innerText();
     const positiveOrderTeamText = await olleTeamRow.locator("td").nth(3).innerText();
@@ -289,6 +309,9 @@ const viewport = mode === "mobile"
       }
     };
     await assertTrendPanelState("order");
+    if (await trendSection.locator("[data-metric-definition]").count()) {
+      throw new Error(`${mode}: protected 10-day trend markup contains definition metadata`);
+    }
     const weekSlotCount = await orderPanel.locator(".sc-team-order-x-label").count();
     if (weekSlotCount !== 16) throw new Error(`${mode}: expected 16 trend week slots, got ${weekSlotCount}`);
     const yLabels = await orderPanel.locator(".sc-team-order-y-label").allTextContents();
@@ -471,6 +494,28 @@ const viewport = mode === "mobile"
     await page.locator('[data-diagnostic-tab="visits"]').press("End");
     await assertKeyboardTab("channels", "Kanaler after End");
 
+    const visibleMetricLabels = new Set();
+    const collectVisibleMetricLabels = async selector => {
+      const labels = await page.locator(selector).evaluateAll(elements => elements.map(element => {
+        const copy = element.cloneNode(true);
+        copy.querySelectorAll("button, [hidden]").forEach(child => child.remove());
+        return copy.textContent.replace(/\s+/g, " ").trim();
+      }).filter(Boolean));
+      labels.forEach(label => visibleMetricLabels.add(label));
+    };
+    await collectVisibleMetricLabels([
+      ".sc-kpi-label",
+      ".sc-team-chart h3",
+      ".sc-comparison-table thead th",
+      ".sc-team-trend-panel h3",
+      ".sc-matrix-x-axis-label",
+      ".sc-matrix-y-axis-label",
+    ].join(", "));
+    for (const key of ["visits", "followup", "channels"]) {
+      await page.locator(`[data-diagnostic-tab="${key}"]`).click();
+      await collectVisibleMetricLabels(".sc-diagnostic-panel .sc-mini-label, .sc-diagnostic-panel thead th");
+    }
+
     if (await page.locator("#sc-quality-details").getAttribute("open") !== null) {
       throw new Error(`${mode}: data quality and definitions is open on first render`);
     }
@@ -496,10 +541,41 @@ const viewport = mode === "mobile"
     if (definitionAudit.missing.length) {
       throw new Error(`${mode}: missing metric definitions: ${definitionAudit.missing.join(", ")}`);
     }
-    for (const key of ["reach", "positive_dialogue", "order_10d", "bom_ratio", "positive_next_step_coverage", "priority_focus"]) {
+    const visibleMetricAudit = (() => {
+      const definedLabels = new Set(glossaryLabels.map(label => label.replace(/\s+/g, " ").trim()));
+      const aliases = new Map([
+        ["Mänskliga aktiviteter", "Aktiviteter"],
+        ["Kontakt → order inom 10 dagar", "Kontakt – order inom 10 dagar"],
+        ["Historiskt prioritetsfokus", "Prioritetsfokus"],
+        ["Positiv kontakt med nästa steg/order", "Nästa-steg-täckning"],
+        ["Försenade planerade", "Försenade planerade aktiviteter"],
+        ["Överhoppade planerade", "Överhoppade planerade aktiviteter"],
+        ["Positiv utan order/uppföljning 10 dagar", "Positiv utan order eller uppföljning efter 10 dagar"],
+        ["Attribuerat utfall", "Attribuerade order"],
+      ]);
+      const nonMetrics = new Set(["Säljare", "Mönster", "Underlag", "Kanal"]);
+      return [...visibleMetricLabels].filter(label => {
+        if (nonMetrics.has(label)) return false;
+        return !definedLabels.has(aliases.get(label) || label);
+      });
+    })();
+    if (visibleMetricAudit.length) {
+      throw new Error(`${mode}: visible untagged metrics lack glossary definitions: ${visibleMetricAudit.join(", ")}`);
+    }
+    for (const key of [
+      "reach", "visit_reach", "positive_dialogue", "positive_to_order_10d",
+      "order_10d", "priority_focus", "bom_ratio", "planned_bom_ratio",
+      "unplanned_bom_ratio", "positive_next_step_coverage", "planned_completed_in_time",
+    ]) {
       const definition = await page.locator(`.sc-definition[data-metric-definition="${key}"] dd`).innerText();
-      if (!definition.includes("Täljaren är") || !definition.includes("nämnaren är")) {
-        throw new Error(`${mode}: ${key} does not explain its numerator and denominator`);
+      if (!definition.includes("Täljaren är") || !definition.includes("nämnaren är") || !definition.includes("Måttet bedöms först när nämnaren är minst 10.")) {
+        throw new Error(`${mode}: ${key} does not explain its numerator, denominator, and 10-observation rule`);
+      }
+    }
+    for (const key of ["priority_percentile_coverage", "secure_customer_identity", "order_attribution_identity_coverage", "standardized_activity"]) {
+      const definition = await page.locator(`.sc-definition[data-metric-definition="${key}"] dd`).innerText();
+      if (definition.includes("Måttet bedöms först")) {
+        throw new Error(`${mode}: ${key} incorrectly claims the 10-observation rule`);
       }
     }
     if (mode === "mobile") {
@@ -539,7 +615,7 @@ const viewport = mode === "mobile"
     if (await page.locator(".sc-coaching-card .sc-rate-pending").count()) {
       throw new Error(`${mode}: zero pending outcomes still render on a coaching card`);
     }
-    if (!(await moreFilters.innerText()).includes("1 aktiva") || !(await moreFilters.evaluate(element => element.classList.contains("is-active")))) {
+    if (!(await moreFilters.innerText()).includes("1 aktivt") || !(await moreFilters.evaluate(element => element.classList.contains("is-active")))) {
       throw new Error(`${mode}: active hidden filters are not indicated while the filter block is closed`);
     }
     const filteredTeamOlle = await page.locator(".sc-comparison-table tbody tr", { hasText: "Olle" }).innerText();
@@ -570,6 +646,25 @@ const viewport = mode === "mobile"
     const matrixSection = page.locator(".sc-section", { hasText: "Teamets prioriteringsmatris" }).first();
     if (!(await matrixSection.isVisible()) || !(await matrixSection.innerText()).includes("Kontakt – order inom 10 dagar")) {
       throw new Error(`${mode}: priority matrix is missing or uses the wrong x-axis`);
+    }
+    if (await matrixSection.locator("[data-metric-definition]").count()) {
+      throw new Error(`${mode}: protected priority-matrix markup contains definition metadata`);
+    }
+    if (await matrixSection.locator('.sc-matrix[role="img"]').count()) {
+      const matrixInteractions = await matrixSection.locator('.sc-matrix[role="img"] .sc-bubble').evaluateAll(bubbles => bubbles.map(bubble => ({
+        tagName: bubble.tagName,
+        seller: bubble.getAttribute("data-seller"),
+        title: bubble.getAttribute("title"),
+        ariaLabel: bubble.getAttribute("aria-label"),
+      })));
+      if (!matrixInteractions.length || matrixInteractions.some(item => item.tagName !== "BUTTON" || !item.seller || !item.title || item.title !== item.ariaLabel)) {
+        throw new Error(`${mode}: protected priority-matrix structure or seller interactions changed`);
+      }
+    } else {
+      const buildUpText = await matrixSection.locator(".sc-priority-build-up").innerText();
+      if (!buildUpText.includes("Historisk prioriteringsdata byggs upp.") || !buildUpText.includes("Matrisen aktiveras vid minst")) {
+        throw new Error(`${mode}: protected priority-matrix build-up state changed: ${buildUpText}`);
+      }
     }
     if (bodyText.includes("Nästa bästa kunder")) {
       throw new Error(`${mode}: operational customer list leaked into sales coaching`);

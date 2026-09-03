@@ -1,5 +1,6 @@
 from pathlib import Path
 from unittest import TestCase, main
+import hashlib
 import re
 import sys
 
@@ -71,6 +72,10 @@ class SalesCoachingFrontendTests(TestCase):
         self.assertIn('<option value="custom">Anpassad period</option>', markup)
         self.assertIn("rangeMatchesPeriod", self.javascript)
         self.assertIn("updateMoreFiltersControl", self.javascript)
+        self.assertIn(
+            '${activeCount === 1 ? "aktivt" : "aktiva"}',
+            self.javascript,
+        )
         self.assertIn(".sc-custom-dates[hidden]", self.css)
 
     def test_removed_status_row_is_absent_from_markup_and_styles(self):
@@ -213,7 +218,39 @@ class SalesCoachingFrontendTests(TestCase):
         frontend_keys = set(re.findall(r'"([a-z0-9_]+)"', inventory))
         self.assertEqual(frontend_keys, set(METRIC_DEFINITIONS) - {"strategic_coverage"})
 
+    def test_protected_blocks_match_master_source_contract(self):
+        # These hashes are calculated from the corresponding source blocks on master.
+        contracts = {
+            "Teamjämförelse": (
+                "  function teamComparisonMarkup",
+                "  function teamTrendWeekLabel",
+                "b34c0dbc36113f36369f3f42e966301c6d567fc10d54e9cc77b75806c2a6439c",
+            ),
+            "10-dagarstrenden": (
+                "  function teamTrendWeekLabel",
+                "  function matrixReasonLabel",
+                "0d0d41ab730d874a4a00e9edbaaac72417f69be84e8c70bdde42a2e9f433796b",
+            ),
+            "prioriteringsmatrisen": (
+                "  function matrixReasonLabel",
+                "  function visitMarkup",
+                "efcdf65279dce47469bea98458a63419ec776f1d4fed53ec186253a21cfd982c",
+            ),
+        }
+        for name, (start_marker, end_marker, expected_hash) in contracts.items():
+            with self.subTest(block=name):
+                start = self.javascript.index(start_marker)
+                end = self.javascript.index(end_marker, start)
+                source = self.javascript[start:end].rstrip()
+                self.assertEqual(
+                    hashlib.sha256(source.encode("utf-8")).hexdigest(),
+                    expected_hash,
+                )
+
     def test_team_comparison_has_three_activity_bars_and_exact_table(self):
+        team = self.javascript.split("function teamComparisonMarkup", 1)[1].split(
+            "function teamTrendWeekLabel", 1
+        )[0]
         for expected in (
             "teamComparisonMarkup", "human_activities_total",
             "visit_breakdown?.analysable", "visit_breakdown?.reached",
@@ -235,6 +272,14 @@ class SalesCoachingFrontendTests(TestCase):
             'metricLabel("order_10d", "Kontakt – order inom 10 dagar")',
             self.javascript,
         )
+        self.assertNotIn("data-metric-definition", team)
+        self.assertIn("<h3>Mänskliga aktiviteter</h3>", team)
+        self.assertIn("<th>Säljare</th><th>Aktiviteter</th>", team)
+        self.assertIn(
+            'class="sc-team-group${sellerSelected(item.seller) ? " is-selected" : ""}" data-seller=',
+            team,
+        )
+        self.assertIn('<th><button type="button" data-seller=', team)
 
     def test_headline_outcomes_render_only_live_value_and_live_comparisons(self):
         self.assertNotIn("comparableOutcomeText", self.javascript)
@@ -294,6 +339,7 @@ class SalesCoachingFrontendTests(TestCase):
         self.assertIn('id="sc-team-trend-panel-${view}"', trend)
         self.assertIn('aria-labelledby="sc-team-trend-tab-${view}"', trend)
         self.assertIn('${activeView === view ? "" : " hidden"}', trend)
+        self.assertNotIn("data-metric-definition", trend)
         self.assertIn('aria-controls="sc-team-trend-panel-${key}"', trend)
         self.assertIn('aria-selected="${view === key}"', trend)
         self.assertIn('tabindex="${view === key ? "0" : "-1"}"', trend)
@@ -355,6 +401,9 @@ class SalesCoachingFrontendTests(TestCase):
         self.assertIn("writing-mode: vertical-rl", self.css)
 
     def test_only_priority_matrix_and_seller_highlight_are_present(self):
+        matrix = self.javascript.split("function matrixReasonLabel", 1)[1].split(
+            "function visitMarkup", 1
+        )[0]
         self.assertIn("function priorityMatrixPanelMarkup", self.javascript)
         self.assertIn("Teamets prioriteringsmatris", self.javascript)
         self.assertIn("Kontakt – order inom 10 dagar", self.javascript)
@@ -365,6 +414,10 @@ class SalesCoachingFrontendTests(TestCase):
         self.assertNotIn("sc-matrix-tabs", self.css)
         self.assertIn("sellerSelected(item.seller)", self.javascript)
         self.assertIn("is-selected", self.css)
+        self.assertNotIn("data-metric-definition", matrix)
+        self.assertIn('class="sc-matrix" role="img"', matrix)
+        self.assertIn('class="sc-bubble${item.sample_status', matrix)
+        self.assertIn('data-seller="${escapeHtml(item.seller)}"', matrix)
 
     def test_advanced_analysis_is_closed_and_has_exactly_three_tabs(self):
         diagnostics = self.javascript[
