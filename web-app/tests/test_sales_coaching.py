@@ -1638,6 +1638,14 @@ class SnapshotAndAggregateTests(TestCase):
             ["visit", "phone"],
         )
         self.assertEqual(
+            METRIC_DEFINITIONS["positive_to_order_10d"]["denominator_label"],
+            "alla berättigade positiva dialoger med säker kundidentitet",
+        )
+        self.assertEqual(
+            METRIC_DEFINITIONS["order_10d"]["denominator_label"],
+            "alla berättigade nådda mänskliga kontakter med säker kundidentitet",
+        )
+        self.assertEqual(
             METRIC_DEFINITIONS["human_activities"]["definition"],
             "Antal mänskliga aktiviteter som inte är automatiska CRM-mejl. Besök, telefon och manuella mejl redovisas som kanaler.",
         )
