@@ -21,7 +21,7 @@ services:
       - key: INSTAGRAM_GRAPH_API_VERSION
         value: "v26.0"
       - key: INSTAGRAM_FEED_LIMIT
-        value: "12"
+        value: "18"
       - key: APP_ENV
         value: production
       - key: WEB_CONCURRENCY

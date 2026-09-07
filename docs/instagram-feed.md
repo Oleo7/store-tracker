@@ -94,7 +94,7 @@ Server environment variables (never place values in source or frontend):
 | INSTAGRAM_WEBHOOK_VERIFY_TOKEN | Random callback verification secret |
 | INSTAGRAM_FEED_CACHE_TTL_SECONDS | Default 36000, supported range 60–604800 |
 | INSTAGRAM_GRAPH_API_VERSION | Default v26.0 |
-| INSTAGRAM_FEED_LIMIT | Default 12, supported range 1–24 |
+| INSTAGRAM_FEED_LIMIT | Default 18, supported range 1–24 |
 
 ## Security and browser behavior
 

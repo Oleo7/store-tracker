@@ -56,7 +56,7 @@ def normalize(raw, source):
     return item
 
 
-def mix_feed(own, ugc, limit=12, pattern=MIX):
+def mix_feed(own, ugc, limit=18, pattern=MIX):
     # Own membership wins when a collaborative post is also in the tags collection.
     seen_ids, seen_urls = set(), set()
     pools = {}
@@ -183,7 +183,7 @@ class FeedService:
 
     def result(self):
         return {"items": mix_feed(self.sources["own"], self.sources["tags"] + self.sources["mentions"],
-                    integer(self.env, "INSTAGRAM_FEED_LIMIT", 12, 1, 24)), "stale": self.stale}
+                    integer(self.env, "INSTAGRAM_FEED_LIMIT", 18, 1, 24)), "stale": self.stale}
 
     def feed(self):
         ttl = integer(self.env, "INSTAGRAM_FEED_CACHE_TTL_SECONDS", 36000, 60, 604800)

@@ -49,6 +49,17 @@ class InstagramTests(TestCase):
         self.assertIsNone(normalize(dict(row, timestamp="invalid"), "own"))
         self.assertNotIn("access_token", normalize(dict(row, access_token="secret"), "own"))
 
+    def test_default_eighteen_posts_and_configurable_limit(self):
+        self.client.collection.side_effect = lambda account, edge, deadline: [
+            media(n) for n in (range(1, 9) if edge == "media" else range(10, 26))]
+        result = self.service.feed()["items"]
+        self.assertEqual(len(result), 18)
+        self.assertEqual([r["source"] for r in result], ["ugc", "ugc", "own"] * 6)
+        self.assertEqual(len({r["id"] for r in result}), 18)
+        self.service.env["INSTAGRAM_FEED_LIMIT"] = "9"
+        self.assertEqual(len(self.service.feed()["items"]), 9)
+        self.assertEqual(self.client.collection.call_count, 2)
+
     def test_cache_hit_expiry_and_partial_stale_recovery(self):
         initial = self.service.feed()
         self.service.feed()
