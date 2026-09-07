@@ -8,6 +8,20 @@ services:
     healthCheckPath: /health
     numInstances: 1
     envVars:
+      - key: INSTAGRAM_ACCESS_TOKEN
+        sync: false
+      - key: INSTAGRAM_ACCOUNT_ID
+        sync: false
+      - key: INSTAGRAM_APP_SECRET
+        sync: false
+      - key: INSTAGRAM_WEBHOOK_VERIFY_TOKEN
+        sync: false
+      - key: INSTAGRAM_FEED_CACHE_TTL_SECONDS
+        value: "36000"
+      - key: INSTAGRAM_GRAPH_API_VERSION
+        value: "v26.0"
+      - key: INSTAGRAM_FEED_LIMIT
+        value: "12"
       - key: APP_ENV
         value: production
       - key: WEB_CONCURRENCY
