@@ -104,7 +104,7 @@ class InstagramTests(TestCase):
         transport = Mock()
         transport.get.side_effect = requests.Timeout("secret URL")
         client = MetaClient({"INSTAGRAM_ACCESS_TOKEN": "secret"}, transport)
-        with self.assertRaisesRegex(MetaError, "network_or_json_error"):
+        with self.assertRaisesRegex(MetaError, "timeout"):
             client.get("123/media", {}, time.monotonic() + 20)
         with self.assertRaisesRegex(MetaError, "timeout"):
             client.get("123/media", {}, time.monotonic() - 1)

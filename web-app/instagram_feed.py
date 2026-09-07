@@ -95,7 +95,7 @@ class MetaClient:
             response = self.transport.get(
                 f"https://graph.facebook.com/{version}/{path}", params=params,
                 headers={"Authorization": "Bearer " + token},
-                timeout=(min(3, remaining), min(6, remaining)), allow_redirects=False,
+                timeout=(min(3, remaining), min(15, remaining)), allow_redirects=False,
             )
             if response.status_code != 200:
                 raise MetaError("upstream_http_" + str(response.status_code))
@@ -103,6 +103,8 @@ class MetaClient:
             if not isinstance(body, dict) or "error" in body:
                 raise MetaError("invalid_response")
             return body
+        except requests.Timeout:
+            raise MetaError("timeout") from None
         except (requests.RequestException, ValueError):
             raise MetaError("network_or_json_error") from None
 
@@ -110,7 +112,7 @@ class MetaClient:
         result, after, seen = [], None, set()
         # Bounded work per refresh. Tags uses cursors even when 'next' is absent.
         for _ in range(3):
-            params = {"fields": FIELDS, "limit": 50}
+            params = {"fields": FIELDS, "limit": 25}
             if after:
                 params["after"] = after
             body = self.get(f"{account}/{edge}", params, deadline)
