@@ -22,7 +22,7 @@ It does not replace the Instagram iframe's content or visual identity.
 Facebook Login Graph API v26.0 is used because its `/tags` edge is needed.
 `GET /{ig-user-id}/media` reads own images, albums and videos/Reels.
 `GET /{ig-user-id}/tags` reads public tagged media, including Reels.
-Each collection reads up to three pages of 50 objects; tags pagination uses `after`
+Each collection reads up to three pages of 25 objects; tags pagination uses `after`
 cursors even when Meta omits `next`. Results are sorted newest first within each source.
 Only ID, permalink, media type, timestamp, optional username and source are returned.
 Media files and captions are neither downloaded nor stored.
@@ -80,8 +80,9 @@ Data access has its own expiry and can also require reauthorization. Tokens can 
 earlier by Meta or account/security changes. This is not an indefinitely self-renewing
 Instagram Login token. App roles permit development testing with the owner's account;
 Advanced Access/App Review and business verification may be required for third-party
-access and live webhook delivery. Do not claim full mention delivery until a real event
-has been observed. The app was in Development mode during initial validation.
+access. Meta explicitly states that an unpublished app receives only dashboard test
+webhooks, even for app admins/developers/testers. Real mention delivery has not been
+verified. The app remains in Development mode; see the remaining step below.
 
 Server environment variables (never place values in source or frontend):
 
@@ -122,7 +123,47 @@ retains links to Instagram. No-IntersectionObserver browsers hide the section.
   one embed script and two cards near the section; navigation loaded a third card. No page
   overflow. Real Instagram embeds rendered with original links and controls.
 - Desktop at 1440×900: three full cards visible, horizontal navigation, no page overflow.
-- Live deployment and webhook delivery results must be recorded after those checks finish.
+- Render deployed `f629717bcd42ac5dfa23158641c5c8b2ff838e70` successfully on 7 September
+  2026. Live endpoint returned HTTP 200, 12 unique items, 8 UGC and 4 own in the exact
+  UGC/UGC/own pattern, with `stale: false`. A repeat request used the populated cache.
+- The original six-second read timeout was too short for tagged-media responses in
+  Render. Pages were reduced to 25 objects and the bounded read timeout raised to 15
+  seconds. All 9 focused Instagram tests passed after this change.
+- Live CORS allowed both Polarbär origins without credentials; another origin received
+  HTTP 403. Unauthenticated `/customers` still returned HTTP 401.
+- Meta verified the callback URL; Instagram `mentions` is subscribed at v26.0. A dashboard
+  test POST reached the deployed callback with HTTP 200 (7 September, 19:54:06 UTC),
+  verifying the real signature path. This is a synthetic event, not a real customer mention.
+- Browser fault checks: blocking Instagram scripts with CSP left original-post links
+  and navigation available; a feed HTTP 503 hid the section with zero Instagram scripts.
+  The surrounding page remained usable. Invalid metadata/permalinks are rejected by tests.
+
+## Remaining Meta step and deployment state
+
+Explicit approval is needed to switch **Polarbär Social Feed** from **Development** to
+**Live** at https://developers.facebook.com/apps/1553369652626144/webhooks/?view=instagram.
+Automatic approval review blocked that UI action because it publishes the app and enables
+production webhook delivery. No publication took place. Once approved, resolve any actual
+Meta publication requirements, verify the professional account subscription if required,
+and observe a real public caption/comment mention before declaring mentions operational.
+Do not create an unsolicited public test post on the user's behalf.
+
+Own and tagged-media retrieval already work independently of this remaining step.
+The token must be renewed before **6 November 2026**. There is no historical mention
+backfill, Story mention support, or persistence across service restarts.
+
+Render auto-deploy was automatically disabled by its specific-commit deployment flow.
+The service still tracks master in its settings, but the live runtime is the explicitly
+deployed Instagram commit. No merge to master was performed. Keep auto-deploy disabled
+until this branch is merged through the repository's normal review process; deploying
+master before that would remove the Instagram routes and assets.
+
+Changed files: `web-app/app.py`, `web-app/instagram_feed.py`,
+`web-app/static/instagram-feed.js`, `web-app/static/instagram-feed.css`,
+`web-app/tests/test_instagram_feed.py`, `web-app/tests/instagram_browser_harness.py`,
+`.env.example`, `render.yaml`, `docs/instagram-feed.md`, `docs/instagram-squarespace.html`.
+Implementation commits: `d4c2147` and `f629717`; subsequent documentation/test-fixture
+commits do not change the deployed runtime.
 
 ## Official references checked 7 September 2026
 
