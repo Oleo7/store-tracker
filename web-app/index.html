@@ -3168,6 +3168,7 @@
     .planning-activity-card.status-cancelled { --planning-status: #aaa1a8; opacity: 0.68; }
     .planning-activity-card.status-planned.contact-phone { --planning-status: #7597bd; background: #fbfdff; }
     .planning-activity-card.status-planned.contact-email { --planning-status: #c98aa8; background: #fffafd; }
+    .planning-activity-card.status-planned.picking-help { --planning-status: #7a61b8; background: #f7f3ff; }
     .planning-activity-card.appointment-confirmed {
       box-shadow: inset 0 0 0 2px var(--pb-pink-strong);
     }
@@ -3608,6 +3609,16 @@
       border-radius: 999px;
       background: var(--pb-pink-soft);
       color: #8c214c;
+      font-size: 0.76rem;
+      font-weight: 850;
+    }
+    .planning-picking-help-badge {
+      grid-column: 1 / -1;
+      width: fit-content;
+      padding: 6px 9px;
+      border-radius: 999px;
+      background: #f7f3ff;
+      color: #5f4699;
       font-size: 0.76rem;
       font-weight: 850;
     }
@@ -4370,6 +4381,10 @@
           <label class="planning-followup-toggle" for="f-followup-appointment">
             <input type="checkbox" id="f-followup-appointment" />
             Tidsbokat med butiken
+          </label>
+          <label class="planning-followup-toggle" for="f-followup-picking-help">
+            <input type="checkbox" id="f-followup-picking-help" />
+            Hjälp med plock
           </label>
         </div>
       </div>
@@ -7044,9 +7059,13 @@
   function updateFollowupAppointmentField() {
     const field = document.getElementById("f-followup-appointment-field");
     const checkbox = document.getElementById("f-followup-appointment");
+    const pickingHelpCheckbox = document.getElementById("f-followup-picking-help");
     const visible = document.getElementById("f-followup-type").value === "visit";
     field.hidden = !visible;
-    if (!visible) checkbox.checked = false;
+    if (!visible) {
+      checkbox.checked = false;
+      pickingHelpCheckbox.checked = false;
+    }
   }
 
   function setContactFormRetryMode(enabled) {
@@ -7091,6 +7110,7 @@
     document.getElementById("f-nextFollowUpTime").value = "";
     document.getElementById("f-followup-note").value = "";
     document.getElementById("f-followup-appointment").checked = false;
+    document.getElementById("f-followup-picking-help").checked = false;
     syncVisitCompetitorButtons({});
     setFreezerSectionInvalid(false);
     setContactFormRetryMode(false);
@@ -7139,6 +7159,7 @@
         scheduled_at: followupScheduledAt,
         note: followupNote,
         appointment_confirmed: followupType === "visit" && document.getElementById("f-followup-appointment").checked,
+        picking_help: followupType === "visit" && document.getElementById("f-followup-picking-help").checked,
       } : { enabled: false },
       planned_activity_id: activePlannedActivityId || undefined,
       client_request_id: contactClientRequestId || document.getElementById("f-client-request-id").value,
@@ -7418,6 +7439,7 @@
       source: ["manual", "follow_up", "route"].includes(source.source) ? source.source : "manual",
       time_is_estimated: planningTruthy(source.time_is_estimated ?? source.is_estimated ?? source.approximate_time),
       appointment_confirmed: contactType === "visit" && planningTruthy(source.appointment_confirmed),
+      picking_help: contactType === "visit" && planningTruthy(source.picking_help),
     };
   }
 
@@ -8009,12 +8031,14 @@
     const style = `top:${item.top}px;height:${item.height}px;left:calc(${item.lane * width}% + ${gap}px);width:calc(${width}% - ${gap * 2}px)`;
     const content = `<span class="planning-activity-customer">${esc(activity.customer || "Okänd kund")}</span>`;
     const appointmentConfirmed = activity.contact_type === "visit" && activity.appointment_confirmed;
+    const pickingHelp = activity.contact_type === "visit" && activity.picking_help;
     const aria = [
       time,
       type.label,
       activity.customer,
       PLANNING_STATUS_LABELS[status],
       appointmentConfirmed ? "Tidsbokat med butiken" : "",
+      pickingHelp ? "Hjälp med plock" : "",
     ].filter(Boolean).join(", ");
     if (activity.unplanned) {
       return `<div class="planning-activity-shell" style="${style}">
@@ -8026,7 +8050,7 @@
     const saving = planningDragSavingIds.has(activityId);
     return `<div class="planning-activity-shell${draggable ? " is-draggable" : ""}${saving ? " is-saving" : ""}" style="${style}"
       data-planning-shell-id="${escAttr(activityId)}">
-      <button class="planning-activity-card contact-${activity.contact_type} status-${status}${appointmentConfirmed ? " appointment-confirmed" : ""}" type="button"
+      <button class="planning-activity-card contact-${activity.contact_type} status-${status}${pickingHelp ? " picking-help" : ""}${appointmentConfirmed ? " appointment-confirmed" : ""}" type="button"
         data-planning-open-id="${escAttr(activityId)}" aria-label="${escAttr(aria)}">${content}</button>
       ${draggable && !saving ? `<button class="planning-drag-handle" type="button" data-planning-drag-handle="${escAttr(activityId)}" aria-label="Flytta ${escAttr(activity.customer || "aktivitet")}"></button>` : ""}
     </div>`;
@@ -8786,6 +8810,10 @@
             <input id="planning-editor-appointment" type="checkbox" ${selectedType === "visit" && planningEditorActivity?.appointment_confirmed ? "checked" : ""} />
             Tidsbokat med butiken
           </label>
+          <label class="planning-followup-toggle" for="planning-editor-picking-help">
+            <input id="planning-editor-picking-help" type="checkbox" ${selectedType === "visit" && planningEditorActivity?.picking_help ? "checked" : ""} />
+            Hjälp med plock
+          </label>
         </div>
         <div class="planning-form-row">
           <div class="planning-field">
@@ -8834,10 +8862,14 @@
   function syncPlanningEditorAppointment(contactType) {
     const field = document.getElementById("planning-editor-appointment-field");
     const checkbox = document.getElementById("planning-editor-appointment");
-    if (!field || !checkbox) return;
+    const pickingHelpCheckbox = document.getElementById("planning-editor-picking-help");
+    if (!field || !checkbox || !pickingHelpCheckbox) return;
     const visible = contactType === "visit";
     field.hidden = !visible;
-    if (!visible) checkbox.checked = false;
+    if (!visible) {
+      checkbox.checked = false;
+      pickingHelpCheckbox.checked = false;
+    }
   }
 
   function showPlanningEditorError(message) {
@@ -8882,6 +8914,7 @@
       scheduled_at: scheduledAt,
       note,
       appointment_confirmed: contactType === "visit" && document.getElementById("planning-editor-appointment").checked,
+      picking_help: contactType === "visit" && document.getElementById("planning-editor-picking-help").checked,
       client_request_id: planningEditorRequestId,
     };
     if (editing) {
@@ -9021,6 +9054,7 @@
           <div class="planning-detail-value">${esc(activity.sales_person || activity.user_name || "—")}</div>
         </div>
         ${activity.contact_type === "visit" && activity.appointment_confirmed ? '<div class="planning-appointment-badge">Tidsbokat med butiken</div>' : ""}
+        ${activity.contact_type === "visit" && activity.picking_help ? '<div class="planning-picking-help-badge">Hjälp med plock</div>' : ""}
         ${activity.note ? `<div class="planning-detail-note">${esc(activity.note)}</div>` : ""}
         ${activity.source === "route" ? '<div class="planning-route-origin-note" style="grid-column:1/-1;margin:0">Planen beräknades från din position vid skapandet.</div>' : ""}
       </div>
