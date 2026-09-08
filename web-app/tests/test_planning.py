@@ -525,6 +525,7 @@ class PlanningHelperTests(TestCase):
         self.assertEqual(public["contact_type"], "phone")
         self.assertTrue(public["time_is_estimated"])
         self.assertFalse(public["appointment_confirmed"])
+        self.assertFalse(public["picking_help"])
         self.assertEqual(public["status"], "planned")
         self.assertTrue(public["overdue"])
 
@@ -603,18 +604,19 @@ class PlanningActivityApiTests(PlanningApiTestCase):
         self.assertEqual(saved["duration_minutes"], 20)
         self.assertEqual(saved["status"], "planned")
 
-    def test_existing_planning_schema_appends_appointment_column(self):
+    def test_existing_planning_schema_appends_picking_help_column(self):
         sheet = self.spreadsheet.worksheet(app_module.PLANNED_ACTIVITIES_SHEET)
         sheet.values[0] = list(app_module.PLANNED_ACTIVITY_COLUMNS[:-1])
 
         response = self.client.post(
             "/planning/activities",
-            json=self.manual_payload(client_request_id="schema-appointment-column"),
+            json=self.manual_payload(client_request_id="schema-picking-help-column"),
         )
 
         self.assertEqual(response.status_code, 201, response.get_json())
         self.assertEqual(sheet.row_values(1), app_module.PLANNED_ACTIVITY_COLUMNS)
         self.assertEqual(sheet.dict_rows()[0]["appointment_confirmed"], "N")
+        self.assertEqual(sheet.dict_rows()[0]["picking_help"], "N")
 
     def test_create_normalizes_stockholm_time_and_ignores_client_duration(self):
         response = self.client.post(
@@ -662,6 +664,42 @@ class PlanningActivityApiTests(PlanningApiTestCase):
         )
         self.assertEqual(
             rows[phone.get_json()["activity"]["client_request_id"]]["appointment_confirmed"],
+            "N",
+        )
+
+    def test_create_persists_picking_help_for_visits_only_and_fingerprints_it(self):
+        visit_payload = self.manual_payload(
+            client_request_id="picking-help-visit",
+            picking_help=True,
+        )
+        visit = self.client.post("/planning/activities", json=visit_payload)
+        conflict = self.client.post(
+            "/planning/activities",
+            json={**visit_payload, "picking_help": False},
+        )
+        email = self.client.post(
+            "/planning/activities",
+            json=self.manual_payload(
+                client_request_id="picking-help-email",
+                contact_type="Mejl",
+                picking_help=True,
+            ),
+        )
+
+        self.assertEqual(visit.status_code, 201, visit.get_json())
+        self.assertTrue(visit.get_json()["activity"]["picking_help"])
+        self.assertFalse(visit.get_json()["activity"]["appointment_confirmed"])
+        self.assertEqual(conflict.status_code, 409, conflict.get_json())
+        self.assertEqual(conflict.get_json()["error"], "idempotency_payload_mismatch")
+        self.assertEqual(email.status_code, 201, email.get_json())
+        self.assertFalse(email.get_json()["activity"]["picking_help"])
+        rows = {row["client_request_id"]: row for row in self.planning_rows()}
+        self.assertEqual(
+            rows[visit.get_json()["activity"]["client_request_id"]]["picking_help"],
+            "Y",
+        )
+        self.assertEqual(
+            rows[email.get_json()["activity"]["client_request_id"]]["picking_help"],
             "N",
         )
 
@@ -1326,6 +1364,46 @@ class PlanningActivityApiTests(PlanningApiTestCase):
         )
         self.assertEqual(self.planning_rows()[0]["appointment_confirmed"], "N")
 
+    def test_picking_help_update_preserves_route_timing_and_clears_for_phone(self):
+        activity = self.append_planning_row(
+            planned_activity_id="route-picking-help",
+            source="route",
+            route_group_id="route-group",
+            route_sequence=3,
+            time_is_estimated=True,
+            picking_help="N",
+        )
+
+        enabled = self.client.patch(
+            "/planning/activities/route-picking-help",
+            json={
+                "client_request_id": "enable-route-picking-help",
+                "expected_revision": 1,
+                "picking_help": True,
+            },
+        )
+        cleared = self.client.patch(
+            "/planning/activities/route-picking-help",
+            json={
+                "client_request_id": "route-picking-help-to-phone",
+                "expected_revision": 2,
+                "contact_type": "phone",
+            },
+        )
+
+        self.assertEqual(enabled.status_code, 200, enabled.get_json())
+        enabled_activity = enabled.get_json()["activity"]
+        self.assertTrue(enabled_activity["picking_help"])
+        self.assertEqual(enabled_activity["source"], "route")
+        self.assertTrue(enabled_activity["time_is_estimated"])
+        self.assertEqual(enabled_activity["route_group_id"], "route-group")
+        self.assertEqual(enabled_activity["route_sequence"], 3)
+        self.assertEqual(enabled_activity["scheduled_at"], activity["scheduled_at"])
+        self.assertEqual(cleared.status_code, 200, cleared.get_json())
+        self.assertEqual(cleared.get_json()["activity"]["contact_type"], "phone")
+        self.assertFalse(cleared.get_json()["activity"]["picking_help"])
+        self.assertEqual(self.planning_rows()[0]["picking_help"], "N")
+
     def test_drag_style_patch_changes_only_time_and_converts_route_to_manual(self):
         activity = self.append_planning_row(
             planned_activity_id="route-drag",
@@ -1907,6 +1985,37 @@ class PlanningContactCompletionTests(PlanningApiTestCase):
         self.assertEqual(completed["appointment_confirmed"], "Y")
         self.assertEqual(follow_up["contact_type"], "visit")
         self.assertEqual(follow_up["appointment_confirmed"], "Y")
+
+    def test_contact_completion_creates_picking_help_followup(self):
+        activity = self.append_planning_row(
+            planned_activity_id="picking-help-followup-source",
+            contact_type="phone",
+        )
+        payload = self.contact_payload(
+            activity,
+            client_request_id="picking-help-followup",
+            follow_up={
+                "enabled": True,
+                "contact_type": "visit",
+                "scheduled_at": "2026-08-01T11:30:00+02:00",
+                "note": "Hjälp butiken med plock",
+                "picking_help": True,
+            },
+        )
+
+        response = self.client.post(
+            "/customers/Butik%20A/contacts",
+            json=payload,
+        )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        follow_up_id = response.get_json()["follow_up"]["planned_activity_id"]
+        follow_up = {
+            row["planned_activity_id"]: row for row in self.planning_rows()
+        }[follow_up_id]
+        self.assertEqual(follow_up["contact_type"], "visit")
+        self.assertEqual(follow_up["picking_help"], "Y")
+        self.assertEqual(follow_up["appointment_confirmed"], "N")
 
     def test_partial_followup_failure_resumes_without_duplicate_contact(self):
         activity = self.append_planning_row(
