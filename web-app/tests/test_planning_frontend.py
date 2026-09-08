@@ -276,6 +276,38 @@ class PlanningFrontendContractTests(TestCase):
             self.html,
         )
 
+    def test_picking_help_controls_calendar_and_detail_contract(self):
+        self.assertIn('id="planning-editor-picking-help"', self.html)
+        self.assertIn('id="f-followup-picking-help"', self.html)
+        self.assertIn("planningEditorActivity?.picking_help", self.html)
+        self.assertIn("planningTruthy(source.picking_help)", self.html)
+        self.assertIn(
+            'picking_help: contactType === "visit" && document.getElementById("planning-editor-picking-help").checked',
+            self.html,
+        )
+        self.assertIn(
+            'picking_help: followupType === "visit" && document.getElementById("f-followup-picking-help").checked',
+            self.html,
+        )
+        card = re.search(
+            r"function renderPlanningCalendarActivity\(item\) \{(.*?)\n  \}",
+            self.html,
+            flags=re.DOTALL,
+        )
+        self.assertIsNotNone(card)
+        self.assertIn('" picking-help"', card.group(1))
+        self.assertIn('pickingHelp ? "Hjälp med plock"', card.group(1))
+        self.assertIn(
+            ".planning-activity-card.status-planned.picking-help",
+            self.html,
+        )
+        self.assertIn("#7a61b8", self.html)
+        self.assertIn("#f7f3ff", self.html)
+        self.assertIn(
+            '<div class="planning-picking-help-badge">Hjälp med plock</div>',
+            self.html,
+        )
+
     def test_planning_week_omits_legacy_followup_payload(self):
         self.assertIn('include_followups: "0"', self.html)
 

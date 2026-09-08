@@ -660,6 +660,7 @@ PLANNED_ACTIVITY_COLUMNS = [
     "source_trigger_key",
     "recommended_contact_type",
     "appointment_confirmed",
+    "picking_help",
 ]
 PLANNING_CONTACT_TYPES = {"visit", "phone", "email"}
 PLANNING_CONTACT_TYPE_LABELS = {
@@ -2222,7 +2223,8 @@ def planning_revision(row):
 
 def planning_create_fingerprint(*, actor, owner, customer_id, contact_type,
                                 scheduled_at, duration_minutes, note, source,
-                                source_contact_id, appointment_confirmed=False):
+                                source_contact_id, appointment_confirmed=False,
+                                picking_help=False):
     return canonical_payload_fingerprint({
         "operation": "planned_activity.create.v1",
         "actor": normalize_key((actor or {}).get("user_name")),
@@ -2236,6 +2238,10 @@ def planning_create_fingerprint(*, actor, owner, customer_id, contact_type,
         "source_contact_id": str(source_contact_id or "").strip(),
         "appointment_confirmed": normalize_planning_appointment_confirmed(
             appointment_confirmed,
+            contact_type,
+        ),
+        "picking_help": normalize_planning_picking_help(
+            picking_help,
             contact_type,
         ),
     })
@@ -2270,6 +2276,13 @@ def normalize_planning_contact_type(value):
 
 
 def normalize_planning_appointment_confirmed(value, contact_type):
+    return bool(
+        normalize_planning_contact_type(contact_type) == "visit"
+        and is_yes(value)
+    )
+
+
+def normalize_planning_picking_help(value, contact_type):
     return bool(
         normalize_planning_contact_type(contact_type) == "visit"
         and is_yes(value)
@@ -2533,6 +2546,10 @@ def public_planned_activity(row, *, now=None):
         "time_is_estimated": is_yes(row.get("time_is_estimated")),
         "appointment_confirmed": normalize_planning_appointment_confirmed(
             row.get("appointment_confirmed"),
+            row.get("contact_type"),
+        ),
+        "picking_help": normalize_planning_picking_help(
+            row.get("picking_help"),
             row.get("contact_type"),
         ),
         "note": str(row.get("note") or "").strip(),
@@ -3629,6 +3646,7 @@ def build_planned_activity_row(
     source_trigger_key="",
     recommended_contact_type="",
     appointment_confirmed=False,
+    picking_help=False,
 ):
     contact_type = normalize_planning_contact_type(contact_type)
     source = str(source or "manual").strip().casefold()
@@ -3677,6 +3695,12 @@ def build_planned_activity_row(
                 contact_type,
             ) else "N"
         ),
+        "picking_help": (
+            "Y" if normalize_planning_picking_help(
+                picking_help,
+                contact_type,
+            ) else "N"
+        ),
     }
 
 
@@ -3702,6 +3726,7 @@ def planned_contact_id_for_payload(
     follow_up_at,
     follow_up_note,
     follow_up_appointment_confirmed,
+    follow_up_picking_help,
     mirrored_follow_up_date,
 ):
     canonical = json.dumps(
@@ -3739,6 +3764,7 @@ def planned_contact_id_for_payload(
                 "appointment_confirmed": bool(
                     follow_up_appointment_confirmed
                 ),
+                "picking_help": bool(follow_up_picking_help),
                 "mirrored_date": str(
                     mirrored_follow_up_date or ""
                 ).strip(),
@@ -7049,7 +7075,7 @@ def suggestion_candidates_by_id(owner, candidates):
 
 def planned_suggestion_payload_matches(
     activity, *, customer_id, contact_type, scheduled_at, note,
-    appointment_confirmed=False,
+    appointment_confirmed=False, picking_help=False,
 ):
     return all((
         str(activity.get("customer_id") or "").strip()
@@ -7066,6 +7092,13 @@ def planned_suggestion_payload_matches(
             activity.get("contact_type"),
         ) == normalize_planning_appointment_confirmed(
             appointment_confirmed,
+            contact_type,
+        ),
+        normalize_planning_picking_help(
+            activity.get("picking_help"),
+            activity.get("contact_type"),
+        ) == normalize_planning_picking_help(
+            picking_help,
             contact_type,
         ),
     ))
@@ -7281,6 +7314,10 @@ def plan_planning_suggestion(suggestion_id):
         data.get("appointment_confirmed"),
         contact_type,
     )
+    picking_help = normalize_planning_picking_help(
+        data.get("picking_help"),
+        contact_type,
+    )
     scheduled_at = parse_planning_datetime(data.get("scheduled_at"))
     if scheduled_at is None:
         return planning_error(
@@ -7384,6 +7421,7 @@ def plan_planning_suggestion(suggestion_id):
                 source="system_suggestion",
                 source_contact_id="",
                 appointment_confirmed=appointment_confirmed,
+                picking_help=picking_help,
             )
             active_suggestion_activities = [
                 row for row in activity_rows
@@ -7423,6 +7461,7 @@ def plan_planning_suggestion(suggestion_id):
                     scheduled_at=scheduled_at,
                     note=note,
                     appointment_confirmed=appointment_confirmed,
+                    picking_help=picking_help,
                 )
                 if not same_payload:
                     return planning_error(
@@ -7490,6 +7529,7 @@ def plan_planning_suggestion(suggestion_id):
                         "recommended_contact_type"
                     ),
                     appointment_confirmed=appointment_confirmed,
+                    picking_help=picking_help,
                 )
                 append_dict_row(
                     _activity_sheet, PLANNED_ACTIVITY_COLUMNS, activity
@@ -7502,6 +7542,7 @@ def plan_planning_suggestion(suggestion_id):
                     "duration_minutes": PLANNING_CONTACT_DURATIONS[contact_type],
                     "note": note,
                     "appointment_confirmed": appointment_confirmed,
+                    "picking_help": picking_help,
                 }
             )
             updated, duplicate = service.transition(
@@ -7588,6 +7629,10 @@ def planning_activities():
             )
         appointment_confirmed = normalize_planning_appointment_confirmed(
             data.get("appointment_confirmed"),
+            contact_type,
+        )
+        picking_help = normalize_planning_picking_help(
+            data.get("picking_help"),
             contact_type,
         )
         scheduled_at = parse_planning_datetime(data.get("scheduled_at"))
@@ -7700,6 +7745,7 @@ def planning_activities():
                 source=source,
                 source_contact_id=source_contact_id_for_fingerprint,
                 appointment_confirmed=appointment_confirmed,
+                picking_help=picking_help,
             )
             for _row_index, existing in existing_rows:
                 if (
@@ -7778,8 +7824,10 @@ def planning_activities():
                     source=source,
                     source_contact_id=source_contact_id,
                     appointment_confirmed=appointment_confirmed,
+                    picking_help=picking_help,
                 ),
                 appointment_confirmed=appointment_confirmed,
+                picking_help=picking_help,
                 revision=1,
             )
             append_dict_row(
@@ -8132,7 +8180,7 @@ def update_planning_activity(activity_id):
 
     mutable_fields = {
         "contact_type", "scheduled_at", "note", "status", "customer_id",
-        "appointment_confirmed",
+        "appointment_confirmed", "picking_help",
     }
     requested_fields = mutable_fields.intersection(data)
     if not requested_fields:
@@ -8266,6 +8314,11 @@ def update_planning_activity(activity_id):
                     data.get("appointment_confirmed"),
                     data.get("contact_type", current.get("contact_type")),
                 )
+            )
+        if "picking_help" in data:
+            mutation_changes["picking_help"] = normalize_planning_picking_help(
+                data.get("picking_help"),
+                data.get("contact_type", current.get("contact_type")),
             )
         mutation_fingerprint = planning_update_fingerprint(
             actor=caller,
@@ -8411,8 +8464,16 @@ def update_planning_activity(activity_id):
                     effective_contact_type,
                 ) else "N"
             )
+        if "picking_help" in data:
+            updates["picking_help"] = (
+                "Y" if normalize_planning_picking_help(
+                    data.get("picking_help"),
+                    effective_contact_type,
+                ) else "N"
+            )
         if effective_contact_type != "visit":
             updates["appointment_confirmed"] = "N"
+            updates["picking_help"] = "N"
         if "scheduled_at" in data:
             scheduled_at = parse_planning_datetime(data.get("scheduled_at"))
             if scheduled_at is None:
@@ -13548,6 +13609,7 @@ def add_contact(customer_name):
     follow_up_at = None
     follow_up_note = ""
     follow_up_appointment_confirmed = False
+    follow_up_picking_help = False
     if follow_up_enabled:
         follow_up_type = normalize_planning_contact_type(
             follow_up.get("contact_type")
@@ -13573,6 +13635,10 @@ def add_contact(customer_name):
                 follow_up.get("appointment_confirmed"),
                 follow_up_type,
             )
+        )
+        follow_up_picking_help = normalize_planning_picking_help(
+            follow_up.get("picking_help"),
+            follow_up_type,
         )
         if len(follow_up_note) > 300:
             return planning_error(
@@ -13925,6 +13991,7 @@ def add_contact(customer_name):
             follow_up_appointment_confirmed=(
                 follow_up_appointment_confirmed
             ),
+            follow_up_picking_help=follow_up_picking_help,
             mirrored_follow_up_date=mirrored_follow_up_date,
         )
     elif client_request_id:
@@ -14263,6 +14330,7 @@ def add_contact(customer_name):
                         appointment_confirmed=(
                             follow_up_appointment_confirmed
                         ),
+                        picking_help=follow_up_picking_help,
                         client_request_id=planning_request_scope(
                             caller,
                             "create_follow_up",
@@ -14284,6 +14352,7 @@ def add_contact(customer_name):
                             appointment_confirmed=(
                                 follow_up_appointment_confirmed
                             ),
+                            picking_help=follow_up_picking_help,
                         ),
                         revision=1,
                     )
