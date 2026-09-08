@@ -140,13 +140,44 @@ retains links to Instagram. No-IntersectionObserver browsers hide the section.
 
 ## Remaining Meta step and deployment state
 
-Explicit approval is needed to switch **Polarbär Social Feed** from **Development** to
-**Live** at https://developers.facebook.com/apps/1553369652626144/webhooks/?view=instagram.
-Automatic approval review blocked that UI action because it publishes the app and enables
-production webhook delivery. No publication took place. Once approved, resolve any actual
-Meta publication requirements, verify the professional account subscription if required,
-and observe a real public caption/comment mention before declaring mentions operational.
-Do not create an unsolicited public test post on the user's behalf.
+The user explicitly approved publication. On 8 September 2026, the app still showed
+**Development** after attempts to switch to Live. Basic settings have no contact email,
+privacy-policy URL or category, and offer connecting a business portfolio. Automatic
+approval review blocked a subsequent retry because prerequisites were missing. The
+publication approval remains valid; do not ask for it again. Obtain the correct contact
+email and published privacy-policy URL from the owner, complete the relevant basic
+settings, and then retry publication. Do not invent policy URLs or legal statements.
+
+The official [Instagram webhook setup guide](https://developers.facebook.com/docs/graph-api/webhooks/getting-started/webhooks-for-instagram)
+checked on 8 September requires a subscription on the linked Facebook Page, a Page
+access token with `pages_manage_metadata`, the appropriate Instagram permission, and
+a verified linked business. It also describes Advanced Access requirements for Business
+apps. The dashboard currently labels this app's type as `Ingen` and the relevant
+`instagram_basic`, `instagram_manage_comments`, `pages_read_engagement` and
+`pages_show_list` permissions as Standard Access, with no App Review requested.
+No Advanced Access or business verification completion has been established.
+
+The linked Page `868369943031594` was queried and returned Polarbär / `polarbar.se`.
+`GET /868369943031594/subscribed_apps` returned OAuth error 190, subcode 2069032:
+a Page access token is required; the current User token is unsupported for this check.
+`GET /17841475991503244/subscribed_apps` is not a supported field on this Facebook
+Login Instagram node. Therefore the account subscription is **not verified**. Obtain
+owner approval for the additional `pages_manage_metadata` permission, obtain the Page
+token through the authorized login flow, and verify/enable the linked Page subscription.
+Then test a real public caption/comment mention end to end. No real event was tested
+while publication and Page subscription remained blocked. The guide additionally lists
+Reels as unsupported for these webhooks; do not equate working Reel tags with Reel mentions.
+
+The Instagram `mentions` field remains subscribed at v26.0, callback URL unchanged.
+A new Meta dashboard test reached the deployed callback with HTTP 200 at
+**8 September 2026, 05:34:51 UTC**. This verifies the signed callback after the new Render
+deployment, not after Meta publication (which has not happened).
+
+Final feed verification on 8 September: **18 unique posts, 12 UGC + 6 own**, exact
+UGC/UGC/own sequence, HTTP 200, `stale: false`. Render deployed `39998a7` successfully.
+`INSTAGRAM_FEED_LIMIT=18` is saved in Render and is consistent with `.env.example`,
+`render.yaml` and the Python defaults. Ten focused Instagram tests pass, including
+the new 18-item/default/override test. Frontend lazy-loading code is unchanged.
 
 Own and tagged-media retrieval already work independently of this remaining step.
 The token must be renewed before **6 November 2026**. There is no historical mention
@@ -162,7 +193,7 @@ Changed files: `web-app/app.py`, `web-app/instagram_feed.py`,
 `web-app/static/instagram-feed.js`, `web-app/static/instagram-feed.css`,
 `web-app/tests/test_instagram_feed.py`, `web-app/tests/instagram_browser_harness.py`,
 `.env.example`, `render.yaml`, `docs/instagram-feed.md`, `docs/instagram-squarespace.html`.
-Implementation commits: `d4c2147` and `f629717`; subsequent documentation/test-fixture
+Runtime commits: `d4c2147`, `f629717`, and `39998a7` (18-post default). Documentation
 commits do not change the deployed runtime.
 
 ## Official references checked 7 September 2026
