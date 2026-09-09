@@ -1,6 +1,7 @@
 from pathlib import Path
 import sys
 from unittest.mock import patch
+from urllib.parse import quote
 
 
 WEB_APP_DIR = Path(__file__).resolve().parents[1]
@@ -144,3 +145,105 @@ class CustomerNextFollowUpTests(PlanningApiTestCase):
         self.assertEqual(payload["next_follow_up"]["source"], "planned_activity")
         self.assertEqual(payload["next_follow_up"]["time"], "16:30")
         self.assertEqual(payload["next_follow_up"]["contact_type_label"], "Besök")
+
+
+class CustomerNameRoutingTests(PlanningApiTestCase):
+    ROUTING_NAMES = (
+        "Butik A",
+        "ICA Kvantum / Oj Åstorp",
+        "Å Ä Ö & +",
+        "Butik med %2F bokstavligt",
+    )
+
+    def set_customer_name(self, row_number, name):
+        sheet = self.spreadsheet.worksheet("customers_enriched")
+        customer_column = sheet.row_values(1).index("customer") + 1
+        sheet.update_cell(row_number, customer_column, name)
+        app_module.invalidate_sheet_cache(
+            self.spreadsheet,
+            "customers_enriched",
+        )
+
+    def clear_contacts(self):
+        sheet = self.spreadsheet.worksheet("sales_activities")
+        sheet.values = [sheet.values[0]]
+        app_module.invalidate_sheet_cache(
+            self.spreadsheet,
+            "sales_activities",
+        )
+
+    @staticmethod
+    def customer_url(name, suffix):
+        return f"/customers/{quote(name, safe='')}/{suffix}"
+
+    def test_stats_routes_encoded_customer_names_without_double_decoding(self):
+        for index, name in enumerate(self.ROUTING_NAMES):
+            with self.subTest(name=name):
+                self.set_customer_name(2, name)
+                self.clear_contacts()
+                self.append_contact_row(
+                    contact_id=f"routing-stats-{index}",
+                    customer=name,
+                    customer_id="11111111-1111-4111-8111-111111111111",
+                    comment=f"Stats för {name}",
+                )
+
+                response = self.client.get(self.customer_url(name, "stats"))
+
+                self.assertEqual(response.status_code, 200, response.get_json())
+                self.assertEqual(response.get_json()["contacts"][0]["customer"], name)
+                self.assertEqual(
+                    response.get_json()["contacts"][0]["comment"],
+                    f"Stats för {name}",
+                )
+
+        self.assertIn(
+            "/customers/<path:customer_name>/stats",
+            app_module.PERFORMANCE_ENDPOINTS,
+        )
+
+    def test_contacts_route_persists_encoded_customer_names_exactly_once(self):
+        for index, name in enumerate(self.ROUTING_NAMES):
+            with self.subTest(name=name):
+                self.set_customer_name(2, name)
+                self.clear_contacts()
+                response = self.client.post(
+                    self.customer_url(name, "contacts"),
+                    json={
+                        "client_request_id": f"routing-contact-{index}",
+                        "customer_id": "11111111-1111-4111-8111-111111111111",
+                        "date_time": "2026-07-28 09:10",
+                        "contact_channel": "Telefon",
+                        "result": "Positiv",
+                        "comment": f"Kontakt för {name}",
+                    },
+                )
+
+                self.assertEqual(response.status_code, 200, response.get_json())
+                self.assertEqual(len(self.contact_rows()), 1)
+                self.assertEqual(self.contact_rows()[0]["customer"], name)
+
+        self.assertIn(
+            "/customers/<path:customer_name>/contacts",
+            app_module.PERFORMANCE_ENDPOINTS,
+        )
+
+    def test_special_customer_names_do_not_bypass_ownership(self):
+        other_name = "Sofias / Å Ä Ö & + %2F"
+        self.set_customer_name(3, other_name)
+
+        stats = self.client.get(self.customer_url(other_name, "stats"))
+        contact = self.client.post(
+            self.customer_url(other_name, "contacts"),
+            json={
+                "customer_id": "22222222-2222-4222-8222-222222222222",
+                "date_time": "2026-07-28 09:10",
+                "contact_channel": "Telefon",
+                "result": "Positiv",
+                "comment": "Får inte sparas",
+            },
+        )
+
+        self.assertEqual(stats.status_code, 404, stats.get_json())
+        self.assertEqual(contact.status_code, 404, contact.get_json())
+        self.assertEqual(self.contact_rows(), [])
