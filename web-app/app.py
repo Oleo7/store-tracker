@@ -14,7 +14,6 @@ from contextlib import contextmanager
 import gspread
 from gspread.exceptions import WorksheetNotFound
 from google.oauth2.service_account import Credentials
-from urllib.parse import unquote
 from datetime import datetime, date, time as datetime_time, timedelta, timezone
 from collections import defaultdict
 import copy
@@ -371,7 +370,7 @@ PERFORMANCE_ENDPOINTS = {
     "/customers/<int:row>/reminder-email-draft",
     "/customers/<int:row>/email-proposal/send",
     "/customers/<int:row>/reminder-email/send",
-    "/customers/<customer_name>/contacts",
+    "/customers/<path:customer_name>/contacts",
     "/planning/activities",
     "/planning/activities/<activity_id>",
     "/planning/suggestions",
@@ -384,7 +383,7 @@ PERFORMANCE_ENDPOINTS = {
     "/planning/route-preview-status",
     "/route-proposal",
     "/api/brevo/reconcile/<secret>",
-    "/customers/<customer_name>/stats",
+    "/customers/<path:customer_name>/stats",
 }
 PERFORMANCE_SHEETS = {
     "customers_enriched",
@@ -6312,9 +6311,9 @@ def select_next_customer_follow_up(
     return legacy_candidate
 
 
-@app.route("/customers/<customer_name>/stats", methods=["GET"])
+@app.route("/customers/<path:customer_name>/stats", methods=["GET"])
 def get_customer_stats(customer_name):
-    customer_name = unquote(customer_name).strip()
+    customer_name = customer_name.strip()
     spreadsheet = get_spreadsheet_with_retry()
     customers = get_customer_rows(spreadsheet)
     customer_lookup = CustomerLookup(customers)
@@ -13507,9 +13506,9 @@ def update_customer_contact(row):
     return jsonify(result)
 
 
-@app.route("/customers/<customer_name>/contacts", methods=["POST"])
+@app.route("/customers/<path:customer_name>/contacts", methods=["POST"])
 def add_contact(customer_name):
-    customer_name = unquote(customer_name).strip()
+    customer_name = customer_name.strip()
     data = request.get_json(silent=True)
     if not isinstance(data, dict):
         return planning_error(
