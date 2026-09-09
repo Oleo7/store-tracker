@@ -10,6 +10,7 @@ from flask import (
     session,
 )
 from flask_cors import CORS
+from instagram_feed import create_blueprint as create_instagram_blueprint
 from contextlib import contextmanager
 import gspread
 from gspread.exceptions import WorksheetNotFound
@@ -333,7 +334,8 @@ app.config.update(
         or application_environment() in PILOT_ENVIRONMENTS
     ),
 )
-CORS(app, supports_credentials=True)
+CORS(app, resources={r"^(?!/api/public/instagram-feed$|/api/webhooks/instagram$).*": {}}, supports_credentials=True)
+app.register_blueprint(create_instagram_blueprint())
 
 
 PERFORMANCE_LOGGER_NAME = "store_tracker.performance"
@@ -4669,7 +4671,7 @@ def build_sales_activity_for_email(spreadsheet, *, email_id, email_type,
 def require_authenticated_session():
     public_endpoints = {
         "index", "images", "static", "login", "get_session", "health",
-        "brevo_webhook", "brevo_reconcile"
+        "brevo_webhook", "brevo_reconcile", "instagram.feed", "instagram.webhook"
     }
     if request.method == "OPTIONS" or request.endpoint in public_endpoints:
         return None
