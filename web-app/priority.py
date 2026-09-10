@@ -354,7 +354,6 @@ def build_order_features(order_rows: list[dict]) -> dict:
             "customer_id": latest_order.get("customer_id", ""),
             "customer_number": latest_order.get("customer_number", ""),
             "order_identity_count": len(identity_orders),
-            "commercial_orders": customer_orders,
             "order_count": order_count,
             "delivery_count": len(delivery_dates),
             "total_dfp": _clean_number(total_dfp),
@@ -362,7 +361,7 @@ def build_order_features(order_rows: list[dict]) -> dict:
             "avg_dfp_per_order": _clean_number(avg_dfp),
             "avg_sales_per_order": _clean_number(avg_sales),
             "last_order_date": max(order_dates) if order_dates else None,
-            "last_delivery_date": latest_order.get("delivery_date"),
+            "last_delivery_date": latest_order.get("delivery_date") if customer_orders else None,
             "latest_order_reference": latest_order.get("reference", ""),
             "delivery_dates": delivery_dates,
             "delivery_gaps": gaps,
@@ -372,8 +371,8 @@ def build_order_features(order_rows: list[dict]) -> dict:
             "first_delivery_dfp": _clean_number(first_delivery_dfp),
             "first_delivery_value": _clean_number(first_delivery_value),
             "expected_order_dfp": _clean_number(
-                _weighted_recent_average(latest_dfp, avg_dfp) if latest_dfp is not None
-                else avg_dfp
+                (_weighted_recent_average(latest_dfp, avg_dfp) if latest_dfp is not None
+                 else avg_dfp) if customer_orders else 0
             ),
             "expected_order_value": _clean_number(_weighted_recent_average(latest_sales, avg_sales)),
             "median_reorder_gap_days": _clean_number(median_gap),
@@ -427,7 +426,8 @@ def build_contact_features(sales_activities: list[dict], order_features: dict) -
                 "sort_key": (contact_dt, idx),
                 "datetime": contact_dt,
                 "row": row,
-                "is_email": bool(str(row.get("email_id") or "").strip()),
+                "is_email": bool(str(row.get("email_id") or "").strip())
+                or normalize_customer_key(row.get("activity_source")) == "crm_email",
                 "follow_up_date": parse_date(row.get("follow_up_date")),
                 "customer_id": customer_id,
                 "customer_number": str(row.get("customer_number") or "").strip(),
@@ -455,7 +455,7 @@ def build_contact_features(sales_activities: list[dict], order_features: dict) -
             and any(
                 activity["sort_key"] > latest_plan["sort_key"]
                 and activity["datetime"].date() >= follow_up_date
-                for activity in human_activities
+                for activity in activities
             )
         )
         latest_identity = latest_activity
@@ -510,6 +510,7 @@ def build_contact_features(sales_activities: list[dict], order_features: dict) -
             "latest_contact_result": result,
             "latest_contact_class": normalize_contact_result(result) if result else "",
             "latest_contact_comment": comment,
+            "latest_contact_person": latest_human_row.get("customer_contact_person", ""),
             "latest_freezer_fields": _freezer_fields(latest_human_row),
             "latest_follow_up_date": follow_up_date,
             "follow_up_resolved": contact_resolved_followup or order_resolved_followup,
@@ -1490,7 +1491,10 @@ def build_priority_customers(
             "delivery_count": delivery_count,
             "first_order_sku_count": first_order_sku_count,
             "total_dfp": _clean_number(order.get("total_dfp") or 0),
-            "expected_order_dfp": _clean_number(expected_order_dfp),
+            "expected_order_dfp": (
+                None if order and order.get("expected_order_dfp") is None
+                else _clean_number(expected_order_dfp)
+            ),
             "expected_order_value": _clean_number(expected_order_value),
             "latest_order_dfp": order.get("latest_order_dfp"),
             "latest_order_volume_missing": order.get("latest_order_dfp") is None,
@@ -1507,6 +1511,7 @@ def build_priority_customers(
             "latest_human_contact_id": contact.get("latest_human_contact_id", ""),
             "latest_contact_result": contact.get("latest_contact_result", ""),
             "latest_contact_comment": contact.get("latest_contact_comment", ""),
+            "latest_contact_person": contact.get("latest_contact_person", ""),
             "latest_contact_class": latest_contact_class,
             "latest_contact_channel": contact.get("latest_contact_channel", ""),
             "latest_contact_sales_person": contact.get("latest_contact_sales_person", ""),

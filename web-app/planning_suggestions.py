@@ -54,6 +54,7 @@ SUGGESTION_COLUMNS = [
     "strategic_index_at_creation",
     "recommendation_eligible_at_creation",
     "suppression_reason_at_creation",
+    "history_index_at_creation",
 ]
 
 SCORE_EVENTS_SHEET = "score_events"
@@ -84,6 +85,7 @@ SCORE_EVENT_COLUMNS = [
     "resolved_by_type",
     "resolved_by_id",
     "client_request_id",
+    "history_index",
 ]
 
 ACTIVE_STATUSES = {"pending", "snoozed", "planned"}
@@ -367,6 +369,7 @@ class PlanningSuggestionService:
             "intent_timing": row.get("intent_timing_at_creation", ""),
             "value_index": row.get("value_index_at_creation", ""),
             "strategic_index": row.get("strategic_index_at_creation", ""),
+            "history_index": row.get("history_index_at_creation", ""),
             "expected_order_dfp": row.get("expected_order_dfp_at_creation", ""),
             "recommended_contact_type": _text(
                 row.get("recommended_contact_type") or "phone"
@@ -410,6 +413,9 @@ class PlanningSuggestionService:
             ),
             "value_index_at_creation": candidate.get(
                 "value_index", row.get("value_index_at_creation", "")
+            ),
+            "history_index_at_creation": candidate.get(
+                "history_index", row.get("history_index_at_creation", "")
             ),
             "strategic_index_at_creation": candidate.get(
                 "strategic_index", row.get("strategic_index_at_creation", "")
@@ -476,6 +482,7 @@ class PlanningSuggestionService:
             "intent_timing_at_creation": candidate.get("intent_timing", ""),
             "value_index_at_creation": candidate.get("value_index", ""),
             "strategic_index_at_creation": candidate.get("strategic_index", ""),
+            "history_index_at_creation": candidate.get("history_index", ""),
             "recommendation_eligible_at_creation": (
                 "Y" if candidate.get("recommendation_eligible", True) else "N"
             ),

@@ -464,7 +464,8 @@ class PriorityTests(TestCase):
         self.assertEqual(customer["total_dfp"], 15)
         self.assertEqual(customer["latest_order_dfp"], 15)
         self.assertNotIn(normalize_customer_key("Polarbär - Inköp"), features)
-        self.assertNotIn(normalize_customer_key("Customer B"), features)
+        self.assertEqual(features[normalize_customer_key("Customer B")]["order_count"], 0)
+        self.assertEqual(features[normalize_customer_key("Customer B")]["expected_order_dfp"], 0)
 
     def test_order_features_prefer_total_weight_for_dfp(self):
         features = build_order_features(

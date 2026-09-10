@@ -700,6 +700,7 @@ class RouteEndpointTests(TestCase):
         self.customers = [
             {
                 "row": 2,
+                "customer_id": "route-2",
                 "customer": "Authoritative Store",
                 "cancelled_flag": "",
                 "sales_person": "Route User",
@@ -708,6 +709,7 @@ class RouteEndpointTests(TestCase):
             },
             {
                 "row": 3,
+                "customer_id": "route-3",
                 "customer": "Other Store",
                 "cancelled_flag": "",
                 "sales_person": "Other Seller",
@@ -800,6 +802,7 @@ class RouteEndpointTests(TestCase):
         self.customers[:] = [
             {
                 "row": row,
+                "customer_id": f"route-{row}",
                 "customer": f"Store {row}",
                 "cancelled_flag": "",
                 "sales_person": "Route User",
@@ -811,6 +814,7 @@ class RouteEndpointTests(TestCase):
         self.priorities[:] = [
             {
                 "row": row,
+                "customer_id": f"route-{row}",
                 "customer": f"Store {row}",
                 "priority_score": 1000 - row,
             }
@@ -854,7 +858,7 @@ class RouteEndpointTests(TestCase):
         self.assertEqual([stop["row"] for stop in payload["stops"]], [2])
         self.assertEqual(payload["stops"][0]["priority_score"], 88)
 
-    def test_non_eligible_recommendation_customer_remains_route_candidate(self):
+    def test_contact_suppression_excludes_optional_route_candidate(self):
         self.login()
         for reason in (
             "recent_human_contact", "dismissed", "snoozed",
@@ -870,10 +874,8 @@ class RouteEndpointTests(TestCase):
                     "candidate_rows": [2],
                 })
 
-                self.assertEqual(response.status_code, 200, response.get_json())
-                self.assertEqual(
-                    [stop["row"] for stop in response.get_json()["stops"]], [2]
-                )
+                self.assertEqual(response.status_code, 422, response.get_json())
+                self.assertEqual(response.get_json()["code"], "no_eligible_candidates")
 
     def test_route_matrix_candidate_limit_default_is_not_reduced(self):
         self.assertEqual(app_module.route_matrix_candidate_limit({}), 60)

@@ -39,6 +39,9 @@ from dotenv import load_dotenv
 from gspread.utils import rowcol_to_a1
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 from requests.exceptions import ConnectionError as RequestsConnectionError
+# Resolve the selected score policy before importing its module defaults.
+load_dotenv()
+
 from priority import (
     SCORE_VERSION,
     apply_workflow_suppressions,
@@ -147,7 +150,6 @@ from planning_suggestions import (
 )
 from sheets_availability import SheetReadCache, read_with_retry
 
-load_dotenv()
 
 
 LOCAL_SESSION_SECRET = "store-tracker-local-session"
@@ -2304,7 +2306,7 @@ def parse_planning_date(value):
         return None
 
 
-def parse_planning_datetime(value):
+def parse_planning_datetime(value, *, preserve_seconds=False):
     if isinstance(value, datetime):
         parsed = value
     else:
@@ -2338,7 +2340,7 @@ def parse_planning_datetime(value):
         ):
             return None
         parsed = stockholm_value
-    return parsed.replace(second=0, microsecond=0)
+    return parsed if preserve_seconds else parsed.replace(second=0, microsecond=0)
 
 
 def planning_datetime_text(value):
@@ -2585,10 +2587,10 @@ def active_planned_activity_queue_state(
     current = current.astimezone(STOCKHOLM_ZONE)
     latest_contact_by_customer = {}
     for row in contact_rows or ():
-        if str(row.get("email_id") or "").strip():
+        if str(row.get("email_id") or "").strip() or normalize_key(row.get("activity_source")) == "crm_email":
             continue
         customer_id = str(row.get("customer_id") or "").strip()
-        contacted = parse_planning_datetime(row.get("date_time"))
+        contacted = parse_planning_datetime(row.get("date_time"), preserve_seconds=True)
         if not customer_id or contacted is None:
             continue
         previous = latest_contact_by_customer.get(customer_id)
@@ -2603,7 +2605,7 @@ def active_planned_activity_queue_state(
         if str(row.get("status") or "planned").strip().casefold() != "planned":
             continue
         customer_id = str(row.get("customer_id") or "").strip()
-        scheduled = parse_planning_datetime(row.get("scheduled_at"))
+        scheduled = parse_planning_datetime(row.get("scheduled_at"), preserve_seconds=True)
         if not customer_id or scheduled is None:
             continue
         if scheduled < current:
@@ -3426,8 +3428,9 @@ def planning_suggestion_candidates(spreadsheet, owner, activity_rows=()):
                     "date": priority.get("latest_human_contact_date"),
                     "result": priority.get("latest_contact_result"),
                     "comment": priority.get("latest_contact_comment"),
+                    "contact_person": priority.get("latest_contact_person"),
                     "latest_order_dfp": priority.get("latest_order_dfp"),
-                    "follow_up": priority.get("latest_follow_up_date"),
+                    "follow_up": priority.get("latest_follow_up_date") if priority.get("follow_up_due") else "",
                 },
                 "recommendation_eligible": priority.get("recommendation_eligible"),
                 "recommendation_suppression_reason": suppression,
@@ -3506,7 +3509,8 @@ def planning_suggestion_candidates(spreadsheet, owner, activity_rows=()):
             "contact_context": {
                 **(candidate.get("contact_context") or {}),
                 "phone": customer.get("phone"),
-                "contact_person": customer.get("customer_contact_person") or customer.get("contact_person"),
+                "contact_person": customer.get("customer_contact_person") or customer.get("contact_person")
+                or (candidate.get("contact_context") or {}).get("contact_person"),
             },
         })
     candidates = enriched
@@ -6619,8 +6623,9 @@ def calibration_score_band(value):
     return "90-100"
 
 
-def build_calibration_rows(score_events, order_rows, customers):
-    """Join persisted event scores to later orders without recomputing history."""
+def build_calibration_rows(score_events, order_rows, customers, *, today=None):
+    """Event observations, not contacts. Credit an order to one created suggestion."""
+    today = today or stockholm_today()
     by_id = {
         normalize_key(row.get("customer_id")): row
         for row in customers if normalize_key(row.get("customer_id"))
@@ -6656,6 +6661,28 @@ def build_calibration_rows(score_events, order_rows, customers):
         if customer_id:
             orders_by_customer[customer_id].append(order)
 
+    # Keep every historical event, but count each logical order at most once.
+    # Planned/resolved events are workflow observations, never extra contacts.
+    creation_events = defaultdict(list)
+    for event in score_events:
+        if event.get("event_type") == "suggestion_created":
+            creation_events[str(event.get("customer_id") or "").strip()].append(event)
+    order_credits = defaultdict(list)
+    for customer_id, orders in orders_by_customer.items():
+        for order in orders:
+            eligible = [
+                event for event in creation_events.get(customer_id, ())
+                if (when := parse_datetime_value(event.get("occurred_at")))
+                and 0 <= (order["date"] - when.date()).days <= 10
+                and order["date"] <= today
+            ]
+            if eligible:
+                latest = max(eligible, key=lambda event: (
+                    parse_datetime_value(event.get("occurred_at")).isoformat(),
+                    str(event.get("event_id") or ""),
+                ))
+                order_credits[str(latest.get("event_id") or "")].append(order)
+
     rows = []
     for event in sorted(
         score_events,
@@ -6673,6 +6700,13 @@ def build_calibration_rows(score_events, order_rows, customers):
             later_orders,
             key=lambda order: (order["date"], order.get("reference") or ""),
         ) if later_orders else None
+        window_orders = [order for order in later_orders
+                         if (order["date"] - occurred.date()).days <= 10
+                         and order["date"] <= today]
+        window_first = min(window_orders, key=lambda order: (
+            order["date"], order.get("reference") or ""
+        )) if window_orders else None
+        credited_orders = order_credits.get(str(event.get("event_id") or ""), [])
         rows.append({
             "event_id": str(event.get("event_id") or ""),
             "event_type": str(event.get("event_type") or ""),
@@ -6697,6 +6731,20 @@ def build_calibration_rows(score_events, order_rows, customers):
             "status_after": str(event.get("status_after") or ""),
             "resolved_by_type": str(event.get("resolved_by_type") or ""),
             "resolved_by_id": str(event.get("resolved_by_id") or ""),
+            "history_index": event.get("history_index", ""),
+            "observation_unit": "score_event",
+            "is_human_contact": False,
+            "order_within_10d": bool(window_first),
+            "first_order_date_within_10d": window_first["date"].isoformat() if window_first else "",
+            "first_order_reference_within_10d": str(window_first.get("reference") or "") if window_first else "",
+            "first_order_dfp_within_10d": (
+                window_first["dfp"] if window_first and not window_first["volume_missing"] else ""
+            ),
+            # Day ten remains open until the full calendar day has elapsed.
+            "window_closed_10d": bool(occurred and (today - occurred.date()).days > 10),
+            "credited_order_count_10d": len(credited_orders),
+            "credited_order_dfp_10d": sum(order["dfp"] for order in credited_orders),
+            "outcome_credit_basis": "latest_suggestion_created_in_window",
             "order_outcome": "order_after_event" if first_order else "no_later_order",
             "first_order_date_after_event": (
                 first_order["date"].isoformat() if first_order else ""
@@ -6835,10 +6883,7 @@ def get_customer_insights():
     order_references = defaultdict(set)
     for o in order_rows:
         name = normalize_key(o["Customer"])
-        is_ordered = (
-            parse_number_value(o.get("Quantity"), 0) > 0
-            or parse_number_value(o.get("Total"), 0) > 0
-        )
+        is_ordered = commercial_order(parse_number_value(o.get("Total"), 0), order_volume(o))
         if not name or not is_ordered:
             continue
         d = parse_date_value(o["Order date"])

@@ -183,7 +183,7 @@ class PlanningSuggestionV3IntegrationTests(PlanningApiTestCase):
         self.assertEqual(row["status"], "resolved")
         self.assertEqual(row["resolved_by_type"], "business_context")
 
-    def test_simultaneous_dialogue_and_strategic_signal_materialize_one_context(self):
+    def test_expired_dialogue_keeps_strategic_signal_in_one_context(self):
         self._append_contact("2026-06-01 09:00:00", contact_id="warm-old")
         today = date(2026, 7, 20)
         today_patch, now_patch = self.clock(today)
@@ -192,12 +192,12 @@ class PlanningSuggestionV3IntegrationTests(PlanningApiTestCase):
 
         suggestion = payload["suggestion"]
         self.assertEqual(payload["pending_count"], 1)
-        self.assertEqual(suggestion["trigger_key"], "positive_dialogue_followup")
+        self.assertEqual(suggestion["trigger_key"], "strategic_contact_due")
         rows = self.spreadsheet.worksheet(SUGGESTIONS_SHEET).dict_rows()
         self.assertEqual(len(rows), 1)
         self.assertEqual(
             json.loads(rows[0]["covered_trigger_keys_json"]),
-            ["positive_dialogue_followup", "strategic_contact_due"],
+            ["strategic_contact_due"],
         )
 
         self._append_contact("2026-07-20 10:00:00", "Neutral", "later-contact")

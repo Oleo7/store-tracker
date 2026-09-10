@@ -139,7 +139,6 @@ class ChannelAndEmailIntentTests(TestCase):
             "new_customer": "Nykund",
         }
         engagement = {
-            "open": (date(2026, 8, 12), "email_open_followup", "öppnat mejlförslag"),
             "product": (
                 date(2026, 8, 5), "product_sheet_click_followup",
                 "produktbladsklick",
@@ -166,7 +165,7 @@ class ChannelAndEmailIntentTests(TestCase):
                     )
                     self.assertEqual(channel["base_contact_type"], "phone")
 
-    def test_open_wait_uses_first_human_open_and_suppresses_generic_trigger(self):
+    def test_open_retains_historical_first_open_without_suppressing_generic_trigger(self):
         messages, recipients = email_rows(kind="open", proposal_type="reactivation")
         recipients[0]["last_opened_at"] = "2026-08-09 10:00:00"
         waiting_snapshot = app_module.build_email_engagement_snapshot(
@@ -189,9 +188,9 @@ class ChannelAndEmailIntentTests(TestCase):
         self.assertEqual(waiting_snapshot["email_followup_wait_days_remaining"], 1)
         self.assertEqual(
             waiting["recommendation_suppression_reason"],
-            "recent_email_engagement_wait",
+            "",
         )
-        self.assertEqual(ready["primary_trigger_type"], "email_open_followup")
+        self.assertEqual(ready["primary_trigger_type"], "strategic_contact_due")
         self.assertEqual(
             waiting["active_email_intent_event"], ready["active_email_intent_event"]
         )
@@ -257,7 +256,7 @@ class ChannelAndEmailIntentTests(TestCase):
             {},
         )
 
-    def test_farjestaden_reactivation_open_becomes_email_primary_phone(self):
+    def test_farjestaden_reactivation_uses_history_and_phone_despite_open(self):
         feature = self.snapshot("open", "reactivation", date(2026, 8, 12))
         item = scored(
             today=date(2026, 8, 12),
@@ -271,10 +270,10 @@ class ChannelAndEmailIntentTests(TestCase):
             segment=item["segment"], phone="0701234567", email_available=True,
         )
         self.assertEqual(item["lifecycle"], "reactivation")
-        self.assertEqual(item["primary_trigger_type"], "email_open_followup")
+        self.assertEqual(item["primary_trigger_type"], "repeat_reactivation_due")
         self.assertEqual(
             item["primary_reason_text"],
-            "Följ upp öppnat mejlförslag – Återaktivering",
+            "Återaktivera tidigare återkommande kund",
         )
         self.assertEqual(channel["recommended_contact_type"], "phone")
 
@@ -328,7 +327,7 @@ class AnchorAwareRouteTests(TestCase):
             customers.append({
                 "row": row, "customer_id": f"cid-{row}",
                 "customer": f"Kund {row}", "sales_person": "Olle",
-                "latitude": 57.0 + index / 100, "longitude": 12.0 + index / 100,
+                "latitude_google": 57.0 + index / 100, "longitude_google": 12.0 + index / 100,
             })
             priorities.append({"row": row, "priority_score": 100 - index})
         snapshot = {"customers": customers, "priorities": priorities}
