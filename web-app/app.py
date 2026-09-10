@@ -59,6 +59,7 @@ from sales_coaching import (
     normalize_result_class,
     strip_internal_analysis,
 )
+from commercial_orders import order_volume, commercial_order
 from contact_channel import recommend_contact_channel
 from route_proposal import (
     Coordinate,
@@ -5694,11 +5695,7 @@ def group_customer_orders(order_rows):
             )
         )
         order_date = parse_date_value(order.get("Order date"))
-        is_ordered = (
-            parse_number_value(order.get("Quantity"), 0) > 0
-            or parse_number_value(order.get("Total"), 0) > 0
-        )
-        if not customer_key or not order_date or not is_ordered:
+        if not customer_key or not order_date:
             continue
 
         reference = str(order.get("Reference", "")).strip()
@@ -5723,15 +5720,20 @@ def group_customer_orders(order_rows):
             "total": 0.0,
             "currency": currency,
             "dfp": 0.0,
+            "volume_missing": True,
             "source_row": index,
         })
         group["total"] += parse_number_value(order.get("Total"), 0)
         group["currency"] = group["currency"] or currency
-        if str(order.get("Unit", "")).strip().casefold() == "dfp":
-            group["dfp"] += parse_number_value(order.get("Quantity"), 0)
+        volume = order_volume(order)
+        if volume is not None:
+            group["dfp"] += volume
+            group["volume_missing"] = False
 
     return sorted(
-        grouped.values(),
+        (row for row in grouped.values() if commercial_order(
+            row["total"], None if row["volume_missing"] else row["dfp"]
+        )),
         key=lambda order: (order["date"], order["customer_key"], order["reference"], order["source_row"]),
     )
 
