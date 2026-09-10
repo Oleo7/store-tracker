@@ -849,14 +849,17 @@ def expected_reorder_cycle(delivery_dates, segment_median=28) -> int | None:
     return int(_clamp(round(cycle), 14, 75))
 
 
-def _future_activity_index(planned_activities, today):
+def _future_activity_index(planned_activities, today, now=None):
     result = {}
     for row in planned_activities or ():
         if str(row.get("status") or "planned").strip().casefold() != "planned":
             continue
         if str(row.get("source_suggestion_id") or "").strip():
             continue
-        scheduled = parse_date(row.get("scheduled_at"))
+        scheduled_at = parse_datetime(row.get("scheduled_at"))
+        scheduled = scheduled_at.date() if scheduled_at else None
+        if now and scheduled_at and scheduled_at.replace(tzinfo=None) < now.replace(tzinfo=None):
+            continue
         if not scheduled or scheduled < today:
             continue
         keys = {
@@ -927,7 +930,7 @@ def _active_email_intent(
     if not first_event:
         return {}
     age = ((today or date.today()) - first_event.date()).days
-    if age < 0 or age > 14:
+    if age < 0:
         return {}
     if latest_human_contact and latest_human_contact > first_event:
         return {}
@@ -944,7 +947,7 @@ def _active_email_intent(
         email_feature.get("email_followup_wait_days_remaining")
     )))
     wait_days = max(wait_days, 3 - age)
-    ready = not blocked and wait_days <= 0
+    ready = not blocked and wait_days <= 0 and age <= 14
     proposal_label = str(
         email_feature.get("email_followup_proposal_label") or "Påminnelse"
     ).strip()
@@ -956,7 +959,7 @@ def _active_email_intent(
         "reason": reason,
         "first_event_at": first_event,
         "ready": ready,
-        "waiting": bool(not blocked and wait_days > 0),
+        "waiting": bool(not blocked and wait_days > 0 and age <= 14),
         "wait_days": wait_days,
     }
 
@@ -1110,6 +1113,7 @@ def build_priority_customers(
     planned_activities=(),
     workflow_suppressions: dict | None = None,
     scoring_version: str = SCORE_VERSION,
+    now: datetime | None = None,
 ) -> list[dict]:
     """Build the authoritative current score for every active, in-scope customer."""
     if str(scoring_version or "").strip().casefold() == "legacy":
@@ -1147,7 +1151,7 @@ def build_priority_customers(
         identity_indices=order_indices,
         ambiguous_master_names=ambiguous_master_names,
     )
-    future_activities = _future_activity_index(planned_activities, today)
+    future_activities = _future_activity_index(planned_activities, today, now)
     represented_source_contact_ids = {
         str(row.get("source_contact_id") or "").strip()
         for row in planned_activities or ()

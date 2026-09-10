@@ -2585,6 +2585,8 @@ def active_planned_activity_queue_state(
     current = current.astimezone(STOCKHOLM_ZONE)
     latest_contact_by_customer = {}
     for row in contact_rows or ():
+        if str(row.get("email_id") or "").strip():
+            continue
         customer_id = str(row.get("customer_id") or "").strip()
         contacted = parse_planning_datetime(row.get("date_time"))
         if not customer_id or contacted is None:
@@ -3419,6 +3421,14 @@ def planning_suggestion_candidates(spreadsheet, owner, activity_rows=()):
                 "intent_timing": priority.get("intent_timing"),
                 "value_index": priority.get("value_index"),
                 "strategic_index": priority.get("strategic_index"),
+                "history_index": priority.get("history_index"),
+                "contact_context": {
+                    "date": priority.get("latest_human_contact_date"),
+                    "result": priority.get("latest_contact_result"),
+                    "comment": priority.get("latest_contact_comment"),
+                    "latest_order_dfp": priority.get("latest_order_dfp"),
+                    "follow_up": priority.get("latest_follow_up_date"),
+                },
                 "recommendation_eligible": priority.get("recommendation_eligible"),
                 "recommendation_suppression_reason": suppression,
                 "reason_code": priority.get("primary_reason_code"),
@@ -3491,7 +3501,14 @@ def planning_suggestion_candidates(spreadsheet, owner, activity_rows=()):
             email_available=email_available,
             visible=not candidate.get("externally_suppressed"),
         )
-        enriched.append({**candidate, **(channel or {})})
+        enriched.append({
+            **candidate, **(channel or {}),
+            "contact_context": {
+                **(candidate.get("contact_context") or {}),
+                "phone": customer.get("phone"),
+                "contact_person": customer.get("customer_contact_person") or customer.get("contact_person"),
+            },
+        })
     candidates = enriched
     return sorted(candidates, key=planning_suggestion_sort_key)
 
@@ -6440,6 +6457,7 @@ def build_current_priority_snapshot(
         limit=len(customers),
         email_features=email_engagement_by_customer,
         planned_activities=planned_activity_rows,
+        now=stockholm_now(),
     )
     if responsible:
         responsible_key = normalize_key(responsible)
@@ -8737,6 +8755,14 @@ def calculate_route_proposal_for_user(
             503,
         )
 
+    priority_customers = apply_workflow_suppressions(
+        priority_customers, priority_workflow_suppressions(spreadsheet, priority_customers)
+    )
+    active_route_customer_ids, _overdue = active_planned_activity_queue_state(
+        snapshot.get("planned_activity_rows") or [], owner or user,
+        contact_rows=snapshot.get("contact_rows") or [],
+    )
+    coordinate_quality = route_coordinate_quality(customers)
     required_rows = tuple(sorted(set(required_rows or ())))
     requested_rows = tuple(sorted(set(client_requested_rows or ())))
     customer_scope_owner = owner or (
@@ -8803,6 +8829,13 @@ def calculate_route_proposal_for_user(
         if (
             customer_scope_owner is not None
             and not customer_owned_by_user(customer, customer_scope_owner)
+        ):
+            continue
+        if row not in required_set and (
+            not priority
+            or priority.get("recommendation_suppression_reason")
+            or str(customer.get("customer_id") or "") in active_route_customer_ids
+            or not coordinate_quality.get(str(customer.get("customer_id") or ""), {}).get("trusted")
         ):
             continue
         latitude = parse_coordinate_value(
@@ -9914,9 +9947,13 @@ def build_route_optimization_inputs(
             customer_ids=duplicate_ids,
         )
     customers_by_id = {customer_id: matches[0] for customer_id, matches in by_id_lists.items()}
+    route_priorities = apply_workflow_suppressions(
+        snapshot.get("priorities") or [],
+        priority_workflow_suppressions(spreadsheet, snapshot.get("priorities") or []),
+    )
     priorities_by_id = {
         str(item.get("customer_id") or "").strip(): item
-        for item in (snapshot.get("priorities") or [])
+        for item in route_priorities
         if str(item.get("customer_id") or "").strip()
     }
     date_rows = planning_rows_for_date(indexed_rows, owner, route_date)
@@ -10079,30 +10116,21 @@ def build_route_optimization_inputs(
                 ])),
             )
 
-    blocked_customer_ids = set()
     current = stockholm_now().astimezone(STOCKHOLM_ZONE)
-    for row in planned_rows:
-        if str(row.get("status") or "planned").strip().casefold() != "planned":
-            continue
-        scheduled = parse_planning_datetime(row.get("scheduled_at"))
-        customer_id = str(row.get("customer_id") or "").strip()
-        if not scheduled or not customer_id:
-            continue
-        if scheduled < current:
-            blocked_customer_ids.add(customer_id)
-            continue
-        if str(row.get("source") or "").strip().casefold() == "route":
-            continue
-        if scheduled.date() > route_date or (
-            scheduled.date() == route_date
-            and normalize_planning_contact_type(row.get("contact_type")) in {"phone", "email"}
-        ):
-            blocked_customer_ids.add(customer_id)
-    for contact in snapshot.get("contact_rows") or []:
-        if parse_date_value(contact.get("date_time")) == route_date:
-            customer_id = str(contact.get("customer_id") or "").strip()
-            if customer_id:
-                blocked_customer_ids.add(customer_id)
+    effective_planning = [
+        row for row in planned_rows
+        if str(row.get("source") or "").strip().casefold() != "route"
+        or (parse_planning_datetime(row.get("scheduled_at")) or current) < current
+    ]
+    blocked_customer_ids, _overdue = active_planned_activity_queue_state(
+        effective_planning, owner, contact_rows=snapshot.get("contact_rows") or [], now=current,
+    )
+    # Eligibility here means a contact restriction, never an action-queue trigger
+    # or a channel preference. Mandatory appointments retain their own validation.
+    blocked_customer_ids.update(
+        customer_id for customer_id, priority in priorities_by_id.items()
+        if priority.get("recommendation_suppression_reason")
+    )
 
     excluded_untrusted = 0
     for customer_id, customer in customers_by_id.items():

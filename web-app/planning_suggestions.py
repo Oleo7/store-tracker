@@ -287,6 +287,7 @@ def public_suggestion(row, live_candidate=None):
         ),
         "can_call": bool(candidate.get("can_call", False)),
         "phone_tel": _text(candidate.get("phone_tel")),
+        "contact_context": candidate.get("contact_context") or {},
         "trigger_key": _text(
             candidate.get("primary_trigger_key") or row.get("primary_trigger_key")
         ),

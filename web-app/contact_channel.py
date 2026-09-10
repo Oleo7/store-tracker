@@ -52,20 +52,9 @@ def recommend_contact_channel(
     elif trigger_key == "positive_dialogue_followup" and segment == "A":
         base = "visit"
         reason = "positive_dialogue_segment_a_visit"
-    elif lifecycle == "reactivation":
-        base = "visit"
-        reason = "reactivation_visit"
-    elif lifecycle == "established":
-        try:
-            overdue = int(float(overdue_days))
-        except (TypeError, ValueError):
-            overdue = 0
-        if overdue >= 31:
-            base = "visit"
-            reason = "established_overdue_visit"
-        else:
-            base = "phone"
-            reason = "established_phone"
+    elif lifecycle in {"reactivation", "established"}:
+        base = "phone"
+        reason = f"{lifecycle}_phone"
     elif lifecycle == "first_order":
         base = "phone"
         reason = "first_order_phone"
