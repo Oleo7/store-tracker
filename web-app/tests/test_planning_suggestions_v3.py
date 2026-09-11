@@ -72,6 +72,46 @@ class PlanningSuggestionV3IntegrationTests(PlanningApiTestCase):
         }
         sheet.append_row([row.get(column, "") for column in app_module.CONTACT_COLUMNS])
 
+    def test_reactivation_trigger_precedence_breaks_equal_score_volume_ties(self):
+        expected = [
+            "positive_dialogue_followup",
+            "repeat_reactivation_due",
+            "single_order_reactivation_due",
+            "strategic_contact_due",
+            "legacy_missed_followup",
+        ]
+        priorities = [
+            {
+                "customer_id": f"precedence-{index}",
+                "customer": f"Precedence store {index}",
+                "row": 100 - index,
+                "sales_person": "Olle",
+                "priority_score": 60,
+                "expected_order_dfp": 10,
+                "recommendation_eligible": True,
+                "primary_trigger_type": trigger,
+            }
+            for index, trigger in enumerate(expected)
+        ]
+        snapshot = {
+            "customers": priorities,
+            "contact_rows": [],
+            "priorities": list(reversed(priorities)),
+        }
+        with patch.object(
+            app_module, "get_authoritative_priority_snapshot", return_value=snapshot
+        ), patch.object(app_module, "priority_workflow_suppressions", return_value={}):
+            candidates = app_module.planning_suggestion_candidates(
+                self.spreadsheet, {"user_name": "olle", "name": "Olle"}
+            )
+
+        self.assertEqual(
+            [item["primary_trigger_type"] for item in candidates], expected
+        )
+        self.assertEqual(
+            [item["trigger_precedence"] for item in candidates], [7, 8, 9, 10, 11]
+        )
+
     def test_live_trigger_and_plan_attribution_follow_current_candidate(self):
         self._append_order("FIRST-1", "2026-01-01", sku="ONLY-SKU")
         day_8 = date(2026, 1, 9)
