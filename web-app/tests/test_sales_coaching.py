@@ -1127,7 +1127,7 @@ class Team10dTrendTests(TestCase):
         )
 
         self.assertEqual(set(trends["metrics"]), {
-            "order_10d", "positive_to_order_10d",
+            "order_10d_count", "order_10d", "positive_to_order_10d",
         })
         self.assertEqual(
             (order_point["numerator"], order_point["denominator"], order_point["value"]),
@@ -1604,10 +1604,10 @@ class SnapshotAndAggregateTests(TestCase):
             MAIN_KPI_KEYS,
             (
                 "human_activities", "reach", "positive_dialogue",
-                "positive_to_order_10d", "order_10d",
+                "order_10d_count", "order_10d",
             ),
         )
-        self.assertEqual(list(summary["kpis"]), list(MAIN_KPI_KEYS))
+        self.assertEqual(set(summary["kpis"]), set(MAIN_KPI_KEYS) | {"positive_to_order_10d"})
         self.assertEqual(summary["metric_definitions"], METRIC_DEFINITIONS)
         self.assertEqual(METRIC_DEFINITIONS["human_activities"]["label"], "Aktiviteter")
         self.assertEqual(
@@ -2996,6 +2996,44 @@ class SnapshotAndAggregateTests(TestCase):
         self.assertEqual(build_drilldown(summary, "bom_ratio")["total_count"], 3)
         self.assertEqual(build_drilldown(summary, "planned_boms")["total_count"], 1)
         self.assertEqual(build_drilldown(summary, "unplanned_boms")["total_count"], 1)
+
+
+class Order10dCountTests(TestCase):
+    def test_count_matches_contact_numerator_at_every_level_and_drilldown(self):
+        for day, expected in ((0, 1), (10, 1), (11, 0)):
+            with self.subTest(day=day):
+                when = date(2026, 6, 1)
+                order_date = (when + timedelta(days=day)).isoformat()
+                rows = [{**order("first", order_date), "SKU": "vanilla"},
+                        {**order("first", order_date, quantity="2"), "SKU": "chocolate"},
+                        order("second", order_date)]
+                summary = build_sales_coaching_summary(
+                    activities=[activity("older", "2026-05-31T09:00:00"),
+                                activity("latest", "2026-06-01T09:00:00")],
+                    customers=CUSTOMERS, users=USERS, order_rows=rows,
+                    start=when, end=date(2026, 6, 7),
+                    generated_at=datetime(2026, 7, 1, 12),
+                )
+                count = summary["kpis"]["order_10d_count"]
+                self.assertEqual(count["metric_type"], "count")
+                self.assertEqual(count["value"], expected)
+                self.assertEqual(count["value"], summary["kpis"]["order_10d"]["numerator"])
+                self.assertNotIn("denominator", count)
+                self.assertEqual(count["waiting_outcome_count"], summary["kpis"]["order_10d"]["waiting_outcome_count"])
+                for seller in summary["team_comparison"]["sellers"]:
+                    self.assertEqual(seller["order_10d_count"]["value"], seller["order_10d"]["numerator"])
+                    if seller["seller"] == "olle" and expected:
+                        self.assertEqual(seller["attributed_orders"], 2)
+                        self.assertEqual(seller["order_10d_count"]["value"], 1)
+                metrics = summary["team_10d_trends"]["metrics"]
+                for counts, rates in zip(metrics["order_10d_count"]["series"], metrics["order_10d"]["series"]):
+                    self.assertEqual(counts["seller"], rates["seller"])
+                    self.assertEqual(len(counts["points"]), 16)
+                    for cp, rp in zip(counts["points"], rates["points"]):
+                        self.assertEqual(cp["week"], rp["week"])
+                        self.assertEqual(cp["value"], rp["numerator"])
+                drilldown = build_drilldown(summary, "converted_order_10d")
+                self.assertEqual(drilldown["total_count"], expected)
 
 
 if __name__ == "__main__":
