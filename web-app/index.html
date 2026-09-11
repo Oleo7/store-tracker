@@ -1931,29 +1931,16 @@
       line-height: 1.35;
     }
 
-    .next-action-urgent {
+    .next-action-red {
       background: #fff3f4;
-      border-color: #f3c9d1;
     }
 
-    .next-action-warning {
-      background: #fff7ed;
-      border-color: #fed7aa;
+    .next-action-yellow {
+      background: #fff8d6;
     }
 
-    .next-action-positive {
+    .next-action-green {
       background: #effaf4;
-      border-color: #bbebd1;
-    }
-
-    .next-action-opportunity {
-      background: var(--pb-blue-soft);
-      border-color: rgba(53,89,131,0.18);
-    }
-
-    .next-action-neutral,
-    .next-action-low {
-      background: #faf8fb;
     }
 
     .priority-summary {
@@ -1962,11 +1949,6 @@
       font-weight: 800;
       color: var(--pb-chocolate);
     }
-
-    .customer-card.priority-high { border-color: #9c2834; }
-    .customer-card.priority-medium { border-color: #934513; }
-    .customer-card.priority-low { border-color: #355983; }
-    .customer-card.priority-neutral { border-color: #c8cdd7; }
 
     .potential-summary {
       margin-top: 7px;
@@ -4978,6 +4960,13 @@
     );
   }
 
+  // Urgency is a presentation concern; keep backend tones unchanged.
+  function getNextActionColorClass(tone) {
+    if (tone === "urgent") return "next-action-red";
+    if (tone === "low") return "next-action-green";
+    return "next-action-yellow";
+  }
+
   function getNextActionHtml(c) {
     const insight = getCustomerInsight(c);
     const action = insight.next_action || {};
@@ -4989,19 +4978,12 @@
       "avvakta": "Avvakta",
     }[insight.recommended_channel] || "Avvakta";
 
-    const toneClass = {
-      urgent: "next-action-urgent",
-      warning: "next-action-warning",
-      positive: "next-action-positive",
-      opportunity: "next-action-opportunity",
-      neutral: "next-action-neutral",
-      low: "next-action-low",
-    }[action.tone] || "next-action-neutral";
+    const toneClass = getNextActionColorClass(action.tone);
 
     return `
       <div class="next-action ${toneClass}">
         <div class="next-action-label">Nästa: ${esc(actionLabel)} · ${esc(channel)}</div>
-        <div class="card-reason">Varför nu: ${esc(action.reason || "Ingen förklaring tillgänglig")}</div>
+        <div class="card-reason">Status: ${esc(action.reason || "Ingen förklaring tillgänglig")}</div>
       </div>
     `;
   }
