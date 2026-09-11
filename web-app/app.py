@@ -39,6 +39,9 @@ from dotenv import load_dotenv
 from gspread.utils import rowcol_to_a1
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 from requests.exceptions import ConnectionError as RequestsConnectionError
+# Resolve the selected score policy before importing its module defaults.
+load_dotenv()
+
 from priority import (
     SCORE_VERSION,
     apply_workflow_suppressions,
@@ -59,6 +62,7 @@ from sales_coaching import (
     normalize_result_class,
     strip_internal_analysis,
 )
+from commercial_orders import order_volume, commercial_order
 from contact_channel import recommend_contact_channel
 from route_proposal import (
     Coordinate,
@@ -146,7 +150,6 @@ from planning_suggestions import (
 )
 from sheets_availability import SheetReadCache, read_with_retry
 
-load_dotenv()
 
 
 LOCAL_SESSION_SECRET = "store-tracker-local-session"
@@ -2303,7 +2306,7 @@ def parse_planning_date(value):
         return None
 
 
-def parse_planning_datetime(value):
+def parse_planning_datetime(value, *, preserve_seconds=False):
     if isinstance(value, datetime):
         parsed = value
     else:
@@ -2337,7 +2340,7 @@ def parse_planning_datetime(value):
         ):
             return None
         parsed = stockholm_value
-    return parsed.replace(second=0, microsecond=0)
+    return parsed if preserve_seconds else parsed.replace(second=0, microsecond=0)
 
 
 def planning_datetime_text(value):
@@ -2584,8 +2587,10 @@ def active_planned_activity_queue_state(
     current = current.astimezone(STOCKHOLM_ZONE)
     latest_contact_by_customer = {}
     for row in contact_rows or ():
+        if str(row.get("email_id") or "").strip() or normalize_key(row.get("activity_source")) == "crm_email":
+            continue
         customer_id = str(row.get("customer_id") or "").strip()
-        contacted = parse_planning_datetime(row.get("date_time"))
+        contacted = parse_planning_datetime(row.get("date_time"), preserve_seconds=True)
         if not customer_id or contacted is None:
             continue
         previous = latest_contact_by_customer.get(customer_id)
@@ -2600,7 +2605,7 @@ def active_planned_activity_queue_state(
         if str(row.get("status") or "planned").strip().casefold() != "planned":
             continue
         customer_id = str(row.get("customer_id") or "").strip()
-        scheduled = parse_planning_datetime(row.get("scheduled_at"))
+        scheduled = parse_planning_datetime(row.get("scheduled_at"), preserve_seconds=True)
         if not customer_id or scheduled is None:
             continue
         if scheduled < current:
@@ -3418,6 +3423,15 @@ def planning_suggestion_candidates(spreadsheet, owner, activity_rows=()):
                 "intent_timing": priority.get("intent_timing"),
                 "value_index": priority.get("value_index"),
                 "strategic_index": priority.get("strategic_index"),
+                "history_index": priority.get("history_index"),
+                "contact_context": {
+                    "date": priority.get("latest_human_contact_date"),
+                    "result": priority.get("latest_contact_result"),
+                    "comment": priority.get("latest_contact_comment"),
+                    "contact_person": priority.get("latest_contact_person"),
+                    "latest_order_dfp": priority.get("latest_order_dfp"),
+                    "follow_up": priority.get("latest_follow_up_date") if priority.get("follow_up_due") else "",
+                },
                 "recommendation_eligible": priority.get("recommendation_eligible"),
                 "recommendation_suppression_reason": suppression,
                 "reason_code": priority.get("primary_reason_code"),
@@ -3433,8 +3447,10 @@ def planning_suggestion_candidates(spreadsheet, owner, activity_rows=()):
                     "first_order_onboarding": 5,
                     "first_order_reorder": 6,
                     "positive_dialogue_followup": 7,
-                    "strategic_contact_due": 8,
-                    "legacy_missed_followup": 9,
+                    "repeat_reactivation_due": 8,
+                    "single_order_reactivation_due": 9,
+                    "strategic_contact_due": 10,
+                    "legacy_missed_followup": 11,
                 }.get(primary_trigger, 99),
                 "externally_suppressed": not recommendation_visible,
                 "overdue_days": priority.get("overdue_days"),
@@ -3490,7 +3506,15 @@ def planning_suggestion_candidates(spreadsheet, owner, activity_rows=()):
             email_available=email_available,
             visible=not candidate.get("externally_suppressed"),
         )
-        enriched.append({**candidate, **(channel or {})})
+        enriched.append({
+            **candidate, **(channel or {}),
+            "contact_context": {
+                **(candidate.get("contact_context") or {}),
+                "phone": customer.get("phone"),
+                "contact_person": customer.get("customer_contact_person") or customer.get("contact_person")
+                or (candidate.get("contact_context") or {}).get("contact_person"),
+            },
+        })
     candidates = enriched
     return sorted(candidates, key=planning_suggestion_sort_key)
 
@@ -5694,11 +5718,7 @@ def group_customer_orders(order_rows):
             )
         )
         order_date = parse_date_value(order.get("Order date"))
-        is_ordered = (
-            parse_number_value(order.get("Quantity"), 0) > 0
-            or parse_number_value(order.get("Total"), 0) > 0
-        )
-        if not customer_key or not order_date or not is_ordered:
+        if not customer_key or not order_date:
             continue
 
         reference = str(order.get("Reference", "")).strip()
@@ -5723,15 +5743,20 @@ def group_customer_orders(order_rows):
             "total": 0.0,
             "currency": currency,
             "dfp": 0.0,
+            "volume_missing": True,
             "source_row": index,
         })
         group["total"] += parse_number_value(order.get("Total"), 0)
         group["currency"] = group["currency"] or currency
-        if str(order.get("Unit", "")).strip().casefold() == "dfp":
-            group["dfp"] += parse_number_value(order.get("Quantity"), 0)
+        volume = order_volume(order)
+        if volume is not None:
+            group["dfp"] += volume
+            group["volume_missing"] = False
 
     return sorted(
-        grouped.values(),
+        (row for row in grouped.values() if commercial_order(
+            row["total"], None if row["volume_missing"] else row["dfp"]
+        )),
         key=lambda order: (order["date"], order["customer_key"], order["reference"], order["source_row"]),
     )
 
@@ -6438,6 +6463,7 @@ def build_current_priority_snapshot(
         limit=len(customers),
         email_features=email_engagement_by_customer,
         planned_activities=planned_activity_rows,
+        now=stockholm_now(),
     )
     if responsible:
         responsible_key = normalize_key(responsible)
@@ -6599,8 +6625,9 @@ def calibration_score_band(value):
     return "90-100"
 
 
-def build_calibration_rows(score_events, order_rows, customers):
-    """Join persisted event scores to later orders without recomputing history."""
+def build_calibration_rows(score_events, order_rows, customers, *, today=None):
+    """Event observations, not contacts. Credit an order to one created suggestion."""
+    today = today or stockholm_today()
     by_id = {
         normalize_key(row.get("customer_id")): row
         for row in customers if normalize_key(row.get("customer_id"))
@@ -6636,6 +6663,28 @@ def build_calibration_rows(score_events, order_rows, customers):
         if customer_id:
             orders_by_customer[customer_id].append(order)
 
+    # Keep every historical event, but count each logical order at most once.
+    # Planned/resolved events are workflow observations, never extra contacts.
+    creation_events = defaultdict(list)
+    for event in score_events:
+        if event.get("event_type") == "suggestion_created":
+            creation_events[str(event.get("customer_id") or "").strip()].append(event)
+    order_credits = defaultdict(list)
+    for customer_id, orders in orders_by_customer.items():
+        for order in orders:
+            eligible = [
+                event for event in creation_events.get(customer_id, ())
+                if (when := parse_datetime_value(event.get("occurred_at")))
+                and 0 <= (order["date"] - when.date()).days <= 10
+                and order["date"] <= today
+            ]
+            if eligible:
+                latest = max(eligible, key=lambda event: (
+                    parse_datetime_value(event.get("occurred_at")).isoformat(),
+                    str(event.get("event_id") or ""),
+                ))
+                order_credits[str(latest.get("event_id") or "")].append(order)
+
     rows = []
     for event in sorted(
         score_events,
@@ -6653,6 +6702,13 @@ def build_calibration_rows(score_events, order_rows, customers):
             later_orders,
             key=lambda order: (order["date"], order.get("reference") or ""),
         ) if later_orders else None
+        window_orders = [order for order in later_orders
+                         if (order["date"] - occurred.date()).days <= 10
+                         and order["date"] <= today]
+        window_first = min(window_orders, key=lambda order: (
+            order["date"], order.get("reference") or ""
+        )) if window_orders else None
+        credited_orders = order_credits.get(str(event.get("event_id") or ""), [])
         rows.append({
             "event_id": str(event.get("event_id") or ""),
             "event_type": str(event.get("event_type") or ""),
@@ -6677,6 +6733,20 @@ def build_calibration_rows(score_events, order_rows, customers):
             "status_after": str(event.get("status_after") or ""),
             "resolved_by_type": str(event.get("resolved_by_type") or ""),
             "resolved_by_id": str(event.get("resolved_by_id") or ""),
+            "history_index": event.get("history_index", ""),
+            "observation_unit": "score_event",
+            "is_human_contact": False,
+            "order_within_10d": bool(window_first),
+            "first_order_date_within_10d": window_first["date"].isoformat() if window_first else "",
+            "first_order_reference_within_10d": str(window_first.get("reference") or "") if window_first else "",
+            "first_order_dfp_within_10d": (
+                window_first["dfp"] if window_first and not window_first["volume_missing"] else ""
+            ),
+            # Day ten remains open until the full calendar day has elapsed.
+            "window_closed_10d": bool(occurred and (today - occurred.date()).days > 10),
+            "credited_order_count_10d": len(credited_orders),
+            "credited_order_dfp_10d": sum(order["dfp"] for order in credited_orders),
+            "outcome_credit_basis": "latest_suggestion_created_in_window",
             "order_outcome": "order_after_event" if first_order else "no_later_order",
             "first_order_date_after_event": (
                 first_order["date"].isoformat() if first_order else ""
@@ -6815,10 +6885,7 @@ def get_customer_insights():
     order_references = defaultdict(set)
     for o in order_rows:
         name = normalize_key(o["Customer"])
-        is_ordered = (
-            parse_number_value(o.get("Quantity"), 0) > 0
-            or parse_number_value(o.get("Total"), 0) > 0
-        )
+        is_ordered = commercial_order(parse_number_value(o.get("Total"), 0), order_volume(o))
         if not name or not is_ordered:
             continue
         d = parse_date_value(o["Order date"])
@@ -8735,6 +8802,14 @@ def calculate_route_proposal_for_user(
             503,
         )
 
+    priority_customers = apply_workflow_suppressions(
+        priority_customers, priority_workflow_suppressions(spreadsheet, priority_customers)
+    )
+    active_route_customer_ids, _overdue = active_planned_activity_queue_state(
+        snapshot.get("planned_activity_rows") or [], owner or user,
+        contact_rows=snapshot.get("contact_rows") or [],
+    )
+    coordinate_quality = route_coordinate_quality(customers)
     required_rows = tuple(sorted(set(required_rows or ())))
     requested_rows = tuple(sorted(set(client_requested_rows or ())))
     customer_scope_owner = owner or (
@@ -8801,6 +8876,13 @@ def calculate_route_proposal_for_user(
         if (
             customer_scope_owner is not None
             and not customer_owned_by_user(customer, customer_scope_owner)
+        ):
+            continue
+        if row not in required_set and (
+            not priority
+            or priority.get("recommendation_suppression_reason")
+            or str(customer.get("customer_id") or "") in active_route_customer_ids
+            or not coordinate_quality.get(str(customer.get("customer_id") or ""), {}).get("trusted")
         ):
             continue
         latitude = parse_coordinate_value(
@@ -9912,9 +9994,13 @@ def build_route_optimization_inputs(
             customer_ids=duplicate_ids,
         )
     customers_by_id = {customer_id: matches[0] for customer_id, matches in by_id_lists.items()}
+    route_priorities = apply_workflow_suppressions(
+        snapshot.get("priorities") or [],
+        priority_workflow_suppressions(spreadsheet, snapshot.get("priorities") or []),
+    )
     priorities_by_id = {
         str(item.get("customer_id") or "").strip(): item
-        for item in (snapshot.get("priorities") or [])
+        for item in route_priorities
         if str(item.get("customer_id") or "").strip()
     }
     date_rows = planning_rows_for_date(indexed_rows, owner, route_date)
@@ -10077,30 +10163,21 @@ def build_route_optimization_inputs(
                 ])),
             )
 
-    blocked_customer_ids = set()
     current = stockholm_now().astimezone(STOCKHOLM_ZONE)
-    for row in planned_rows:
-        if str(row.get("status") or "planned").strip().casefold() != "planned":
-            continue
-        scheduled = parse_planning_datetime(row.get("scheduled_at"))
-        customer_id = str(row.get("customer_id") or "").strip()
-        if not scheduled or not customer_id:
-            continue
-        if scheduled < current:
-            blocked_customer_ids.add(customer_id)
-            continue
-        if str(row.get("source") or "").strip().casefold() == "route":
-            continue
-        if scheduled.date() > route_date or (
-            scheduled.date() == route_date
-            and normalize_planning_contact_type(row.get("contact_type")) in {"phone", "email"}
-        ):
-            blocked_customer_ids.add(customer_id)
-    for contact in snapshot.get("contact_rows") or []:
-        if parse_date_value(contact.get("date_time")) == route_date:
-            customer_id = str(contact.get("customer_id") or "").strip()
-            if customer_id:
-                blocked_customer_ids.add(customer_id)
+    effective_planning = [
+        row for row in planned_rows
+        if str(row.get("source") or "").strip().casefold() != "route"
+        or (parse_planning_datetime(row.get("scheduled_at")) or current) < current
+    ]
+    blocked_customer_ids, _overdue = active_planned_activity_queue_state(
+        effective_planning, owner, contact_rows=snapshot.get("contact_rows") or [], now=current,
+    )
+    # Eligibility here means a contact restriction, never an action-queue trigger
+    # or a channel preference. Mandatory appointments retain their own validation.
+    blocked_customer_ids.update(
+        customer_id for customer_id, priority in priorities_by_id.items()
+        if priority.get("recommendation_suppression_reason")
+    )
 
     excluded_untrusted = 0
     for customer_id, customer in customers_by_id.items():

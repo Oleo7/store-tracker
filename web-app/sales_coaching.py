@@ -14,6 +14,8 @@ import time as clock
 import unicodedata
 from zoneinfo import ZoneInfo
 
+from commercial_orders import order_volume, commercial_order
+
 from sales_coaching_rules import (
     add_seller_benchmarks,
     build_seller_signals,
@@ -912,9 +914,9 @@ def group_logical_orders(order_rows, customers):
     for source_index, raw in enumerate(order_rows or ()):
         row = dict(raw)
         order_date = _date(row.get("Order date") or row.get("date"))
-        quantity = _number(row.get("Quantity"), 0) or 0
+        volume = order_volume(row)
         total = _number(row.get("Total"), 0) or 0
-        if order_date is None or (quantity <= 0 and total <= 0):
+        if order_date is None:
             continue
         identity_row = {
             "customer_id": row.get("customer_id"),
@@ -950,14 +952,20 @@ def group_logical_orders(order_rows, customers):
             "currency": currency,
             "total": 0.0,
             "dfp": 0.0,
+            "volume_missing": True,
             "source_rows": [],
         })
         group["date"] = min(group["date"], order_date)
         group["total"] += total
         group["source_rows"].append(source_index)
-        if normalize_key(row.get("Unit")) == "dfp":
-            group["dfp"] += quantity
-    orders = sorted(grouped.values(), key=lambda row: (row["date"], row["order_id"]))
+        if volume is not None:
+            group["dfp"] += volume
+            group["volume_missing"] = False
+    orders = sorted(
+        (row for row in grouped.values() if commercial_order(
+            row["total"], None if row["volume_missing"] else row["dfp"]
+        )), key=lambda row: (row["date"], row["order_id"])
+    )
     return {"orders": orders, "excluded": excluded}
 
 

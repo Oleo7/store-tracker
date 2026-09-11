@@ -59,7 +59,7 @@ def contact(name, when, result="Neutral", contact_id="contact-1"):
     }
 
 
-def priorities(customers, orders=(), contacts=(), *, today, planned=()):
+def priorities(customers, orders=(), contacts=(), *, today, planned=(), **kwargs):
     order_features = build_order_features(list(orders))
     return build_priority_customers(
         list(customers),
@@ -69,6 +69,7 @@ def priorities(customers, orders=(), contacts=(), *, today, planned=()):
         today,
         limit=len(customers),
         planned_activities=list(planned),
+        **kwargs,
     )
 
 
@@ -91,7 +92,7 @@ def context_identity(item, owner="olle"):
 
 class ScoringV2Tests(TestCase):
     def test_control_case_scores_74(self):
-        self.assertEqual(calculate_priority_score_v2(60, 100, 100), 74)
+        self.assertEqual(calculate_priority_score_v2(60, 100, 100, policy="v2.1"), 74)
 
     def test_score_is_calculated_when_recent_contact_suppresses_recommendation(self):
         result = priorities(
@@ -239,7 +240,7 @@ class ScoringV2Tests(TestCase):
         )[0]
         self.assertEqual(result["lifecycle"], "reactivation")
         self.assertEqual(result["intent_timing"], 60)
-        self.assertEqual(result["primary_trigger_type"], "strategic_contact_due")
+        self.assertEqual(result["primary_trigger_type"], "repeat_reactivation_due")
 
     def test_suppressed_customers_remain_and_sort_score_dfp_stable_row(self):
         customers = [

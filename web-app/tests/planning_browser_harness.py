@@ -114,6 +114,23 @@ def build_browser_spreadsheet():
     ):
         append_dict(planning, app_module.PLANNED_ACTIVITY_COLUMNS, row)
 
+    if os.environ.get("BROWSER_HARNESS_COMMERCIAL") == "1":
+        # Same in-memory harness, with a real v2.2 reactivation instead of stub scoring.
+        target = "11111111-1111-4111-8111-111111111111"
+        planning.values = [planning.values[0]] + [
+            values for values in planning.values[1:]
+            if values[planning.values[0].index("customer_id")] != target
+        ]
+        headers = contacts.values[0]
+        for values in contacts.values[1:]:
+            if values[headers.index("customer_id")] == target:
+                values[headers.index("date_time")] = f"{today - timedelta(days=35)} 09:00:00"
+                values[headers.index("follow_up_date")] = ""
+                values[headers.index("comment")] = "Kunden vill diskutera sortimentet"
+                values[headers.index("customer_contact_person")] = "Alex"
+        customers = spreadsheet.worksheet("customers_enriched")
+        phone_index = customers.values[0].index("phone")
+        customers.values[1][phone_index] = "0701234567"
     return spreadsheet
 
 
@@ -176,7 +193,7 @@ Object.defineProperty(navigator, "geolocation", {
     app_module.app.config.update(
         SECRET_KEY="planning-browser-harness-secret",
         TESTING=False,
-        PLANNING_SUGGESTIONS_STUB=True,
+        PLANNING_SUGGESTIONS_STUB=os.environ.get("BROWSER_HARNESS_COMMERCIAL") != "1",
     )
     app_module.get_spreadsheet_with_retry = lambda: browser_spreadsheet
     app_module.get_route_travel_time_provider = lambda: road_provider

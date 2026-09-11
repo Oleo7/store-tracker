@@ -26,10 +26,10 @@ class ContactChannelV21Tests(TestCase):
             ({"lifecycle": "prospect", "trigger_key": "stockfiller_click_followup"}, "phone"),
             ({"lifecycle": "prospect", "trigger_key": "product_sheet_click_followup"}, "phone"),
             ({"lifecycle": "established", "overdue_days": 30}, "phone"),
-            ({"lifecycle": "established", "overdue_days": 31}, "visit"),
-            ({"lifecycle": "established", "overdue_days": 60}, "visit"),
-            ({"lifecycle": "established", "overdue_days": 61}, "visit"),
-            ({"lifecycle": "reactivation"}, "visit"),
+            ({"lifecycle": "established", "overdue_days": 31}, "phone"),
+            ({"lifecycle": "established", "overdue_days": 60}, "phone"),
+            ({"lifecycle": "established", "overdue_days": 61}, "phone"),
+            ({"lifecycle": "reactivation"}, "phone"),
             ({"lifecycle": "first_order"}, "phone"),
         ]
         for fields, expected in cases:
@@ -54,7 +54,7 @@ class ContactChannelV21Tests(TestCase):
 
     def test_visit_base_never_falls_back_and_phone_is_tel_safe(self):
         result = recommend_contact_channel(
-            lifecycle="reactivation", phone="070-123 45 67", email_available=True
+            lifecycle="prospect", phone="070-123 45 67", email_available=True
         )
         self.assertEqual(result["recommended_contact_type"], "visit")
         self.assertTrue(result["can_call"])
@@ -339,7 +339,7 @@ class ScoreAndCacheV21Tests(TestCase):
         for days, score in expected.items():
             with self.subTest(days=days):
                 self.assertEqual(established_intent_timing(days), score)
-        self.assertEqual(SCORE_VERSION, "v2.1")
+        self.assertEqual(SCORE_VERSION, "v2.2")
 
     def test_score_version_and_channel_are_not_context_inputs(self):
         base = dict(

@@ -7597,6 +7597,7 @@
       <div class="planning-recommendation-card">
         <button class="planning-recommendation-customer" id="planning-recommendation-customer" type="button" ${disabled}>${esc(planningRecommendation.customer || "Okänd kund")}</button>
         <div class="planning-recommendation-reason">${esc(planningRecommendation.reason_text || "")}</div>
+        ${planningRecommendationContactContext(planningRecommendation.contact_context)}
         <div class="planning-recommendation-channel">Förslag: ${esc(PLANNING_CONTACT_TYPES[planningRecommendation.recommended_contact_type]?.label || "Besök")}</div>
         <div class="planning-recommendation-actions">
           <button class="planning-compact-btn primary" id="planning-recommendation-contact" type="button" ${disabled || !planningRecommendation.can_call ? "disabled" : ""}>Ring nu</button>
@@ -7610,6 +7611,17 @@
     document.getElementById("planning-recommendation-plan")?.addEventListener("click", () => openRecommendationPlanner());
     document.getElementById("planning-recommendation-snooze")?.addEventListener("click", snoozePlanningRecommendation);
     document.getElementById("planning-recommendation-dismiss")?.addEventListener("click", dismissPlanningRecommendation);
+  }
+
+  function planningRecommendationContactContext(context = {}) {
+    const lines = [];
+    if (context.date) lines.push(`Senaste kontakt ${context.date}: ${context.result || ""}`);
+    if (context.comment) lines.push(context.comment);
+    const person = [context.contact_person, context.phone].filter(Boolean).join(" · ");
+    if (person) lines.push(person);
+    if (context.latest_order_dfp != null) lines.push(`Senaste order: ${context.latest_order_dfp} DFP`);
+    if (context.follow_up) lines.push(`Uppföljning: ${context.follow_up}`);
+    return lines.map(line => `<div class="planning-recommendation-channel">${esc(String(line))}</div>`).join("");
   }
 
   async function loadPlanningRecommendation({ previewLimit = planningRecommendationPreviewLimit } = {}) {

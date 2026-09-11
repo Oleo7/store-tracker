@@ -72,6 +72,46 @@ class PlanningSuggestionV3IntegrationTests(PlanningApiTestCase):
         }
         sheet.append_row([row.get(column, "") for column in app_module.CONTACT_COLUMNS])
 
+    def test_reactivation_trigger_precedence_breaks_equal_score_volume_ties(self):
+        expected = [
+            "positive_dialogue_followup",
+            "repeat_reactivation_due",
+            "single_order_reactivation_due",
+            "strategic_contact_due",
+            "legacy_missed_followup",
+        ]
+        priorities = [
+            {
+                "customer_id": f"precedence-{index}",
+                "customer": f"Precedence store {index}",
+                "row": 100 - index,
+                "sales_person": "Olle",
+                "priority_score": 60,
+                "expected_order_dfp": 10,
+                "recommendation_eligible": True,
+                "primary_trigger_type": trigger,
+            }
+            for index, trigger in enumerate(expected)
+        ]
+        snapshot = {
+            "customers": priorities,
+            "contact_rows": [],
+            "priorities": list(reversed(priorities)),
+        }
+        with patch.object(
+            app_module, "get_authoritative_priority_snapshot", return_value=snapshot
+        ), patch.object(app_module, "priority_workflow_suppressions", return_value={}):
+            candidates = app_module.planning_suggestion_candidates(
+                self.spreadsheet, {"user_name": "olle", "name": "Olle"}
+            )
+
+        self.assertEqual(
+            [item["primary_trigger_type"] for item in candidates], expected
+        )
+        self.assertEqual(
+            [item["trigger_precedence"] for item in candidates], [7, 8, 9, 10, 11]
+        )
+
     def test_live_trigger_and_plan_attribution_follow_current_candidate(self):
         self._append_order("FIRST-1", "2026-01-01", sku="ONLY-SKU")
         day_8 = date(2026, 1, 9)
@@ -183,7 +223,7 @@ class PlanningSuggestionV3IntegrationTests(PlanningApiTestCase):
         self.assertEqual(row["status"], "resolved")
         self.assertEqual(row["resolved_by_type"], "business_context")
 
-    def test_simultaneous_dialogue_and_strategic_signal_materialize_one_context(self):
+    def test_expired_dialogue_keeps_strategic_signal_in_one_context(self):
         self._append_contact("2026-06-01 09:00:00", contact_id="warm-old")
         today = date(2026, 7, 20)
         today_patch, now_patch = self.clock(today)
@@ -192,12 +232,12 @@ class PlanningSuggestionV3IntegrationTests(PlanningApiTestCase):
 
         suggestion = payload["suggestion"]
         self.assertEqual(payload["pending_count"], 1)
-        self.assertEqual(suggestion["trigger_key"], "positive_dialogue_followup")
+        self.assertEqual(suggestion["trigger_key"], "strategic_contact_due")
         rows = self.spreadsheet.worksheet(SUGGESTIONS_SHEET).dict_rows()
         self.assertEqual(len(rows), 1)
         self.assertEqual(
             json.loads(rows[0]["covered_trigger_keys_json"]),
-            ["positive_dialogue_followup", "strategic_contact_due"],
+            ["strategic_contact_due"],
         )
 
         self._append_contact("2026-07-20 10:00:00", "Neutral", "later-contact")

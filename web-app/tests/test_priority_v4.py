@@ -158,21 +158,21 @@ class Phase4EmailIntentTests(TestCase):
             identities.append((context, deterministic_suggestion_id("olle", "cid-1", context)))
         self.assertEqual(identities[0], identities[1])
 
-    def test_open_has_no_modifier_during_wait_and_becomes_actionable_day_ten(self):
+    def test_open_never_becomes_actionable_or_suppresses_contact(self):
         baseline = scored(today=date(2026, 8, 2))[0]
         opened = scored(today=date(2026, 8, 2), email_feature=self.snapshot("open"))[0]
         self.assertEqual(opened["intent_timing"], baseline["intent_timing"])
         self.assertNotIn("email", opened["primary_trigger_type"])
-        self.assertTrue(opened["active_email_intent_event"])
+        self.assertFalse(opened["active_email_intent_event"])
         self.assertEqual(
             opened["recommendation_suppression_reason"],
-            "recent_email_engagement_wait",
+            "",
         )
         ready = scored(
             today=date(2026, 8, 12),
             email_feature=self.snapshot("open", date(2026, 8, 12)),
         )[0]
-        self.assertEqual(ready["primary_trigger_type"], "email_open_followup")
+        self.assertNotIn("email", ready["primary_trigger_type"])
         self.assertEqual(ready["intent_timing"], baseline["intent_timing"])
         self.assertEqual(
             opened["active_email_intent_event"], ready["active_email_intent_event"]
@@ -466,7 +466,7 @@ class Phase4LegacyFollowupTests(TestCase):
         self.assertEqual(
             item["covered_trigger_keys"],
             [
-                "established_reorder_due", "positive_dialogue_followup",
+                "established_reorder_due",
                 "stockfiller_click_followup", "legacy_missed_followup",
             ],
         )

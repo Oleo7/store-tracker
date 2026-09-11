@@ -170,15 +170,15 @@ class PlanningSuggestionV2IntegrationTests(PlanningApiTestCase):
         payload = response.get_json()
 
         self.assertEqual(response.status_code, 200, payload)
-        self.assertEqual(payload["score_version"], "v2.1")
+        self.assertEqual(payload["score_version"], "v2.2")
         self.assertGreaterEqual(payload["pending_count"], 1)
         self.assertEqual(payload["suggestion"]["customer"], "Butik A")
         rows = self.spreadsheet.worksheet(SUGGESTIONS_SHEET).dict_rows()
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["primary_trigger_type"], "established_reorder_due")
-        self.assertEqual(rows[0]["score_version"], "v2.1")
+        self.assertEqual(rows[0]["score_version"], "v2.2")
         event = self.spreadsheet.worksheet(SCORE_EVENTS_SHEET).dict_rows()[0]
-        self.assertEqual(event["score_version"], "v2.1")
+        self.assertEqual(event["score_version"], "v2.2")
         self.assertEqual(event["lifecycle"], "established")
         self.assertEqual(event["recommendation_eligible"], "Y")
         for field in (
@@ -526,7 +526,7 @@ class PlanningSuggestionV2IntegrationTests(PlanningApiTestCase):
             payload["suggestion"]["suggestion_id"], suggestion["suggestion_id"]
         )
         self.assertEqual(
-            payload["suggestion"]["trigger_key"], "strategic_contact_due"
+            payload["suggestion"]["trigger_key"], "repeat_reactivation_due"
         )
         row = self.spreadsheet.worksheet(SUGGESTIONS_SHEET).dict_rows()[0]
         self.assertEqual(row["suggestion_id"], suggestion["suggestion_id"])

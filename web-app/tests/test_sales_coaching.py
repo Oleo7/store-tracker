@@ -72,6 +72,7 @@ def order(reference, order_date, *, customer_id="customer-1", customer="Nytt nam
         "customer_id": customer_id,
         "Customer number": "100" if customer_id == "customer-1" else "200",
         "Quantity": quantity,
+        "Total weight": quantity,
         "Unit": unit,
         "Total": total,
         "Currency": "SEK",

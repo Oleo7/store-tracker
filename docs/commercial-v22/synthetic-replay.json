@@ -1,0 +1,194 @@
+{
+  "data": "SYNTHETIC ONLY. No current complete authorized local CRM snapshot was available. July CSV fragments were not replayed.",
+  "baseline": "b98ed5d2af3291ac4aa1aaa4e4f2daf2a3a3deea",
+  "as_of": "2026-09-10T12:00:00+02:00",
+  "portfolio_per_seller": 36,
+  "variants": [
+    {
+      "variant": "master_v2.1",
+      "sellers": [
+        {
+          "seller": "Johan",
+          "reactivation_with_relevant_trigger": 12,
+          "next_action_after_suppression": 16,
+          "top30_previous": 4,
+          "top30_prospects": 12,
+          "overdue": 3,
+          "route_candidates": 24,
+          "restrictions": {
+            "snoozed": 1,
+            "dismissed": 1,
+            "future_planned_activity": 3,
+            "negative_contact_cooldown": 3,
+            "recent_human_contact": 3,
+            "future_delivery": 3
+          },
+          "active_planning": 6,
+          "untrusted_coordinates": 3
+        },
+        {
+          "seller": "Daniel",
+          "reactivation_with_relevant_trigger": 12,
+          "next_action_after_suppression": 16,
+          "top30_previous": 4,
+          "top30_prospects": 12,
+          "overdue": 3,
+          "route_candidates": 24,
+          "restrictions": {
+            "snoozed": 1,
+            "dismissed": 1,
+            "future_planned_activity": 3,
+            "negative_contact_cooldown": 3,
+            "recent_human_contact": 3,
+            "future_delivery": 3
+          },
+          "active_planning": 6,
+          "untrusted_coordinates": 3
+        },
+        {
+          "seller": "Sofia",
+          "reactivation_with_relevant_trigger": 12,
+          "next_action_after_suppression": 16,
+          "top30_previous": 4,
+          "top30_prospects": 12,
+          "overdue": 3,
+          "route_candidates": 24,
+          "restrictions": {
+            "snoozed": 1,
+            "dismissed": 1,
+            "future_planned_activity": 3,
+            "negative_contact_cooldown": 3,
+            "recent_human_contact": 3,
+            "future_delivery": 3
+          },
+          "active_planning": 6,
+          "untrusted_coordinates": 3
+        }
+      ]
+    },
+    {
+      "variant": "corrected_rules_v2.1_weights",
+      "sellers": [
+        {
+          "seller": "Johan",
+          "reactivation_with_relevant_trigger": 18,
+          "next_action_after_suppression": 13,
+          "top30_previous": 4,
+          "top30_prospects": 9,
+          "overdue": 3,
+          "route_candidates": 16,
+          "restrictions": {
+            "snoozed": 1,
+            "dismissed": 1,
+            "future_delivery": 3,
+            "future_planned_activity": 3,
+            "negative_contact_cooldown": 3,
+            "recent_human_contact": 3
+          },
+          "active_planning": 6,
+          "untrusted_coordinates": 3
+        },
+        {
+          "seller": "Daniel",
+          "reactivation_with_relevant_trigger": 18,
+          "next_action_after_suppression": 13,
+          "top30_previous": 4,
+          "top30_prospects": 9,
+          "overdue": 3,
+          "route_candidates": 16,
+          "restrictions": {
+            "snoozed": 1,
+            "dismissed": 1,
+            "future_delivery": 3,
+            "future_planned_activity": 3,
+            "negative_contact_cooldown": 3,
+            "recent_human_contact": 3
+          },
+          "active_planning": 6,
+          "untrusted_coordinates": 3
+        },
+        {
+          "seller": "Sofia",
+          "reactivation_with_relevant_trigger": 18,
+          "next_action_after_suppression": 13,
+          "top30_previous": 4,
+          "top30_prospects": 9,
+          "overdue": 3,
+          "route_candidates": 16,
+          "restrictions": {
+            "snoozed": 1,
+            "dismissed": 1,
+            "future_delivery": 3,
+            "future_planned_activity": 3,
+            "negative_contact_cooldown": 3,
+            "recent_human_contact": 3
+          },
+          "active_planning": 6,
+          "untrusted_coordinates": 3
+        }
+      ]
+    },
+    {
+      "variant": "full_v2.2",
+      "sellers": [
+        {
+          "seller": "Johan",
+          "reactivation_with_relevant_trigger": 18,
+          "next_action_after_suppression": 10,
+          "top30_previous": 4,
+          "top30_prospects": 6,
+          "overdue": 3,
+          "route_candidates": 16,
+          "restrictions": {
+            "future_delivery": 3,
+            "future_planned_activity": 3,
+            "snoozed": 1,
+            "dismissed": 1,
+            "negative_contact_cooldown": 3,
+            "recent_human_contact": 3
+          },
+          "active_planning": 6,
+          "untrusted_coordinates": 3
+        },
+        {
+          "seller": "Daniel",
+          "reactivation_with_relevant_trigger": 18,
+          "next_action_after_suppression": 10,
+          "top30_previous": 4,
+          "top30_prospects": 6,
+          "overdue": 3,
+          "route_candidates": 16,
+          "restrictions": {
+            "future_delivery": 3,
+            "future_planned_activity": 3,
+            "snoozed": 1,
+            "dismissed": 1,
+            "negative_contact_cooldown": 3,
+            "recent_human_contact": 3
+          },
+          "active_planning": 6,
+          "untrusted_coordinates": 3
+        },
+        {
+          "seller": "Sofia",
+          "reactivation_with_relevant_trigger": 18,
+          "next_action_after_suppression": 10,
+          "top30_previous": 4,
+          "top30_prospects": 6,
+          "overdue": 3,
+          "route_candidates": 16,
+          "restrictions": {
+            "future_delivery": 3,
+            "future_planned_activity": 3,
+            "snoozed": 1,
+            "dismissed": 1,
+            "negative_contact_cooldown": 3,
+            "recent_human_contact": 3
+          },
+          "active_planning": 6,
+          "untrusted_coordinates": 3
+        }
+      ]
+    }
+  ]
+}
