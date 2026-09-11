@@ -126,6 +126,15 @@ METRIC_DEFINITIONS = {
         "window_days": ATTRIBUTION_WINDOW_DAYS,
         "drilldown_metric": "positive_to_order_10d",
     },
+    "order_10d_count": {
+        "label": "Antal order inom 10 dagar",
+        "definition": "Antal berättigade nådda mänskliga kontakter i vald period som hittills har följts av en attribuerad order inom 0–10 dagar. Måttet är exakt täljaren i Kontakt – order inom 10 dagar. Varje kontakt räknas högst en gång.",
+        "metric_type": "count",
+        "unit": "orderutfall",
+        "channels": ["visit", "phone", "email"],
+        "window_days": ATTRIBUTION_WINDOW_DAYS,
+        "drilldown_metric": "converted_order_10d",
+    },
     "order_10d": {
         "label": "Kontakt – order inom 10 dagar",
         "definition": "Andelen av alla berättigade nådda mänskliga kontakter med säker kundidentitet i vald period som hittills har följts av en attribuerad order inom 0–10 dagar. Kontakter vars 10-dagarsfönster fortfarande är öppet ingår i nämnaren, därför är måttet preliminärt. Samma definition används i Coachningsöversikt, Teamjämförelse och övriga jämförelser. Jämförelser mellan säljare kan förändras medan utfall fortfarande väntar. Jämförelse med föregående period visas först när båda perioderna saknar väntande 10-dagarsutfall.",
@@ -355,7 +364,7 @@ METRIC_DEFINITIONS = {
 }
 
 MAIN_KPI_KEYS = (
-    "human_activities", "reach", "positive_dialogue", "positive_to_order_10d",
+    "human_activities", "reach", "positive_dialogue", "order_10d_count",
     "order_10d",
 )
 
@@ -1247,11 +1256,22 @@ def _comparison_dates(start, end):
     return start - timedelta(days=days), start - timedelta(days=1)
 
 
+def _order_10d_count(rate):
+    """Expose the existing contact conversion numerator, never order-row totals."""
+    return {
+        "metric_type": METRIC_DEFINITIONS["order_10d_count"]["metric_type"],
+        "unit": METRIC_DEFINITIONS["order_10d_count"]["unit"],
+        "value": rate["numerator"],
+        "status": "sufficient",
+        "waiting_outcome_count": rate.get("waiting_outcome_count", 0),
+    }
+
+
 def _team_10d_trends(
     activities, attribution, sellers, *, generated_date, selected_seller="",
     segment="all", lifecycle="all", weeks=TEAM_ORDER_TREND_WEEKS,
 ):
-    """Build both live 10-day rates over complete ISO contact weeks."""
+    """Build the count and both live 10-day rates over complete ISO contact weeks."""
     maturity_cutoff = generated_date - timedelta(days=ATTRIBUTION_WINDOW_DAYS)
     latest_week_end = maturity_cutoff - timedelta(
         days=(maturity_cutoff.weekday() - 6) % 7
@@ -1285,7 +1305,7 @@ def _team_10d_trends(
             (normalize_key(row.get("sales_user_name")), row.get("contact_week"))
         ].append(row)
 
-    metric_keys = ("order_10d", "positive_to_order_10d")
+    metric_keys = ("order_10d_count", "order_10d", "positive_to_order_10d")
     series_by_metric = {metric_key: [] for metric_key in metric_keys}
     for seller in sellers:
         seller_key = normalize_key(seller)
@@ -1296,6 +1316,13 @@ def _team_10d_trends(
                 attribution,
             )
             for metric_key in metric_keys:
+                if metric_key == "order_10d_count":
+                    points_by_metric[metric_key].append({
+                        "week": slot["week"],
+                        "period": dict(slot["period"]),
+                        **_order_10d_count(aggregate["rates"]["order_10d"]),
+                    })
+                    continue
                 rate = aggregate["rates"][metric_key]
                 points_by_metric[metric_key].append({
                     "week": slot["week"],
@@ -1323,6 +1350,7 @@ def _team_10d_trends(
         "metrics": {
             metric_key: {
                 "metric_key": metric_key,
+                "metric_type": METRIC_DEFINITIONS[metric_key]["metric_type"],
                 "series": series_by_metric[metric_key],
             }
             for metric_key in metric_keys
@@ -1366,6 +1394,7 @@ def _seller_comparison(rows, attribution, sellers):
             "order_10d_converted_contacts": len(aggregate["ordered_contacts"]),
             "attributed_orders": len(aggregate["attributed"]),
             "waiting_outcome_count": len(aggregate["waiting"]),
+            "order_10d_count": _order_10d_count(aggregate["rates"]["order_10d"]),
             **aggregate["rates"],
             "snapshot_coverage": _rate(
                 sum(
@@ -2158,6 +2187,7 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
                 ),
             },
         },
+        "order_10d_count": _order_10d_count(current["rates"]["order_10d"]),
         "reach": current["rates"]["reach"],
         "positive_dialogue": current["rates"]["positive_dialogue"],
         "positive_to_order_10d": {
@@ -2169,7 +2199,7 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
             "waiting_outcome_count": len(current["waiting"]),
         },
     }
-    for key in MAIN_KPI_KEYS:
+    for key in kpis:
         kpis[key].update(METRIC_DEFINITIONS[key])
     data_quality = _data_quality(rows, canonical_result, order_result, attribution)
     comparable_sellers = [

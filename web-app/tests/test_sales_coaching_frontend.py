@@ -102,14 +102,14 @@ class SalesCoachingFrontendTests(TestCase):
 
     def test_exactly_five_main_kpis_are_rendered_in_requested_order(self):
         self.assertIn(
-            'const order = ["human_activities", "reach", "positive_dialogue", "positive_to_order_10d", "order_10d"]',
+            'const order = ["human_activities", "reach", "positive_dialogue", "order_10d_count", "order_10d"]',
             self.javascript,
         )
         self.assertEqual(
             MAIN_KPI_KEYS,
             (
                 "human_activities", "reach", "positive_dialogue",
-                "positive_to_order_10d", "order_10d",
+                "order_10d_count", "order_10d",
             ),
         )
         self.assertIn("grid-template-columns: repeat(5, minmax(0, 1fr))", self.css)
@@ -219,17 +219,17 @@ class SalesCoachingFrontendTests(TestCase):
         self.assertEqual(frontend_keys, set(METRIC_DEFINITIONS) - {"strategic_coverage"})
 
     def test_protected_blocks_match_master_source_contract(self):
-        # These hashes are calculated from the corresponding source blocks on master.
+        # Intentional count-metric contract update; the priority matrix stays unchanged.
         contracts = {
             "Teamjämförelse": (
                 "  function teamComparisonMarkup",
                 "  function teamTrendWeekLabel",
-                "b34c0dbc36113f36369f3f42e966301c6d567fc10d54e9cc77b75806c2a6439c",
+                "d5fe82b4ed1c98e2fec39f9b85e6bbc3bed70ec844909ced88fcdaee365d9fa2",
             ),
             "10-dagarstrenden": (
                 "  function teamTrendWeekLabel",
                 "  function matrixReasonLabel",
-                "0d0d41ab730d874a4a00e9edbaaac72417f69be84e8c70bdde42a2e9f433796b",
+                "ccf59858bc4d5b9f936b9f5b5ae3129e21e1ad02293d1b6dcd5c4df61a638b0f",
             ),
             "prioriteringsmatrisen": (
                 "  function matrixReasonLabel",
@@ -281,6 +281,27 @@ class SalesCoachingFrontendTests(TestCase):
         )
         self.assertIn('<th><button type="button" data-seller=', team)
 
+    def test_count_metric_table_and_scale_contract(self):
+        team = self.javascript.split("function teamComparisonMarkup", 1)[1].split("function teamTrendWeekLabel", 1)[0]
+        headers = team.split("<thead><tr>", 1)[1].split("</tr>", 1)[0]
+        self.assertEqual(headers.count("<th>"), 9)
+        labels = ["Säljare", "Aktiviteter", "Antal order inom 10 dagar",
+                  "Kontakt – order inom 10 dagar", "Positiv dialog → order inom 10 dagar",
+                  "Träffgrad", "Nästa-steg-täckning", "Bom-ratio", "Positiv dialog"]
+        cells = re.findall(r"<th>(.*?)</th>", headers)
+        for label, cell in zip(labels, cells):
+            self.assertIn(label, cell)
+        self.assertIn("number(item.order_10d_count?.value)", team)
+        self.assertIn('converted_order_10d: "order_10d_count"', self.javascript)
+        trend = self.javascript.split("function teamTrendPanelMarkup", 1)[1].split("function matrixReasonLabel", 1)[0]
+        self.assertIn('trend.metric_type === "count"', trend)
+        self.assertIn("Math.ceil(maximum / step) * step", trend)
+        self.assertIn("(_, index) => index * step", trend)
+        self.assertIn('isCount ? number(value)', trend)
+        self.assertIn("${number(point.value)} order inom 10 dagar", trend)
+        self.assertIn('point.value === null', trend)
+        self.assertIn('metric.metric_type === "rate"', self.javascript)
+
     def test_headline_outcomes_render_only_live_value_and_live_comparisons(self):
         self.assertNotIn("comparableOutcomeText", self.javascript)
         self.assertNotIn("Jämförbart 10-dagarsutfall", self.javascript)
@@ -305,7 +326,7 @@ class SalesCoachingFrontendTests(TestCase):
             "lifecycle och segment följer filtren",
             'metricKey: "order_10d"',
             'metricKey: "positive_to_order_10d"',
-            'data-drilldown="${config.metricKey}"',
+            'data-drilldown="${config.drilldownMetric || config.metricKey}"',
             'data-channel="all"',
             'data-seller="${escapeHtml(item.seller)}"',
             'tabindex="0" role="button"',
@@ -317,7 +338,7 @@ class SalesCoachingFrontendTests(TestCase):
         ):
             with self.subTest(expected=expected):
                 self.assertIn(expected, trend)
-        self.assertIn("const ticks = [0, 0.25, 0.5, 0.75, 1]", trend)
+        self.assertIn(" : [0, 0.25, 0.5, 0.75, 1]", trend)
         self.assertIn("week_axis", trend)
         self.assertIn("teamTrendWeekLabel", trend)
         self.assertIn("previousYear !== match[1]", self.javascript)
@@ -362,8 +383,8 @@ class SalesCoachingFrontendTests(TestCase):
             'const teamTrendTab = event.target.closest("[data-team-trend-view]")',
             2,
         )[2].split('const diagnosticTab =', 1)[0]
-        self.assertIn('teamTrendView: "order"', self.javascript)
-        self.assertIn('const keys = ["order", "positive"]', self.javascript)
+        self.assertIn('teamTrendView: "count"', self.javascript)
+        self.assertIn('const keys = ["count", "order", "positive"]', self.javascript)
         for key in ("ArrowLeft", "ArrowRight", "Home", "End"):
             self.assertIn(key, self.javascript)
         self.assertIn("renderDashboard(state.data)", click_handler)
@@ -465,8 +486,8 @@ class SalesCoachingFrontendTests(TestCase):
 
     def test_comparison_formatting_respects_count_metrics(self):
         self.assertIn('metric?.metric_type === "count"', self.javascript)
-        self.assertIn('`${number(value, 1)} aktiviteter`', self.javascript)
-        self.assertIn('`${value >= 0 ? "+" : ""}${number(value, 1)} aktiviteter`', self.javascript)
+        self.assertIn('`${number(value, 1)} ${escapeHtml(metric.unit || "st")}`', self.javascript)
+        self.assertIn('`${value >= 0 ? "+" : ""}${number(value, 1)} ${escapeHtml(metric.unit || "st")}`', self.javascript)
         self.assertIn("formatValue(comparisons.peer_median)", self.javascript)
         self.assertIn("formatValue(previousValue)", self.javascript)
         self.assertIn(

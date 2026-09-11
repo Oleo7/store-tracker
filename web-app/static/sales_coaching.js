@@ -10,7 +10,7 @@
     controller: null,
     drawerController: null,
     lastFocus: null,
-    teamTrendView: "order",
+    teamTrendView: "count",
     diagnosticTab: "visits",
     pendingInitialMode: "business",
     filters: defaultFilters(),
@@ -23,7 +23,7 @@
   const VISIBLE_METRIC_DEFINITION_KEYS = Object.freeze([
     "human_activities", "unique_customers", "visits", "reached_visits",
     "bom_visits", "phone", "manual_email", "reach", "visit_reach",
-    "positive_dialogue", "positive_to_order_10d", "order_10d",
+    "positive_dialogue", "positive_to_order_10d", "order_10d", "order_10d_count",
     "bom_ratio", "planned_bom_ratio", "unplanned_bom_ratio", "repeat_boms",
     "high_priority_boms", "positive_next_step_coverage",
     "positive_without_next_step", "positive_without_order_or_follow_up_10d",
@@ -43,6 +43,7 @@
     positive_dialogue: "positive_dialogue",
     positive_to_order_10d: "positive_to_order_10d",
     order_10d: "order_10d",
+    converted_order_10d: "order_10d_count",
     repeat_boms: "repeat_boms",
     high_priority_boms: "high_priority_boms",
     planned_boms: "planned_bom_ratio",
@@ -183,9 +184,9 @@
     const previousSuppressed = comparisons.previous_period_suppressed_reason === "pending_10d_outcomes";
     const previous = comparisons.previous_period;
     const previousValue = previous && typeof previous === "object" ? previous.value : previous?.value ?? previous;
-    const formatValue = value => countMetric ? `${number(value, 1)} aktiviteter` : percent(value);
+    const formatValue = value => countMetric ? `${number(value, 1)} ${escapeHtml(metric.unit || "st")}` : percent(value);
     const formatDelta = value => countMetric
-      ? `${value >= 0 ? "+" : ""}${number(value, 1)} aktiviteter`
+      ? `${value >= 0 ? "+" : ""}${number(value, 1)} ${escapeHtml(metric.unit || "st")}`
       : `${value >= 0 ? "+" : ""}${number(value * 100, 1)} pp`;
     const parts = [];
     if (comparisons.peer_median !== null && comparisons.peer_median !== undefined) {
@@ -411,7 +412,7 @@
       const teamTrendTab = event.target.closest("[data-team-trend-view]");
       if (teamTrendTab && ["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
         event.preventDefault();
-        const keys = ["order", "positive"];
+        const keys = ["count", "order", "positive"];
         const current = keys.indexOf(teamTrendTab.dataset.teamTrendView);
         const next = event.key === "Home" ? 0 : event.key === "End" ? keys.length - 1 : (current + (event.key === "ArrowRight" ? 1 : -1) + keys.length) % keys.length;
         state.teamTrendView = keys[next];
@@ -512,7 +513,7 @@
   }
 
   function kpiMarkup(key, metric) {
-    const isRate = metric.denominator !== undefined;
+    const isRate = metric.metric_type === "rate";
     const value = isRate ? percent(metric.value) : number(metric.value);
     const definition = metricDefinition(key, metric);
     const info = definitionParts(key, `kpi-${key}`, metric, "sc-kpi-info sc-metric-info");
@@ -532,7 +533,7 @@
     if (key === "human_activities") {
       secondary = `${metricName("unique_customers", "Unika kunder")} ${number(metric.unique_customers)} · ${metricName("visits", "Besök")} ${number(metric.channel_mix?.visit)} · ${metricName("phone", "Telefon")} ${number(metric.channel_mix?.phone)} · ${metricName("manual_email", "Manuellt mejl")} ${number(metric.channel_mix?.email)}`;
     }
-    if (["positive_to_order_10d", "order_10d"].includes(key) && !selectedChannelUnavailable) {
+    if (["order_10d_count", "positive_to_order_10d", "order_10d"].includes(key) && !selectedChannelUnavailable) {
       secondary = Number(metric.waiting_outcome_count) > 0
         ? `Preliminärt · ${number(metric.waiting_outcome_count)} väntar på 10-dagarsutfall`
         : "";
@@ -553,7 +554,7 @@
   }
 
   function kpisMarkup(kpis) {
-    const order = ["human_activities", "reach", "positive_dialogue", "positive_to_order_10d", "order_10d"];
+    const order = ["human_activities", "reach", "positive_dialogue", "order_10d_count", "order_10d"];
     return `<section class="sc-section" aria-labelledby="sc-kpi-title"><div class="sc-section-heading"><div><h2 id="sc-kpi-title">Coachningsöversikt</h2><p>Procentsatser bedöms först när underlaget är minst 10.</p></div></div><div class="sc-kpi-grid">${order.map(key => kpiMarkup(key, kpis[key])).join("")}</div></section>`;
   }
 
@@ -572,8 +573,8 @@
       return `<button type="button" class="sc-team-group${sellerSelected(item.seller) ? " is-selected" : ""}" data-seller="${escapeHtml(item.seller)}" aria-label="${escapeHtml(title)}" title="${escapeHtml(title)}"><span class="sc-team-total">Totalt ${number(item.human_activities_total)}</span><span class="sc-team-bars"><i class="sc-team-bar is-visit-stack" style="height:${visits / activityMax * 100}%"><b>${number(visits)}</b><span class="sc-team-bar-segment is-visit-reached" style="flex:${reachedVisits}" aria-hidden="true"></span><span class="sc-team-bar-segment is-visit-bom" style="flex:${boms}" aria-hidden="true"></span></i><i class="sc-team-bar is-phone" style="height:${Number(item.channel_mix?.phone || 0) / activityMax * 100}%"><b>${number(item.channel_mix?.phone)}</b></i><i class="sc-team-bar is-email" style="height:${Number(item.channel_mix?.email || 0) / activityMax * 100}%"><b>${number(item.channel_mix?.email)}</b></i></span><span class="sc-team-seller">${escapeHtml(item.seller)}</span></button>`;
     }).join("");
     const rateCell = (metric, pending = 0) => `<span class="sc-rate-value">${percent(metric?.value)}</span><small>${rateEvidence(metric)} · ${statusLabel(metric?.status)}</small>${Number(pending) > 0 ? `<small class="sc-rate-pending">Preliminärt · ${number(pending)} väntar på 10-dagarsutfall</small>` : ""}${comparisonText(metric) ? `<small>${escapeHtml(comparisonText(metric))}</small>` : ""}`;
-    const rows = sellers.map(item => `<tr${sellerSelected(item.seller) ? ' class="is-selected"' : ""}><th><button type="button" data-seller="${escapeHtml(item.seller)}">${escapeHtml(item.seller)}</button></th><td>${number(item.human_activities_total)}</td><td>${rateCell(item.reach)}</td><td>${rateCell(item.positive_dialogue)}</td><td>${rateCell(item.positive_to_order_10d, item.waiting_positive_dialogues_count)}</td><td>${rateCell(item.order_10d, item.waiting_outcome_count)}</td><td>${rateCell(item.positive_next_step_coverage)}</td><td>${rateCell(item.bom_ratio)}</td></tr>`).join("");
-    return `<section class="sc-section" aria-labelledby="sc-team-title"><div class="sc-section-heading"><div><h2 id="sc-team-title">Teamjämförelse</h2><p>10-dagarsmåtten använder samma definition som i Coachningsöversikten. Kontakter vars 10-dagarsfönster fortfarande är öppet ingår i nämnaren, därför markeras måttet som preliminärt när utfall fortfarande väntar. Jämförelsen gäller alla kanaler under vald period, lifecycle och segment; kanal- och säljarfilter påverkar inte teamblocken.</p></div></div><article class="sc-team-chart"><h3>Mänskliga aktiviteter</h3><p>Besök är stackade: <span class="sc-legend-key is-visit">nådda besök</span> + <span class="sc-legend-key is-bom">bom</span>. <span class="sc-legend-key is-phone">Telefon</span> och manuellt mejl visas separat.</p><div class="sc-team-plot">${activityGroups}</div></article><div class="sc-table-wrap"><table class="sc-table sc-comparison-table"><thead><tr><th>Säljare</th><th>Aktiviteter</th><th>${metricHeader("Träffgrad", "reach", "team-reach")}</th><th>${metricHeader("Positiv dialog", "positive_dialogue", "team-positive")}</th><th>${metricHeader(metricLabel("positive_to_order_10d", "Positiv dialog → order inom 10 dagar"), "positive_to_order_10d", "team-positive-order")}</th><th>${metricHeader(metricLabel("order_10d", "Kontakt – order inom 10 dagar"), "order_10d", "team-order")}</th><th>${metricHeader("Nästa-steg-täckning", "positive_next_step_coverage", "team-next-step")}</th><th>${metricHeader("Bom-ratio", "bom_ratio", "team-bom")}</th></tr></thead><tbody>${rows}</tbody></table></div></section>`;
+    const rows = sellers.map(item => `<tr${sellerSelected(item.seller) ? ' class="is-selected"' : ""}><th><button type="button" data-seller="${escapeHtml(item.seller)}">${escapeHtml(item.seller)}</button></th><td>${number(item.human_activities_total)}</td><td><button type="button" data-drilldown="converted_order_10d" data-seller="${escapeHtml(item.seller)}" data-channel="all">${number(item.order_10d_count?.value)}</button></td><td>${rateCell(item.order_10d, item.waiting_outcome_count)}</td><td>${rateCell(item.positive_to_order_10d, item.waiting_positive_dialogues_count)}</td><td>${rateCell(item.reach)}</td><td>${rateCell(item.positive_next_step_coverage)}</td><td>${rateCell(item.bom_ratio)}</td><td>${rateCell(item.positive_dialogue)}</td></tr>`).join("");
+    return `<section class="sc-section" aria-labelledby="sc-team-title"><div class="sc-section-heading"><div><h2 id="sc-team-title">Teamjämförelse</h2><p>10-dagarsmåtten använder samma definition som i Coachningsöversikten. Kontakter vars 10-dagarsfönster fortfarande är öppet ingår i nämnaren, därför markeras måttet som preliminärt när utfall fortfarande väntar. Jämförelsen gäller alla kanaler under vald period, lifecycle och segment; kanal- och säljarfilter påverkar inte teamblocken.</p></div></div><article class="sc-team-chart"><h3>Mänskliga aktiviteter</h3><p>Besök är stackade: <span class="sc-legend-key is-visit">nådda besök</span> + <span class="sc-legend-key is-bom">bom</span>. <span class="sc-legend-key is-phone">Telefon</span> och manuellt mejl visas separat.</p><div class="sc-team-plot">${activityGroups}</div></article><div class="sc-table-wrap"><table class="sc-table sc-comparison-table"><thead><tr><th>Säljare</th><th>Aktiviteter</th><th>${metricHeader("Antal order inom 10 dagar", "order_10d_count", "team-order-count")}</th><th>${metricHeader(metricLabel("order_10d", "Kontakt – order inom 10 dagar"), "order_10d", "team-order")}</th><th>${metricHeader(metricLabel("positive_to_order_10d", "Positiv dialog → order inom 10 dagar"), "positive_to_order_10d", "team-positive-order")}</th><th>${metricHeader("Träffgrad", "reach", "team-reach")}</th><th>${metricHeader("Nästa-steg-täckning", "positive_next_step_coverage", "team-next-step")}</th><th>${metricHeader("Bom-ratio", "bom_ratio", "team-bom")}</th><th>${metricHeader("Positiv dialog", "positive_dialogue", "team-positive")}</th></tr></thead><tbody>${rows}</tbody></table></div></section>`;
   }
 
   function teamTrendWeekLabel(week, previousWeek = "") {
@@ -620,12 +621,18 @@
     const plotWidth = width - pad.left - pad.right;
     const plotHeight = height - pad.top - pad.bottom;
     const x = index => pad.left + (slots.length <= 1 ? plotWidth / 2 : index * plotWidth / (slots.length - 1));
-    const y = value => pad.top + (1 - Number(value)) * plotHeight;
+    const isCount = trend.metric_type === "count" || config.metricType === "count";
+    const maximum = Math.max(0, ...series.flatMap(item => (item.points || []).map(point => Number(point.value) || 0)));
+    const rawStep = Math.max(1, maximum / 4);
+    const magnitude = 10 ** Math.floor(Math.log10(rawStep));
+    const step = [1, 2, 5, 10].find(value => value * magnitude >= rawStep) * magnitude;
+    const axisMax = isCount ? Math.max(step, Math.ceil(maximum / step) * step) : 1;
+    const y = value => pad.top + (1 - Number(value) / axisMax) * plotHeight;
     const selectedSeller = String(trends?.selected_seller || "");
     const hasSelection = Boolean(selectedSeller);
     const isSelected = seller => hasSelection && String(seller).localeCompare(selectedSeller, "sv-SE", { sensitivity: "base" }) === 0;
-    const ticks = [0, 0.25, 0.5, 0.75, 1];
-    const grid = ticks.map(value => `<g aria-hidden="true"><line class="sc-team-order-grid" x1="${pad.left}" x2="${width - pad.right}" y1="${y(value)}" y2="${y(value)}"></line><text class="sc-team-order-y-label" x="${pad.left - 10}" y="${y(value) + 4}" text-anchor="end">${value * 100} %</text></g>`).join("");
+    const ticks = isCount ? Array.from({ length: axisMax / step + 1 }, (_, index) => index * step) : [0, 0.25, 0.5, 0.75, 1];
+    const grid = ticks.map(value => `<g aria-hidden="true"><line class="sc-team-order-grid" x1="${pad.left}" x2="${width - pad.right}" y1="${y(value)}" y2="${y(value)}"></line><text class="sc-team-order-y-label" x="${pad.left - 10}" y="${y(value) + 4}" text-anchor="end">${isCount ? number(value) : `${value * 100} %`}</text></g>`).join("");
     const xLabels = slots.map((slot, index) => `<text class="sc-team-order-x-label" x="${x(index)}" y="${height - 18}" text-anchor="middle">${escapeHtml(teamTrendWeekLabel(slot.week, slots[index - 1]?.week || ""))}</text>`).join("");
 
     const seriesMarkup = series.map(item => {
@@ -637,7 +644,7 @@
       let segment = [];
       slots.forEach((slot, index) => {
         const point = pointByWeek.get(slot.week);
-        if (point?.value !== null && Number.isFinite(Number(point.value))) {
+        if (point && point.value !== null && Number.isFinite(Number(point.value))) {
           segment.push(`${x(index)},${y(point.value)}`);
         } else {
           if (segment.length > 1) segments.push(segment);
@@ -649,11 +656,13 @@
       const points = slots.map((slot, index) => {
         const point = pointByWeek.get(slot.week);
         if (!point || point.value === null || !Number.isFinite(Number(point.value))) return "";
-        const small = point.status === "small_sample";
+        const small = !isCount && point.status === "small_sample";
         const evidence = `${number(point.numerator)} av ${number(point.denominator)} ${config.evidenceLabel}`;
         const period = `${point.period?.start || "—"}–${point.period?.end || "—"}`;
-        const title = `${item.seller} · ${teamTrendWeekLabel(point.week)} · ${period}: ${percent(point.value)} · ${evidence} · ${small ? "Litet underlag" : "Tillräckligt underlag"}`;
-        return `<g class="sc-team-order-point${small ? " is-small-sample" : ""}${selectionClass}" style="--series-color:${style.color}" tabindex="0" role="button" data-drilldown="${config.metricKey}" data-trend-view="${view}" data-seller="${escapeHtml(item.seller)}" data-series-style="${style.key}" data-week="${escapeHtml(point.week)}" data-numerator="${number(point.numerator)}" data-denominator="${number(point.denominator)}" data-channel="all" data-start="${escapeHtml(point.period?.start || "")}" data-end="${escapeHtml(point.period?.end || "")}" aria-label="${escapeHtml(title)}"><title>${escapeHtml(title)}</title><circle class="sc-team-order-point-hit" cx="${x(index)}" cy="${y(point.value)}" r="22"></circle>${teamTrendMarker(style.marker, x(index), y(point.value))}</g>`;
+        const title = isCount
+          ? `${item.seller} · ${teamTrendWeekLabel(point.week)}: ${number(point.value)} order inom 10 dagar · ${period}`
+          : `${item.seller} · ${teamTrendWeekLabel(point.week)} · ${period}: ${percent(point.value)} · ${evidence} · ${small ? "Litet underlag" : "Tillräckligt underlag"}`;
+        return `<g class="sc-team-order-point${small ? " is-small-sample" : ""}${selectionClass}" style="--series-color:${style.color}" tabindex="0" role="button" data-drilldown="${config.drilldownMetric || config.metricKey}" data-trend-view="${view}" data-seller="${escapeHtml(item.seller)}" data-series-style="${style.key}" data-week="${escapeHtml(point.week)}" data-numerator="${number(point.numerator)}" data-denominator="${number(point.denominator)}" data-channel="all" data-start="${escapeHtml(point.period?.start || "")}" data-end="${escapeHtml(point.period?.end || "")}" aria-label="${escapeHtml(title)}"><title>${escapeHtml(title)}</title><circle class="sc-team-order-point-hit" cx="${x(index)}" cy="${y(point.value)}" r="22"></circle>${teamTrendMarker(style.marker, x(index), y(point.value))}</g>`;
       }).join("");
       return `${lines}${points}`;
     }).join("");
@@ -664,12 +673,18 @@
       return `<button type="button" class="sc-team-order-legend-item${selected ? " is-selected" : hasSelection ? " is-unselected" : ""}" style="--series-color:${style.color}" data-trend-view="${view}" data-seller="${escapeHtml(item.seller)}" data-series-style="${style.key}" aria-label="Visa ${escapeHtml(item.seller)} som vald säljare"><svg viewBox="0 0 42 18" aria-hidden="true"><line x1="2" x2="40" y1="9" y2="9" style="stroke:${style.color}${style.dash ? `;stroke-dasharray:${style.dash}` : ""}"></line>${teamTrendMarker(style.marker, 21, 9)}</svg><span>${escapeHtml(item.seller)}</span></button>`;
     }).join("");
 
-    return `<div class="sc-team-trend-panel" id="sc-team-trend-panel-${view}" role="tabpanel" aria-labelledby="sc-team-trend-tab-${view}"${activeView === view ? "" : " hidden"}><h3>${escapeHtml(config.title)}</h3><div class="sc-team-order-trend-wrap" tabindex="0" aria-label="Horisontellt rullningsbar trendgraf"><svg class="sc-team-order-trend" viewBox="0 0 ${width} ${height}" role="group" aria-label="Veckovis ${escapeHtml(config.title)} för aktiva säljare, fast skala 0 till 100 procent">${grid}${seriesMarkup}${xLabels}</svg></div><div class="sc-team-order-legend" aria-label="Säljarserier">${legend || `<span class="sc-empty">Inga aktiva säljare.</span>`}</div></div>`;
+    return `<div class="sc-team-trend-panel" id="sc-team-trend-panel-${view}" role="tabpanel" aria-labelledby="sc-team-trend-tab-${view}"${activeView === view ? "" : " hidden"}><h3>${escapeHtml(config.title)}</h3><div class="sc-team-order-trend-wrap" tabindex="0" aria-label="Horisontellt rullningsbar trendgraf"><svg class="sc-team-order-trend" viewBox="0 0 ${width} ${height}" role="group" aria-label="Veckovis ${escapeHtml(config.title)} för aktiva säljare, ${isCount ? `antal från 0 till ${number(axisMax)}` : "fast skala 0 till 100 procent"}">${grid}${seriesMarkup}${xLabels}</svg></div><div class="sc-team-order-legend" aria-label="Säljarserier">${legend || `<span class="sc-empty">Inga aktiva säljare.</span>`}</div></div>`;
   }
 
   function teamTrendsMarkup(trends) {
-    const view = state.teamTrendView === "positive" ? "positive" : "order";
+    const view = ["count", "order", "positive"].includes(state.teamTrendView) ? state.teamTrendView : "count";
     const tabs = [
+      ["count", "Antal order inom 10 dagar", {
+        metricKey: "order_10d_count",
+        metricType: "count",
+        drilldownMetric: "converted_order_10d",
+        title: "Antal order inom 10 dagar",
+      }],
       ["order", "Kontakt → order", {
         metricKey: "order_10d",
         title: "Kontakt – order inom 10 dagar",

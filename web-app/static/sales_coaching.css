@@ -262,6 +262,7 @@ details[open] > summary .sc-disclosure-icon { transform: rotate(225deg) translat
 .sc-team-bar.is-converted-positive { background: #b7791f; }
 .sc-team-seller { overflow-wrap: anywhere; margin-top: 8px; font-size: 0.78rem; font-weight: 850; }
 .sc-rate-value { display: block; font-weight: 850; }
+.sc-comparison-table th:nth-child(3) { min-width: 145px; }
 .sc-comparison-table small { display: block; margin-top: 3px; color: var(--sc-muted); white-space: nowrap; }
 .sc-comparison-table tr.is-selected { background: #fbf3f6; }
 .sc-card-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
@@ -455,7 +456,8 @@ button.sc-mini-main { cursor: pointer; }
   .sc-drawer { width: 100vw; }
   .sc-team-plot { grid-template-columns: repeat(auto-fit, minmax(82px, 1fr)); }
   .sc-team-group { min-height: 230px; padding-inline: 4px; }
-  .sc-team-trend-tabs { display: flex; width: 100%; }
+  .sc-team-trend-tabs { display: flex; flex-wrap: wrap; width: 100%; }
+  .sc-team-trend-tabs button:first-child { flex-basis: 100%; }
   .sc-team-trend-tabs button { flex: 1; }
   .sc-matrix-layout { grid-template-columns: 30px minmax(500px, 1fr); min-width: 540px; }
 }
