@@ -186,7 +186,15 @@ def _ensure_columns(sheet, columns, values_reader=None, invalidator=None):
     missing = [column for column in columns if column not in headers]
     if missing:
         start = len(headers) + 1
-        sheet.insert_cols([[column] for column in missing], col=start)
+        end = len(headers) + len(missing)
+        # Grow the grid before writing: insert_cols at col_count + 1 is invalid
+        # in Sheets and insertion would shift any existing cells to the right.
+        if sheet.col_count < end:
+            sheet.resize(cols=end)
+        sheet.batch_update([{
+            "range": f"{rowcol_to_a1(1, start)}:{rowcol_to_a1(1, end)}",
+            "values": [missing],
+        }], value_input_option="RAW")
         headers.extend(missing)
         if invalidator:
             invalidator(sheet)
