@@ -15,7 +15,6 @@
     pendingInitialMode: "business",
     filters: defaultFilters(),
   };
-  const MATRIX_TICKS = [0, 25, 50, 75, 100];
   const TEAM_TREND_COLORS = ["#942a52", "#176b87", "#2f7a4f", "#a66012", "#6657a4", "#a23b32", "#39738f", "#6d6a25"];
   const TEAM_TREND_DASHES = ["", "10 5", "3 4", "13 4 3 4", "7 3", "2 3 9 3", "15 5", "5 3 2 3"];
   const STANDARD_PERIODS = ["1", "2", "4", "8", "12"];
@@ -655,59 +654,36 @@
     return `<section class="sc-section sc-team-10d-trend-section" aria-labelledby="sc-team-trend-title"><div class="sc-section-heading"><div><h2 id="sc-team-trend-title">10-dagarskonvertering – trend</h2><p>Varje punkt avser en kontaktvecka. Endast veckor där hela 10-dagarsfönstret har passerat visas, så veckopunkterna förändras inte enbart för att fler dagar passerar. Diagrammen använder samma KPI-definitioner som Coachningsöversikten.</p></div></div><p class="sc-team-order-filter-note">Period-, säljar- och kanalfilter begränsar inte grafen. Vald säljare markeras; lifecycle och segment följer filtren.</p><div class="sc-team-trend-tabs" role="tablist" aria-label="Välj 10-dagarstrend">${tabList}</div>${panels}</section>`;
   }
 
-  function matrixReasonLabel(reason) {
-    return ({
-      order_denominator_zero: "inga berättigade kontakter för ordermåttet",
-      priority_denominator_zero: "ingen sparad historisk percentil",
-      order_sample_below_10: "färre än 10 berättigade kontakter",
-      priority_sample_below_10: "färre än 10 kontakter med historisk percentil",
-      priority_percentile_coverage_below_70: "percentiltäckning under 70 %",
-    }[reason] || reason);
+  function priorityProfileReasonLabel(reason) {
+    return {
+      priority_denominator_zero: "inga jämförbara historiska kontakter",
+      priority_sample_below_10: "färre än 10 jämförbara historiska kontakter",
+      priority_percentile_coverage_below_70: "mindre än 70 % historisk prioritetstäckning",
+    }[reason] || reason;
   }
 
-  function priorityMatrixPanelMarkup(matrix) {
-    const xKey = matrix.axes?.x?.key;
-    const yKey = matrix.axes?.y?.key;
-    const xLabel = matrix.axes?.x?.label || xKey || "X";
-    const yLabel = matrix.axes?.y?.label || yKey || "Y";
-    const xMedian = matrix.medians?.[xKey];
-    const yMedian = matrix.medians?.[yKey];
-    const insufficient = (matrix.insufficient_sample || []).map(item => `${escapeHtml(item.seller)} (${(item.reasons || []).map(matrixReasonLabel).join(", ")})`).join(" · ");
-    if (!matrix.available) {
-      return `<div class="sc-matrix-panel"><div class="sc-priority-build-up"><strong>Historisk prioriteringsdata byggs upp.</strong><br>${rateEvidence(matrix.build_up?.coverage)} nya kontakter har jämförbar historisk prioritet.<br>Matrisen aktiveras vid minst ${percent(matrix.build_up?.minimum_coverage)} täckning och två jämförbara säljare.</div></div>`;
+  function priorityProfileMarkup(profile = {}) {
+    const buildUp = profile.build_up || {};
+    const insufficient = (profile.insufficient_sample || []).map(item => `${escapeHtml(item.seller)} (${(item.reasons || []).map(priorityProfileReasonLabel).map(escapeHtml).join(", ")})`).join(" · ");
+    const heading = `<div class="sc-section-heading"><div><h2 id="sc-priority-profile-title">Historiskt prioritetsfokus</h2><p>Prioriteringsprofil per säljare: fördelning av jämförbara historiska kontakter. Sorterat efter andelen i Topp 25 %. Vald period, lifecycle och segment gäller för hela teamet; kanal- och säljarfilter begränsar inte underlaget.</p></div></div>`;
+    const requirements = `Minst ${number(buildUp.minimum_contacts ?? 10)} jämförbara historiska kontakter per säljare, ${percent(buildUp.minimum_coverage ?? 0.7)} täckning per säljare och i teamet samt minst två jämförbara säljare krävs.`;
+    let content;
+    if (!profile.available) {
+      content = `<div class="sc-priority-build-up" role="status"><strong>Historisk prioriteringsdata byggs upp.</strong><p>${rateEvidence(buildUp.coverage)} nya kontakter har jämförbar historisk prioritet.</p><p>${requirements}</p></div>`;
+    } else {
+      const bands = [["top", "Topp 25 %"], ["middle", "Mitten 50 %"], ["bottom", "Botten 25 %"]];
+      const rows = (profile.sellers || []).map(item => {
+        const description = `${item.seller}: ${bands.map(([key, label]) => `${label}: ${percent(item.distribution[key].value)} (${number(item.distribution[key].numerator)} kontakter)`).join(", ")}. Prioritetsfokus ${percent(item.priority_focus.value)}. Underlag ${number(item.comparable_contact_count)}. Täckning ${percent(item.priority_percentile_coverage.value)}.`;
+        const segments = bands.map(([key, label]) => {
+          const metric = item.distribution[key];
+          return `<span class="sc-priority-band is-${key}" data-band="${key}" data-count="${metric.numerator}" style="width:${metric.value * 100}%" title="${escapeHtml(label)}: ${percent(metric.value)}">${metric.value >= 0.1 ? percent(metric.value) : ""}</span>`;
+        }).join("");
+        return `<div class="sc-priority-row${sellerSelected(item.seller) ? " is-selected" : ""}" data-profile-seller="${escapeHtml(item.seller)}"><button type="button" class="sc-priority-seller" data-seller="${escapeHtml(item.seller)}" aria-pressed="${Boolean(sellerSelected(item.seller))}">${escapeHtml(item.seller)}</button><div class="sc-priority-bar" role="img" tabindex="0" aria-label="${escapeHtml(description)}" title="${escapeHtml(description)}">${segments}</div><strong class="sc-priority-focus">${percent(item.priority_focus.value)}</strong><span class="sc-priority-sample">${number(item.comparable_contact_count)}</span><span class="sc-priority-coverage">${percent(item.priority_percentile_coverage.value)}</span></div>`;
+      }).join("");
+      const median = profile.median;
+      content = `<div class="sc-priority-legend">${bands.map(([key, label]) => `<span><i class="sc-priority-key is-${key}" aria-hidden="true"></i>${label}</span>`).join("")}<span class="sc-priority-median-label"><i aria-hidden="true"></i>Teammedian: ${percent(median)}</span></div><p class="sc-priority-help">Topp 25 %: percentil ≥ 75 · Mitten 50 %: 25–&lt;75 · Botten 25 %: &lt;25. Teammedianen är medianen av de visade säljarnas prioritetsfokus.</p><p class="sc-priority-scroll-hint">Rulla i sidled för att se hela profilen och värdena till höger.</p><div class="sc-priority-scroll" tabindex="0" role="region" aria-label="Prioriteringsprofiler per säljare, horisontellt rullningsbara"><div class="sc-priority-chart"><div class="sc-priority-header"><span>Säljare</span><span>Andel jämförbara kontakter</span><span>Prioritetsfokus</span><span>Underlag</span><span>Täckning</span></div><div class="sc-priority-rows">${rows}${median === null || median === undefined ? "" : `<div class="sc-priority-median-track" aria-hidden="true"><div class="sc-priority-median" style="--median:${median * 100}%"></div></div>`}</div></div></div><p class="sc-priority-help">${requirements}</p>`;
     }
-    const medianLines = `${xMedian === null || xMedian === undefined ? "" : `<span class="sc-matrix-median-x" style="left:${Number(xMedian) * 100}%" aria-hidden="true"></span>`}${yMedian === null || yMedian === undefined ? "" : `<span class="sc-matrix-median-y" style="bottom:${Number(yMedian) * 100}%" aria-hidden="true"></span>`}`;
-    const gridLines = MATRIX_TICKS.map(tick => `<span class="sc-matrix-gridline is-vertical" style="left:${tick}%" aria-hidden="true"><span class="sc-matrix-x-tick">${tick} %</span></span><span class="sc-matrix-gridline is-horizontal" style="bottom:${tick}%" aria-hidden="true"><span class="sc-matrix-y-tick">${tick} %</span></span>`).join("");
-    const occupied = new Map();
-    const bubbles = [...(matrix.sellers || [])].sort((a, b) => String(a.seller).localeCompare(String(b.seller), "sv")).map(item => {
-      const xRate = item[xKey];
-      const yRate = item[yKey];
-      const x = Math.max(0, Math.min(100, Number(xRate.value) * 100));
-      const y = Math.max(0, Math.min(100, Number(yRate.value) * 100));
-      const coordinate = `${x.toFixed(2)}:${y.toFixed(2)}`;
-      const overlap = occupied.get(coordinate) || 0;
-      occupied.set(coordinate, overlap + 1);
-      const collisionOffsets = [[0, 0], [-8, -8], [8, -8], [-8, 8], [8, 8], [0, -12], [0, 12], [-12, 0], [12, 0]];
-      const collisionOffset = collisionOffsets[overlap % collisionOffsets.length];
-      const collisionRing = Math.floor(overlap / collisionOffsets.length);
-      const offsetX = collisionOffset[0] * (collisionRing + 1);
-      const offsetY = collisionOffset[1] * (collisionRing + 1);
-      const coverage = `, historisk prioritetstäckning ${percent(item.priority_percentile_coverage?.value)}`;
-      const pending = Number(xRate.waiting_outcome_count) > 0
-        ? `, preliminärt: ${number(xRate.waiting_outcome_count)} väntar på 10-dagarsutfall`
-        : "";
-      const title = `${item.seller}: ${xLabel} ${percent(xRate.value)} (${rateEvidence(xRate)}, ${statusLabel(xRate.status)}${pending}), ${yLabel} ${percent(yRate.value)} (${rateEvidence(yRate)}, ${statusLabel(yRate.status)}), ${item.human_activities} mänskliga aktiviteter${coverage}`;
-      return `<button type="button" class="sc-bubble${item.sample_status === "small_sample" ? " is-small-sample" : ""}${sellerSelected(item.seller) ? " is-selected" : ""}" style="left:${x}%;bottom:${y}%;--offset-x:${offsetX}px;--offset-y:${offsetY}px" data-seller="${escapeHtml(item.seller)}" title="${escapeHtml(title)}" aria-label="${escapeHtml(title)}">${escapeHtml(String(item.seller).slice(0, 2).toUpperCase())}</button>`;
-    }).join("");
-    const medianNotice = xMedian === null || xMedian === undefined || yMedian === null || yMedian === undefined
-      ? `<div class="sc-insufficient">Otillräckligt jämförbart underlag för ${xMedian === null || xMedian === undefined ? xLabel : yLabel}-median. Ingen fiktiv medianlinje visas.</div>`
-      : "";
-    return `<div class="sc-matrix-panel"><div class="sc-matrix-wrap"><div class="sc-matrix-layout"><div class="sc-matrix-y-axis-label">${escapeHtml(yLabel)}</div><div class="sc-matrix" role="img" aria-label="${escapeHtml(xLabel)} mot ${escapeHtml(yLabel)}, skala 0 till 100 procent. Punktstorleken är fast; aktivitetsvolym finns i tooltip."><div class="sc-matrix-inner">${gridLines}${medianLines}${bubbles}</div></div><span aria-hidden="true"></span><div class="sc-matrix-x-axis-label">${escapeHtml(xLabel)}</div></div></div>${medianNotice}${insufficient ? `<div class="sc-insufficient"><strong>Ej jämförbart underlag:</strong> ${insufficient}</div>` : ""}</div>`;
-  }
-
-  function priorityMatrixMarkup(matrix) {
-    const safeMatrix = matrix || { sellers: [], medians: {}, insufficient_sample: [] };
-    return `<section class="sc-section" aria-labelledby="sc-matrix-title"><div class="sc-section-heading"><div><h2 id="sc-matrix-title">Teamets prioriteringsmatris</h2><p>Matrisen visar sambandet mellan historiskt prioritetsfokus och Kontakt – order inom 10 dagar för vald period. Ordermåttet använder samma preliminära definition som Coachningsöversikten; kontakter som väntar på 10-dagarsutfall ingår i nämnaren. Medianlinjer kräver tillräckligt underlag och minst 70 % jämförbar historisk prioritetstäckning.</p></div></div>${priorityMatrixPanelMarkup(safeMatrix)}</section>`;
+    return `<section class="sc-section sc-priority-profile" aria-labelledby="sc-priority-profile-title">${heading}${content}${insufficient ? `<div class="sc-insufficient"><strong>Ej jämförbart underlag:</strong> ${insufficient}</div>` : ""}</section>`;
   }
 
   function visitMarkup(data) {
@@ -802,7 +778,7 @@
       teamComparisonMarkup(data.team_comparison || { sellers: [] }),
       coachingMarkup(data.coaching_cards || []),
       teamTrendsMarkup(data.team_10d_trends || { metrics: {} }),
-      priorityMatrixMarkup(data.coaching_matrix || data.coaching_matrices?.priority),
+      priorityProfileMarkup(data.historical_priority_profile),
       diagnosticsMarkup(data),
       dataQualityDetailsMarkup(data.data_quality || {}),
     ].join("");
