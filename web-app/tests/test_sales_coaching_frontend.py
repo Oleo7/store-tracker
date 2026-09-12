@@ -33,7 +33,7 @@ class SalesCoachingFrontendTests(TestCase):
     def test_dashboard_has_all_specified_sections(self):
         for expected in (
             "Period", "Säljare", "Kanal", "Lifecycle", "Kundsegment",
-            "Coachningsöversikt", "Coachningskort", "Teamjämförelse",
+            "Coachningskort", "Teamjämförelse",
             "10-dagarskonvertering – trend",
             "Teamets prioriteringsmatris", "Fördjupad analys",
             "Besök", "Kanaler", "Uppföljning",
@@ -93,26 +93,21 @@ class SalesCoachingFrontendTests(TestCase):
             self.javascript.index("function handleDashboardClick")
         ]
         ordered = (
-            "kpisMarkup", "coachingMarkup", "teamComparisonMarkup",
+            "teamComparisonMarkup", "coachingMarkup",
             "teamTrendsMarkup", "priorityMatrixMarkup", "diagnosticsMarkup",
             "dataQualityDetailsMarkup",
         )
         positions = [render.index(name) for name in ordered]
         self.assertEqual(positions, sorted(positions))
 
-    def test_exactly_five_main_kpis_are_rendered_in_requested_order(self):
-        self.assertIn(
-            'const order = ["human_activities", "reach", "positive_dialogue", "order_10d_count", "order_10d"]',
-            self.javascript,
-        )
-        self.assertEqual(
-            MAIN_KPI_KEYS,
-            (
-                "human_activities", "reach", "positive_dialogue",
-                "order_10d_count", "order_10d",
-            ),
-        )
-        self.assertIn("grid-template-columns: repeat(5, minmax(0, 1fr))", self.css)
+    def test_coaching_overview_ui_is_removed_and_team_is_first(self):
+        for removed in ("function kpiMarkup", "function kpisMarkup", "sc-kpi-", "data-kpi-key"):
+            self.assertNotIn(removed, self.javascript)
+        self.assertNotIn("sc-kpi-", self.css)
+        render = self.javascript.split("function renderDashboard", 1)[1].split("function handleDashboardClick", 1)[0]
+        first_section = render.split("target.innerHTML = [", 1)[1].lstrip()
+        self.assertTrue(first_section.startswith("teamComparisonMarkup("))
+        self.assertNotIn("data.kpis", render)
 
     def test_main_kpis_explain_their_denominators_in_plain_swedish(self):
         self.assertEqual(
@@ -132,7 +127,6 @@ class SalesCoachingFrontendTests(TestCase):
             "alla berättigade nådda mänskliga kontakter med säker kundidentitet",
         )
         self.assertIn("definition.denominator_label", self.javascript)
-        self.assertIn("sc-kpi-denominator", self.javascript)
         self.assertIn("flex-wrap: wrap", self.css)
 
     def test_all_main_kpis_have_clickable_plain_language_explanations(self):
@@ -162,9 +156,9 @@ class SalesCoachingFrontendTests(TestCase):
                 )
 
     def test_frontend_uses_backend_rate_contract_without_recalculating_kpis(self):
-        self.assertIn("percent(metric.value)", self.javascript)
+        self.assertIn("percent(metric?.value)", self.javascript)
         self.assertIn("rateEvidence(metric)", self.javascript)
-        self.assertIn("metricDefinition(key, metric)", self.javascript)
+        self.assertIn("metricDefinition(key", self.javascript)
         self.assertNotIn("attributed_orders /", self.javascript)
         self.assertNotIn("priority_percentile_at_contact >=", self.javascript)
 
@@ -174,14 +168,6 @@ class SalesCoachingFrontendTests(TestCase):
             METRIC_DEFINITIONS["order_10d"]["label"],
             "Kontakt – order inom 10 dagar",
         )
-        kpi_markup = self.javascript.split("function kpiMarkup", 1)[1].split(
-            "function kpisMarkup", 1
-        )[0]
-        self.assertIn('metric.status === "small_sample"', kpi_markup)
-        self.assertIn("Inte tillräckligt underlag", kpi_markup)
-        self.assertNotIn("statusLabel(metric.status)", kpi_markup.split("const status", 1)[1])
-        self.assertNotIn("Tillräckligt underlag</span>", kpi_markup)
-
     def test_matrix_uses_generic_backend_axes_and_does_not_invent_medians(self):
         self.assertIn("Otillräckligt jämförbart underlag", self.javascript)
         self.assertNotIn("matrix.medians?.priority_focus ?? 0.5", self.javascript)
@@ -300,7 +286,6 @@ class SalesCoachingFrontendTests(TestCase):
         self.assertIn('isCount ? number(value)', trend)
         self.assertIn("${number(point.value)} order inom 10 dagar", trend)
         self.assertIn('point.value === null', trend)
-        self.assertIn('metric.metric_type === "rate"', self.javascript)
 
     def test_headline_outcomes_render_only_live_value_and_live_comparisons(self):
         self.assertNotIn("comparableOutcomeText", self.javascript)
@@ -505,14 +490,6 @@ class SalesCoachingFrontendTests(TestCase):
         self.assertNotIn("positive_order_denominator_zero", self.javascript)
 
     def test_pending_outcome_copy_is_preliminary_and_hidden_at_zero(self):
-        kpi_markup = self.javascript.split("function kpiMarkup", 1)[1].split(
-            "function kpisMarkup", 1
-        )[0]
-        self.assertIn("Number(metric.waiting_outcome_count) > 0", kpi_markup)
-        self.assertIn(
-            "Preliminärt · ${number(metric.waiting_outcome_count)} väntar på 10-dagarsutfall",
-            kpi_markup,
-        )
         self.assertNotIn("väntar fortfarande på fullt 10-dagarsutfall", self.javascript)
         coaching_markup = self.javascript.split(
             "function coachingMarkup", 1
