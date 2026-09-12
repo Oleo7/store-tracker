@@ -2251,78 +2251,6 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
     for key in kpis:
         kpis[key].update(METRIC_DEFINITIONS[key])
     data_quality = _data_quality(rows, canonical_result, order_result, attribution)
-    comparable_sellers = [
-        item for item in seller_comparison
-        if item["order_10d"]["status"] == "sufficient"
-        and item["priority_focus"]["status"] == "sufficient"
-        and item["priority_percentile_coverage"]["value"] is not None
-        and item["priority_percentile_coverage"]["value"] >= MIN_PRIORITY_COVERAGE
-    ]
-    comparable_names = {item["seller"] for item in comparable_sellers}
-    team_priority_numerator = sum(
-        item["priority_percentile_coverage"]["numerator"]
-        for item in seller_comparison
-    )
-    team_priority_denominator = sum(
-        item["priority_percentile_coverage"]["denominator"]
-        for item in seller_comparison
-    )
-    team_priority_coverage = _rate(
-        team_priority_numerator, team_priority_denominator, minimum=1
-    )
-    priority_matrix_available = (
-        team_priority_coverage["value"] is not None
-        and team_priority_coverage["value"] >= MIN_PRIORITY_COVERAGE
-        and len(comparable_sellers) >= 2
-    )
-    priority_matrix_sellers = [
-        {**item, "sample_status": "sufficient"}
-        for item in comparable_sellers
-    ] if priority_matrix_available else []
-    priority_matrix = {
-        "type": "priority",
-        "available": priority_matrix_available,
-        "axes": {
-            "x": {
-                "key": "order_10d",
-                "label": "Kontakt – order inom 10 dagar",
-            },
-            "y": {"key": "priority_focus", "label": "Historiskt prioritetsfokus"},
-        },
-        "sellers": priority_matrix_sellers,
-        "medians": {
-            "order_10d": statistics.median(
-                item["order_10d"]["value"]
-                for item in comparable_sellers
-            ) if len(comparable_sellers) >= 2 else None,
-            "priority_focus": statistics.median(item["priority_focus"]["value"] for item in comparable_sellers) if len(comparable_sellers) >= 2 else None,
-        },
-        "build_up": {
-            "coverage": team_priority_coverage,
-            "minimum_coverage": MIN_PRIORITY_COVERAGE,
-            "comparable_seller_count": len(comparable_sellers),
-            "required_seller_count": 2,
-        },
-        "insufficient_sample": [
-            {
-                "seller": item["seller"],
-                "human_activities": item["human_activities"],
-                "order_denominator": item["order_10d"]["denominator"],
-                "priority_percentile_coverage": item["priority_percentile_coverage"],
-                "reasons": [
-                    reason for reason, applies in (
-                        ("order_denominator_zero", item["order_10d"]["denominator"] == 0),
-                        ("order_sample_below_10", 0 < item["order_10d"]["denominator"] < MIN_RATE_SAMPLE),
-                        ("priority_denominator_zero", item["priority_focus"]["denominator"] == 0),
-                        ("priority_sample_below_10", 0 < item["priority_focus"]["denominator"] < MIN_RATE_SAMPLE),
-                        ("priority_percentile_coverage_below_70", item["priority_percentile_coverage"]["value"] is None or item["priority_percentile_coverage"]["value"] < MIN_PRIORITY_COVERAGE),
-                    ) if applies
-                ],
-            }
-            for item in seller_comparison if item["seller"] not in comparable_names
-        ],
-    }
-    coaching_matrix = priority_matrix
     if seller and selected_seller_metrics:
         signal_metrics = {
             **selected_seller_metrics,
@@ -2392,8 +2320,6 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
         },
         "team_10d_trends": team_10d_trends,
         "historical_priority_profile": _historical_priority_profile(seller_comparison),
-        "coaching_matrices": {"priority": priority_matrix},
-        "coaching_matrix": coaching_matrix,
         "funnel": {
             "attempts": len(current["sync"]),
             "reached": len(current["sync_reached"]),

@@ -2002,13 +2002,6 @@ class SnapshotAndAggregateTests(TestCase):
         )
         self.assertEqual(team["zero"]["human_activities_total"], 0)
 
-    def test_only_priority_matrix_is_built(self):
-        summary = self.summary([])
-
-        self.assertEqual(set(summary["coaching_matrices"]), {"priority"})
-        self.assertEqual(summary["coaching_matrix"]["type"], "priority")
-        self.assertNotIn("sales", repr(summary["coaching_matrices"]))
-
     def test_tie_aware_value_percentile_does_not_make_zero_values_strategic(self):
         priorities = [
             {
@@ -2225,60 +2218,18 @@ class SnapshotAndAggregateTests(TestCase):
 
         self.assertEqual(summary["seller_comparison"][0]["snapshot_coverage"]["value"], 0.6)
         self.assertEqual(summary["seller_comparison"][0]["priority_percentile_coverage"]["value"], 0.6)
-        self.assertEqual(summary["coaching_matrix"]["sellers"], [])
+        self.assertEqual(summary["historical_priority_profile"]["sellers"], [])
         self.assertEqual(
-            summary["coaching_matrices"]["priority"]["build_up"]["coverage"]["value"],
+            summary["historical_priority_profile"]["build_up"]["coverage"]["value"],
             0.6,
         )
         self.assertEqual(
-            summary["coaching_matrices"]["priority"]["build_up"]["minimum_coverage"],
+            summary["historical_priority_profile"]["build_up"]["minimum_coverage"],
             0.7,
-        )
-        self.assertEqual(
-            summary["coaching_matrices"]["priority"]["axes"]["x"]["key"],
-            "order_10d",
         )
         self.assertIn(
             "priority_percentile_coverage_below_70",
-            summary["coaching_matrix"]["insufficient_sample"][0]["reasons"],
-        )
-
-    def test_priority_matrix_sample_uses_live_order_denominator(self):
-        users = [
-            {"user_name": seller, "active": "Y", "admin": "N"}
-            for seller in ("alice", "bob")
-        ]
-        rows = [
-            activity(
-                f"{seller}-{index}", "2026-08-16 10:00",
-                seller=seller,
-                analytics_snapshot_version=ANALYTICS_SNAPSHOT_VERSION,
-                priority_snapshot_quality="exact",
-                priority_percentile_at_contact="80",
-                priority_percentile_basis_at_contact=PRIORITY_PERCENTILE_BASIS,
-            )
-            for seller in ("alice", "bob")
-            for index in range(10)
-        ]
-
-        matrix = self.summary(rows, users=users)["coaching_matrix"]
-
-        self.assertTrue(matrix["available"])
-        self.assertEqual(matrix["axes"]["x"]["key"], "order_10d")
-        self.assertEqual(
-            {item["order_10d"]["denominator"] for item in matrix["sellers"]},
-            {10},
-        )
-        self.assertEqual(
-            {
-                item["order_10d"]["waiting_outcome_count"]
-                for item in matrix["sellers"]
-            },
-            {10},
-        )
-        self.assertEqual(
-            {item["order_10d_comparable"]["denominator"] for item in matrix["sellers"]},
-            {0},
+            summary["historical_priority_profile"]["insufficient_sample"][0]["reasons"],
         )
 
     def test_api_model_exposes_definitions_and_deterministic_coaching_cards(self):
