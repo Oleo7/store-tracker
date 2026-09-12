@@ -25,6 +25,8 @@ const viewport = mode === "mobile"
       return { ok: response.ok, body: await response.text() };
     });
     if (!login.ok) throw new Error(`${mode}: harness login failed: ${login.body}`);
+    const reset = await page.evaluate(async () => (await fetch("/__test__/priority-profile?reset=1", { method: "POST" })).ok);
+    if (!reset) throw new Error("priority fixture reset failed");
     const browserErrors = [];
     let summaryRequestCount = 0;
     page.on("console", message => {
@@ -165,7 +167,7 @@ const viewport = mode === "mobile"
     const sectionHeadings = await page.locator("#sc-dashboard-content > .sc-section > .sc-section-heading h2").allInnerTexts();
     const teamComparisonPosition = sectionHeadings.indexOf("Teamjämförelse");
     const trendPosition = sectionHeadings.indexOf("10-dagarskonvertering – trend");
-    const matricesPosition = sectionHeadings.indexOf("Teamets prioriteringsmatris");
+    const matricesPosition = sectionHeadings.indexOf("Historiskt prioritetsfokus");
     if (!(teamComparisonPosition === 0 && sectionHeadings[1] === "Coachningskort" && teamComparisonPosition + 2 === trendPosition && trendPosition + 1 === matricesPosition)) {
       throw new Error(`${mode}: long-term trend is in the wrong section order: ${JSON.stringify(sectionHeadings)}`);
     }
@@ -180,7 +182,7 @@ const viewport = mode === "mobile"
     ]) {
       if (!trendCopy.includes(expected)) throw new Error(`${mode}: missing trend explanation: ${expected}`);
     }
-    if (await page.locator(".sc-matrix-tabs").count()) {
+    if (await page.locator(".sc-matrix, .sc-bubble, .sc-matrix-tabs").count()) {
       throw new Error(`${mode}: removed sales/priority matrix tabs still render`);
     }
     const orderPanel = trendSection.locator("#sc-team-trend-panel-order");
@@ -448,8 +450,6 @@ const viewport = mode === "mobile"
       ".sc-team-chart h3",
       ".sc-comparison-table thead th",
       ".sc-team-trend-panel h3",
-      ".sc-matrix-x-axis-label",
-      ".sc-matrix-y-axis-label",
     ].join(", "));
     for (const key of ["visits", "followup", "channels"]) {
       await page.locator(`[data-diagnostic-tab="${key}"]`).click();
@@ -519,7 +519,7 @@ const viewport = mode === "mobile"
       }
     }
     if (mode === "mobile") {
-      const matrixScroller = page.locator(".sc-matrix-wrap").first();
+      const matrixScroller = page.locator(".sc-priority-scroll").first();
       if (await matrixScroller.count()) {
         await matrixScroller.scrollIntoViewIfNeeded();
         if (!(await matrixScroller.isVisible())) throw new Error("mobile: matrix scroller missing");
@@ -572,29 +572,12 @@ const viewport = mode === "mobile"
         throw new Error(`${mode}: removed comparable UI copy is visible: ${removed}`);
       }
     }
-    const matrixSection = page.locator(".sc-section", { hasText: "Teamets prioriteringsmatris" }).first();
-    if (!(await matrixSection.isVisible()) || !(await matrixSection.innerText()).includes("Kontakt – order inom 10 dagar")) {
-      throw new Error(`${mode}: priority matrix is missing or uses the wrong x-axis`);
-    }
-    if (await matrixSection.locator("[data-metric-definition]").count()) {
-      throw new Error(`${mode}: protected priority-matrix markup contains definition metadata`);
-    }
-    if (await matrixSection.locator('.sc-matrix[role="img"]').count()) {
-      const matrixInteractions = await matrixSection.locator('.sc-matrix[role="img"] .sc-bubble').evaluateAll(bubbles => bubbles.map(bubble => ({
-        tagName: bubble.tagName,
-        seller: bubble.getAttribute("data-seller"),
-        title: bubble.getAttribute("title"),
-        ariaLabel: bubble.getAttribute("aria-label"),
-      })));
-      if (!matrixInteractions.length || matrixInteractions.some(item => item.tagName !== "BUTTON" || !item.seller || !item.title || item.title !== item.ariaLabel)) {
-        throw new Error(`${mode}: protected priority-matrix structure or seller interactions changed`);
-      }
-    } else {
-      const buildUpText = await matrixSection.locator(".sc-priority-build-up").innerText();
-      if (!buildUpText.includes("Historisk prioriteringsdata byggs upp.") || !buildUpText.includes("Matrisen aktiveras vid minst")) {
-        throw new Error(`${mode}: protected priority-matrix build-up state changed: ${buildUpText}`);
-      }
-    }
+    const profileSection = page.locator('.sc-priority-profile');
+    const buildUpText = await profileSection.locator('.sc-priority-build-up').innerText();
+    if (!buildUpText.includes('Historisk prioriteringsdata byggs upp.') || !buildUpText.includes('10 jämförbara historiska kontakter') || !buildUpText.includes('70 %')) throw new Error('missing profile build-up explanation');
+    if ((await profileSection.innerText()).includes('order inom 10 dagar')) throw new Error('order metric leaked into priority profile');
+    if (await profileSection.locator('.sc-priority-median-track').count()) throw new Error('insufficient history fabricated median');
+    await profileSection.screenshot({ path: `sales-coaching-priority-insufficient-${mode}.png` });
     if (bodyText.includes("Nästa bästa kunder")) {
       throw new Error(`${mode}: operational customer list leaked into sales coaching`);
     }
@@ -655,6 +638,50 @@ const viewport = mode === "mobile"
       throw new Error(`${mode}: custom direct-link period was not restored`);
     }
     await assertTeamFirst();
+    const seeded = await page.evaluate(async () => (await fetch('/__test__/priority-profile', { method: 'POST' })).ok);
+    if (!seeded) throw new Error('profile fixture setup failed');
+    await page.goto('http://127.0.0.1:5065/?sales_coaching=1&period=4&seller=olle', { waitUntil: 'networkidle' });
+    await page.locator('.sc-priority-row').first().waitFor();
+    const rows = page.locator('.sc-priority-row');
+    const sellers = await rows.evaluateAll(items => items.map(item => item.dataset.profileSeller));
+    if (JSON.stringify(sellers) !== JSON.stringify(['olle', 'viewer', 'sofia'])) throw new Error(`wrong priority sort: ${sellers}`);
+    const focus = await rows.locator('.sc-priority-focus').allTextContents();
+    const samples = await rows.locator('.sc-priority-sample').allTextContents();
+    const coverage = await rows.locator('.sc-priority-coverage').allTextContents();
+    if (JSON.stringify(focus) !== JSON.stringify(['60 %', '40 %', '20 %']) || JSON.stringify(samples) !== JSON.stringify(['35', '10', '10']) || coverage.some(text => text !== '100 %')) throw new Error('incorrect priority values');
+    const geometry = await page.locator('.sc-priority-profile').evaluate(section => {
+      const bars = [...section.querySelectorAll('.sc-priority-bar')];
+      const line = section.querySelector('.sc-priority-median');
+      const box = line.getBoundingClientRect();
+      return {
+        sums: bars.map(bar => [...bar.children].reduce((sum, band) => sum + parseFloat(band.style.width), 0)),
+        median: line.style.getPropertyValue('--median'),
+        aligned: bars.every(bar => Math.abs(bar.getBoundingClientRect().left - box.left) < 1 && Math.abs(bar.getBoundingClientRect().width - box.width) < 1),
+        valuesRight: [...section.querySelectorAll('.sc-priority-row')].every(row => row.querySelector('.sc-priority-focus').getBoundingClientRect().left >= row.querySelector('.sc-priority-bar').getBoundingClientRect().right),
+      };
+    });
+    if (geometry.sums.some(value => Math.abs(value - 100) > .01) || geometry.median !== '40%' || !geometry.aligned || !geometry.valuesRight) throw new Error(`priority geometry invalid: ${JSON.stringify(geometry)}`);
+    if (!(await page.locator('.sc-priority-median-label').innerText()).includes('40 %')) throw new Error('median label missing');
+    for (const bar of await rows.locator('.sc-priority-bar').all()) {
+      const aria = await bar.getAttribute('aria-label');
+      if (!aria.includes('Topp 25 %') || !aria.includes('Mitten 50 %') || !aria.includes('Botten 25 %') || !aria.includes('Täckning')) throw new Error('incomplete profile accessible description');
+      await bar.focus();
+    }
+    await page.locator('.sc-priority-profile').screenshot({ path: `sales-coaching-priority-profile-${mode}.png` });
+    if (mode === 'mobile') {
+      const scroller = page.locator('.sc-priority-scroll');
+      const scrollable = await scroller.evaluate(element => element.scrollWidth > element.clientWidth);
+      if (!scrollable) throw new Error('profile needs local horizontal scrolling on mobile');
+      await scroller.evaluate(element => element.scrollLeft = element.scrollWidth);
+      await page.locator('.sc-priority-profile').screenshot({ path: `sales-coaching-priority-profile-right-${mode}.png` });
+      await scroller.evaluate(element => element.scrollLeft = 0);
+    }
+    if (await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth + 1)) throw new Error('priority profile causes page overflow');
+    await page.locator('.sc-priority-seller[data-seller="viewer"]').press('Enter');
+    await page.locator('.sc-priority-row.is-selected[data-profile-seller="viewer"]').waitFor();
+    if (await page.locator('#sc-seller').inputValue() !== 'viewer') throw new Error('profile seller selection failed');
+    if (JSON.stringify(await rows.evaluateAll(items => items.map(item => item.dataset.profileSeller))) !== JSON.stringify(sellers)) throw new Error('seller filter changed team profile');
+    if (browserErrors.length) throw new Error(`profile browser errors: ${JSON.stringify(browserErrors)}`);
     console.log(`${mode} sales-coaching smoke passed`);
   } finally {
     await browser.close();

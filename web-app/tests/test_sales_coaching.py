@@ -3036,5 +3036,98 @@ class Order10dCountTests(TestCase):
                 self.assertEqual(drilldown["total_count"], expected)
 
 
+class HistoricalPriorityProfileTests(TestCase):
+    def rows(self, seller, percentiles, **extra):
+        return [activity(
+            f"{seller}-{i}", "2026-08-16 10:00", seller=seller,
+            channel="Besök", result="Ej anträffbar",
+            analytics_snapshot_version=ANALYTICS_SNAPSHOT_VERSION,
+            priority_snapshot_quality="exact",
+            priority_percentile_at_contact=str(value) if value is not None else "",
+            priority_percentile_basis_at_contact=PRIORITY_PERCENTILE_BASIS,
+            **extra,
+        ) for i, value in enumerate(percentiles)]
+
+    def summary(self, rows, **filters):
+        return build_sales_coaching_summary(
+            activities=rows, customers=CUSTOMERS,
+            users=[{"user_name": name, "active": "Y"} for name in sorted({r["sales_user_name"] for r in rows})],
+            order_rows=[], start="2026-08-01", end="2026-08-20",
+            generated_at="2026-08-20 12:00", **filters,
+        )
+
+    def test_bands_boundaries_sorting_median_and_no_order_dependency(self):
+        rows = self.rows("olle", [0, 24.9, 25, 74.9, 75, 100, 80, 85, 90, 95])
+        rows += self.rows("sofia", [10] * 10) + self.rows("viewer", [80] * 4 + [50] * 16)
+        summary = self.summary(rows)
+        profile = summary["historical_priority_profile"]
+        self.assertTrue(profile["available"])
+        self.assertEqual([r["seller"] for r in profile["sellers"]], ["olle", "viewer", "sofia"])
+        self.assertEqual(profile["median"], .2)  # median of sellers, not pooled contacts
+        self.assertEqual(profile["build_up"]["coverage"]["value"], 1)
+        olle = profile["sellers"][0]
+        self.assertEqual([v["numerator"] for v in olle["distribution"].values()], [6, 2, 2])
+        for row in profile["sellers"]:
+            self.assertEqual(row["distribution"]["top"]["value"], row["priority_focus"]["value"])
+            self.assertEqual(sum(v["numerator"] for v in row["distribution"].values()), row["comparable_contact_count"])
+            self.assertAlmostEqual(sum(v["value"] for v in row["distribution"].values()), 1)
+        self.assertTrue(all(r["order_10d"]["denominator"] == 0 for r in summary["team_comparison"]["sellers"]))
+        self.assertNotIn("order_10d", repr(profile))
+        self.assertEqual(self.summary(rows, seller="sofia", channel="email")["historical_priority_profile"], profile)
+
+    def test_only_existing_comparable_observations_enter_bands(self):
+        rows = self.rows("olle", [80] * 10) + self.rows("sofia", [25] * 10)
+        invalid = self.rows("olle", [100] * 5)
+        for i, row in enumerate(invalid):
+            row["contact_id"] = f"invalid-{i}"
+        invalid[0]["priority_snapshot_quality"] = "late"
+        invalid[1]["priority_percentile_basis_at_contact"] = "legacy"
+        invalid[2]["analytics_snapshot_version"] = "v1"
+        invalid[3]["priority_percentile_at_contact"] = ""
+        invalid[4]["customer_id"] = "unknown"
+        invalid[4]["customer"] = "unknown"
+        profile = self.summary(rows + invalid)["historical_priority_profile"]
+        self.assertTrue(profile["available"])
+        self.assertEqual(profile["sellers"][0]["comparable_contact_count"], 10)
+        self.assertEqual(profile["sellers"][0]["priority_percentile_coverage"]["numerator"], 10)
+        self.assertLess(profile["sellers"][0]["priority_percentile_coverage"]["value"], 1)
+
+    def test_sample_and_coverage_thresholds_and_unavailable_states(self):
+        for count in (9, 10):
+            profile = self.summary(self.rows("olle", [80] * count) + self.rows("sofia", [25] * 10))["historical_priority_profile"]
+            self.assertEqual(profile["available"], count == 10)
+            if count == 9:
+                self.assertEqual(profile["sellers"], [])
+                self.assertIsNone(profile["median"])
+        for valid, expected in ((13, False), (14, True)):
+            rows = self.rows("olle", [80] * valid + [None] * (20 - valid))
+            rows += self.rows("sofia", [25] * 20)
+            profile = self.summary(rows)["historical_priority_profile"]
+            self.assertEqual(profile["available"], expected)
+        rows = self.rows("olle", [80] * 10) + self.rows("sofia", [25] * 10) + self.rows("viewer", [None] * 30)
+        self.assertFalse(self.summary(rows)["historical_priority_profile"]["available"])
+        self.assertFalse(self.summary(self.rows("olle", [80] * 10))["historical_priority_profile"]["available"])
+        self.assertFalse(self.summary([])["historical_priority_profile"]["available"])
+
+    def test_zero_and_full_focus_are_valid_and_filters_apply(self):
+        rows = self.rows("olle", [0] * 10, customer_segment_at_contact="A", lifecycle_at_contact="active") + self.rows("sofia", [100] * 10, customer_segment_at_contact="B", lifecycle_at_contact="new")
+        profile = self.summary(rows)["historical_priority_profile"]
+        self.assertEqual([r["priority_focus"]["value"] for r in profile["sellers"]], [1, 0])
+        self.assertEqual(profile["median"], .5)
+        self.assertFalse(self.summary(rows, segment="A")["historical_priority_profile"]["available"])
+        filtered = self.summary(rows, lifecycle="active")["historical_priority_profile"]
+        self.assertFalse(filtered["available"])
+        self.assertEqual(filtered["build_up"]["coverage"]["denominator"], 10)
+
+    def test_zero_and_full_team_medians_and_ties_are_valid(self):
+        for percentile in (0, 100):
+            rows = self.rows("sofia", [percentile] * 10) + self.rows("olle", [percentile] * 10)
+            profile = self.summary(rows)["historical_priority_profile"]
+            self.assertTrue(profile["available"])
+            self.assertEqual(profile["median"], percentile / 100)
+            self.assertEqual([row["seller"] for row in profile["sellers"]], ["olle", "sofia"])
+
+
+
 if __name__ == "__main__":
     main()

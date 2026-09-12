@@ -1218,6 +1218,11 @@ def _aggregate_period(rows, attribution):
         "v2_contacts": v2_contacts,
         "percentile_rows": percentile_rows,
         "top_priority": top_priority,
+        "priority_distribution": {
+            "top": _rate(len(top_priority), len(percentile_rows)),
+            "middle": _rate(sum(25 <= row["priority_percentile_at_contact"] < 75 for row in percentile_rows), len(percentile_rows)),
+            "bottom": _rate(sum(row["priority_percentile_at_contact"] < 25 for row in percentile_rows), len(percentile_rows)),
+        },
         "attributed": attributed,
         "rates": {
             "reach": _rate(
@@ -1404,6 +1409,7 @@ def _seller_comparison(rows, attribution, sellers):
                 len(aggregate["v2_contacts"]),
                 minimum=1,
             ),
+            "priority_distribution": aggregate["priority_distribution"],
             "priority_percentile_coverage": _rate(
                 len(aggregate["percentile_rows"]),
                 len(aggregate["v2_contacts"]),
@@ -1411,6 +1417,49 @@ def _seller_comparison(rows, attribution, sellers):
             ),
         })
     return result
+
+
+def _historical_priority_profile(sellers):
+    """Describe the existing comparable historical cohort without an order axis."""
+    eligible, insufficient = [], []
+    for item in sellers:
+        focus = item["priority_focus"]
+        coverage = item["priority_percentile_coverage"]
+        reasons = [reason for reason, applies in (
+            ("priority_denominator_zero", focus["denominator"] == 0),
+            ("priority_sample_below_10", 0 < focus["denominator"] < MIN_RATE_SAMPLE),
+            ("priority_percentile_coverage_below_70", coverage["value"] is None or coverage["value"] < MIN_PRIORITY_COVERAGE),
+        ) if applies]
+        if reasons:
+            insufficient.append({"seller": item["seller"], "reasons": reasons})
+        else:
+            eligible.append({
+                "seller": item["seller"],
+                "priority_focus": focus,
+                "comparable_contact_count": focus["denominator"],
+                "priority_percentile_coverage": coverage,
+                "distribution": item["priority_distribution"],
+            })
+    eligible.sort(key=lambda item: (-item["priority_focus"]["value"], normalize_key(item["seller"])))
+    coverage = _rate(
+        sum(item["priority_percentile_coverage"]["numerator"] for item in sellers),
+        sum(item["priority_percentile_coverage"]["denominator"] for item in sellers),
+        minimum=1,
+    )
+    available = coverage["value"] is not None and coverage["value"] >= MIN_PRIORITY_COVERAGE and len(eligible) >= 2
+    return {
+        "available": available,
+        "sellers": eligible if available else [],
+        "median": statistics.median(item["priority_focus"]["value"] for item in eligible) if available else None,
+        "build_up": {
+            "coverage": coverage,
+            "minimum_coverage": MIN_PRIORITY_COVERAGE,
+            "minimum_contacts": MIN_RATE_SAMPLE,
+            "comparable_seller_count": len(eligible),
+            "required_seller_count": 2,
+        },
+        "insufficient_sample": insufficient,
+    }
 
 
 def _sufficient_median(sellers, metric):
@@ -2342,6 +2391,7 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
             },
         },
         "team_10d_trends": team_10d_trends,
+        "historical_priority_profile": _historical_priority_profile(seller_comparison),
         "coaching_matrices": {"priority": priority_matrix},
         "coaching_matrix": coaching_matrix,
         "funnel": {
