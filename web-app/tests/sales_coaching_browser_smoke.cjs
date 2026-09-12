@@ -39,7 +39,14 @@ const viewport = mode === "mobile"
       waitUntil: "networkidle",
     });
     await page.locator("#sales-coaching-dashboard:not([hidden])").waitFor();
-    await page.locator(".sc-kpi-card").first().waitFor();
+    await page.locator(".sc-comparison-table").waitFor();
+    const assertTeamFirst = async () => {
+      if (await page.locator('#sc-kpi-title, .sc-kpi-grid, .sc-kpi-card, [data-kpi-key]').count()) throw new Error(`${mode}: removed coaching overview still renders`);
+      const firstSection = page.locator('#sc-dashboard-content > .sc-section').first();
+      if (await firstSection.getAttribute('aria-labelledby') !== 'sc-team-title') throw new Error(`${mode}: Teamjämförelse is not first`);
+    };
+    await assertTeamFirst();
+    await page.locator('#sales-coaching-dashboard').screenshot({ path: `sales-coaching-team-first-${mode}.png` });
     if (await page.locator(".sc-filter-primary .sc-field:visible").count() !== 2) {
       throw new Error(`${mode}: Period and Säljare are not the only initially visible filter fields`);
     }
@@ -70,97 +77,29 @@ const viewport = mode === "mobile"
     if (await page.locator(".sc-quality-status").count()) {
       throw new Error(`${mode}: removed top data-quality row still renders`);
     }
-    const coachingIntro = await page.locator("#sc-kpi-title + p").innerText();
-    if (coachingIntro.trim() !== "Procentsatser bedöms först när underlaget är minst 10.") {
-      throw new Error(`${mode}: coaching overview uses the wrong sample-size copy: ${coachingIntro}`);
+    const infoButtons = page.locator('.sc-comparison-table [data-sc-action="metric-info"]');
+    if (await infoButtons.count() !== 7) {
+      throw new Error(`${mode}: expected seven team metric information controls`);
     }
-    const kpiCount = await page.locator(".sc-kpi-card").count();
-    if (kpiCount !== 5) throw new Error(`${mode}: expected 5 KPI cards, got ${kpiCount}`);
-    const expectedDenominators = [
-      "analyserbara besök/telefonsamtal",
-      "nådda besök/telefonsamtal",
-      "alla berättigade nådda mänskliga kontakter med säker kundidentitet",
-    ];
-    const denominatorText = await page.locator(".sc-kpi-denominator").allInnerTexts();
-    for (const expected of expectedDenominators) {
-      if (!denominatorText.includes(expected)) {
-        throw new Error(`${mode}: missing KPI denominator explanation: ${expected}`);
-      }
-    }
-    const infoButtons = page.locator('.sc-kpi-info[data-sc-action="metric-info"]');
-    if (await infoButtons.count() !== 5) {
-      throw new Error(`${mode}: expected five KPI information controls`);
-    }
-    for (let index = 0; index < 5; index += 1) {
+    for (let index = 0; index < 7; index += 1) {
       const info = infoButtons.nth(index);
       await info.focus();
       await info.press("Enter");
       const explanationId = await info.getAttribute("aria-controls");
       const explanation = page.locator(`#${explanationId}`);
       if (!(await explanation.isVisible()) || !(await explanation.innerText()).trim()) {
-        throw new Error(`${mode}: KPI explanation ${index + 1} did not open`);
+        throw new Error(`${mode}: Team metric explanation ${index + 1} did not open`);
       }
       if (await info.getAttribute("aria-expanded") !== "true") {
-        throw new Error(`${mode}: KPI explanation ${index + 1} has wrong expanded state`);
+        throw new Error(`${mode}: Team metric explanation ${index + 1} has wrong expanded state`);
       }
       if (await page.locator("#sc-drawer-backdrop").count()) {
-        throw new Error(`${mode}: KPI information opened drilldown`);
+        throw new Error(`${mode}: Team metric information opened drilldown`);
       }
       await info.press("Space");
       if (await explanation.isVisible()) {
-        throw new Error(`${mode}: KPI explanation ${index + 1} did not close`);
+        throw new Error(`${mode}: Team metric explanation ${index + 1} did not close`);
       }
-    }
-    const activityLabel = await page.locator('.sc-kpi-card[data-kpi-key="human_activities"] .sc-kpi-label').innerText();
-    if (activityLabel.trim() !== "Aktiviteter") {
-      throw new Error(`${mode}: activity KPI has the wrong label: ${activityLabel}`);
-    }
-    const contactOrderLabel = await page.locator('.sc-kpi-card[data-kpi-key="order_10d"] .sc-kpi-label').innerText();
-    if (contactOrderLabel.trim() !== "Kontakt – order inom 10 dagar") {
-      throw new Error(`${mode}: contact-order KPI has the wrong label: ${contactOrderLabel}`);
-    }
-    const contactOrderCard = page.locator('.sc-kpi-card[data-kpi-key="order_10d"]');
-    const contactOrderText = await contactOrderCard.innerText();
-    if (!contactOrderText.includes("20 %") || !contactOrderText.includes("7 av 35") || !contactOrderText.includes("alla berättigade nådda mänskliga kontakter med säker kundidentitet")) {
-      throw new Error(`${mode}: provisional contact KPI does not use the full eligible cohort: ${contactOrderText}`);
-    }
-    if (!contactOrderText.includes("Preliminärt · 22 väntar på 10-dagarsutfall")) {
-      throw new Error(`${mode}: contact pending copy/count is wrong: ${contactOrderText}`);
-    }
-    if (contactOrderText.includes("Föregående period") || !contactOrderText.includes("Median övriga säljare")) {
-      throw new Error(`${mode}: pending contact KPI must suppress previous period but keep peer median: ${contactOrderText}`);
-    }
-    if (contactOrderText.includes("40 %") || contactOrderText.includes("Jämförbart")) {
-      throw new Error(`${mode}: removed comparable contact outcome is still visible: ${contactOrderText}`);
-    }
-    const countCard = page.locator('.sc-kpi-card[data-kpi-key="order_10d_count"]');
-    const countValue = await countCard.locator('.sc-kpi-value').innerText();
-    if (countValue !== "7" || (await countCard.innerText()).includes("%")) {
-      throw new Error(`${mode}: count KPI must show exactly 7 without percent`);
-    }
-    const kpiKeys = await page.locator('.sc-kpi-card').evaluateAll(cards => cards.map(card => card.dataset.kpiKey));
-    if (JSON.stringify(kpiKeys) !== JSON.stringify(["human_activities", "reach", "positive_dialogue", "order_10d_count", "order_10d"])) {
-      throw new Error(`${mode}: wrong KPI order: ${JSON.stringify(kpiKeys)}`);
-    }
-    if (!(await countCard.innerText()).includes("Preliminärt · 22 väntar")) throw new Error("count lost pending outcome copy");
-    await contactOrderCard.locator(".sc-kpi-main").click();
-    await page.locator("#sc-drawer-backdrop").waitFor();
-    await page.locator("#sc-drawer-content .sc-drawer-meta").waitFor();
-    const orderDrawerText = await page.locator("#sc-drawer-content").innerText();
-    if (!orderDrawerText.includes("Visar 35 av 35") || !orderDrawerText.includes("SMOKE-ORDER-1") || !orderDrawerText.includes("Väntar på utfall")) {
-      throw new Error(`${mode}: eligible contact drilldown does not match KPI denominator/outcomes: ${orderDrawerText}`);
-    }
-    await page.locator("[data-sc-drawer-close]").click();
-    await countCard.locator(".sc-kpi-main").click();
-    await page.locator("#sc-drawer-backdrop").waitFor();
-    await page.locator("#sc-drawer-content .sc-drawer-meta").waitFor();
-    const positiveDrawerText = await page.locator("#sc-drawer-content").innerText();
-    if (!positiveDrawerText.includes("Visar 7 av 7") || !positiveDrawerText.includes("SMOKE-ORDER-1") || !(await page.locator("#sc-drawer-title").innerText()).includes("Antal order inom 10 dagar")) {
-      throw new Error(`${mode}: eligible positive drilldown does not match KPI denominator/outcomes: ${positiveDrawerText}`);
-    }
-    await page.locator("[data-sc-drawer-close]").click();
-    if (await page.locator(".sc-kpi-comparable").count()) {
-      throw new Error(`${mode}: removed comparable KPI row still renders`);
     }
     const closingStrength = page.locator(".sc-coaching-card", {
       hasText: "Stark positiv-till-order-konvertering",
@@ -179,23 +118,6 @@ const viewport = mode === "mobile"
       throw new Error(`${mode}: strength card drilldown does not reconcile 7/28: ${closingDrawerText}`);
     }
     await page.locator("[data-sc-drawer-close]").click();
-    const statusLabels = await page.locator(".sc-kpi-card .sc-status").allInnerTexts();
-    if (statusLabels.some(label => label.trim() !== "Inte tillräckligt underlag")) {
-      throw new Error(`${mode}: a sufficient KPI status badge is still visible`);
-    }
-    const positiveCard = page.locator('.sc-kpi-card[data-kpi-key="positive_dialogue"]');
-    const positiveEvidence = await positiveCard.locator(".sc-kpi-evidence").innerText();
-    if (!positiveEvidence.includes("nådda besök/telefonsamtal")) {
-      throw new Error(`${mode}: positive dialogue uses the wrong denominator copy`);
-    }
-    const benchmark = await positiveCard.locator(".sc-kpi-comparison").innerText();
-    if (!benchmark.includes("Median övriga säljare")) {
-      throw new Error(`${mode}: self-excluding benchmark label is missing`);
-    }
-    await positiveCard.locator(".sc-kpi-main").click();
-    await page.locator("#sc-drawer-backdrop").waitFor();
-    await page.locator("[data-sc-drawer-close]").click();
-
     const teamHeaders = await page.locator(".sc-comparison-table thead th").allInnerTexts();
     const normalizedTeamHeaders = teamHeaders.map(text => text.toLocaleLowerCase("sv-SE"));
     const positiveOrderIndex = normalizedTeamHeaders.findIndex(text => text.startsWith("positiv dialog → order inom 10 dagar"));
@@ -244,7 +166,7 @@ const viewport = mode === "mobile"
     const teamComparisonPosition = sectionHeadings.indexOf("Teamjämförelse");
     const trendPosition = sectionHeadings.indexOf("10-dagarskonvertering – trend");
     const matricesPosition = sectionHeadings.indexOf("Teamets prioriteringsmatris");
-    if (!(teamComparisonPosition >= 0 && teamComparisonPosition + 1 === trendPosition && trendPosition + 1 === matricesPosition)) {
+    if (!(teamComparisonPosition === 0 && sectionHeadings[1] === "Coachningskort" && teamComparisonPosition + 2 === trendPosition && trendPosition + 1 === matricesPosition)) {
       throw new Error(`${mode}: long-term trend is in the wrong section order: ${JSON.stringify(sectionHeadings)}`);
     }
     const trendSection = page.locator(".sc-team-10d-trend-section");
@@ -308,7 +230,6 @@ const viewport = mode === "mobile"
     if (countLabels[0] !== "0" || countLabels.some(label => !/^\d+$/.test(label)) || Number(countLabels.at(-1)) !== 6) throw new Error(`incorrect dynamic count axis: ${countLabels}`);
     const countPoints = await countPanel.locator('.sc-team-order-point').evaluateAll(points => points.map(point => point.getAttribute('aria-label')));
     if (!countPoints.some(text => text.includes(': 0 order inom 10 dagar')) || !countPoints.some(text => text.includes(': 4 order inom 10 dagar')) || countPoints.some(text => text.includes('%') || text.includes(' av '))) throw new Error('count points must include zero and integer outcome labels');
-    await page.locator('.sc-kpi-grid').screenshot({ path: `sales-coaching-kpis-${mode}.png` });
     await page.locator('.sc-comparison-table').evaluate(table => table.parentElement.scrollLeft = 0);
     await page.locator('.sc-comparison-table').locator('..').screenshot({ path: `sales-coaching-team-${mode}.png` });
     await trendSection.screenshot({ path: `sales-coaching-count-${mode}.png` });
@@ -524,7 +445,6 @@ const viewport = mode === "mobile"
       labels.forEach(label => visibleMetricLabels.add(label));
     };
     await collectVisibleMetricLabels([
-      ".sc-kpi-label",
       ".sc-team-chart h3",
       ".sc-comparison-table thead th",
       ".sc-team-trend-panel h3",
@@ -620,16 +540,7 @@ const viewport = mode === "mobile"
     if (await page.locator("#sc-more-filters-panel").isVisible()) {
       throw new Error(`${mode}: additional filters did not close after changing channel`);
     }
-    await page.locator('.sc-kpi-card[data-kpi-key="positive_dialogue"] .sc-kpi-evidence').waitFor();
-    const emailPositive = await page.locator('.sc-kpi-card[data-kpi-key="positive_dialogue"]').innerText();
-    if (!emailPositive.includes("Positiv dialog mäts endast för Besök och Telefon.")) {
-      throw new Error(`${mode}: email filter fabricated a positive-dialogue rate`);
-    }
-    const emailCountValue = await page.locator('.sc-kpi-card[data-kpi-key="order_10d_count"] .sc-kpi-value').innerText();
-    if (emailCountValue !== "0") throw new Error(`${mode}: empty email cohort must have count zero`);
-    if (await page.locator('.sc-kpi-card[data-kpi-key="order_10d"] .sc-kpi-secondary').count()) {
-      throw new Error(`${mode}: zero pending outcomes still render a pending line`);
-    }
+    await assertTeamFirst();
     if (await page.locator(".sc-coaching-card .sc-rate-pending").count()) {
       throw new Error(`${mode}: zero pending outcomes still render on a coaching card`);
     }
@@ -743,6 +654,7 @@ const viewport = mode === "mobile"
     if (await page.locator("#sc-period").inputValue() !== "custom" || !(await page.locator("#sc-custom-dates").isVisible())) {
       throw new Error(`${mode}: custom direct-link period was not restored`);
     }
+    await assertTeamFirst();
     console.log(`${mode} sales-coaching smoke passed`);
   } finally {
     await browser.close();

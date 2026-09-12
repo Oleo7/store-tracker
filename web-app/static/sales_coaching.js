@@ -512,52 +512,6 @@
     return `<section class="sc-section sc-details-section" aria-labelledby="sc-details-title"><details id="sc-quality-details"><summary id="sc-details-title"><span>Datakvalitet och definitioner</span><span class="sc-disclosure-icon" aria-hidden="true"></span></summary><div class="sc-details-content"><div class="sc-details-grid"><div><h3>Datakvalitet och täckning</h3><ul class="sc-quality-metrics">${qualityMetric("secure_customer_identity", percent(core.secure_customer_identity?.value), rateEvidence(core.secure_customer_identity))}${qualityMetric("order_attribution_identity_coverage", percent(core.order_attribution_identity_coverage?.value), rateEvidence(core.order_attribution_identity_coverage))}${qualityMetric("standardized_activity", percent(core.standardized_activity?.value), rateEvidence(core.standardized_activity))}${qualityMetric("flagged_activity_rows", number(quality.core_flagged_activity_rows))}${qualityMetric("quality_issue_count", number(quality.quality_issue_count))}${qualityMetric("waiting_outcome", number(quality.waiting_outcome_count))}</ul><button type="button" data-drilldown="data_quality" data-metric-definition="flagged_activity_rows">Visa kvalitetsunderlag</button></div><div><h3>Historisk analysmognad</h3><ul class="sc-quality-metrics">${qualityMetric("priority_percentile_coverage", percent(comparable.value), rateEvidence(comparable))}${qualityMetric("exact_snapshots", number(history.exact_snapshot_count), rateEvidence(exact))}${qualityMetric("late_snapshots", number(history.late_snapshot_count))}${qualityMetric("operationally_suppressed", number(history.operationally_suppressed_count))}</ul><p>Kontaktmått använder de kundvärden som sparades vid kontakten. Planeringsmått använder kundens aktuella värden. Operativa undantag är inte i sig datakvalitetsfel.</p></div></div>${metricDefinitionsMarkup()}</div></details></section>`;
   }
 
-  function kpiMarkup(key, metric) {
-    const isRate = metric.metric_type === "rate";
-    const value = isRate ? percent(metric.value) : number(metric.value);
-    const definition = metricDefinition(key, metric);
-    const info = definitionParts(key, `kpi-${key}`, metric, "sc-kpi-info sc-metric-info");
-    const selectedChannelUnavailable = state.filters.channel !== "all"
-      && metric.status === "not_computable"
-      && Array.isArray(definition.channels)
-      && !definition.channels.includes(state.filters.channel);
-    const evidence = isRate
-      ? selectedChannelUnavailable
-        ? `<span class="sc-kpi-evidence">${escapeHtml(definition.not_computable_text || statusLabel(metric.status))}</span>`
-        : `<span class="sc-kpi-evidence"><span>${rateEvidence(metric)}</span><span class="sc-kpi-denominator">${escapeHtml(definition.denominator_label || "kontakter")}</span></span>`
-      : "";
-    const status = metric.status === "small_sample"
-      ? '<span class="sc-status">Inte tillräckligt underlag</span>'
-      : "";
-    let secondary = "";
-    if (key === "human_activities") {
-      secondary = `${metricName("unique_customers", "Unika kunder")} ${number(metric.unique_customers)} · ${metricName("visits", "Besök")} ${number(metric.channel_mix?.visit)} · ${metricName("phone", "Telefon")} ${number(metric.channel_mix?.phone)} · ${metricName("manual_email", "Manuellt mejl")} ${number(metric.channel_mix?.email)}`;
-    }
-    if (["order_10d_count", "positive_to_order_10d", "order_10d"].includes(key) && !selectedChannelUnavailable) {
-      secondary = Number(metric.waiting_outcome_count) > 0
-        ? `Preliminärt · ${number(metric.waiting_outcome_count)} väntar på 10-dagarsutfall`
-        : "";
-    }
-    return `
-      <article class="sc-kpi-card" data-kpi-key="${escapeHtml(key)}" data-metric-definition="${escapeHtml(key)}">
-        <button type="button" class="sc-kpi-main" data-drilldown="${escapeHtml(metric.drilldown_metric)}" data-metric-definition="${escapeHtml(key)}" aria-label="${escapeHtml(metric.label)}: ${value}">
-          <span class="sc-kpi-header"><span class="sc-kpi-label">${escapeHtml(metric.label)}</span></span>
-          <span class="sc-kpi-value">${value}</span>
-          ${evidence}
-          ${status}
-          <span class="sc-kpi-comparison">${escapeHtml(comparisonText(metric))}</span>
-          ${secondary ? `<span class="sc-kpi-secondary">${secondary}</span>` : ""}
-        </button>
-        ${info.button}
-        ${info.explanation}
-      </article>`;
-  }
-
-  function kpisMarkup(kpis) {
-    const order = ["human_activities", "reach", "positive_dialogue", "order_10d_count", "order_10d"];
-    return `<section class="sc-section" aria-labelledby="sc-kpi-title"><div class="sc-section-heading"><div><h2 id="sc-kpi-title">Coachningsöversikt</h2><p>Procentsatser bedöms först när underlaget är minst 10.</p></div></div><div class="sc-kpi-grid">${order.map(key => kpiMarkup(key, kpis[key])).join("")}</div></section>`;
-  }
-
   function sellerSelected(seller) {
     return state.filters.seller && state.filters.seller === seller;
   }
@@ -845,9 +799,8 @@
     const target = document.getElementById("sc-dashboard-content");
     target.removeAttribute("aria-busy");
     target.innerHTML = [
-      kpisMarkup(data.kpis || {}),
-      coachingMarkup(data.coaching_cards || []),
       teamComparisonMarkup(data.team_comparison || { sellers: [] }),
+      coachingMarkup(data.coaching_cards || []),
       teamTrendsMarkup(data.team_10d_trends || { metrics: {} }),
       priorityMatrixMarkup(data.coaching_matrix || data.coaching_matrices?.priority),
       diagnosticsMarkup(data),
