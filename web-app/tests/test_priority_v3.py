@@ -57,7 +57,7 @@ class FirstOrderPhase3Tests(TestCase):
             60: ("first_order_reorder", 88),
             61: ("first_order_reorder", 60),
             90: ("first_order_reorder", 60),
-            91: ("strategic_contact_due", 60),
+            91: ("single_order_reactivation_due", 60),
         }
         for days, (trigger, timing) in expected.items():
             with self.subTest(days=days):
@@ -271,7 +271,7 @@ class DialogueAndStrategicPhase3Tests(TestCase):
             sku_order("B1", "B seed", "2026-07-01", 100, "b-seed", "B")
         ]
         high = selected(
-            priorities(high_customers, high_orders, today=today), "high-b"
+            priorities(high_customers, high_orders, today=today, scoring_version="v2.1"), "high-b"
         )
         self.assertGreaterEqual(high["priority_score"], 70)
         self.assertEqual(high["primary_trigger_type"], "strategic_contact_due")
@@ -319,8 +319,8 @@ class DialogueAndStrategicPhase3Tests(TestCase):
         )[0]
         self.assertEqual(
             reactivation["covered_trigger_keys"],
-            ["positive_dialogue_followup", "strategic_contact_due"],
+            ["strategic_contact_due"],
         )
         self.assertEqual(
-            reactivation["primary_trigger_type"], "positive_dialogue_followup"
+            reactivation["primary_trigger_type"], "strategic_contact_due"
         )

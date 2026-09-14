@@ -14,6 +14,8 @@ import time as clock
 import unicodedata
 from zoneinfo import ZoneInfo
 
+from commercial_orders import order_volume, commercial_order
+
 from sales_coaching_rules import (
     add_seller_benchmarks,
     build_seller_signals,
@@ -123,6 +125,15 @@ METRIC_DEFINITIONS = {
         "not_computable_text": "Positiv → order mäts endast för Besök och Telefon.",
         "window_days": ATTRIBUTION_WINDOW_DAYS,
         "drilldown_metric": "positive_to_order_10d",
+    },
+    "order_10d_count": {
+        "label": "Antal order inom 10 dagar",
+        "definition": "Antal berättigade nådda mänskliga kontakter i vald period som hittills har följts av en attribuerad order inom 0–10 dagar. Måttet är exakt täljaren i Kontakt – order inom 10 dagar. Varje kontakt räknas högst en gång.",
+        "metric_type": "count",
+        "unit": "orderutfall",
+        "channels": ["visit", "phone", "email"],
+        "window_days": ATTRIBUTION_WINDOW_DAYS,
+        "drilldown_metric": "converted_order_10d",
     },
     "order_10d": {
         "label": "Kontakt – order inom 10 dagar",
@@ -353,7 +364,7 @@ METRIC_DEFINITIONS = {
 }
 
 MAIN_KPI_KEYS = (
-    "human_activities", "reach", "positive_dialogue", "positive_to_order_10d",
+    "human_activities", "reach", "positive_dialogue", "order_10d_count",
     "order_10d",
 )
 
@@ -912,9 +923,9 @@ def group_logical_orders(order_rows, customers):
     for source_index, raw in enumerate(order_rows or ()):
         row = dict(raw)
         order_date = _date(row.get("Order date") or row.get("date"))
-        quantity = _number(row.get("Quantity"), 0) or 0
+        volume = order_volume(row)
         total = _number(row.get("Total"), 0) or 0
-        if order_date is None or (quantity <= 0 and total <= 0):
+        if order_date is None:
             continue
         identity_row = {
             "customer_id": row.get("customer_id"),
@@ -950,14 +961,20 @@ def group_logical_orders(order_rows, customers):
             "currency": currency,
             "total": 0.0,
             "dfp": 0.0,
+            "volume_missing": True,
             "source_rows": [],
         })
         group["date"] = min(group["date"], order_date)
         group["total"] += total
         group["source_rows"].append(source_index)
-        if normalize_key(row.get("Unit")) == "dfp":
-            group["dfp"] += quantity
-    orders = sorted(grouped.values(), key=lambda row: (row["date"], row["order_id"]))
+        if volume is not None:
+            group["dfp"] += volume
+            group["volume_missing"] = False
+    orders = sorted(
+        (row for row in grouped.values() if commercial_order(
+            row["total"], None if row["volume_missing"] else row["dfp"]
+        )), key=lambda row: (row["date"], row["order_id"])
+    )
     return {"orders": orders, "excluded": excluded}
 
 
@@ -1201,6 +1218,11 @@ def _aggregate_period(rows, attribution):
         "v2_contacts": v2_contacts,
         "percentile_rows": percentile_rows,
         "top_priority": top_priority,
+        "priority_distribution": {
+            "top": _rate(len(top_priority), len(percentile_rows)),
+            "middle": _rate(sum(25 <= row["priority_percentile_at_contact"] < 75 for row in percentile_rows), len(percentile_rows)),
+            "bottom": _rate(sum(row["priority_percentile_at_contact"] < 25 for row in percentile_rows), len(percentile_rows)),
+        },
         "attributed": attributed,
         "rates": {
             "reach": _rate(
@@ -1239,11 +1261,22 @@ def _comparison_dates(start, end):
     return start - timedelta(days=days), start - timedelta(days=1)
 
 
+def _order_10d_count(rate):
+    """Expose the existing contact conversion numerator, never order-row totals."""
+    return {
+        "metric_type": METRIC_DEFINITIONS["order_10d_count"]["metric_type"],
+        "unit": METRIC_DEFINITIONS["order_10d_count"]["unit"],
+        "value": rate["numerator"],
+        "status": "sufficient",
+        "waiting_outcome_count": rate.get("waiting_outcome_count", 0),
+    }
+
+
 def _team_10d_trends(
     activities, attribution, sellers, *, generated_date, selected_seller="",
     segment="all", lifecycle="all", weeks=TEAM_ORDER_TREND_WEEKS,
 ):
-    """Build both live 10-day rates over complete ISO contact weeks."""
+    """Build the count and both live 10-day rates over complete ISO contact weeks."""
     maturity_cutoff = generated_date - timedelta(days=ATTRIBUTION_WINDOW_DAYS)
     latest_week_end = maturity_cutoff - timedelta(
         days=(maturity_cutoff.weekday() - 6) % 7
@@ -1277,7 +1310,7 @@ def _team_10d_trends(
             (normalize_key(row.get("sales_user_name")), row.get("contact_week"))
         ].append(row)
 
-    metric_keys = ("order_10d", "positive_to_order_10d")
+    metric_keys = ("order_10d_count", "order_10d", "positive_to_order_10d")
     series_by_metric = {metric_key: [] for metric_key in metric_keys}
     for seller in sellers:
         seller_key = normalize_key(seller)
@@ -1288,6 +1321,13 @@ def _team_10d_trends(
                 attribution,
             )
             for metric_key in metric_keys:
+                if metric_key == "order_10d_count":
+                    points_by_metric[metric_key].append({
+                        "week": slot["week"],
+                        "period": dict(slot["period"]),
+                        **_order_10d_count(aggregate["rates"]["order_10d"]),
+                    })
+                    continue
                 rate = aggregate["rates"][metric_key]
                 points_by_metric[metric_key].append({
                     "week": slot["week"],
@@ -1315,6 +1355,7 @@ def _team_10d_trends(
         "metrics": {
             metric_key: {
                 "metric_key": metric_key,
+                "metric_type": METRIC_DEFINITIONS[metric_key]["metric_type"],
                 "series": series_by_metric[metric_key],
             }
             for metric_key in metric_keys
@@ -1358,6 +1399,7 @@ def _seller_comparison(rows, attribution, sellers):
             "order_10d_converted_contacts": len(aggregate["ordered_contacts"]),
             "attributed_orders": len(aggregate["attributed"]),
             "waiting_outcome_count": len(aggregate["waiting"]),
+            "order_10d_count": _order_10d_count(aggregate["rates"]["order_10d"]),
             **aggregate["rates"],
             "snapshot_coverage": _rate(
                 sum(
@@ -1367,6 +1409,7 @@ def _seller_comparison(rows, attribution, sellers):
                 len(aggregate["v2_contacts"]),
                 minimum=1,
             ),
+            "priority_distribution": aggregate["priority_distribution"],
             "priority_percentile_coverage": _rate(
                 len(aggregate["percentile_rows"]),
                 len(aggregate["v2_contacts"]),
@@ -1374,6 +1417,49 @@ def _seller_comparison(rows, attribution, sellers):
             ),
         })
     return result
+
+
+def _historical_priority_profile(sellers):
+    """Describe the existing comparable historical cohort without an order axis."""
+    eligible, insufficient = [], []
+    for item in sellers:
+        focus = item["priority_focus"]
+        coverage = item["priority_percentile_coverage"]
+        reasons = [reason for reason, applies in (
+            ("priority_denominator_zero", focus["denominator"] == 0),
+            ("priority_sample_below_10", 0 < focus["denominator"] < MIN_RATE_SAMPLE),
+            ("priority_percentile_coverage_below_70", coverage["value"] is None or coverage["value"] < MIN_PRIORITY_COVERAGE),
+        ) if applies]
+        if reasons:
+            insufficient.append({"seller": item["seller"], "reasons": reasons})
+        else:
+            eligible.append({
+                "seller": item["seller"],
+                "priority_focus": focus,
+                "comparable_contact_count": focus["denominator"],
+                "priority_percentile_coverage": coverage,
+                "distribution": item["priority_distribution"],
+            })
+    eligible.sort(key=lambda item: (-item["priority_focus"]["value"], normalize_key(item["seller"])))
+    coverage = _rate(
+        sum(item["priority_percentile_coverage"]["numerator"] for item in sellers),
+        sum(item["priority_percentile_coverage"]["denominator"] for item in sellers),
+        minimum=1,
+    )
+    available = coverage["value"] is not None and coverage["value"] >= MIN_PRIORITY_COVERAGE and len(eligible) >= 2
+    return {
+        "available": available,
+        "sellers": eligible if available else [],
+        "median": statistics.median(item["priority_focus"]["value"] for item in eligible) if available else None,
+        "build_up": {
+            "coverage": coverage,
+            "minimum_coverage": MIN_PRIORITY_COVERAGE,
+            "minimum_contacts": MIN_RATE_SAMPLE,
+            "comparable_seller_count": len(eligible),
+            "required_seller_count": 2,
+        },
+        "insufficient_sample": insufficient,
+    }
 
 
 def _sufficient_median(sellers, metric):
@@ -2150,6 +2236,7 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
                 ),
             },
         },
+        "order_10d_count": _order_10d_count(current["rates"]["order_10d"]),
         "reach": current["rates"]["reach"],
         "positive_dialogue": current["rates"]["positive_dialogue"],
         "positive_to_order_10d": {
@@ -2161,81 +2248,9 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
             "waiting_outcome_count": len(current["waiting"]),
         },
     }
-    for key in MAIN_KPI_KEYS:
+    for key in kpis:
         kpis[key].update(METRIC_DEFINITIONS[key])
     data_quality = _data_quality(rows, canonical_result, order_result, attribution)
-    comparable_sellers = [
-        item for item in seller_comparison
-        if item["order_10d"]["status"] == "sufficient"
-        and item["priority_focus"]["status"] == "sufficient"
-        and item["priority_percentile_coverage"]["value"] is not None
-        and item["priority_percentile_coverage"]["value"] >= MIN_PRIORITY_COVERAGE
-    ]
-    comparable_names = {item["seller"] for item in comparable_sellers}
-    team_priority_numerator = sum(
-        item["priority_percentile_coverage"]["numerator"]
-        for item in seller_comparison
-    )
-    team_priority_denominator = sum(
-        item["priority_percentile_coverage"]["denominator"]
-        for item in seller_comparison
-    )
-    team_priority_coverage = _rate(
-        team_priority_numerator, team_priority_denominator, minimum=1
-    )
-    priority_matrix_available = (
-        team_priority_coverage["value"] is not None
-        and team_priority_coverage["value"] >= MIN_PRIORITY_COVERAGE
-        and len(comparable_sellers) >= 2
-    )
-    priority_matrix_sellers = [
-        {**item, "sample_status": "sufficient"}
-        for item in comparable_sellers
-    ] if priority_matrix_available else []
-    priority_matrix = {
-        "type": "priority",
-        "available": priority_matrix_available,
-        "axes": {
-            "x": {
-                "key": "order_10d",
-                "label": "Kontakt – order inom 10 dagar",
-            },
-            "y": {"key": "priority_focus", "label": "Historiskt prioritetsfokus"},
-        },
-        "sellers": priority_matrix_sellers,
-        "medians": {
-            "order_10d": statistics.median(
-                item["order_10d"]["value"]
-                for item in comparable_sellers
-            ) if len(comparable_sellers) >= 2 else None,
-            "priority_focus": statistics.median(item["priority_focus"]["value"] for item in comparable_sellers) if len(comparable_sellers) >= 2 else None,
-        },
-        "build_up": {
-            "coverage": team_priority_coverage,
-            "minimum_coverage": MIN_PRIORITY_COVERAGE,
-            "comparable_seller_count": len(comparable_sellers),
-            "required_seller_count": 2,
-        },
-        "insufficient_sample": [
-            {
-                "seller": item["seller"],
-                "human_activities": item["human_activities"],
-                "order_denominator": item["order_10d"]["denominator"],
-                "priority_percentile_coverage": item["priority_percentile_coverage"],
-                "reasons": [
-                    reason for reason, applies in (
-                        ("order_denominator_zero", item["order_10d"]["denominator"] == 0),
-                        ("order_sample_below_10", 0 < item["order_10d"]["denominator"] < MIN_RATE_SAMPLE),
-                        ("priority_denominator_zero", item["priority_focus"]["denominator"] == 0),
-                        ("priority_sample_below_10", 0 < item["priority_focus"]["denominator"] < MIN_RATE_SAMPLE),
-                        ("priority_percentile_coverage_below_70", item["priority_percentile_coverage"]["value"] is None or item["priority_percentile_coverage"]["value"] < MIN_PRIORITY_COVERAGE),
-                    ) if applies
-                ],
-            }
-            for item in seller_comparison if item["seller"] not in comparable_names
-        ],
-    }
-    coaching_matrix = priority_matrix
     if seller and selected_seller_metrics:
         signal_metrics = {
             **selected_seller_metrics,
@@ -2304,8 +2319,7 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
             },
         },
         "team_10d_trends": team_10d_trends,
-        "coaching_matrices": {"priority": priority_matrix},
-        "coaching_matrix": coaching_matrix,
+        "historical_priority_profile": _historical_priority_profile(seller_comparison),
         "funnel": {
             "attempts": len(current["sync"]),
             "reached": len(current["sync_reached"]),

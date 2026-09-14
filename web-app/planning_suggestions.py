@@ -54,6 +54,7 @@ SUGGESTION_COLUMNS = [
     "strategic_index_at_creation",
     "recommendation_eligible_at_creation",
     "suppression_reason_at_creation",
+    "history_index_at_creation",
 ]
 
 SCORE_EVENTS_SHEET = "score_events"
@@ -84,6 +85,7 @@ SCORE_EVENT_COLUMNS = [
     "resolved_by_type",
     "resolved_by_id",
     "client_request_id",
+    "history_index",
 ]
 
 ACTIVE_STATUSES = {"pending", "snoozed", "planned"}
@@ -184,7 +186,15 @@ def _ensure_columns(sheet, columns, values_reader=None, invalidator=None):
     missing = [column for column in columns if column not in headers]
     if missing:
         start = len(headers) + 1
-        sheet.insert_cols([[column] for column in missing], col=start)
+        end = len(headers) + len(missing)
+        # Grow the grid before writing: insert_cols at col_count + 1 is invalid
+        # in Sheets and insertion would shift any existing cells to the right.
+        if sheet.col_count < end:
+            sheet.resize(cols=end)
+        sheet.batch_update([{
+            "range": f"{rowcol_to_a1(1, start)}:{rowcol_to_a1(1, end)}",
+            "values": [missing],
+        }], value_input_option="RAW")
         headers.extend(missing)
         if invalidator:
             invalidator(sheet)
@@ -287,6 +297,7 @@ def public_suggestion(row, live_candidate=None):
         ),
         "can_call": bool(candidate.get("can_call", False)),
         "phone_tel": _text(candidate.get("phone_tel")),
+        "contact_context": candidate.get("contact_context") or {},
         "trigger_key": _text(
             candidate.get("primary_trigger_key") or row.get("primary_trigger_key")
         ),
@@ -366,6 +377,7 @@ class PlanningSuggestionService:
             "intent_timing": row.get("intent_timing_at_creation", ""),
             "value_index": row.get("value_index_at_creation", ""),
             "strategic_index": row.get("strategic_index_at_creation", ""),
+            "history_index": row.get("history_index_at_creation", ""),
             "expected_order_dfp": row.get("expected_order_dfp_at_creation", ""),
             "recommended_contact_type": _text(
                 row.get("recommended_contact_type") or "phone"
@@ -409,6 +421,9 @@ class PlanningSuggestionService:
             ),
             "value_index_at_creation": candidate.get(
                 "value_index", row.get("value_index_at_creation", "")
+            ),
+            "history_index_at_creation": candidate.get(
+                "history_index", row.get("history_index_at_creation", "")
             ),
             "strategic_index_at_creation": candidate.get(
                 "strategic_index", row.get("strategic_index_at_creation", "")
@@ -475,6 +490,7 @@ class PlanningSuggestionService:
             "intent_timing_at_creation": candidate.get("intent_timing", ""),
             "value_index_at_creation": candidate.get("value_index", ""),
             "strategic_index_at_creation": candidate.get("strategic_index", ""),
+            "history_index_at_creation": candidate.get("history_index", ""),
             "recommendation_eligible_at_creation": (
                 "Y" if candidate.get("recommendation_eligible", True) else "N"
             ),

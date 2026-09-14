@@ -72,6 +72,7 @@ def order(reference, order_date, *, customer_id="customer-1", customer="Nytt nam
         "customer_id": customer_id,
         "Customer number": "100" if customer_id == "customer-1" else "200",
         "Quantity": quantity,
+        "Total weight": quantity,
         "Unit": unit,
         "Total": total,
         "Currency": "SEK",
@@ -1126,7 +1127,7 @@ class Team10dTrendTests(TestCase):
         )
 
         self.assertEqual(set(trends["metrics"]), {
-            "order_10d", "positive_to_order_10d",
+            "order_10d_count", "order_10d", "positive_to_order_10d",
         })
         self.assertEqual(
             (order_point["numerator"], order_point["denominator"], order_point["value"]),
@@ -1603,10 +1604,10 @@ class SnapshotAndAggregateTests(TestCase):
             MAIN_KPI_KEYS,
             (
                 "human_activities", "reach", "positive_dialogue",
-                "positive_to_order_10d", "order_10d",
+                "order_10d_count", "order_10d",
             ),
         )
-        self.assertEqual(list(summary["kpis"]), list(MAIN_KPI_KEYS))
+        self.assertEqual(set(summary["kpis"]), set(MAIN_KPI_KEYS) | {"positive_to_order_10d"})
         self.assertEqual(summary["metric_definitions"], METRIC_DEFINITIONS)
         self.assertEqual(METRIC_DEFINITIONS["human_activities"]["label"], "Aktiviteter")
         self.assertEqual(
@@ -2001,13 +2002,6 @@ class SnapshotAndAggregateTests(TestCase):
         )
         self.assertEqual(team["zero"]["human_activities_total"], 0)
 
-    def test_only_priority_matrix_is_built(self):
-        summary = self.summary([])
-
-        self.assertEqual(set(summary["coaching_matrices"]), {"priority"})
-        self.assertEqual(summary["coaching_matrix"]["type"], "priority")
-        self.assertNotIn("sales", repr(summary["coaching_matrices"]))
-
     def test_tie_aware_value_percentile_does_not_make_zero_values_strategic(self):
         priorities = [
             {
@@ -2224,60 +2218,18 @@ class SnapshotAndAggregateTests(TestCase):
 
         self.assertEqual(summary["seller_comparison"][0]["snapshot_coverage"]["value"], 0.6)
         self.assertEqual(summary["seller_comparison"][0]["priority_percentile_coverage"]["value"], 0.6)
-        self.assertEqual(summary["coaching_matrix"]["sellers"], [])
+        self.assertEqual(summary["historical_priority_profile"]["sellers"], [])
         self.assertEqual(
-            summary["coaching_matrices"]["priority"]["build_up"]["coverage"]["value"],
+            summary["historical_priority_profile"]["build_up"]["coverage"]["value"],
             0.6,
         )
         self.assertEqual(
-            summary["coaching_matrices"]["priority"]["build_up"]["minimum_coverage"],
+            summary["historical_priority_profile"]["build_up"]["minimum_coverage"],
             0.7,
-        )
-        self.assertEqual(
-            summary["coaching_matrices"]["priority"]["axes"]["x"]["key"],
-            "order_10d",
         )
         self.assertIn(
             "priority_percentile_coverage_below_70",
-            summary["coaching_matrix"]["insufficient_sample"][0]["reasons"],
-        )
-
-    def test_priority_matrix_sample_uses_live_order_denominator(self):
-        users = [
-            {"user_name": seller, "active": "Y", "admin": "N"}
-            for seller in ("alice", "bob")
-        ]
-        rows = [
-            activity(
-                f"{seller}-{index}", "2026-08-16 10:00",
-                seller=seller,
-                analytics_snapshot_version=ANALYTICS_SNAPSHOT_VERSION,
-                priority_snapshot_quality="exact",
-                priority_percentile_at_contact="80",
-                priority_percentile_basis_at_contact=PRIORITY_PERCENTILE_BASIS,
-            )
-            for seller in ("alice", "bob")
-            for index in range(10)
-        ]
-
-        matrix = self.summary(rows, users=users)["coaching_matrix"]
-
-        self.assertTrue(matrix["available"])
-        self.assertEqual(matrix["axes"]["x"]["key"], "order_10d")
-        self.assertEqual(
-            {item["order_10d"]["denominator"] for item in matrix["sellers"]},
-            {10},
-        )
-        self.assertEqual(
-            {
-                item["order_10d"]["waiting_outcome_count"]
-                for item in matrix["sellers"]
-            },
-            {10},
-        )
-        self.assertEqual(
-            {item["order_10d_comparable"]["denominator"] for item in matrix["sellers"]},
-            {0},
+            summary["historical_priority_profile"]["insufficient_sample"][0]["reasons"],
         )
 
     def test_api_model_exposes_definitions_and_deterministic_coaching_cards(self):
@@ -2995,6 +2947,137 @@ class SnapshotAndAggregateTests(TestCase):
         self.assertEqual(build_drilldown(summary, "bom_ratio")["total_count"], 3)
         self.assertEqual(build_drilldown(summary, "planned_boms")["total_count"], 1)
         self.assertEqual(build_drilldown(summary, "unplanned_boms")["total_count"], 1)
+
+
+class Order10dCountTests(TestCase):
+    def test_count_matches_contact_numerator_at_every_level_and_drilldown(self):
+        for day, expected in ((0, 1), (10, 1), (11, 0)):
+            with self.subTest(day=day):
+                when = date(2026, 6, 1)
+                order_date = (when + timedelta(days=day)).isoformat()
+                rows = [{**order("first", order_date), "SKU": "vanilla"},
+                        {**order("first", order_date, quantity="2"), "SKU": "chocolate"},
+                        order("second", order_date)]
+                summary = build_sales_coaching_summary(
+                    activities=[activity("older", "2026-05-31T09:00:00"),
+                                activity("latest", "2026-06-01T09:00:00")],
+                    customers=CUSTOMERS, users=USERS, order_rows=rows,
+                    start=when, end=date(2026, 6, 7),
+                    generated_at=datetime(2026, 7, 1, 12),
+                )
+                count = summary["kpis"]["order_10d_count"]
+                self.assertEqual(count["metric_type"], "count")
+                self.assertEqual(count["value"], expected)
+                self.assertEqual(count["value"], summary["kpis"]["order_10d"]["numerator"])
+                self.assertNotIn("denominator", count)
+                self.assertEqual(count["waiting_outcome_count"], summary["kpis"]["order_10d"]["waiting_outcome_count"])
+                for seller in summary["team_comparison"]["sellers"]:
+                    self.assertEqual(seller["order_10d_count"]["value"], seller["order_10d"]["numerator"])
+                    if seller["seller"] == "olle" and expected:
+                        self.assertEqual(seller["attributed_orders"], 2)
+                        self.assertEqual(seller["order_10d_count"]["value"], 1)
+                metrics = summary["team_10d_trends"]["metrics"]
+                for counts, rates in zip(metrics["order_10d_count"]["series"], metrics["order_10d"]["series"]):
+                    self.assertEqual(counts["seller"], rates["seller"])
+                    self.assertEqual(len(counts["points"]), 16)
+                    for cp, rp in zip(counts["points"], rates["points"]):
+                        self.assertEqual(cp["week"], rp["week"])
+                        self.assertEqual(cp["value"], rp["numerator"])
+                drilldown = build_drilldown(summary, "converted_order_10d")
+                self.assertEqual(drilldown["total_count"], expected)
+
+
+class HistoricalPriorityProfileTests(TestCase):
+    def rows(self, seller, percentiles, **extra):
+        return [activity(
+            f"{seller}-{i}", "2026-08-16 10:00", seller=seller,
+            channel="Besök", result="Ej anträffbar",
+            analytics_snapshot_version=ANALYTICS_SNAPSHOT_VERSION,
+            priority_snapshot_quality="exact",
+            priority_percentile_at_contact=str(value) if value is not None else "",
+            priority_percentile_basis_at_contact=PRIORITY_PERCENTILE_BASIS,
+            **extra,
+        ) for i, value in enumerate(percentiles)]
+
+    def summary(self, rows, **filters):
+        return build_sales_coaching_summary(
+            activities=rows, customers=CUSTOMERS,
+            users=[{"user_name": name, "active": "Y"} for name in sorted({r["sales_user_name"] for r in rows})],
+            order_rows=[], start="2026-08-01", end="2026-08-20",
+            generated_at="2026-08-20 12:00", **filters,
+        )
+
+    def test_bands_boundaries_sorting_median_and_no_order_dependency(self):
+        rows = self.rows("olle", [0, 24.9, 25, 74.9, 75, 100, 80, 85, 90, 95])
+        rows += self.rows("sofia", [10] * 10) + self.rows("viewer", [80] * 4 + [50] * 16)
+        summary = self.summary(rows)
+        profile = summary["historical_priority_profile"]
+        self.assertTrue(profile["available"])
+        self.assertEqual([r["seller"] for r in profile["sellers"]], ["olle", "viewer", "sofia"])
+        self.assertEqual(profile["median"], .2)  # median of sellers, not pooled contacts
+        self.assertEqual(profile["build_up"]["coverage"]["value"], 1)
+        olle = profile["sellers"][0]
+        self.assertEqual([v["numerator"] for v in olle["distribution"].values()], [6, 2, 2])
+        for row in profile["sellers"]:
+            self.assertEqual(row["distribution"]["top"]["value"], row["priority_focus"]["value"])
+            self.assertEqual(sum(v["numerator"] for v in row["distribution"].values()), row["comparable_contact_count"])
+            self.assertAlmostEqual(sum(v["value"] for v in row["distribution"].values()), 1)
+        self.assertTrue(all(r["order_10d"]["denominator"] == 0 for r in summary["team_comparison"]["sellers"]))
+        self.assertNotIn("order_10d", repr(profile))
+        self.assertEqual(self.summary(rows, seller="sofia", channel="email")["historical_priority_profile"], profile)
+
+    def test_only_existing_comparable_observations_enter_bands(self):
+        rows = self.rows("olle", [80] * 10) + self.rows("sofia", [25] * 10)
+        invalid = self.rows("olle", [100] * 5)
+        for i, row in enumerate(invalid):
+            row["contact_id"] = f"invalid-{i}"
+        invalid[0]["priority_snapshot_quality"] = "late"
+        invalid[1]["priority_percentile_basis_at_contact"] = "legacy"
+        invalid[2]["analytics_snapshot_version"] = "v1"
+        invalid[3]["priority_percentile_at_contact"] = ""
+        invalid[4]["customer_id"] = "unknown"
+        invalid[4]["customer"] = "unknown"
+        profile = self.summary(rows + invalid)["historical_priority_profile"]
+        self.assertTrue(profile["available"])
+        self.assertEqual(profile["sellers"][0]["comparable_contact_count"], 10)
+        self.assertEqual(profile["sellers"][0]["priority_percentile_coverage"]["numerator"], 10)
+        self.assertLess(profile["sellers"][0]["priority_percentile_coverage"]["value"], 1)
+
+    def test_sample_and_coverage_thresholds_and_unavailable_states(self):
+        for count in (9, 10):
+            profile = self.summary(self.rows("olle", [80] * count) + self.rows("sofia", [25] * 10))["historical_priority_profile"]
+            self.assertEqual(profile["available"], count == 10)
+            if count == 9:
+                self.assertEqual(profile["sellers"], [])
+                self.assertIsNone(profile["median"])
+        for valid, expected in ((13, False), (14, True)):
+            rows = self.rows("olle", [80] * valid + [None] * (20 - valid))
+            rows += self.rows("sofia", [25] * 20)
+            profile = self.summary(rows)["historical_priority_profile"]
+            self.assertEqual(profile["available"], expected)
+        rows = self.rows("olle", [80] * 10) + self.rows("sofia", [25] * 10) + self.rows("viewer", [None] * 30)
+        self.assertFalse(self.summary(rows)["historical_priority_profile"]["available"])
+        self.assertFalse(self.summary(self.rows("olle", [80] * 10))["historical_priority_profile"]["available"])
+        self.assertFalse(self.summary([])["historical_priority_profile"]["available"])
+
+    def test_zero_and_full_focus_are_valid_and_filters_apply(self):
+        rows = self.rows("olle", [0] * 10, customer_segment_at_contact="A", lifecycle_at_contact="active") + self.rows("sofia", [100] * 10, customer_segment_at_contact="B", lifecycle_at_contact="new")
+        profile = self.summary(rows)["historical_priority_profile"]
+        self.assertEqual([r["priority_focus"]["value"] for r in profile["sellers"]], [1, 0])
+        self.assertEqual(profile["median"], .5)
+        self.assertFalse(self.summary(rows, segment="A")["historical_priority_profile"]["available"])
+        filtered = self.summary(rows, lifecycle="active")["historical_priority_profile"]
+        self.assertFalse(filtered["available"])
+        self.assertEqual(filtered["build_up"]["coverage"]["denominator"], 10)
+
+    def test_zero_and_full_team_medians_and_ties_are_valid(self):
+        for percentile in (0, 100):
+            rows = self.rows("sofia", [percentile] * 10) + self.rows("olle", [percentile] * 10)
+            profile = self.summary(rows)["historical_priority_profile"]
+            self.assertTrue(profile["available"])
+            self.assertEqual(profile["median"], percentile / 100)
+            self.assertEqual([row["seller"] for row in profile["sellers"]], ["olle", "sofia"])
+
 
 
 if __name__ == "__main__":

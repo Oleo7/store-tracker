@@ -184,6 +184,41 @@ if __name__ == "__main__":
         TESTING=False,
     )
     app_module.get_spreadsheet_with_retry = lambda: spreadsheet
+    initial_activity_values = [list(row) for row in activity_sheet.values]
+
+    # Test-only fixture switch: existing smoke starts with insufficient history.
+    # Mutate only historical snapshot fields after its other assertions finish.
+    @app_module.app.post("/__test__/priority-profile")
+    def priority_profile_fixture():
+        from sales_coaching import ANALYTICS_SNAPSHOT_VERSION, PRIORITY_PERCENTILE_BASIS
+        if app_module.request.args.get("reset") == "1":
+            activity_sheet.values = [list(row) for row in initial_activity_values]
+            app_module._sheet_read_cache.clear()
+            return {"ok": True}
+        profiles = {
+            "olle": [80] * 21 + [50] * 7 + [10] * 7,
+            "viewer": [80] * 4 + [50] * 3 + [10] * 3,
+            "sofia": [80] * 2 + [50] * 5 + [10] * 3,
+        }
+        for values in activity_sheet.values[1:]:
+            row = dict(zip(headers, values))
+            for seller, percentiles in profiles.items():
+                prefix = f"smoke-{seller}-"
+                if not row.get("contact_id", "").startswith(prefix):
+                    continue
+                index = int(row["contact_id"][len(prefix):])
+                snapshot = {
+                    "analytics_snapshot_version": ANALYTICS_SNAPSHOT_VERSION,
+                    "priority_snapshot_quality": "exact",
+                    "priority_percentile_basis_at_contact": PRIORITY_PERCENTILE_BASIS,
+                    "priority_percentile_at_contact": str(percentiles[index]),
+                    "customer_segment_at_contact": "A",
+                }
+                for key, value in snapshot.items():
+                    values[headers.index(key)] = value
+        app_module._sheet_read_cache.clear()
+        return {"ok": True}
+
     app_module.app.run(
         host="127.0.0.1",
         port=int(os.environ.get("SALES_COACHING_BROWSER_PORT", "5065")),

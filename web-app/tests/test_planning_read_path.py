@@ -415,7 +415,7 @@ class PlanningReadPathTests(TestCase):
         for record in lock_steps:
             self.assertEqual(
                 record["endpoint"],
-                "/customers/<customer_name>/contacts",
+                "/customers/<path:customer_name>/contacts",
             )
         output = " ".join(captured.output)
         self.assertNotIn("Butik A", output)
@@ -435,7 +435,7 @@ class PlanningReadPathTests(TestCase):
             "/customers/<int:row>/reminder-email-draft",
             "/customers/<int:row>/email-proposal/send",
             "/customers/<int:row>/reminder-email/send",
-            "/customers/<customer_name>/contacts",
+            "/customers/<path:customer_name>/contacts",
             "/planning/activities",
             "/planning/activities/<activity_id>",
             "/planning/suggestions/<suggestion_id>/snooze",

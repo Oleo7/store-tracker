@@ -105,12 +105,21 @@ class SalesCoachingAccessTests(TestCase):
             set(payload),
             {
                 "meta", "options", "data_quality", "metric_definitions", "kpis",
-                "seller_comparison", "team_comparison", "coaching_matrix",
-                "team_10d_trends", "coaching_matrices", "funnel", "outcome_10d",
+                "seller_comparison", "team_comparison", "historical_priority_profile",
+                "team_10d_trends", "funnel", "outcome_10d",
                 "weekly_trend", "visit_efficiency", "channel_effectiveness",
                 "priority_allocation", "follow_up_discipline", "coaching_cards",
             },
         )
+        self.assertNotIn("coaching_matrix", payload)
+        self.assertNotIn("coaching_matrices", payload)
+        profile = payload["historical_priority_profile"]
+        self.assertEqual(set(profile), {
+            "available", "sellers", "median", "build_up", "insufficient_sample",
+        })
+        self.assertFalse(profile["available"])
+        self.assertEqual(profile["sellers"], [])
+        self.assertIsNone(profile["median"])
         self.assertIn("secure_customer_identity", payload["data_quality"])
         self.assertIn("order_attribution_identity_coverage", payload["data_quality"])
         self.assertIn("flagged_activity_rows", payload["data_quality"])

@@ -3,6 +3,8 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import date, datetime, time, timedelta
 import re
+import os
+from commercial_orders import order_volume, commercial_order
 from statistics import median
 import unicodedata
 import uuid
@@ -10,7 +12,14 @@ import uuid
 
 FREEZER_FIELDS = ("Franui", "Schufrulade", "Boujee", "polarbar", "none")
 OTHER_COMPETITOR_FREEZER_FIELDS = {"Schufrulade", "Boujee"}
-SCORE_VERSION = "v2.1"
+# Pilot policy; switching weights never switches off the corrected business rules.
+SCORING_POLICIES = {
+    "v2.1": {"intent_timing": .65, "value_index": .30, "history_index": 0, "strategic_index": .05},
+    "v2.2": {"intent_timing": .62, "value_index": .26, "history_index": .07, "strategic_index": .05},
+}
+SCORE_VERSION = os.environ.get("PRIORITY_SCORING_POLICY", "v2.2").strip()
+if SCORE_VERSION not in SCORING_POLICIES:
+    raise ValueError("PRIORITY_SCORING_POLICY must be v2.1 or v2.2")
 
 
 def normalize_customer_key(value: str) -> str:
@@ -220,10 +229,7 @@ def build_order_features(order_rows: list[dict]) -> dict:
             continue
 
         dfp = _order_dfp(row)
-        if dfp <= 0:
-            continue
-
-        reference = str(row.get("Reference") or "").strip() or f"row-{idx}"
+        reference = str(row.get("Reference") or "").strip() or str(row.get("Order date") or row.get("Delivery date") or f"row-{idx}")
         order_date = parse_date(row.get("Order date"))
         delivery_date = parse_date(row.get("Delivery date")) or order_date
         total = _parse_number(row.get("Total"))
@@ -251,10 +257,13 @@ def build_order_features(order_rows: list[dict]) -> dict:
                 "delivery_date": delivery_date,
                 "dfp": 0.0,
                 "sales": 0.0,
+                "volume_known": False,
                 "skus": set(),
             },
         )
-        order["dfp"] += dfp
+        if dfp is not None:
+            order["dfp"] += dfp
+            order["volume_known"] = True
         order["sales"] += total
         if sku:
             order["skus"].add(normalize_customer_key(sku))
@@ -269,8 +278,8 @@ def build_order_features(order_rows: list[dict]) -> dict:
 
     orders_by_customer = defaultdict(list)
     for order in orders.values():
-        if order.get("sales", 0) <= 0:
-            continue
+        if not order.pop("volume_known"):
+            order["dfp"] = None
         key = _identity_group_key(
             normalize_customer_key(order.get("customer_id")),
             normalize_customer_key(order.get("customer_number")),
@@ -281,13 +290,16 @@ def build_order_features(order_rows: list[dict]) -> dict:
     features = {}
     for customer_orders in orders_by_customer.values():
         customer_orders.sort(key=lambda o: o.get("delivery_date") or o.get("order_date") or date.min)
-        latest_order = customer_orders[-1]
+        identity_orders = customer_orders
+        customer_orders = [o for o in customer_orders if commercial_order(o["sales"], o["dfp"])]
+        latest_order = (customer_orders or identity_orders)[-1]
         order_dates = [o["order_date"] for o in customer_orders if o.get("order_date")]
         delivery_dates = sorted({o["delivery_date"] for o in customer_orders if o.get("delivery_date")})
-        total_dfp = sum(o["dfp"] for o in customer_orders)
+        known_volumes = [o["dfp"] for o in customer_orders if o["dfp"] is not None]
+        total_dfp = sum(known_volumes) if known_volumes else None
         total_sales = sum(o["sales"] for o in customer_orders)
         order_count = len(customer_orders)
-        avg_dfp = total_dfp / order_count if order_count else 0
+        avg_dfp = total_dfp / len(known_volumes) if known_volumes else None
         avg_sales = total_sales / order_count if order_count else 0
         latest_dfp = latest_order.get("dfp", 0)
         latest_sales = latest_order.get("sales", 0)
@@ -313,8 +325,10 @@ def build_order_features(order_rows: list[dict]) -> dict:
             == first_delivery_date
         ]
         first_delivery_dfp = sum(
-            order.get("dfp", 0) for order in first_delivery_orders
+            order["dfp"] for order in first_delivery_orders if order["dfp"] is not None
         )
+        if not any(o["dfp"] is not None for o in first_delivery_orders):
+            first_delivery_dfp = None
         first_delivery_value = sum(
             order.get("sales", 0) for order in first_delivery_orders
         )
@@ -339,14 +353,15 @@ def build_order_features(order_rows: list[dict]) -> dict:
             "customer_key": primary_name_key,
             "customer_id": latest_order.get("customer_id", ""),
             "customer_number": latest_order.get("customer_number", ""),
+            "order_identity_count": len(identity_orders),
             "order_count": order_count,
             "delivery_count": len(delivery_dates),
             "total_dfp": _clean_number(total_dfp),
             "total_sales": _clean_number(total_sales),
             "avg_dfp_per_order": _clean_number(avg_dfp),
             "avg_sales_per_order": _clean_number(avg_sales),
-            "last_order_date": max(order_dates) if order_dates else latest_order.get("delivery_date"),
-            "last_delivery_date": latest_order.get("delivery_date"),
+            "last_order_date": max(order_dates) if order_dates else None,
+            "last_delivery_date": latest_order.get("delivery_date") if customer_orders else None,
             "latest_order_reference": latest_order.get("reference", ""),
             "delivery_dates": delivery_dates,
             "delivery_gaps": gaps,
@@ -355,7 +370,10 @@ def build_order_features(order_rows: list[dict]) -> dict:
             "first_order_sku_count": len(first_delivery_skus),
             "first_delivery_dfp": _clean_number(first_delivery_dfp),
             "first_delivery_value": _clean_number(first_delivery_value),
-            "expected_order_dfp": _clean_number(_weighted_recent_average(latest_dfp, avg_dfp)),
+            "expected_order_dfp": _clean_number(
+                (_weighted_recent_average(latest_dfp, avg_dfp) if latest_dfp is not None
+                 else avg_dfp) if customer_orders else 0
+            ),
             "expected_order_value": _clean_number(_weighted_recent_average(latest_sales, avg_sales)),
             "median_reorder_gap_days": _clean_number(median_gap),
             "expected_cycle_days": expected_cycle,
@@ -408,7 +426,8 @@ def build_contact_features(sales_activities: list[dict], order_features: dict) -
                 "sort_key": (contact_dt, idx),
                 "datetime": contact_dt,
                 "row": row,
-                "is_email": bool(str(row.get("email_id") or "").strip()),
+                "is_email": bool(str(row.get("email_id") or "").strip())
+                or normalize_customer_key(row.get("activity_source")) == "crm_email",
                 "follow_up_date": parse_date(row.get("follow_up_date")),
                 "customer_id": customer_id,
                 "customer_number": str(row.get("customer_number") or "").strip(),
@@ -491,6 +510,7 @@ def build_contact_features(sales_activities: list[dict], order_features: dict) -
             "latest_contact_result": result,
             "latest_contact_class": normalize_contact_result(result) if result else "",
             "latest_contact_comment": comment,
+            "latest_contact_person": latest_human_row.get("customer_contact_person", ""),
             "latest_freezer_fields": _freezer_fields(latest_human_row),
             "latest_follow_up_date": follow_up_date,
             "follow_up_resolved": contact_resolved_followup or order_resolved_followup,
@@ -759,13 +779,15 @@ def _build_priority_customers_legacy(
     return result[:limit]
 
 
-def calculate_priority_score_v2(intent_timing, value_index, strategic_index) -> int:
-    score = round(
-        (0.65 * float(intent_timing or 0))
-        + (0.30 * float(value_index or 0))
-        + (0.05 * float(strategic_index or 0))
-    )
-    return int(_clamp(score, 0, 100))
+def calculate_priority_score_v2(intent_timing, value_index, strategic_index,
+                                history_index=0, *, policy=SCORE_VERSION) -> int:
+    weights = SCORING_POLICIES[policy]
+    components = dict(intent_timing=intent_timing, value_index=value_index,
+                      strategic_index=strategic_index, history_index=history_index)
+    return int(_clamp(round(sum(
+        weights[key] * _clamp(float(value or 0), 0, 100)
+        for key, value in components.items()
+    )), 0, 100))
 
 
 def established_intent_timing(overdue_days: int) -> int:
@@ -828,14 +850,17 @@ def expected_reorder_cycle(delivery_dates, segment_median=28) -> int | None:
     return int(_clamp(round(cycle), 14, 75))
 
 
-def _future_activity_index(planned_activities, today):
+def _future_activity_index(planned_activities, today, now=None):
     result = {}
     for row in planned_activities or ():
         if str(row.get("status") or "planned").strip().casefold() != "planned":
             continue
         if str(row.get("source_suggestion_id") or "").strip():
             continue
-        scheduled = parse_date(row.get("scheduled_at"))
+        scheduled_at = parse_datetime(row.get("scheduled_at"))
+        scheduled = scheduled_at.date() if scheduled_at else None
+        if now and scheduled_at and scheduled_at.replace(tzinfo=None) < now.replace(tzinfo=None):
+            continue
         if not scheduled or scheduled < today:
             continue
         keys = {
@@ -884,12 +909,6 @@ EMAIL_INTENT_STATUS = {
         "engagement_label": "produktbladsklick",
         "modifier": 4,
     },
-    "opened_no_click": {
-        "trigger": "email_open_followup",
-        "event_field": "email_first_opened_at",
-        "engagement_label": "öppnat mejlförslag",
-        "modifier": 0,
-    },
 }
 
 
@@ -902,7 +921,7 @@ def _stable_legacy_contact_id(row_index, customer_key, date_time_value):
 
 
 def _active_email_intent(
-    email_feature, latest_human_contact, last_order_date, *, blocked=False
+    email_feature, latest_human_contact, last_order_date, *, blocked=False, today=None
 ):
     status = str(email_feature.get("email_followup_status") or "").strip()
     intent = EMAIL_INTENT_STATUS.get(status)
@@ -910,6 +929,9 @@ def _active_email_intent(
         return {}
     first_event = parse_datetime(email_feature.get(intent["event_field"]))
     if not first_event:
+        return {}
+    age = ((today or date.today()) - first_event.date()).days
+    if age < 0:
         return {}
     if latest_human_contact and latest_human_contact > first_event:
         return {}
@@ -925,7 +947,8 @@ def _active_email_intent(
     wait_days = max(0, int(_parse_number(
         email_feature.get("email_followup_wait_days_remaining")
     )))
-    ready = not blocked and wait_days <= 0
+    wait_days = max(wait_days, 3 - age)
+    ready = not blocked and wait_days <= 0 and age <= 14
     proposal_label = str(
         email_feature.get("email_followup_proposal_label") or "Påminnelse"
     ).strip()
@@ -937,7 +960,7 @@ def _active_email_intent(
         "reason": reason,
         "first_event_at": first_event,
         "ready": ready,
-        "waiting": bool(not blocked and wait_days > 0),
+        "waiting": bool(not blocked and wait_days > 0 and age <= 14),
         "wait_days": wait_days,
     }
 
@@ -986,13 +1009,22 @@ def _phase3_trigger_snapshot(
         and not has_order_after_latest_contact
         and not has_current_explicit_follow_up
         and days_since_contact is not None
-        and days_since_contact >= (7 if delivery_count == 0 else 3)
+        and (7 if delivery_count == 0 else 3) <= days_since_contact <= 30
     )
     if positive_dialogue:
         triggers.append("positive_dialogue_followup")
         reasons["positive_dialogue_followup"] = (
             "positive_dialogue_followup", "Följ upp positiv dialog"
         )
+
+    if lifecycle == "reactivation" and delivery_count > 0 and (
+        days_since_contact is None or days_since_contact >= 30
+    ):
+        trigger = ("repeat_reactivation_due" if delivery_count >= 2
+                   else "single_order_reactivation_due")
+        triggers.append(trigger)
+        reasons[trigger] = (trigger, "Återaktivera tidigare återkommande kund"
+                            if delivery_count >= 2 else "Återaktivera kund efter första ordern")
 
     strategic_due = (
         lifecycle in {"prospect", "reactivation"}
@@ -1031,6 +1063,8 @@ def _phase3_trigger_snapshot(
         "first_order_onboarding",
         "first_order_reorder",
         "positive_dialogue_followup",
+        "repeat_reactivation_due",
+        "single_order_reactivation_due",
         "strategic_contact_due",
         "legacy_missed_followup",
     )
@@ -1080,6 +1114,7 @@ def build_priority_customers(
     planned_activities=(),
     workflow_suppressions: dict | None = None,
     scoring_version: str = SCORE_VERSION,
+    now: datetime | None = None,
 ) -> list[dict]:
     """Build the authoritative current score for every active, in-scope customer."""
     if str(scoring_version or "").strip().casefold() == "legacy":
@@ -1117,7 +1152,7 @@ def build_priority_customers(
         identity_indices=order_indices,
         ambiguous_master_names=ambiguous_master_names,
     )
-    future_activities = _future_activity_index(planned_activities, today)
+    future_activities = _future_activity_index(planned_activities, today, now)
     represented_source_contact_ids = {
         str(row.get("source_contact_id") or "").strip()
         for row in planned_activities or ()
@@ -1163,15 +1198,18 @@ def build_priority_customers(
         segment = _segment_value(customer)
         defaults = _segment_defaults(benchmarks, segment)
         order_count = int(order.get("order_count") or 0)
-        delivery_count = int(order.get("delivery_count") or order_count)
+        completed_dates = sorted(d for d in order.get("delivery_dates", ()) if d <= today)
+        delivery_count = len(completed_dates) if "delivery_dates" in order else int(order.get("delivery_count") or order_count)
+        history_index = 100 if delivery_count >= 2 else 60 if delivery_count == 1 else 0
         first_order_sku_count = int(order.get("first_order_sku_count") or 0)
-        last_delivery = order.get("last_delivery_date")
+        future_delivery = order.get("last_delivery_date")
+        last_delivery = completed_dates[-1] if completed_dates else order.get("last_delivery_date")
         last_order = order.get("last_order_date")
         days_since_delivery = (today - last_delivery).days if last_delivery else None
 
         expected_order_dfp = _positive_float(order.get("expected_order_dfp"))
         expected_order_value = _positive_float(order.get("expected_order_value"))
-        if not expected_order_dfp:
+        if not order and not expected_order_dfp:
             expected_order_dfp = _positive_float(defaults.get("expected_order_dfp"))
         if not expected_order_value:
             expected_order_value = _positive_float(defaults.get("expected_order_value"))
@@ -1180,7 +1218,7 @@ def build_priority_customers(
         expected_cycle_source = ""
         if delivery_count >= 2:
             expected_cycle = expected_reorder_cycle(
-                order.get("delivery_dates") or (),
+                completed_dates,
                 defaults.get("expected_cycle_days") or 28,
             )
             expected_cycle_source = "blend" if delivery_count == 2 else "customer"
@@ -1215,6 +1253,7 @@ def build_priority_customers(
             contact.get("latest_human_contact_datetime"),
             last_order,
             blocked=bool(activity or has_current_explicit_follow_up),
+            today=today,
         )
         lifecycle = _v2_lifecycle(delivery_count, days_since_delivery, overdue_days)
         context_lifecycle = decision_context_lifecycle(delivery_count)
@@ -1242,7 +1281,7 @@ def build_priority_customers(
             if (
                 latest_contact_class == "Positiv"
                 and days_since_contact is not None
-                and days_since_contact >= (7 if lifecycle == "prospect" else 3)
+                and (7 if lifecycle == "prospect" else 3) <= days_since_contact <= 30
             ):
                 intent_timing += 10 if lifecycle == "prospect" else 20
             elif (
@@ -1265,7 +1304,8 @@ def build_priority_customers(
         value_index = int(_clamp(round((expected_order_dfp / p90) * 100), 0, 100))
         strategic_index = {"A": 100, "B": 65, "C": 25}.get(segment, 15)
         priority_score = calculate_priority_score_v2(
-            intent_timing, value_index, strategic_index
+            intent_timing, value_index, strategic_index, history_index,
+            policy=scoring_version,
         )
 
         future_follow_up_days = _future_follow_up_days(
@@ -1282,7 +1322,7 @@ def build_priority_customers(
         if not sales_person or not customer_id:
             suppression = "invalid_or_inactive_owner"
             status_text = "Saknar giltig ägare eller kundidentitet"
-        elif last_delivery and last_delivery > today:
+        elif future_delivery and future_delivery > today:
             suppression = "future_delivery"
             status_text = "Framtida leverans registrerad"
         elif activity:
@@ -1376,13 +1416,21 @@ def build_priority_customers(
             latest_human_contact=contact.get("latest_human_contact_datetime"),
             today=today,
         )
+        if not active_email_intent.get("ready") and email_signal.get("status") in {
+            "opened_no_click", "stockfiller_clicked_no_order", "product_sheet_clicked_no_order"
+        }:
+            email_signal = {}
+        advice_contact_class = (
+            "" if latest_contact_class == "Positiv" and (days_since_contact or 0) > 30
+            else latest_contact_class
+        )
         priority_type = _priority_type(
             follow_up_due=follow_up_due,
             scheduled_followup=scheduled_followup,
             has_order_after_latest_contact=has_order_after_latest_contact,
             order_count=order_count,
             overdue_days=overdue_days,
-            latest_contact_class=latest_contact_class,
+            latest_contact_class=advice_contact_class,
             days_since_contact=days_since_contact,
             segment=segment,
             self_ordering_followup=self_ordering_followup,
@@ -1396,7 +1444,7 @@ def build_priority_customers(
             total_dfp=order.get("total_dfp", 0),
             expected_order_dfp=expected_order_dfp,
             order_count=order_count,
-            latest_contact_class=latest_contact_class,
+            latest_contact_class=advice_contact_class,
             has_order_after_latest_contact=has_order_after_latest_contact,
             days_since_contact=days_since_contact,
             latest_contact_date=contact.get("latest_contact_date"),
@@ -1415,9 +1463,10 @@ def build_priority_customers(
             "segment": segment,
             "lifecycle": lifecycle,
             "decision_context_lifecycle": context_lifecycle,
-            "score_version": SCORE_VERSION,
+            "score_version": scoring_version,
             "priority_score": priority_score,
             "intent_timing": intent_timing,
+            "history_index": history_index,
             "value_index": value_index,
             "strategic_index": strategic_index,
             "recommendation_eligible": recommendation_eligible,
@@ -1442,8 +1491,13 @@ def build_priority_customers(
             "delivery_count": delivery_count,
             "first_order_sku_count": first_order_sku_count,
             "total_dfp": _clean_number(order.get("total_dfp") or 0),
-            "expected_order_dfp": _clean_number(expected_order_dfp),
+            "expected_order_dfp": (
+                None if order and order.get("expected_order_dfp") is None
+                else _clean_number(expected_order_dfp)
+            ),
             "expected_order_value": _clean_number(expected_order_value),
+            "latest_order_dfp": order.get("latest_order_dfp"),
+            "latest_order_volume_missing": order.get("latest_order_dfp") is None,
             "latest_order_reference": str(order.get("latest_order_reference") or ""),
             "latest_order_date": _iso_date(last_order),
             "latest_delivery_date": _iso_date(last_delivery),
@@ -1457,6 +1511,7 @@ def build_priority_customers(
             "latest_human_contact_id": contact.get("latest_human_contact_id", ""),
             "latest_contact_result": contact.get("latest_contact_result", ""),
             "latest_contact_comment": contact.get("latest_contact_comment", ""),
+            "latest_contact_person": contact.get("latest_contact_person", ""),
             "latest_contact_class": latest_contact_class,
             "latest_contact_channel": contact.get("latest_contact_channel", ""),
             "latest_contact_sales_person": contact.get("latest_contact_sales_person", ""),
@@ -2349,8 +2404,7 @@ def _repeat_index(order_count) -> float:
 
 
 def _order_dfp(row: dict) -> float:
-    total_weight = _parse_number(row.get("Total weight"))
-    return total_weight if total_weight > 0 else _parse_number(row.get("Quantity"))
+    return order_volume(row)
 
 
 def _weighted_recent_average(latest, average) -> float:

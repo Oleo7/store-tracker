@@ -2,17 +2,17 @@
 git status
 git pull origin master
 
-# Aktivera virtuell miljö och..
-# Testa ändringar lokalt
+# Aktivera virtuell miljÃ¶ och..
+# Testa Ã¤ndringar lokalt
 .\.venv\Scripts\python.exe -m pip install -r .\web-app\requirements.txt
 .\.venv\Scripts\python.exe .\web-app\app.py
 
 
-# Deploy ändringar (skicka in i terminalen)
-git status         --> se vilka filer som ändrats
-git add            --> filen du vill lägga till: git add .\README.md
-git commit -m      --> fil att lägga till inom "": git commit -m ".\README.md"
-git push           --> skicka ändringarna till github
+# Deploy Ã¤ndringar (skicka in i terminalen)
+git status         --> se vilka filer som Ã¤ndrats
+git add            --> filen du vill lÃ¤gga till: git add .\README.md
+git commit -m      --> fil att lÃ¤gga till inom "": git commit -m ".\README.md"
+git push           --> skicka Ã¤ndringarna till github
 
 # Store Tracker
 
@@ -83,9 +83,17 @@ The app will be available at `http://localhost:5000`.
 
 ---
 
+## Customer Data Flow
+
+`order_rows` is the order source used to reconcile customer identity and names into `customers_enriched`. The `customers_enriched` worksheet is the active CRM customer master used by Store Tracker and related sync jobs.
+
+Legacy worksheets named `customers` and `customer_enriched` are retired and must not be recreated or used by new code.
+
 ## Data Enrichment
 
-Enriches the `customers` sheet with geocoded address data (city, street, postal code, coordinates) using the Google Maps API. Results are written to a `customers_enriched` worksheet. Already-processed rows are skipped on subsequent runs.
+Geocoding runs directly against rows in `customers_enriched`. `data-enrichment/enrich_stores.py` reads the customer master, enriches rows that are not already marked as enriched, and writes the geocoded address and coordinate fields back to the same worksheet.
+
+The enrichment flow does not depend on the retired `customers` or `customer_enriched` worksheets.
 
 ### Setup
 
@@ -94,12 +102,12 @@ cd data-enrichment
 pip install -r requirements.txt
 ```
 
-### Run the script
+### Run the production enrichment script
 
 ```bash
 python enrich_stores.py
 ```
 
-### Run the notebook
+### Inspect customer enrichment data in the notebook
 
-Open `enrich_stores.ipynb` in Jupyter or VS Code and run the cells in order. Requires the same `.env` file in the project root.
+Open `enrich_stores.ipynb` in Jupyter or VS Code and run the cells in order. The notebook is intentionally read-only and only inspects `customers_enriched`; production writes should be performed by `enrich_stores.py`. It requires the same `.env` file in the project root.

@@ -1931,29 +1931,16 @@
       line-height: 1.35;
     }
 
-    .next-action-urgent {
+    .next-action-red {
       background: #fff3f4;
-      border-color: #f3c9d1;
     }
 
-    .next-action-warning {
-      background: #fff7ed;
-      border-color: #fed7aa;
+    .next-action-yellow {
+      background: #fff8d6;
     }
 
-    .next-action-positive {
+    .next-action-green {
       background: #effaf4;
-      border-color: #bbebd1;
-    }
-
-    .next-action-opportunity {
-      background: var(--pb-blue-soft);
-      border-color: rgba(53,89,131,0.18);
-    }
-
-    .next-action-neutral,
-    .next-action-low {
-      background: #faf8fb;
     }
 
     .priority-summary {
@@ -1962,11 +1949,6 @@
       font-weight: 800;
       color: var(--pb-chocolate);
     }
-
-    .customer-card.priority-high { border-color: #9c2834; }
-    .customer-card.priority-medium { border-color: #934513; }
-    .customer-card.priority-low { border-color: #355983; }
-    .customer-card.priority-neutral { border-color: #c8cdd7; }
 
     .potential-summary {
       margin-top: 7px;
@@ -4978,6 +4960,13 @@
     );
   }
 
+  // Urgency is a presentation concern; keep backend tones unchanged.
+  function getNextActionColorClass(tone) {
+    if (tone === "urgent") return "next-action-red";
+    if (tone === "low") return "next-action-green";
+    return "next-action-yellow";
+  }
+
   function getNextActionHtml(c) {
     const insight = getCustomerInsight(c);
     const action = insight.next_action || {};
@@ -4989,19 +4978,12 @@
       "avvakta": "Avvakta",
     }[insight.recommended_channel] || "Avvakta";
 
-    const toneClass = {
-      urgent: "next-action-urgent",
-      warning: "next-action-warning",
-      positive: "next-action-positive",
-      opportunity: "next-action-opportunity",
-      neutral: "next-action-neutral",
-      low: "next-action-low",
-    }[action.tone] || "next-action-neutral";
+    const toneClass = getNextActionColorClass(action.tone);
 
     return `
       <div class="next-action ${toneClass}">
         <div class="next-action-label">Nästa: ${esc(actionLabel)} · ${esc(channel)}</div>
-        <div class="card-reason">Varför nu: ${esc(action.reason || "Ingen förklaring tillgänglig")}</div>
+        <div class="card-reason">Status: ${esc(action.reason || "Ingen förklaring tillgänglig")}</div>
       </div>
     `;
   }
@@ -7597,6 +7579,7 @@
       <div class="planning-recommendation-card">
         <button class="planning-recommendation-customer" id="planning-recommendation-customer" type="button" ${disabled}>${esc(planningRecommendation.customer || "Okänd kund")}</button>
         <div class="planning-recommendation-reason">${esc(planningRecommendation.reason_text || "")}</div>
+        ${planningRecommendationContactContext(planningRecommendation.contact_context)}
         <div class="planning-recommendation-channel">Förslag: ${esc(PLANNING_CONTACT_TYPES[planningRecommendation.recommended_contact_type]?.label || "Besök")}</div>
         <div class="planning-recommendation-actions">
           <button class="planning-compact-btn primary" id="planning-recommendation-contact" type="button" ${disabled || !planningRecommendation.can_call ? "disabled" : ""}>Ring nu</button>
@@ -7610,6 +7593,17 @@
     document.getElementById("planning-recommendation-plan")?.addEventListener("click", () => openRecommendationPlanner());
     document.getElementById("planning-recommendation-snooze")?.addEventListener("click", snoozePlanningRecommendation);
     document.getElementById("planning-recommendation-dismiss")?.addEventListener("click", dismissPlanningRecommendation);
+  }
+
+  function planningRecommendationContactContext(context = {}) {
+    const lines = [];
+    if (context.date) lines.push(`Senaste kontakt ${context.date}: ${context.result || ""}`);
+    if (context.comment) lines.push(context.comment);
+    const person = [context.contact_person, context.phone].filter(Boolean).join(" · ");
+    if (person) lines.push(person);
+    if (context.latest_order_dfp != null) lines.push(`Senaste order: ${context.latest_order_dfp} DFP`);
+    if (context.follow_up) lines.push(`Uppföljning: ${context.follow_up}`);
+    return lines.map(line => `<div class="planning-recommendation-channel">${esc(String(line))}</div>`).join("");
   }
 
   async function loadPlanningRecommendation({ previewLimit = planningRecommendationPreviewLimit } = {}) {

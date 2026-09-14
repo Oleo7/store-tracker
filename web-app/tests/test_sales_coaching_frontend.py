@@ -33,9 +33,9 @@ class SalesCoachingFrontendTests(TestCase):
     def test_dashboard_has_all_specified_sections(self):
         for expected in (
             "Period", "Säljare", "Kanal", "Lifecycle", "Kundsegment",
-            "Coachningsöversikt", "Coachningskort", "Teamjämförelse",
+            "Coachningskort", "Teamjämförelse",
             "10-dagarskonvertering – trend",
-            "Teamets prioriteringsmatris", "Fördjupad analys",
+            "Historiskt prioritetsfokus", "Fördjupad analys",
             "Besök", "Kanaler", "Uppföljning",
             "Datakvalitet och definitioner",
         ):
@@ -93,26 +93,21 @@ class SalesCoachingFrontendTests(TestCase):
             self.javascript.index("function handleDashboardClick")
         ]
         ordered = (
-            "kpisMarkup", "coachingMarkup", "teamComparisonMarkup",
-            "teamTrendsMarkup", "priorityMatrixMarkup", "diagnosticsMarkup",
+            "teamComparisonMarkup", "coachingMarkup",
+            "teamTrendsMarkup", "priorityProfileMarkup", "diagnosticsMarkup",
             "dataQualityDetailsMarkup",
         )
         positions = [render.index(name) for name in ordered]
         self.assertEqual(positions, sorted(positions))
 
-    def test_exactly_five_main_kpis_are_rendered_in_requested_order(self):
-        self.assertIn(
-            'const order = ["human_activities", "reach", "positive_dialogue", "positive_to_order_10d", "order_10d"]',
-            self.javascript,
-        )
-        self.assertEqual(
-            MAIN_KPI_KEYS,
-            (
-                "human_activities", "reach", "positive_dialogue",
-                "positive_to_order_10d", "order_10d",
-            ),
-        )
-        self.assertIn("grid-template-columns: repeat(5, minmax(0, 1fr))", self.css)
+    def test_coaching_overview_ui_is_removed_and_team_is_first(self):
+        for removed in ("function kpiMarkup", "function kpisMarkup", "sc-kpi-", "data-kpi-key"):
+            self.assertNotIn(removed, self.javascript)
+        self.assertNotIn("sc-kpi-", self.css)
+        render = self.javascript.split("function renderDashboard", 1)[1].split("function handleDashboardClick", 1)[0]
+        first_section = render.split("target.innerHTML = [", 1)[1].lstrip()
+        self.assertTrue(first_section.startswith("teamComparisonMarkup("))
+        self.assertNotIn("data.kpis", render)
 
     def test_main_kpis_explain_their_denominators_in_plain_swedish(self):
         self.assertEqual(
@@ -132,7 +127,6 @@ class SalesCoachingFrontendTests(TestCase):
             "alla berättigade nådda mänskliga kontakter med säker kundidentitet",
         )
         self.assertIn("definition.denominator_label", self.javascript)
-        self.assertIn("sc-kpi-denominator", self.javascript)
         self.assertIn("flex-wrap: wrap", self.css)
 
     def test_all_main_kpis_have_clickable_plain_language_explanations(self):
@@ -162,9 +156,9 @@ class SalesCoachingFrontendTests(TestCase):
                 )
 
     def test_frontend_uses_backend_rate_contract_without_recalculating_kpis(self):
-        self.assertIn("percent(metric.value)", self.javascript)
+        self.assertIn("percent(metric?.value)", self.javascript)
         self.assertIn("rateEvidence(metric)", self.javascript)
-        self.assertIn("metricDefinition(key, metric)", self.javascript)
+        self.assertIn("metricDefinition(key", self.javascript)
         self.assertNotIn("attributed_orders /", self.javascript)
         self.assertNotIn("priority_percentile_at_contact >=", self.javascript)
 
@@ -174,21 +168,9 @@ class SalesCoachingFrontendTests(TestCase):
             METRIC_DEFINITIONS["order_10d"]["label"],
             "Kontakt – order inom 10 dagar",
         )
-        kpi_markup = self.javascript.split("function kpiMarkup", 1)[1].split(
-            "function kpisMarkup", 1
-        )[0]
-        self.assertIn('metric.status === "small_sample"', kpi_markup)
-        self.assertIn("Inte tillräckligt underlag", kpi_markup)
-        self.assertNotIn("statusLabel(metric.status)", kpi_markup.split("const status", 1)[1])
-        self.assertNotIn("Tillräckligt underlag</span>", kpi_markup)
-
-    def test_matrix_uses_generic_backend_axes_and_does_not_invent_medians(self):
-        self.assertIn("Otillräckligt jämförbart underlag", self.javascript)
-        self.assertNotIn("matrix.medians?.priority_focus ?? 0.5", self.javascript)
-        self.assertNotIn("matrix.medians?.order_10d ?? 0.5", self.javascript)
-        self.assertIn("matrix.axes?.x?.key", self.javascript)
-        self.assertIn("matrix.axes?.y?.key", self.javascript)
-        self.assertNotIn('const xKey = sales ?', self.javascript)
+    def test_profile_uses_backend_median_and_keeps_followup_drilldowns(self):
+        self.assertIn("const median = profile.median", self.javascript)
+        self.assertNotIn("profile.median ??", self.javascript)
         for metric in (
             "followup_success", "followup_gap", "followup_gap_10d",
             "planned_on_time", "planned_overdue", "planned_skipped",
@@ -219,22 +201,22 @@ class SalesCoachingFrontendTests(TestCase):
         self.assertEqual(frontend_keys, set(METRIC_DEFINITIONS) - {"strategic_coverage"})
 
     def test_protected_blocks_match_master_source_contract(self):
-        # These hashes are calculated from the corresponding source blocks on master.
+        # Profile replaces the matrix intentionally; team comparison and trends stay locked.
         contracts = {
             "Teamjämförelse": (
                 "  function teamComparisonMarkup",
                 "  function teamTrendWeekLabel",
-                "b34c0dbc36113f36369f3f42e966301c6d567fc10d54e9cc77b75806c2a6439c",
+                "d5fe82b4ed1c98e2fec39f9b85e6bbc3bed70ec844909ced88fcdaee365d9fa2",
             ),
             "10-dagarstrenden": (
                 "  function teamTrendWeekLabel",
-                "  function matrixReasonLabel",
-                "0d0d41ab730d874a4a00e9edbaaac72417f69be84e8c70bdde42a2e9f433796b",
+                "  function priorityProfileReasonLabel",
+                "ccf59858bc4d5b9f936b9f5b5ae3129e21e1ad02293d1b6dcd5c4df61a638b0f",
             ),
-            "prioriteringsmatrisen": (
-                "  function matrixReasonLabel",
+            "prioritetsprofilen": (
+                "  function priorityProfileReasonLabel",
                 "  function visitMarkup",
-                "efcdf65279dce47469bea98458a63419ec776f1d4fed53ec186253a21cfd982c",
+                "8016d091a6f98badc2d1b9a653a8beed7198c5b3529ff88ffbfc78cdeed51b3d",
             ),
         }
         for name, (start_marker, end_marker, expected_hash) in contracts.items():
@@ -281,6 +263,26 @@ class SalesCoachingFrontendTests(TestCase):
         )
         self.assertIn('<th><button type="button" data-seller=', team)
 
+    def test_count_metric_table_and_scale_contract(self):
+        team = self.javascript.split("function teamComparisonMarkup", 1)[1].split("function teamTrendWeekLabel", 1)[0]
+        headers = team.split("<thead><tr>", 1)[1].split("</tr>", 1)[0]
+        self.assertEqual(headers.count("<th>"), 9)
+        labels = ["Säljare", "Aktiviteter", "Antal order inom 10 dagar",
+                  "Kontakt – order inom 10 dagar", "Positiv dialog → order inom 10 dagar",
+                  "Träffgrad", "Nästa-steg-täckning", "Bom-ratio", "Positiv dialog"]
+        cells = re.findall(r"<th>(.*?)</th>", headers)
+        for label, cell in zip(labels, cells):
+            self.assertIn(label, cell)
+        self.assertIn("number(item.order_10d_count?.value)", team)
+        self.assertIn('converted_order_10d: "order_10d_count"', self.javascript)
+        trend = self.javascript.split("function teamTrendPanelMarkup", 1)[1].split("function priorityProfileReasonLabel", 1)[0]
+        self.assertIn('trend.metric_type === "count"', trend)
+        self.assertIn("Math.ceil(maximum / step) * step", trend)
+        self.assertIn("(_, index) => index * step", trend)
+        self.assertIn('isCount ? number(value)', trend)
+        self.assertIn("${number(point.value)} order inom 10 dagar", trend)
+        self.assertIn('point.value === null', trend)
+
     def test_headline_outcomes_render_only_live_value_and_live_comparisons(self):
         self.assertNotIn("comparableOutcomeText", self.javascript)
         self.assertNotIn("Jämförbart 10-dagarsutfall", self.javascript)
@@ -291,7 +293,7 @@ class SalesCoachingFrontendTests(TestCase):
 
     def test_two_live_team_trends_are_accessible_and_independent(self):
         trend = self.javascript.split("function teamTrendPanelMarkup", 1)[1].split(
-            "function matrixReasonLabel", 1
+            "function priorityProfileReasonLabel", 1
         )[0]
         render = self.javascript.split("function renderDashboard", 1)[1].split(
             "function handleDashboardClick", 1
@@ -305,7 +307,7 @@ class SalesCoachingFrontendTests(TestCase):
             "lifecycle och segment följer filtren",
             'metricKey: "order_10d"',
             'metricKey: "positive_to_order_10d"',
-            'data-drilldown="${config.metricKey}"',
+            'data-drilldown="${config.drilldownMetric || config.metricKey}"',
             'data-channel="all"',
             'data-seller="${escapeHtml(item.seller)}"',
             'tabindex="0" role="button"',
@@ -317,7 +319,7 @@ class SalesCoachingFrontendTests(TestCase):
         ):
             with self.subTest(expected=expected):
                 self.assertIn(expected, trend)
-        self.assertIn("const ticks = [0, 0.25, 0.5, 0.75, 1]", trend)
+        self.assertIn(" : [0, 0.25, 0.5, 0.75, 1]", trend)
         self.assertIn("week_axis", trend)
         self.assertIn("teamTrendWeekLabel", trend)
         self.assertIn("previousYear !== match[1]", self.javascript)
@@ -350,7 +352,7 @@ class SalesCoachingFrontendTests(TestCase):
         point_title = trend.split("const title =", 1)[1].split(";", 1)[0]
         self.assertNotIn("prelim", point_title.casefold())
         self.assertLess(render.index("teamComparisonMarkup"), render.index("teamTrendsMarkup"))
-        self.assertLess(render.index("teamTrendsMarkup"), render.index("priorityMatrixMarkup"))
+        self.assertLess(render.index("teamTrendsMarkup"), render.index("priorityProfileMarkup"))
         self.assertIn(".sc-team-order-trend { display: block; width: 100%; min-width: 1040px", self.css)
         self.assertIn(".sc-team-order-trend-wrap { overflow-x: auto", self.css)
         self.assertIn(".sc-team-order-point.is-small-sample", self.css)
@@ -362,8 +364,8 @@ class SalesCoachingFrontendTests(TestCase):
             'const teamTrendTab = event.target.closest("[data-team-trend-view]")',
             2,
         )[2].split('const diagnosticTab =', 1)[0]
-        self.assertIn('teamTrendView: "order"', self.javascript)
-        self.assertIn('const keys = ["order", "positive"]', self.javascript)
+        self.assertIn('teamTrendView: "count"', self.javascript)
+        self.assertIn('const keys = ["count", "order", "positive"]', self.javascript)
         for key in ("ArrowLeft", "ArrowRight", "Home", "End"):
             self.assertIn(key, self.javascript)
         self.assertIn("renderDashboard(state.data)", click_handler)
@@ -383,41 +385,23 @@ class SalesCoachingFrontendTests(TestCase):
         )
         self.assertIn('const value = extra[key] ?? state.filters[key]', self.javascript)
 
-    def test_matrix_uses_fixed_points_offsets_ticks_and_separate_axes(self):
-        for expected in (
-            "MATRIX_TICKS = [0, 25, 50, 75, 100]",
-            "sc-matrix-inner", "sc-matrix-gridline",
-            "sc-matrix-x-axis-label", "sc-matrix-y-axis-label",
-            "Math.max(0, Math.min(100",
-            "const occupied = new Map()", "--offset-x",
-        ):
-            with self.subTest(expected=expected):
-                self.assertIn(expected, self.javascript)
-        self.assertNotIn("Math.max(3, Math.min(97", self.javascript)
-        self.assertIn("const collisionOffsets = [", self.javascript)
-        self.assertIn("[0, 0]", self.javascript)
-        self.assertIn("inset: 48px 48px 56px 62px", self.css)
-        self.assertIn(".sc-matrix { position: relative; height: 410px; overflow: hidden", self.css)
-        self.assertIn("writing-mode: vertical-rl", self.css)
-
-    def test_only_priority_matrix_and_seller_highlight_are_present(self):
-        matrix = self.javascript.split("function matrixReasonLabel", 1)[1].split(
-            "function visitMarkup", 1
-        )[0]
-        self.assertIn("function priorityMatrixPanelMarkup", self.javascript)
-        self.assertIn("Teamets prioriteringsmatris", self.javascript)
-        self.assertIn("Kontakt – order inom 10 dagar", self.javascript)
-        self.assertNotIn('data-matrix-view="sales"', self.javascript)
-        self.assertNotIn('data-matrix-view="priority"', self.javascript)
-        self.assertNotIn("matrixView", self.javascript)
-        self.assertNotIn("Försäljning</button>", self.javascript)
-        self.assertNotIn("sc-matrix-tabs", self.css)
-        self.assertIn("sellerSelected(item.seller)", self.javascript)
-        self.assertIn("is-selected", self.css)
-        self.assertNotIn("data-metric-definition", matrix)
-        self.assertIn('class="sc-matrix" role="img"', matrix)
-        self.assertIn('class="sc-bubble${item.sample_status', matrix)
-        self.assertIn('data-seller="${escapeHtml(item.seller)}"', matrix)
+    def test_priority_profile_replaces_scatter_and_preserves_seller_selection(self):
+        for removed in ("sc-matrix", "sc-bubble", "MATRIX_TICKS", "priorityMatrix", "collisionOffsets", "--offset-x"):
+            self.assertNotIn(removed, self.javascript)
+            self.assertNotIn(removed, self.css)
+        profile = self.javascript.split("function priorityProfileMarkup", 1)[1].split("function visitMarkup", 1)[0]
+        for label in ("Topp 25 %", "Mitten 50 %", "Botten 25 %", "Prioritetsfokus", "Underlag", "Täckning", "Teammedian"):
+            self.assertIn(label, profile)
+        self.assertNotIn("order_10d", profile)
+        self.assertNotIn("Kontakt", profile)
+        self.assertIn("item.comparable_contact_count", profile)
+        self.assertIn("item.priority_percentile_coverage.value", profile)
+        self.assertIn("sellerSelected(item.seller)", profile)
+        self.assertIn('role="img" tabindex="0"', profile)
+        self.assertIn('data-seller="${escapeHtml(item.seller)}"', profile)
+        self.assertIn("sc-priority-median-track", profile)
+        self.assertIn("border-left: 2px dashed", self.css)
+        self.assertIn("grid-column: 2", self.css)
 
     def test_advanced_analysis_is_closed_and_has_exactly_three_tabs(self):
         diagnostics = self.javascript[
@@ -465,8 +449,8 @@ class SalesCoachingFrontendTests(TestCase):
 
     def test_comparison_formatting_respects_count_metrics(self):
         self.assertIn('metric?.metric_type === "count"', self.javascript)
-        self.assertIn('`${number(value, 1)} aktiviteter`', self.javascript)
-        self.assertIn('`${value >= 0 ? "+" : ""}${number(value, 1)} aktiviteter`', self.javascript)
+        self.assertIn('`${number(value, 1)} ${escapeHtml(metric.unit || "st")}`', self.javascript)
+        self.assertIn('`${value >= 0 ? "+" : ""}${number(value, 1)} ${escapeHtml(metric.unit || "st")}`', self.javascript)
         self.assertIn("formatValue(comparisons.peer_median)", self.javascript)
         self.assertIn("formatValue(previousValue)", self.javascript)
         self.assertIn(
@@ -476,22 +460,14 @@ class SalesCoachingFrontendTests(TestCase):
         self.assertIn("!previousSuppressed && previousValue", self.javascript)
         self.assertIn("!previousSuppressed && comparisons.previous_period_status", self.javascript)
 
-    def test_priority_matrix_has_swedish_denominator_zero_reason(self):
+    def test_priority_profile_has_swedish_denominator_zero_reason(self):
         self.assertIn(
-            'order_denominator_zero: "inga berättigade kontakter för ordermåttet"',
+            'priority_denominator_zero: "inga jämförbara historiska kontakter"',
             self.javascript,
         )
         self.assertNotIn("positive_order_denominator_zero", self.javascript)
 
     def test_pending_outcome_copy_is_preliminary_and_hidden_at_zero(self):
-        kpi_markup = self.javascript.split("function kpiMarkup", 1)[1].split(
-            "function kpisMarkup", 1
-        )[0]
-        self.assertIn("Number(metric.waiting_outcome_count) > 0", kpi_markup)
-        self.assertIn(
-            "Preliminärt · ${number(metric.waiting_outcome_count)} väntar på 10-dagarsutfall",
-            kpi_markup,
-        )
         self.assertNotIn("väntar fortfarande på fullt 10-dagarsutfall", self.javascript)
         coaching_markup = self.javascript.split(
             "function coachingMarkup", 1
@@ -504,14 +480,6 @@ class SalesCoachingFrontendTests(TestCase):
         self.assertIn(
             "Preliminärt · ${number(card.evidence.waiting_outcome_count)} väntar på 10-dagarsutfall",
             coaching_markup,
-        )
-        matrix_markup = self.javascript.split(
-            "function priorityMatrixPanelMarkup", 1
-        )[1].split("function priorityMatrixMarkup", 1)[0]
-        self.assertIn("Number(xRate.waiting_outcome_count) > 0", matrix_markup)
-        self.assertIn(
-            "preliminärt: ${number(xRate.waiting_outcome_count)} väntar på 10-dagarsutfall",
-            matrix_markup,
         )
         self.assertIn('waiting_outcome: "waiting_outcome"', self.javascript)
         self.assertNotIn("väntar på slutligt 10-dagarsutfall", self.javascript)
@@ -625,7 +593,7 @@ class SalesCoachingFrontendTests(TestCase):
     def test_responsive_rules_avoid_page_level_horizontal_scroll(self):
         self.assertIn("@media (max-width: 900px)", self.css)
         self.assertIn("@media (max-width: 620px)", self.css)
-        self.assertIn(".sc-matrix-wrap { overflow-x: auto", self.css)
+        self.assertIn(".sc-priority-scroll { overflow-x: auto", self.css)
         self.assertIn(".sc-trend-wrap,", self.css)
         self.assertIn("width: calc(100% - 20px)", self.css)
         self.assertIn(".sc-drawer { width: 100vw; }", self.css)
