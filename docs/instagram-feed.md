@@ -68,7 +68,7 @@ the affected card keeps an original-post link and does not break the carousel.
 ## Permissions and token renewal
 
 Verified granted in Graph API Explorer: `instagram_basic`, `instagram_manage_comments`,
-`pages_read_engagement`, `pages_show_list`, `ads_read`, `public_profile`.
+`pages_read_engagement`, `pages_show_list`, `pages_manage_metadata`, `ads_read`, `public_profile`.
 The comments permission is required by tags/mentions read endpoints. `ads_read` is required
 when the Page role is assigned via Business Manager. The implementation never publishes,
 replies, changes comments or accesses ads. `/me/accounts` returned an empty list for this
@@ -82,7 +82,7 @@ Instagram Login token. App roles permit development testing with the owner's acc
 Advanced Access/App Review and business verification may be required for third-party
 access. Meta explicitly states that an unpublished app receives only dashboard test
 webhooks, even for app admins/developers/testers. Real mention delivery has not been
-verified. The app remains in Development mode; see the remaining step below.
+verified. The app is Live; see the remaining steps below.
 
 Server environment variables (never place values in source or frontend):
 
@@ -138,56 +138,51 @@ retains links to Instagram. No-IntersectionObserver browsers hide the section.
   and navigation available; a feed HTTP 503 hid the section with zero Instagram scripts.
   The surrounding page remained usable. Invalid metadata/permalinks are rejected by tests.
 
-## Remaining Meta step and deployment state
+## Current Meta and deployment state (14 September 2026)
 
-The user explicitly approved publication. On 8 September 2026, the app still showed
-**Development** after attempts to switch to Live. Basic settings have no contact email,
-privacy-policy URL or category, and offer connecting a business portfolio. Automatic
-approval review blocked a subsequent retry because prerequisites were missing. The
-publication approval remains valid; do not ask for it again. Obtain the correct contact
-email and published privacy-policy URL from the owner, complete the relevant basic
-settings, and then retry publication. Do not invent policy URLs or legal statements.
+The app is Live (independently confirmed in My Apps on 8 September). Contact email is
+`olle@eatpolarbar.com`, privacy policy is `https://polarbar.se/integritetspolicy`, and
+category is Business and Pages. On 14 September the new-device security check cleared
+and Meta confirmed that the app is managed by `polarbar.se` (1281349120346231).
+Business verification now shows **In review**. This is pending Meta's decision.
 
-The official [Instagram webhook setup guide](https://developers.facebook.com/docs/graph-api/webhooks/getting-started/webhooks-for-instagram)
-checked on 8 September requires a subscription on the linked Facebook Page, a Page
-access token with `pages_manage_metadata`, the appropriate Instagram permission, and
-a verified linked business. It also describes Advanced Access requirements for Business
-apps. The dashboard currently labels this app's type as `Ingen` and the relevant
-`instagram_basic`, `instagram_manage_comments`, `pages_read_engagement` and
-`pages_show_list` permissions as Standard Access, with no App Review requested.
-No Advanced Access or business verification completion has been established.
+`instagram_manage_comments` and `pages_manage_metadata` still show Standard Access,
+with no App Review requested. The dashboard says Tech Provider access verification is
+for access to other businesses' assets; this implementation serves Polarbär's account.
+Do not claim Advanced Access or business verification approval. Reassess any remaining
+App Review requirements after Meta's decision and a real mention test.
 
-The linked Page `868369943031594` was queried and returned Polarbär / `polarbar.se`.
-`GET /868369943031594/subscribed_apps` returned OAuth error 190, subcode 2069032:
-a Page access token is required; the current User token is unsupported for this check.
-`GET /17841475991503244/subscribed_apps` is not a supported field on this Facebook
-Login Instagram node. Therefore the account subscription is **not verified**. Obtain
-owner approval for the additional `pages_manage_metadata` permission, obtain the Page
-token through the authorized login flow, and verify/enable the linked Page subscription.
-Then test a real public caption/comment mention end to end. No real event was tested
-while publication and Page subscription remained blocked. The guide additionally lists
-Reels as unsupported for these webhooks; do not equate working Reel tags with Reel mentions.
+The linked Page `868369943031594` was verified as Polarbär / `polarbar.se`.
+On 8 September, after the owner's authorization of `pages_manage_metadata`, a Page token
+was obtained through Graph API Explorer. POST to the Page's `subscribed_apps` edge with
+`subscribed_fields=feed` returned success; GET read-back listed Polarbär Social Feed with
+`feed`. This is the Page subscription required by the Facebook Login integration;
+`subscribed_apps` is not a supported field on its Instagram user node.
 
-The Instagram `mentions` field remains subscribed at v26.0, callback URL unchanged.
-A new Meta dashboard test reached the deployed callback with HTTP 200 at
-**8 September 2026, 05:34:51 UTC**. This verifies the signed callback after the new Render
-deployment, not after Meta publication (which has not happened).
+On 14 September, Instagram `mentions` remains subscribed at v26.0 and the callback URL
+is unchanged. The signed synthetic dashboard test returned HTTP 200 after publication
+on 8 September at 11:09:11 UTC. No real public caption/comment mention has been verified
+end to end. The owner must supply a new public photo-post mention of `@polarbar.se`
+from another account and its permalink for that test. Story mentions are unsupported;
+the official webhook guide also excludes Reels, independently of working Reel tags.
 
-Final feed verification on 8 September: **18 unique posts, 12 UGC + 6 own**, exact
-UGC/UGC/own sequence, HTTP 200, `stale: false`. Render deployed `39998a7` successfully.
-`INSTAGRAM_FEED_LIMIT=18` is saved in Render and is consistent with `.env.example`,
-`render.yaml` and the Python defaults. Ten focused Instagram tests pass, including
-the new 18-item/default/override test. Frontend lazy-loading code is unchanged.
+On 8 September the live feed returned HTTP 200, **18 unique posts: 12 UGC + 6 own**,
+in exact UGC/UGC/own order with `stale: false`. `INSTAGRAM_FEED_LIMIT=18` was saved in
+Render and matches `.env.example`, `render.yaml` and Python defaults. Lazy loading is
+unchanged. Own and tagged-media retrieval were verified with real Graph API responses.
 
-Own and tagged-media retrieval already work independently of this remaining step.
+On 14 September Render was found running master `5378ac8` from 12 September, and the
+feed URL returned HTTP 401. The Instagram branch was updated with that master and the
+existing remote Instagram branch, preserving the new CRM features. All **690 tests**
+passed after integration. Redeployment and fresh live checks are pending below.
+
+Render auto-deploy remains off. Its configured branch is master; use a specific commit
+containing the Instagram feature until PR #20 is reviewed and merged by the owner.
+Deploying master before that removes the feed endpoints. This task does not merge PRs.
+PR: https://github.com/Oleo7/store-tracker/pull/20
+
 The token must be renewed before **6 November 2026**. There is no historical mention
-backfill, Story mention support, or persistence across service restarts.
-
-Render auto-deploy was automatically disabled by its specific-commit deployment flow.
-The service still tracks master in its settings, but the live runtime is the explicitly
-deployed Instagram commit. No merge to master was performed. Keep auto-deploy disabled
-until this branch is merged through the repository's normal review process; deploying
-master before that would remove the Instagram routes and assets.
+backfill or persistence across service restarts. No Squarespace changes were made.
 
 Changed files: `web-app/app.py`, `web-app/instagram_feed.py`,
 `web-app/static/instagram-feed.js`, `web-app/static/instagram-feed.css`,
