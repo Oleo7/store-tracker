@@ -174,7 +174,17 @@ unchanged. Own and tagged-media retrieval were verified with real Graph API resp
 On 14 September Render was found running master `5378ac8` from 12 September, and the
 feed URL returned HTTP 401. The Instagram branch was updated with that master and the
 existing remote Instagram branch, preserving the new CRM features. All **690 tests**
-passed after integration. Redeployment and fresh live checks are pending below.
+passed after integration. Render deployed `832fdb2b69e84757cc23261dd5b6d86ed40e3972`
+successfully at 14:20:14 UTC (deploy `dep-dak04rmq1p3s739pcpr0`). The initial tags read
+timed out and used own-media fallback; the next retry recovered automatically. Final
+live GET returned HTTP 200, 18 unique items, exactly 12 UGC and 6 own in repeating
+UGC/UGC/own order, and `stale: false`. Render's limit was read back as 18.
+
+A new Meta dashboard test reached the signed callback with HTTP 200 at **14 September
+2026, 14:22:10 UTC**. This remains a synthetic test, not a customer mention.
+`/health` and the lazy loader returned HTTP 200; the deployed loader exactly matches
+the unchanged repository asset. CORS allows `https://polarbar.se`; unauthenticated
+`/customers` still returns HTTP 401.
 
 Render auto-deploy remains off. Its configured branch is master; use a specific commit
 containing the Instagram feature until PR #20 is reviewed and merged by the owner.
