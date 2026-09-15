@@ -10,7 +10,7 @@
     controller: null,
     drawerController: null,
     lastFocus: null,
-    teamTrendView: "result",
+    teamTrendView: "dfp",
     activityTrendView: "all",
     diagnosticTab: "visits",
     pendingInitialMode: "business",
@@ -25,6 +25,8 @@
     "bom_visits", "phone", "manual_email", "reach", "visit_reach",
     "positive_dialogue", "positive_to_order_10d", "order_10d", "order_10d_count",
     "sales_linked_result",
+    "total_dfp",
+    "sales_linked_dfp",
     "bom_ratio", "planned_bom_ratio", "unplanned_bom_ratio", "repeat_boms",
     "high_priority_boms", "positive_next_step_coverage",
     "positive_without_next_step", "positive_without_order_or_follow_up_10d",
@@ -420,7 +422,7 @@
         const group = teamTrendTab.dataset.trendGroup || "sales";
         const keys = group === "activity"
           ? ["all", "reached", "bom", "phone"]
-          : ["result", "count", "order", "positive"];
+          : ["dfp", "result", "linked-dfp", "count", "order", "positive"];
         const current = keys.indexOf(teamTrendTab.dataset.teamTrendView);
         const next = event.key === "Home" ? 0 : event.key === "End" ? keys.length - 1 : (current + (event.key === "ArrowRight" ? 1 : -1) + keys.length) % keys.length;
         if (group === "activity") state.activityTrendView = keys[next];
@@ -520,7 +522,7 @@
     const comparable = history.comparable_percentile_rate || history.priority_percentile_coverage || quality.priority_percentile_coverage || {};
     const exact = history.exact_snapshot_rate || history.snapshot_coverage || {};
     const exclusionText = Object.entries(contribution.exclusion_reasons || {}).map(([reason, count]) => `${reason}: ${number(count)}`).join(" · ") || "Inga exkluderade order";
-    return `<section class="sc-section sc-details-section" aria-labelledby="sc-details-title"><details id="sc-quality-details"><summary id="sc-details-title"><span>Datakvalitet och definitioner</span><span class="sc-disclosure-icon" aria-hidden="true"></span></summary><div class="sc-details-content"><div class="sc-details-grid"><div><h3>Datakvalitet och täckning</h3><ul class="sc-quality-metrics">${qualityMetric("secure_customer_identity", percent(core.secure_customer_identity?.value), rateEvidence(core.secure_customer_identity))}${qualityMetric("order_attribution_identity_coverage", percent(core.order_attribution_identity_coverage?.value), rateEvidence(core.order_attribution_identity_coverage))}${qualityMetric("standardized_activity", percent(core.standardized_activity?.value), rateEvidence(core.standardized_activity))}${qualityMetric("flagged_activity_rows", number(quality.core_flagged_activity_rows))}${qualityMetric("quality_issue_count", number(quality.quality_issue_count))}${qualityMetric("waiting_outcome", number(quality.waiting_outcome_count))}</ul><button type="button" data-drilldown="data_quality" data-metric-definition="flagged_activity_rows">Visa kvalitetsunderlag</button></div><div><h3>Säljkopplat resultat</h3><ul class="sc-quality-metrics"><li><span>Krediterade logiska order</span><strong>${number(contribution.credited_order_count)}</strong></li><li><span>Exkluderade order</span><strong>${number(contribution.excluded_order_count)}</strong><small>${escapeHtml(exclusionText)}</small></li></ul>${contribution.own_order_component_limited_by_historical_filter ? `<p>Egen-order-komponenten är begränsad eftersom valt lifecycle/segment saknar historiskt kontaktsnapshot.</p>` : ""}<p>Kostnadsmodell: ${escapeHtml(contribution.model_version || "sales_contribution_v1")}.</p></div><div><h3>Historisk analysmognad</h3><ul class="sc-quality-metrics">${qualityMetric("priority_percentile_coverage", percent(comparable.value), rateEvidence(comparable))}${qualityMetric("exact_snapshots", number(history.exact_snapshot_count), rateEvidence(exact))}${qualityMetric("late_snapshots", number(history.late_snapshot_count))}${qualityMetric("operationally_suppressed", number(history.operationally_suppressed_count))}</ul><p>Kontaktmått använder de kundvärden som sparades vid kontakten. Planeringsmått använder kundens aktuella värden. Operativa undantag är inte i sig datakvalitetsfel.</p></div></div>${metricDefinitionsMarkup()}</div></details></section>`;
+    return `<section class="sc-section sc-details-section" aria-labelledby="sc-details-title"><details id="sc-quality-details"><summary id="sc-details-title"><span>Datakvalitet och definitioner</span><span class="sc-disclosure-icon" aria-hidden="true"></span></summary><div class="sc-details-content"><div class="sc-details-grid"><div><h3>Datakvalitet och täckning</h3><ul class="sc-quality-metrics">${qualityMetric("secure_customer_identity", percent(core.secure_customer_identity?.value), rateEvidence(core.secure_customer_identity))}${qualityMetric("order_attribution_identity_coverage", percent(core.order_attribution_identity_coverage?.value), rateEvidence(core.order_attribution_identity_coverage))}${qualityMetric("standardized_activity", percent(core.standardized_activity?.value), rateEvidence(core.standardized_activity))}${qualityMetric("flagged_activity_rows", number(quality.core_flagged_activity_rows))}${qualityMetric("quality_issue_count", number(quality.quality_issue_count))}${qualityMetric("waiting_outcome", number(quality.waiting_outcome_count))}</ul><button type="button" data-drilldown="data_quality" data-metric-definition="flagged_activity_rows">Visa kvalitetsunderlag</button></div><div><h3>Säljkopplat resultat</h3><ul class="sc-quality-metrics"><li><span>Krediterade logiska order</span><strong>${number(contribution.credited_order_count)}</strong></li><li><span>Exkluderade order</span><strong>${number(contribution.excluded_order_count)}</strong><small>${escapeHtml(exclusionText)}</small></li></ul>${contribution.own_order_component_limited_by_historical_filter ? `<p>Egen-order-komponenten är begränsad eftersom valt lifecycle/segment saknar historiskt kontaktsnapshot.</p>` : ""}<p>Modell: ${escapeHtml(contribution.model_version || "sales_contribution_v1")} · EUR/SEK: ${number(contribution.config?.eur_sek, 2)} · KFP/DFP: ${number(contribution.config?.kfp_per_dfp)} · Lager/distribution: ${Number(contribution.config?.warehouse_distribution_sek_per_kfp).toLocaleString("sv-SE", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} kr/KFP · Stockfilleravgift: ${percent(contribution.config?.stockfiller_fee_rate)} · Produktkostnad: SKU-specifik.</p><p>Config hash: ${escapeHtml(contribution.config_hash || "")}</p></div><div><h3>Historisk analysmognad</h3><ul class="sc-quality-metrics">${qualityMetric("priority_percentile_coverage", percent(comparable.value), rateEvidence(comparable))}${qualityMetric("exact_snapshots", number(history.exact_snapshot_count), rateEvidence(exact))}${qualityMetric("late_snapshots", number(history.late_snapshot_count))}${qualityMetric("operationally_suppressed", number(history.operationally_suppressed_count))}</ul><p>Kontaktmått använder de kundvärden som sparades vid kontakten. Planeringsmått använder kundens aktuella värden. Operativa undantag är inte i sig datakvalitetsfel.</p></div></div>${metricDefinitionsMarkup()}</div></details></section>`;
   }
 
   function sellerSelected(seller) {
@@ -538,8 +540,8 @@
       return `<button type="button" class="sc-team-group${sellerSelected(item.seller) ? " is-selected" : ""}" data-seller="${escapeHtml(item.seller)}" aria-label="${escapeHtml(title)}" title="${escapeHtml(title)}"><span class="sc-team-total">Totalt ${number(item.human_activities_total)}</span><span class="sc-team-bars"><i class="sc-team-bar is-visit-stack" style="height:${visits / activityMax * 100}%"><b>${number(visits)}</b><span class="sc-team-bar-segment is-visit-reached" style="flex:${reachedVisits}" aria-hidden="true"></span><span class="sc-team-bar-segment is-visit-bom" style="flex:${boms}" aria-hidden="true"></span></i><i class="sc-team-bar is-phone" style="height:${Number(item.channel_mix?.phone || 0) / activityMax * 100}%"><b>${number(item.channel_mix?.phone)}</b></i><i class="sc-team-bar is-email" style="height:${Number(item.channel_mix?.email || 0) / activityMax * 100}%"><b>${number(item.channel_mix?.email)}</b></i></span><span class="sc-team-seller">${escapeHtml(item.seller)}</span></button>`;
     }).join("");
     const rateCell = (metric, pending = 0) => `<span class="sc-rate-value">${percent(metric?.value)}</span><small>${rateEvidence(metric)} · ${statusLabel(metric?.status)}</small>${Number(pending) > 0 ? `<small class="sc-rate-pending">Preliminärt · ${number(pending)} väntar på 10-dagarsutfall</small>` : ""}${comparisonText(metric) ? `<small>${escapeHtml(comparisonText(metric))}</small>` : ""}`;
-    const resultCell = metric => `<span class="sc-result-value">${sek(metric?.value || 0)}</span><small>Kontakt: ${sek(metric?.contact_tb || 0)} · Egna order: ${sek(metric?.own_order_tb || 0)}</small>`;
-    const rows = sellers.map(item => `<tr${sellerSelected(item.seller) ? ' class="is-selected"' : ""}><th><button type="button" data-seller="${escapeHtml(item.seller)}">${escapeHtml(item.seller)}</button></th><td>${number(item.human_activities_total)}</td><td>${resultCell(item.sales_linked_result)}</td><td><button type="button" data-drilldown="converted_order_10d" data-seller="${escapeHtml(item.seller)}" data-channel="all">${number(item.order_10d_count?.value)}</button></td><td>${rateCell(item.order_10d, item.waiting_outcome_count)}</td><td>${rateCell(item.positive_to_order_10d, item.waiting_positive_dialogues_count)}</td><td>${rateCell(item.reach)}</td><td>${rateCell(item.positive_next_step_coverage)}</td><td>${rateCell(item.bom_ratio)}</td><td>${rateCell(item.positive_dialogue)}</td></tr>`).join("");
+    const resultCell = (metric, pending) => `<span class="sc-result-value">${sek(metric?.value || 0)}</span><small>Via kontakt: ${sek(metric?.contact_tb || 0)} · Egna order utan kontakt: ${sek(metric?.own_order_tb || 0)}</small>${pending ? `<small>Preliminärt · ${number(pending)} kontakter väntar på 10-dagarsutfall</small>` : ""}`;
+    const rows = sellers.map(item => `<tr${sellerSelected(item.seller) ? ' class="is-selected"' : ""}><th><button type="button" data-seller="${escapeHtml(item.seller)}">${escapeHtml(item.seller)}</button></th><td>${number(item.human_activities_total)}</td><td>${resultCell(item.sales_linked_result, item.open_outcome_window_count)}</td><td><button type="button" data-drilldown="converted_order_10d" data-seller="${escapeHtml(item.seller)}" data-channel="all">${number(item.order_10d_count?.value)}</button></td><td>${rateCell(item.order_10d, item.waiting_outcome_count)}</td><td>${rateCell(item.positive_to_order_10d, item.waiting_positive_dialogues_count)}</td><td>${rateCell(item.reach)}</td><td>${rateCell(item.positive_next_step_coverage)}</td><td>${rateCell(item.bom_ratio)}</td><td>${rateCell(item.positive_dialogue)}</td></tr>`).join("");
     return `<section class="sc-section" aria-labelledby="sc-team-title"><div class="sc-section-heading"><div><h2 id="sc-team-title">Teamjämförelse</h2></div></div><article class="sc-team-chart"><h3>Mänskliga aktiviteter</h3><p>Besök är stackade: <span class="sc-legend-key is-visit">nådda besök</span> + <span class="sc-legend-key is-bom">bom</span>. <span class="sc-legend-key is-phone">Telefon</span> och manuellt mejl visas separat.</p><div class="sc-team-plot">${activityGroups}</div></article><div class="sc-table-wrap"><table class="sc-table sc-comparison-table"><thead><tr><th>Säljare</th><th>Aktiviteter</th><th>${metricHeader(metricLabel("sales_linked_result", "Säljkopplat resultat"), "sales_linked_result", "team-sales-result")}</th><th>${metricHeader(metricLabel("order_10d_count", "Kontakter med orderutfall inom 10 dagar"), "order_10d_count", "team-order-count")}</th><th>${metricHeader(metricLabel("order_10d", "Kontakt – order inom 10 dagar"), "order_10d", "team-order")}</th><th>${metricHeader(metricLabel("positive_to_order_10d", "Positiv dialog → order inom 10 dagar"), "positive_to_order_10d", "team-positive-order")}</th><th>${metricHeader("Träffgrad", "reach", "team-reach")}</th><th>${metricHeader("Nästa-steg-täckning", "positive_next_step_coverage", "team-next-step")}</th><th>${metricHeader("Bom-ratio", "bom_ratio", "team-bom")}</th><th>${metricHeader("Positiv dialog", "positive_dialogue", "team-positive")}</th></tr></thead><tbody>${rows}</tbody></table></div></section>`;
   }
 
@@ -591,7 +593,8 @@
     const isCount = trend.metric_type === "count" || config.metricType === "count";
     const isScalar = isCount || isCurrency;
     const values = series.flatMap(item => (item.points || []).map(point => Number(point.value)).filter(Number.isFinite));
-    const maximum = Math.max(0, ...values);
+    const target = trend.target;
+    const maximum = Math.max(0, target || 0, ...values);
     const minimum = isCurrency ? Math.min(0, ...values) : 0;
     const rawStep = Math.max(1, Math.max(Math.abs(maximum), Math.abs(minimum)) / 4);
     const magnitude = 10 ** Math.floor(Math.log10(rawStep));
@@ -600,7 +603,7 @@
     const axisMin = isCurrency ? Math.min(0, Math.floor(minimum / step) * step) : 0;
     const y = value => pad.top + (axisMax - Number(value)) / (axisMax - axisMin) * plotHeight;
     const selectedSeller = String(trends?.selected_seller || "");
-    const hasSelection = Boolean(selectedSeller);
+    const hasSelection = !config.total && Boolean(selectedSeller);
     const isSelected = seller => hasSelection && String(seller).localeCompare(selectedSeller, "sv-SE", { sensitivity: "base" }) === 0;
     const ticks = isScalar ? Array.from({ length: (axisMax - axisMin) / step + 1 }, (_, index) => axisMin + index * step) : [0, 0.25, 0.5, 0.75, 1];
     const grid = ticks.map(value => `<g aria-hidden="true"><line class="sc-team-order-grid" x1="${pad.left}" x2="${width - pad.right}" y1="${y(value)}" y2="${y(value)}"></line><text class="sc-team-order-y-label" x="${pad.left - 10}" y="${y(value) + 4}" text-anchor="end">${isCurrency ? sek(value) : isCount ? number(value) : `${value * 100} %`}</text></g>`).join("");
@@ -608,6 +611,7 @@
 
     const seriesMarkup = series.map(item => {
       const style = teamTrendStyle(item.seller);
+      if (config.total) Object.assign(style, { dash: "", marker: 0, key: "total" });
       const selected = isSelected(item.seller);
       const selectionClass = selected ? " is-selected" : hasSelection ? " is-unselected" : "";
       const pointByWeek = new Map((item.points || []).map(point => [point.week, point]));
@@ -631,35 +635,44 @@
         const evidence = `${number(point.numerator)} av ${number(point.denominator)} ${config.evidenceLabel}`;
         const period = `${point.period?.start || "—"}–${point.period?.end || "—"}`;
         const title = isCurrency
-          ? `${item.seller} · ${teamTrendWeekLabel(point.week)} · ${period}: Säljkopplat resultat ${sek(point.value)} · Via kontakt ${sek(point.contact_tb)} · Egna order utan kontakt ${sek(point.own_order_tb)}`
+          ? `${item.seller} · ${teamTrendWeekLabel(point.week)} · ${period}: Säljkopplat TB ${sek(point.value)} · Via kontakt ${sek(point.contact_tb)} · Egna order utan kontakt ${sek(point.own_order_tb)}`
+          : config.metricKey === "sales_linked_dfp"
+          ? `${item.seller} · ${teamTrendWeekLabel(point.week)} · ${period}: Säljkopplade DFP: ${number(point.value)} · Via kontakt: ${number(point.contact_dfp)} DFP · Egna order utan kontakt: ${number(point.own_order_dfp)} DFP`
           : isCount
           ? `${item.seller} · ${teamTrendWeekLabel(point.week)}: ${number(point.value)} ${config.valueLabel || "aktiviteter"} · ${period}`
           : `${item.seller} · ${teamTrendWeekLabel(point.week)} · ${period}: ${percent(point.value)} · ${evidence} · ${small ? "Litet underlag" : "Tillräckligt underlag"}`;
         const drilldownMetric = config.drilldownMetric === null ? "" : (config.drilldownMetric || config.metricKey);
-        return `<g class="sc-team-order-point${small ? " is-small-sample" : ""}${selectionClass}" style="--series-color:${style.color}" tabindex="0" role="${drilldownMetric ? "button" : "img"}"${drilldownMetric ? ` data-drilldown="${drilldownMetric}"` : ""} data-trend-view="${view}" data-seller="${escapeHtml(item.seller)}" data-series-style="${style.key}" data-week="${escapeHtml(point.week)}" data-numerator="${number(point.numerator)}" data-denominator="${number(point.denominator)}" data-channel="all" data-start="${escapeHtml(point.period?.start || "")}" data-end="${escapeHtml(point.period?.end || "")}" aria-label="${escapeHtml(title)}"><title>${escapeHtml(title)}</title><circle class="sc-team-order-point-hit" cx="${x(index)}" cy="${y(point.value)}" r="22"></circle>${teamTrendMarker(style.marker, x(index), y(point.value))}</g>`;
+        return `<g class="sc-team-order-point${small ? " is-small-sample" : ""}${selectionClass}" style="--series-color:${style.color}" tabindex="0" role="${drilldownMetric ? "button" : "img"}"${drilldownMetric ? ` data-drilldown="${drilldownMetric}"` : ""} data-trend-view="${view}" ${config.total ? "" : `data-seller="${escapeHtml(item.seller)}"`} data-series-style="${style.key}" data-week="${escapeHtml(point.week)}" data-numerator="${number(point.numerator)}" data-denominator="${number(point.denominator)}" data-channel="all" data-start="${escapeHtml(point.period?.start || "")}" data-end="${escapeHtml(point.period?.end || "")}" aria-label="${escapeHtml(title)}"><title>${escapeHtml(title)}</title><circle class="sc-team-order-point-hit" cx="${x(index)}" cy="${y(point.value)}" r="22"></circle>${teamTrendMarker(style.marker, x(index), y(point.value))}</g>`;
       }).join("");
       return `${lines}${points}`;
     }).join("");
 
     const legend = series.map(item => {
       const style = teamTrendStyle(item.seller);
+      if (config.total) Object.assign(style, { dash: "", marker: 0, key: "total" });
       const selected = isSelected(item.seller);
+      if (config.total) return `<span class="sc-team-order-legend-item" style="--series-color:${style.color}"><svg viewBox="0 0 42 18" aria-hidden="true"><line x1="2" x2="40" y1="9" y2="9" style="stroke:${style.color}"></line>${teamTrendMarker(0, 21, 9)}</svg><span>${escapeHtml(item.seller)}</span></span>`;
       return `<button type="button" class="sc-team-order-legend-item${selected ? " is-selected" : hasSelection ? " is-unselected" : ""}" style="--series-color:${style.color}" data-trend-view="${view}" data-seller="${escapeHtml(item.seller)}" data-series-style="${style.key}" aria-label="Visa ${escapeHtml(item.seller)} som vald säljare"><svg viewBox="0 0 42 18" aria-hidden="true"><line x1="2" x2="40" y1="9" y2="9" style="stroke:${style.color}${style.dash ? `;stroke-dasharray:${style.dash}` : ""}"></line>${teamTrendMarker(style.marker, 21, 9)}</svg><span>${escapeHtml(item.seller)}</span></button>`;
     }).join("");
 
+    const targetLabel = target == null ? "" : `Målnivå: ${isCurrency ? sek(target) : `${number(target)} DFP`}${config.total ? "" : " per säljare/vecka"}`;
+    const targetLine = target == null ? "" : `<line class="sc-trend-target" data-target="${target}" x1="${pad.left}" x2="${width - pad.right}" y1="${y(target)}" y2="${y(target)}" stroke="#686868" stroke-width="2" stroke-dasharray="8 6"><title>${escapeHtml(targetLabel)}</title></line>`;
+    const targetLegend = target == null ? "" : `<span class="sc-team-order-legend-item"><svg viewBox="0 0 42 18" aria-hidden="true"><line x1="2" x2="40" y1="9" y2="9" stroke="#686868" stroke-dasharray="8 6"></line></svg>${escapeHtml(targetLabel)}</span>`;
     const idPrefix = group === "activity" ? "sc-activity" : "sc-team";
-    return `<div class="sc-team-trend-panel" id="${idPrefix}-trend-panel-${view}" role="tabpanel" aria-labelledby="${idPrefix}-trend-tab-${view}"${activeView === view ? "" : " hidden"}><h3>${escapeHtml(config.title)}</h3><div class="sc-team-order-trend-wrap" tabindex="0" aria-label="Horisontellt rullningsbar trendgraf"><svg class="sc-team-order-trend" viewBox="0 0 ${width} ${height}" role="group" aria-label="Veckovis ${escapeHtml(config.title)} för aktiva säljare, ${isCurrency ? `SEK från ${number(axisMin)} till ${number(axisMax)}` : isCount ? `antal från 0 till ${number(axisMax)}` : "fast skala 0 till 100 procent"}">${grid}${seriesMarkup}${xLabels}</svg></div><div class="sc-team-order-legend" aria-label="Säljarserier">${legend || `<span class="sc-empty">Inga aktiva säljare.</span>`}</div></div>`;
+    return `<div class="sc-team-trend-panel" id="${idPrefix}-trend-panel-${view}" role="tabpanel" aria-labelledby="${idPrefix}-trend-tab-${view}"${activeView === view ? "" : " hidden"}><h3>${escapeHtml(config.title)}</h3><div class="sc-team-order-trend-wrap" tabindex="0" aria-label="Horisontellt rullningsbar trendgraf"><svg class="sc-team-order-trend" viewBox="0 0 ${width} ${height}" role="group" aria-label="Veckovis ${escapeHtml(config.title)} för aktiva säljare, ${isCurrency ? `SEK från ${number(axisMin)} till ${number(axisMax)}` : isCount ? `antal från 0 till ${number(axisMax)}` : "fast skala 0 till 100 procent"}">${grid}${targetLine}${seriesMarkup}${xLabels}</svg></div><div class="sc-team-order-legend" aria-label="Säljarserier">${legend || `<span class="sc-empty">Inga aktiva säljare.</span>`}${targetLegend}</div></div>`;
   }
 
   function teamTrendsMarkup(trends) {
-    const view = ["result", "count", "order", "positive"].includes(state.teamTrendView) ? state.teamTrendView : "result";
+    const view = ["dfp", "result", "linked-dfp", "count", "order", "positive"].includes(state.teamTrendView) ? state.teamTrendView : "dfp";
     const tabs = [
-      ["result", "Säljkopplat resultat", {
+      ["dfp", "DFP per vecka", { metricKey: "total_dfp", metricType: "count", total: true, drilldownMetric: null, title: "Försäljning – DFP per vecka", valueLabel: "DFP" }],
+      ["result", "Säljkopplat TB", {
         metricKey: "sales_linked_result",
         metricType: "currency",
         drilldownMetric: null,
-        title: "Säljkopplat resultat",
+        title: "Säljkopplat TB – per säljare/vecka",
       }],
+      ["linked-dfp", "Säljkopplade DFP per säljare/vecka", { metricKey: "sales_linked_dfp", metricType: "count", drilldownMetric: null, title: "Säljkopplade DFP – per säljare/vecka", valueLabel: "DFP" }],
       ["count", "Kontakter med orderutfall inom 10 dagar", {
         metricKey: "order_10d_count",
         metricType: "count",
@@ -680,7 +693,7 @@
     ];
     const tabList = tabs.map(([key, label]) => `<button type="button" role="tab" id="sc-team-trend-tab-${key}" data-team-trend-view="${key}" data-trend-group="sales" aria-selected="${view === key}" aria-controls="sc-team-trend-panel-${key}" tabindex="${view === key ? "0" : "-1"}">${label}</button>`).join("");
     const panels = tabs.map(([key, _label, config]) => teamTrendPanelMarkup(trends, key, config, view)).join("");
-    return `<section class="sc-section sc-team-10d-trend-section" aria-labelledby="sc-team-trend-title"><div class="sc-section-heading"><div><h2 id="sc-team-trend-title">Försäljning-trend</h2><p>10-dagarsmåtten visas per kontaktvecka efter att hela utfallsfönstret passerat. Säljkopplat resultat krediteras kontaktveckan för kontaktattribuerade order och orderveckan för egna order utan kontaktmatchning.</p></div></div><p class="sc-team-order-filter-note">Period-, säljar- och kanalfilter begränsar inte grafen. Vald säljare markeras; lifecycle och segment följer filtren.</p><div class="sc-team-trend-tabs" role="tablist" aria-label="Välj försäljningstrend">${tabList}</div>${panels}</section>`;
+    return `<section class="sc-section sc-team-10d-trend-section" aria-labelledby="sc-team-trend-title"><div class="sc-section-heading"><div><h2 id="sc-team-trend-title">Försäljning-trend</h2><p>10-dagarsmåtten visas per kontaktvecka efter att hela utfallsfönstret passerat. Säljkopplat TB och säljkopplade DFP krediteras kontaktveckan för kontaktattribuerade order och orderveckan för egna order utan kontaktmatchning.</p></div></div><p class="sc-team-order-filter-note">Period-, säljar- och kanalfilter begränsar inte grafen. Vald säljare markeras; lifecycle och segment följer filtren för säljkopplade mått. DFP per vecka visar alltid Polarbär totalt, enligt orderdatum.</p><div class="sc-team-trend-tabs" role="tablist" aria-label="Välj försäljningstrend">${tabList}</div>${panels}</section>`;
   }
 
   function activityTrendsMarkup(trends) {

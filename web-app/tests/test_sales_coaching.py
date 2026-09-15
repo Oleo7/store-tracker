@@ -1127,7 +1127,7 @@ class Team10dTrendTests(TestCase):
         )
 
         self.assertEqual(set(trends["metrics"]), {
-            "sales_linked_result", "order_10d_count", "order_10d",
+            "total_dfp", "sales_linked_dfp", "sales_linked_result", "order_10d_count", "order_10d",
             "positive_to_order_10d",
         })
         self.assertEqual(
@@ -1596,7 +1596,7 @@ class SnapshotAndAggregateTests(TestCase):
         summary = self.summary([])
 
         self.assertTrue(required.issubset(METRIC_DEFINITIONS))
-        self.assertEqual(summary["meta"]["definitions_version"], "sales_coaching_v11")
+        self.assertEqual(summary["meta"]["definitions_version"], "sales_coaching_v12")
         self.assertNotIn("positive_to_order_10d_comparable", METRIC_DEFINITIONS)
         self.assertNotIn("order_10d_comparable", METRIC_DEFINITIONS)
         self.assertNotIn("comparable", summary["kpis"]["positive_to_order_10d"])

@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import date, datetime, time, timedelta
+import hashlib
+import json
 import math
 import statistics
 import time as clock
@@ -23,7 +25,7 @@ from sales_coaching_rules import (
 )
 
 
-DEFINITIONS_VERSION = "sales_coaching_v11"
+DEFINITIONS_VERSION = "sales_coaching_v12"
 ANALYTICS_SNAPSHOT_VERSION = "sales_coaching_v2"
 PRIORITY_PERCENTILE_BASIS = "owner_active_scored_portfolio_midrank_v2"
 STOCKHOLM_ZONE = ZoneInfo("Europe/Stockholm")
@@ -31,6 +33,9 @@ ATTRIBUTION_WINDOW_DAYS = 10
 MIN_RATE_SAMPLE = 10
 MIN_PRIORITY_COVERAGE = 0.70
 TEAM_ORDER_TREND_WEEKS = 16
+WEEKLY_DFP_TARGET = 400
+WEEKLY_SALES_LINKED_TB_TARGET_SEK = 15000
+WEEKLY_SALES_LINKED_DFP_TARGET = 120
 SALES_CONTRIBUTION_MODEL_VERSION = "sales_contribution_v1"
 SALES_CONTRIBUTION_DEFAULTS = {
     "eur_sek": 10.77,
@@ -48,6 +53,8 @@ SALES_CONTRIBUTION_DEFAULTS = {
 }
 
 METRIC_DEFINITIONS = {
+    "total_dfp": {"label": "DFP per vecka", "definition": "Polarbärs totala kommersiella DFP från Total weight, fördelat på ISO-vecka enligt Order date.", "metric_type": "count", "unit": "DFP"},
+    "sales_linked_dfp": {"label": "Säljkopplade DFP", "definition": "DFP från samma krediterade order som säljkopplat TB. Kontaktorder redovisas i kontaktveckan och egna order utan kontakt i orderveckan.", "metric_type": "count", "unit": "DFP"},
     "human_activities": {
         "label": "Aktiviteter",
         "definition": "Antal mänskliga aktiviteter som inte är automatiska CRM-mejl. Besök, telefon och manuella mejl redovisas som kanaler.",
@@ -1346,6 +1353,17 @@ def build_sales_linked_results(
             "customer_segment_at_contact": "",
             "contribution": contribution,
         })
+    orders_by_id = {order["order_id"]: order for order in grouped_orders or ()}
+    for item in excluded:
+        order = orders_by_id[item["order_id"]]
+        credit = attribution.get("order_to_contact", {}).get(item["order_id"])
+        contact = activity_by_contact.get((credit or {}).get("contact_id"), {})
+        item.update({
+            "credited_date": contact.get("contact_date") if credit else order.get("date"),
+            "source": "contact_10d" if credit else "own_order_unmatched",
+            "lifecycle_at_contact": _text(contact.get("lifecycle_at_contact")),
+            "customer_segment_at_contact": _text(contact.get("customer_segment_at_contact")),
+        })
     return {
         "model_version": config["model_version"],
         "currency": "SEK",
@@ -1365,8 +1383,9 @@ def _filter_sales_linked_results(
     sales_results, *, start, end, segment="all", lifecycle="all",
 ):
     filtered = []
+    excluded = []
     historical_filter = segment != "all" or lifecycle != "all"
-    for item in sales_results.get("credited_orders", ()):
+    for item in (*sales_results.get("credited_orders", ()), *sales_results.get("excluded_orders", ())):
         credited_date = item.get("credited_date")
         if not credited_date or not (start <= credited_date <= end):
             continue
@@ -1379,10 +1398,11 @@ def _filter_sales_linked_results(
                 continue
             if lifecycle != "all" and item_lifecycle != lifecycle:
                 continue
-        filtered.append(item)
+        (excluded if "reason" in item else filtered).append(item)
     return {
         **sales_results,
         "credited_orders": filtered,
+        "excluded_orders": excluded,
         "metadata": {
             **sales_results.get("metadata", {}),
             "filtered_credited_order_count": len(filtered),
@@ -1409,6 +1429,14 @@ def _sales_linked_metric(items):
         "metric_type": "currency",
         "model_version": SALES_CONTRIBUTION_MODEL_VERSION,
     }
+
+
+def _sales_linked_dfp_metric(items):
+    contact_dfp = sum(item.get("dfp", 0) for item in items if item["source"] == "contact_10d")
+    own_dfp = sum(item.get("dfp", 0) for item in items if item["source"] == "own_order_unmatched")
+    return {"value": round(contact_dfp + own_dfp, 4),
+            "contact_dfp": round(contact_dfp, 4), "own_order_dfp": round(own_dfp, 4),
+            "credited_order_count": len(items), "metric_type": "count"}
 
 
 def _iso_week(value):
@@ -1635,7 +1663,7 @@ def _order_10d_count(rate):
 
 def _team_10d_trends(
     activities, attribution, sales_results, sellers, *, generated_date, selected_seller="",
-    segment="all", lifecycle="all", weeks=TEAM_ORDER_TREND_WEEKS,
+    segment="all", lifecycle="all", weeks=TEAM_ORDER_TREND_WEEKS, commercial_orders=(),
 ):
     """Build sales outcome metrics over the existing mature weekly window."""
     maturity_cutoff = generated_date - timedelta(days=ATTRIBUTION_WINDOW_DAYS)
@@ -1685,7 +1713,7 @@ def _team_10d_trends(
         ].append(item)
 
     metric_keys = (
-        "sales_linked_result", "order_10d_count", "order_10d",
+        "sales_linked_result", "sales_linked_dfp", "order_10d_count", "order_10d",
         "positive_to_order_10d",
     )
     series_by_metric = {metric_key: [] for metric_key in metric_keys}
@@ -1698,8 +1726,8 @@ def _team_10d_trends(
                 attribution,
             )
             for metric_key in metric_keys:
-                if metric_key == "sales_linked_result":
-                    metric = _sales_linked_metric(
+                if metric_key in {"sales_linked_result", "sales_linked_dfp"}:
+                    metric = (_sales_linked_metric if metric_key == "sales_linked_result" else _sales_linked_dfp_metric)(
                         sales_by_seller_week.get((seller_key, slot["week"]), [])
                     )
                     points_by_metric[metric_key].append({
@@ -1733,6 +1761,18 @@ def _team_10d_trends(
                 "points": points_by_metric[metric_key],
             })
 
+    totals_by_week = defaultdict(float)
+    for order in commercial_orders:
+        if order.get("commercial_eligible"):
+            totals_by_week[_iso_week(order["date"])] += order.get("dfp", 0)
+    series_by_metric["total_dfp"] = [{"seller": "Försäljning, DFP", "points": [
+        {"week": slot["week"], "period": dict(slot["period"]),
+         "value": round(totals_by_week[slot["week"]], 4), "status": "sufficient"}
+        for slot in week_axis]}]
+    metric_keys = ("total_dfp", *metric_keys)
+    targets = {"total_dfp": WEEKLY_DFP_TARGET,
+               "sales_linked_result": WEEKLY_SALES_LINKED_TB_TARGET_SEK,
+               "sales_linked_dfp": WEEKLY_SALES_LINKED_DFP_TARGET}
     return {
         "weeks": weeks,
         "period": {
@@ -1747,6 +1787,7 @@ def _team_10d_trends(
                 "metric_key": metric_key,
                 "metric_type": METRIC_DEFINITIONS[metric_key]["metric_type"],
                 "series": series_by_metric[metric_key],
+                "target": targets.get(metric_key),
             }
             for metric_key in metric_keys
         },
@@ -1877,6 +1918,7 @@ def _seller_comparison(rows, attribution, sellers, sales_results=None):
             "attributed_orders": len(aggregate["attributed"]),
             "waiting_outcome_count": len(aggregate["waiting"]),
             "order_10d_count": _order_10d_count(aggregate["rates"]["order_10d"]),
+            "open_outcome_window_count": sum(attribution["maturity"].get(row["contact_id"]) == "waiting_outcome" for row in aggregate["attribution_eligible"]),
             "sales_linked_result": _sales_linked_metric(seller_sales),
             **aggregate["rates"],
             "snapshot_coverage": _rate(
@@ -2024,10 +2066,10 @@ def _data_quality(
         and comparable_percentile_rate["value"] >= MIN_PRIORITY_COVERAGE
         else "building"
     )
+    filtered_sales_results = filtered_sales_results if filtered_sales_results is not None else (sales_results or {})
     contribution_exclusions = defaultdict(int)
-    for item in (sales_results or {}).get("excluded_orders", ()):
+    for item in filtered_sales_results.get("excluded_orders", ()):
         contribution_exclusions[item.get("reason") or "excluded_order"] += 1
-    filtered_sales_results = filtered_sales_results or sales_results or {}
     return {
         "status": status,
         "core_analytics": {
@@ -2057,6 +2099,8 @@ def _data_quality(
             "message": "Historisk prioriteringsdata byggs upp från lanseringen och påverkar inte kärnanalysen av aktivitet och order.",
         },
         "sales_contribution": {
+            "config": (sales_results or {}).get("config", {}),
+            "config_hash": hashlib.sha256(json.dumps((sales_results or {}).get("config", {}), sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:16],
             "model_version": (sales_results or {}).get(
                 "model_version", SALES_CONTRIBUTION_MODEL_VERSION,
             ),
@@ -2064,7 +2108,7 @@ def _data_quality(
                 (filtered_sales_results or {}).get("credited_orders", ())
             ),
             "excluded_order_count": len(
-                (sales_results or {}).get("excluded_orders", ())
+                filtered_sales_results.get("excluded_orders", ())
             ),
             "exclusion_reasons": dict(sorted(contribution_exclusions.items())),
             "own_order_component_limited_by_historical_filter": (
@@ -2136,6 +2180,7 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
         sales_results,
         coached_sellers,
         generated_date=generated.date(),
+        commercial_orders=order_result["orders"],
         selected_seller=seller,
         segment=segment,
         lifecycle=lifecycle,

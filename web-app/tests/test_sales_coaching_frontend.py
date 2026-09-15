@@ -292,7 +292,7 @@ class SalesCoachingFrontendTests(TestCase):
         )[0]
         for expected in (
             "10-dagarsmåtten visas per kontaktvecka",
-            "Säljkopplat resultat krediteras kontaktveckan",
+            "Säljkopplat TB och säljkopplade DFP krediteras kontaktveckan",
             "Mänskliga aktiviteter – trend",
             "helt avslutad ISO-vecka",
             "Period-, säljar- och kanalfilter begränsar inte grafen",
@@ -350,9 +350,9 @@ class SalesCoachingFrontendTests(TestCase):
             'const teamTrendTab = event.target.closest("[data-team-trend-view]")',
             2,
         )[2].split('const diagnosticTab =', 1)[0]
-        self.assertIn('teamTrendView: "result"', self.javascript)
+        self.assertIn('teamTrendView: "dfp"', self.javascript)
         self.assertIn('activityTrendView: "all"', self.javascript)
-        self.assertIn('["result", "count", "order", "positive"]', self.javascript)
+        self.assertIn('["dfp", "result", "linked-dfp", "count", "order", "positive"]', self.javascript)
         self.assertIn('["all", "reached", "bom", "phone"]', self.javascript)
         for key in ("ArrowLeft", "ArrowRight", "Home", "End"):
             self.assertIn(key, self.javascript)
