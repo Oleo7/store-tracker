@@ -1127,7 +1127,8 @@ class Team10dTrendTests(TestCase):
         )
 
         self.assertEqual(set(trends["metrics"]), {
-            "order_10d_count", "order_10d", "positive_to_order_10d",
+            "sales_linked_result", "order_10d_count", "order_10d",
+            "positive_to_order_10d",
         })
         self.assertEqual(
             (order_point["numerator"], order_point["denominator"], order_point["value"]),

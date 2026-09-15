@@ -10,7 +10,8 @@
     controller: null,
     drawerController: null,
     lastFocus: null,
-    teamTrendView: "count",
+    teamTrendView: "result",
+    activityTrendView: "all",
     diagnosticTab: "visits",
     pendingInitialMode: "business",
     filters: defaultFilters(),
@@ -23,6 +24,7 @@
     "human_activities", "unique_customers", "visits", "reached_visits",
     "bom_visits", "phone", "manual_email", "reach", "visit_reach",
     "positive_dialogue", "positive_to_order_10d", "order_10d", "order_10d_count",
+    "sales_linked_result",
     "bom_ratio", "planned_bom_ratio", "unplanned_bom_ratio", "repeat_boms",
     "high_priority_boms", "positive_next_step_coverage",
     "positive_without_next_step", "positive_without_order_or_follow_up_10d",
@@ -153,6 +155,10 @@
     return value === null || value === undefined
       ? "—"
       : `${number(Number(value) * 100, 1)} %`;
+  }
+
+  function sek(value) {
+    return `${number(value)} kr`;
   }
 
   function statusLabel(status) {
@@ -411,12 +417,16 @@
       const teamTrendTab = event.target.closest("[data-team-trend-view]");
       if (teamTrendTab && ["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
         event.preventDefault();
-        const keys = ["count", "order", "positive"];
+        const group = teamTrendTab.dataset.trendGroup || "sales";
+        const keys = group === "activity"
+          ? ["all", "reached", "bom", "phone"]
+          : ["result", "count", "order", "positive"];
         const current = keys.indexOf(teamTrendTab.dataset.teamTrendView);
         const next = event.key === "Home" ? 0 : event.key === "End" ? keys.length - 1 : (current + (event.key === "ArrowRight" ? 1 : -1) + keys.length) % keys.length;
-        state.teamTrendView = keys[next];
+        if (group === "activity") state.activityTrendView = keys[next];
+        else state.teamTrendView = keys[next];
         if (state.data) renderDashboard(state.data);
-        document.getElementById(`sc-team-trend-tab-${keys[next]}`)?.focus();
+        document.getElementById(`${group === "activity" ? "sc-activity" : "sc-team"}-trend-tab-${keys[next]}`)?.focus();
         return;
       }
       const diagnosticTab = event.target.closest("[data-diagnostic-tab]");
@@ -506,9 +516,11 @@
   function dataQualityDetailsMarkup(quality) {
     const core = quality.core_analytics || {};
     const history = quality.historical_priority || {};
+    const contribution = quality.sales_contribution || {};
     const comparable = history.comparable_percentile_rate || history.priority_percentile_coverage || quality.priority_percentile_coverage || {};
     const exact = history.exact_snapshot_rate || history.snapshot_coverage || {};
-    return `<section class="sc-section sc-details-section" aria-labelledby="sc-details-title"><details id="sc-quality-details"><summary id="sc-details-title"><span>Datakvalitet och definitioner</span><span class="sc-disclosure-icon" aria-hidden="true"></span></summary><div class="sc-details-content"><div class="sc-details-grid"><div><h3>Datakvalitet och täckning</h3><ul class="sc-quality-metrics">${qualityMetric("secure_customer_identity", percent(core.secure_customer_identity?.value), rateEvidence(core.secure_customer_identity))}${qualityMetric("order_attribution_identity_coverage", percent(core.order_attribution_identity_coverage?.value), rateEvidence(core.order_attribution_identity_coverage))}${qualityMetric("standardized_activity", percent(core.standardized_activity?.value), rateEvidence(core.standardized_activity))}${qualityMetric("flagged_activity_rows", number(quality.core_flagged_activity_rows))}${qualityMetric("quality_issue_count", number(quality.quality_issue_count))}${qualityMetric("waiting_outcome", number(quality.waiting_outcome_count))}</ul><button type="button" data-drilldown="data_quality" data-metric-definition="flagged_activity_rows">Visa kvalitetsunderlag</button></div><div><h3>Historisk analysmognad</h3><ul class="sc-quality-metrics">${qualityMetric("priority_percentile_coverage", percent(comparable.value), rateEvidence(comparable))}${qualityMetric("exact_snapshots", number(history.exact_snapshot_count), rateEvidence(exact))}${qualityMetric("late_snapshots", number(history.late_snapshot_count))}${qualityMetric("operationally_suppressed", number(history.operationally_suppressed_count))}</ul><p>Kontaktmått använder de kundvärden som sparades vid kontakten. Planeringsmått använder kundens aktuella värden. Operativa undantag är inte i sig datakvalitetsfel.</p></div></div>${metricDefinitionsMarkup()}</div></details></section>`;
+    const exclusionText = Object.entries(contribution.exclusion_reasons || {}).map(([reason, count]) => `${reason}: ${number(count)}`).join(" · ") || "Inga exkluderade order";
+    return `<section class="sc-section sc-details-section" aria-labelledby="sc-details-title"><details id="sc-quality-details"><summary id="sc-details-title"><span>Datakvalitet och definitioner</span><span class="sc-disclosure-icon" aria-hidden="true"></span></summary><div class="sc-details-content"><div class="sc-details-grid"><div><h3>Datakvalitet och täckning</h3><ul class="sc-quality-metrics">${qualityMetric("secure_customer_identity", percent(core.secure_customer_identity?.value), rateEvidence(core.secure_customer_identity))}${qualityMetric("order_attribution_identity_coverage", percent(core.order_attribution_identity_coverage?.value), rateEvidence(core.order_attribution_identity_coverage))}${qualityMetric("standardized_activity", percent(core.standardized_activity?.value), rateEvidence(core.standardized_activity))}${qualityMetric("flagged_activity_rows", number(quality.core_flagged_activity_rows))}${qualityMetric("quality_issue_count", number(quality.quality_issue_count))}${qualityMetric("waiting_outcome", number(quality.waiting_outcome_count))}</ul><button type="button" data-drilldown="data_quality" data-metric-definition="flagged_activity_rows">Visa kvalitetsunderlag</button></div><div><h3>Säljkopplat resultat</h3><ul class="sc-quality-metrics"><li><span>Krediterade logiska order</span><strong>${number(contribution.credited_order_count)}</strong></li><li><span>Exkluderade order</span><strong>${number(contribution.excluded_order_count)}</strong><small>${escapeHtml(exclusionText)}</small></li></ul>${contribution.own_order_component_limited_by_historical_filter ? `<p>Egen-order-komponenten är begränsad eftersom valt lifecycle/segment saknar historiskt kontaktsnapshot.</p>` : ""}<p>Kostnadsmodell: ${escapeHtml(contribution.model_version || "sales_contribution_v1")}.</p></div><div><h3>Historisk analysmognad</h3><ul class="sc-quality-metrics">${qualityMetric("priority_percentile_coverage", percent(comparable.value), rateEvidence(comparable))}${qualityMetric("exact_snapshots", number(history.exact_snapshot_count), rateEvidence(exact))}${qualityMetric("late_snapshots", number(history.late_snapshot_count))}${qualityMetric("operationally_suppressed", number(history.operationally_suppressed_count))}</ul><p>Kontaktmått använder de kundvärden som sparades vid kontakten. Planeringsmått använder kundens aktuella värden. Operativa undantag är inte i sig datakvalitetsfel.</p></div></div>${metricDefinitionsMarkup()}</div></details></section>`;
   }
 
   function sellerSelected(seller) {
@@ -526,8 +538,9 @@
       return `<button type="button" class="sc-team-group${sellerSelected(item.seller) ? " is-selected" : ""}" data-seller="${escapeHtml(item.seller)}" aria-label="${escapeHtml(title)}" title="${escapeHtml(title)}"><span class="sc-team-total">Totalt ${number(item.human_activities_total)}</span><span class="sc-team-bars"><i class="sc-team-bar is-visit-stack" style="height:${visits / activityMax * 100}%"><b>${number(visits)}</b><span class="sc-team-bar-segment is-visit-reached" style="flex:${reachedVisits}" aria-hidden="true"></span><span class="sc-team-bar-segment is-visit-bom" style="flex:${boms}" aria-hidden="true"></span></i><i class="sc-team-bar is-phone" style="height:${Number(item.channel_mix?.phone || 0) / activityMax * 100}%"><b>${number(item.channel_mix?.phone)}</b></i><i class="sc-team-bar is-email" style="height:${Number(item.channel_mix?.email || 0) / activityMax * 100}%"><b>${number(item.channel_mix?.email)}</b></i></span><span class="sc-team-seller">${escapeHtml(item.seller)}</span></button>`;
     }).join("");
     const rateCell = (metric, pending = 0) => `<span class="sc-rate-value">${percent(metric?.value)}</span><small>${rateEvidence(metric)} · ${statusLabel(metric?.status)}</small>${Number(pending) > 0 ? `<small class="sc-rate-pending">Preliminärt · ${number(pending)} väntar på 10-dagarsutfall</small>` : ""}${comparisonText(metric) ? `<small>${escapeHtml(comparisonText(metric))}</small>` : ""}`;
-    const rows = sellers.map(item => `<tr${sellerSelected(item.seller) ? ' class="is-selected"' : ""}><th><button type="button" data-seller="${escapeHtml(item.seller)}">${escapeHtml(item.seller)}</button></th><td>${number(item.human_activities_total)}</td><td><button type="button" data-drilldown="converted_order_10d" data-seller="${escapeHtml(item.seller)}" data-channel="all">${number(item.order_10d_count?.value)}</button></td><td>${rateCell(item.order_10d, item.waiting_outcome_count)}</td><td>${rateCell(item.positive_to_order_10d, item.waiting_positive_dialogues_count)}</td><td>${rateCell(item.reach)}</td><td>${rateCell(item.positive_next_step_coverage)}</td><td>${rateCell(item.bom_ratio)}</td><td>${rateCell(item.positive_dialogue)}</td></tr>`).join("");
-    return `<section class="sc-section" aria-labelledby="sc-team-title"><div class="sc-section-heading"><div><h2 id="sc-team-title">Teamjämförelse</h2><p>10-dagarsmåtten använder samma definition som i Coachningsöversikten. Kontakter vars 10-dagarsfönster fortfarande är öppet ingår i nämnaren, därför markeras måttet som preliminärt när utfall fortfarande väntar. Jämförelsen gäller alla kanaler under vald period, lifecycle och segment; kanal- och säljarfilter påverkar inte teamblocken.</p></div></div><article class="sc-team-chart"><h3>Mänskliga aktiviteter</h3><p>Besök är stackade: <span class="sc-legend-key is-visit">nådda besök</span> + <span class="sc-legend-key is-bom">bom</span>. <span class="sc-legend-key is-phone">Telefon</span> och manuellt mejl visas separat.</p><div class="sc-team-plot">${activityGroups}</div></article><div class="sc-table-wrap"><table class="sc-table sc-comparison-table"><thead><tr><th>Säljare</th><th>Aktiviteter</th><th>${metricHeader("Antal order inom 10 dagar", "order_10d_count", "team-order-count")}</th><th>${metricHeader(metricLabel("order_10d", "Kontakt – order inom 10 dagar"), "order_10d", "team-order")}</th><th>${metricHeader(metricLabel("positive_to_order_10d", "Positiv dialog → order inom 10 dagar"), "positive_to_order_10d", "team-positive-order")}</th><th>${metricHeader("Träffgrad", "reach", "team-reach")}</th><th>${metricHeader("Nästa-steg-täckning", "positive_next_step_coverage", "team-next-step")}</th><th>${metricHeader("Bom-ratio", "bom_ratio", "team-bom")}</th><th>${metricHeader("Positiv dialog", "positive_dialogue", "team-positive")}</th></tr></thead><tbody>${rows}</tbody></table></div></section>`;
+    const resultCell = metric => `<span class="sc-result-value">${sek(metric?.value || 0)}</span><small>Kontakt: ${sek(metric?.contact_tb || 0)} · Egna order: ${sek(metric?.own_order_tb || 0)}</small>`;
+    const rows = sellers.map(item => `<tr${sellerSelected(item.seller) ? ' class="is-selected"' : ""}><th><button type="button" data-seller="${escapeHtml(item.seller)}">${escapeHtml(item.seller)}</button></th><td>${number(item.human_activities_total)}</td><td>${resultCell(item.sales_linked_result)}</td><td><button type="button" data-drilldown="converted_order_10d" data-seller="${escapeHtml(item.seller)}" data-channel="all">${number(item.order_10d_count?.value)}</button></td><td>${rateCell(item.order_10d, item.waiting_outcome_count)}</td><td>${rateCell(item.positive_to_order_10d, item.waiting_positive_dialogues_count)}</td><td>${rateCell(item.reach)}</td><td>${rateCell(item.positive_next_step_coverage)}</td><td>${rateCell(item.bom_ratio)}</td><td>${rateCell(item.positive_dialogue)}</td></tr>`).join("");
+    return `<section class="sc-section" aria-labelledby="sc-team-title"><div class="sc-section-heading"><div><h2 id="sc-team-title">Teamjämförelse</h2></div></div><article class="sc-team-chart"><h3>Mänskliga aktiviteter</h3><p>Besök är stackade: <span class="sc-legend-key is-visit">nådda besök</span> + <span class="sc-legend-key is-bom">bom</span>. <span class="sc-legend-key is-phone">Telefon</span> och manuellt mejl visas separat.</p><div class="sc-team-plot">${activityGroups}</div></article><div class="sc-table-wrap"><table class="sc-table sc-comparison-table"><thead><tr><th>Säljare</th><th>Aktiviteter</th><th>${metricHeader(metricLabel("sales_linked_result", "Säljkopplat resultat"), "sales_linked_result", "team-sales-result")}</th><th>${metricHeader(metricLabel("order_10d_count", "Kontakter med orderutfall inom 10 dagar"), "order_10d_count", "team-order-count")}</th><th>${metricHeader(metricLabel("order_10d", "Kontakt – order inom 10 dagar"), "order_10d", "team-order")}</th><th>${metricHeader(metricLabel("positive_to_order_10d", "Positiv dialog → order inom 10 dagar"), "positive_to_order_10d", "team-positive-order")}</th><th>${metricHeader("Träffgrad", "reach", "team-reach")}</th><th>${metricHeader("Nästa-steg-täckning", "positive_next_step_coverage", "team-next-step")}</th><th>${metricHeader("Bom-ratio", "bom_ratio", "team-bom")}</th><th>${metricHeader("Positiv dialog", "positive_dialogue", "team-positive")}</th></tr></thead><tbody>${rows}</tbody></table></div></section>`;
   }
 
   function teamTrendWeekLabel(week, previousWeek = "") {
@@ -563,7 +576,7 @@
     return `<circle class="sc-team-order-point-shape" cx="${x}" cy="${y}" r="5.5"></circle>`;
   }
 
-  function teamTrendPanelMarkup(trends, view, config, activeView) {
+  function teamTrendPanelMarkup(trends, view, config, activeView, group = "sales") {
     const trend = trends?.metrics?.[config.metricKey] || {};
     const series = trend?.series || [];
     const slots = trends?.week_axis?.length
@@ -574,18 +587,23 @@
     const plotWidth = width - pad.left - pad.right;
     const plotHeight = height - pad.top - pad.bottom;
     const x = index => pad.left + (slots.length <= 1 ? plotWidth / 2 : index * plotWidth / (slots.length - 1));
+    const isCurrency = trend.metric_type === "currency" || config.metricType === "currency";
     const isCount = trend.metric_type === "count" || config.metricType === "count";
-    const maximum = Math.max(0, ...series.flatMap(item => (item.points || []).map(point => Number(point.value) || 0)));
-    const rawStep = Math.max(1, maximum / 4);
+    const isScalar = isCount || isCurrency;
+    const values = series.flatMap(item => (item.points || []).map(point => Number(point.value)).filter(Number.isFinite));
+    const maximum = Math.max(0, ...values);
+    const minimum = isCurrency ? Math.min(0, ...values) : 0;
+    const rawStep = Math.max(1, Math.max(Math.abs(maximum), Math.abs(minimum)) / 4);
     const magnitude = 10 ** Math.floor(Math.log10(rawStep));
     const step = [1, 2, 5, 10].find(value => value * magnitude >= rawStep) * magnitude;
-    const axisMax = isCount ? Math.max(step, Math.ceil(maximum / step) * step) : 1;
-    const y = value => pad.top + (1 - Number(value) / axisMax) * plotHeight;
+    const axisMax = isScalar ? Math.max(step, Math.ceil(maximum / step) * step) : 1;
+    const axisMin = isCurrency ? Math.min(0, Math.floor(minimum / step) * step) : 0;
+    const y = value => pad.top + (axisMax - Number(value)) / (axisMax - axisMin) * plotHeight;
     const selectedSeller = String(trends?.selected_seller || "");
     const hasSelection = Boolean(selectedSeller);
     const isSelected = seller => hasSelection && String(seller).localeCompare(selectedSeller, "sv-SE", { sensitivity: "base" }) === 0;
-    const ticks = isCount ? Array.from({ length: axisMax / step + 1 }, (_, index) => index * step) : [0, 0.25, 0.5, 0.75, 1];
-    const grid = ticks.map(value => `<g aria-hidden="true"><line class="sc-team-order-grid" x1="${pad.left}" x2="${width - pad.right}" y1="${y(value)}" y2="${y(value)}"></line><text class="sc-team-order-y-label" x="${pad.left - 10}" y="${y(value) + 4}" text-anchor="end">${isCount ? number(value) : `${value * 100} %`}</text></g>`).join("");
+    const ticks = isScalar ? Array.from({ length: (axisMax - axisMin) / step + 1 }, (_, index) => axisMin + index * step) : [0, 0.25, 0.5, 0.75, 1];
+    const grid = ticks.map(value => `<g aria-hidden="true"><line class="sc-team-order-grid" x1="${pad.left}" x2="${width - pad.right}" y1="${y(value)}" y2="${y(value)}"></line><text class="sc-team-order-y-label" x="${pad.left - 10}" y="${y(value) + 4}" text-anchor="end">${isCurrency ? sek(value) : isCount ? number(value) : `${value * 100} %`}</text></g>`).join("");
     const xLabels = slots.map((slot, index) => `<text class="sc-team-order-x-label" x="${x(index)}" y="${height - 18}" text-anchor="middle">${escapeHtml(teamTrendWeekLabel(slot.week, slots[index - 1]?.week || ""))}</text>`).join("");
 
     const seriesMarkup = series.map(item => {
@@ -609,13 +627,16 @@
       const points = slots.map((slot, index) => {
         const point = pointByWeek.get(slot.week);
         if (!point || point.value === null || !Number.isFinite(Number(point.value))) return "";
-        const small = !isCount && point.status === "small_sample";
+        const small = !isScalar && point.status === "small_sample";
         const evidence = `${number(point.numerator)} av ${number(point.denominator)} ${config.evidenceLabel}`;
         const period = `${point.period?.start || "—"}–${point.period?.end || "—"}`;
-        const title = isCount
-          ? `${item.seller} · ${teamTrendWeekLabel(point.week)}: ${number(point.value)} order inom 10 dagar · ${period}`
+        const title = isCurrency
+          ? `${item.seller} · ${teamTrendWeekLabel(point.week)} · ${period}: Säljkopplat resultat ${sek(point.value)} · Via kontakt ${sek(point.contact_tb)} · Egna order utan kontakt ${sek(point.own_order_tb)}`
+          : isCount
+          ? `${item.seller} · ${teamTrendWeekLabel(point.week)}: ${number(point.value)} ${config.valueLabel || "aktiviteter"} · ${period}`
           : `${item.seller} · ${teamTrendWeekLabel(point.week)} · ${period}: ${percent(point.value)} · ${evidence} · ${small ? "Litet underlag" : "Tillräckligt underlag"}`;
-        return `<g class="sc-team-order-point${small ? " is-small-sample" : ""}${selectionClass}" style="--series-color:${style.color}" tabindex="0" role="button" data-drilldown="${config.drilldownMetric || config.metricKey}" data-trend-view="${view}" data-seller="${escapeHtml(item.seller)}" data-series-style="${style.key}" data-week="${escapeHtml(point.week)}" data-numerator="${number(point.numerator)}" data-denominator="${number(point.denominator)}" data-channel="all" data-start="${escapeHtml(point.period?.start || "")}" data-end="${escapeHtml(point.period?.end || "")}" aria-label="${escapeHtml(title)}"><title>${escapeHtml(title)}</title><circle class="sc-team-order-point-hit" cx="${x(index)}" cy="${y(point.value)}" r="22"></circle>${teamTrendMarker(style.marker, x(index), y(point.value))}</g>`;
+        const drilldownMetric = config.drilldownMetric === null ? "" : (config.drilldownMetric || config.metricKey);
+        return `<g class="sc-team-order-point${small ? " is-small-sample" : ""}${selectionClass}" style="--series-color:${style.color}" tabindex="0" role="${drilldownMetric ? "button" : "img"}"${drilldownMetric ? ` data-drilldown="${drilldownMetric}"` : ""} data-trend-view="${view}" data-seller="${escapeHtml(item.seller)}" data-series-style="${style.key}" data-week="${escapeHtml(point.week)}" data-numerator="${number(point.numerator)}" data-denominator="${number(point.denominator)}" data-channel="all" data-start="${escapeHtml(point.period?.start || "")}" data-end="${escapeHtml(point.period?.end || "")}" aria-label="${escapeHtml(title)}"><title>${escapeHtml(title)}</title><circle class="sc-team-order-point-hit" cx="${x(index)}" cy="${y(point.value)}" r="22"></circle>${teamTrendMarker(style.marker, x(index), y(point.value))}</g>`;
       }).join("");
       return `${lines}${points}`;
     }).join("");
@@ -626,17 +647,25 @@
       return `<button type="button" class="sc-team-order-legend-item${selected ? " is-selected" : hasSelection ? " is-unselected" : ""}" style="--series-color:${style.color}" data-trend-view="${view}" data-seller="${escapeHtml(item.seller)}" data-series-style="${style.key}" aria-label="Visa ${escapeHtml(item.seller)} som vald säljare"><svg viewBox="0 0 42 18" aria-hidden="true"><line x1="2" x2="40" y1="9" y2="9" style="stroke:${style.color}${style.dash ? `;stroke-dasharray:${style.dash}` : ""}"></line>${teamTrendMarker(style.marker, 21, 9)}</svg><span>${escapeHtml(item.seller)}</span></button>`;
     }).join("");
 
-    return `<div class="sc-team-trend-panel" id="sc-team-trend-panel-${view}" role="tabpanel" aria-labelledby="sc-team-trend-tab-${view}"${activeView === view ? "" : " hidden"}><h3>${escapeHtml(config.title)}</h3><div class="sc-team-order-trend-wrap" tabindex="0" aria-label="Horisontellt rullningsbar trendgraf"><svg class="sc-team-order-trend" viewBox="0 0 ${width} ${height}" role="group" aria-label="Veckovis ${escapeHtml(config.title)} för aktiva säljare, ${isCount ? `antal från 0 till ${number(axisMax)}` : "fast skala 0 till 100 procent"}">${grid}${seriesMarkup}${xLabels}</svg></div><div class="sc-team-order-legend" aria-label="Säljarserier">${legend || `<span class="sc-empty">Inga aktiva säljare.</span>`}</div></div>`;
+    const idPrefix = group === "activity" ? "sc-activity" : "sc-team";
+    return `<div class="sc-team-trend-panel" id="${idPrefix}-trend-panel-${view}" role="tabpanel" aria-labelledby="${idPrefix}-trend-tab-${view}"${activeView === view ? "" : " hidden"}><h3>${escapeHtml(config.title)}</h3><div class="sc-team-order-trend-wrap" tabindex="0" aria-label="Horisontellt rullningsbar trendgraf"><svg class="sc-team-order-trend" viewBox="0 0 ${width} ${height}" role="group" aria-label="Veckovis ${escapeHtml(config.title)} för aktiva säljare, ${isCurrency ? `SEK från ${number(axisMin)} till ${number(axisMax)}` : isCount ? `antal från 0 till ${number(axisMax)}` : "fast skala 0 till 100 procent"}">${grid}${seriesMarkup}${xLabels}</svg></div><div class="sc-team-order-legend" aria-label="Säljarserier">${legend || `<span class="sc-empty">Inga aktiva säljare.</span>`}</div></div>`;
   }
 
   function teamTrendsMarkup(trends) {
-    const view = ["count", "order", "positive"].includes(state.teamTrendView) ? state.teamTrendView : "count";
+    const view = ["result", "count", "order", "positive"].includes(state.teamTrendView) ? state.teamTrendView : "result";
     const tabs = [
-      ["count", "Antal order inom 10 dagar", {
+      ["result", "Säljkopplat resultat", {
+        metricKey: "sales_linked_result",
+        metricType: "currency",
+        drilldownMetric: null,
+        title: "Säljkopplat resultat",
+      }],
+      ["count", "Kontakter med orderutfall inom 10 dagar", {
         metricKey: "order_10d_count",
         metricType: "count",
         drilldownMetric: "converted_order_10d",
-        title: "Antal order inom 10 dagar",
+        title: "Kontakter med orderutfall inom 10 dagar",
+        valueLabel: "kontakter med orderutfall inom 10 dagar",
       }],
       ["order", "Kontakt → order", {
         metricKey: "order_10d",
@@ -649,9 +678,22 @@
         evidenceLabel: "positiva dialoger har följts av order inom 10 dagar",
       }],
     ];
-    const tabList = tabs.map(([key, label]) => `<button type="button" role="tab" id="sc-team-trend-tab-${key}" data-team-trend-view="${key}" aria-selected="${view === key}" aria-controls="sc-team-trend-panel-${key}" tabindex="${view === key ? "0" : "-1"}">${label}</button>`).join("");
+    const tabList = tabs.map(([key, label]) => `<button type="button" role="tab" id="sc-team-trend-tab-${key}" data-team-trend-view="${key}" data-trend-group="sales" aria-selected="${view === key}" aria-controls="sc-team-trend-panel-${key}" tabindex="${view === key ? "0" : "-1"}">${label}</button>`).join("");
     const panels = tabs.map(([key, _label, config]) => teamTrendPanelMarkup(trends, key, config, view)).join("");
-    return `<section class="sc-section sc-team-10d-trend-section" aria-labelledby="sc-team-trend-title"><div class="sc-section-heading"><div><h2 id="sc-team-trend-title">10-dagarskonvertering – trend</h2><p>Varje punkt avser en kontaktvecka. Endast veckor där hela 10-dagarsfönstret har passerat visas, så veckopunkterna förändras inte enbart för att fler dagar passerar. Diagrammen använder samma KPI-definitioner som Coachningsöversikten.</p></div></div><p class="sc-team-order-filter-note">Period-, säljar- och kanalfilter begränsar inte grafen. Vald säljare markeras; lifecycle och segment följer filtren.</p><div class="sc-team-trend-tabs" role="tablist" aria-label="Välj 10-dagarstrend">${tabList}</div>${panels}</section>`;
+    return `<section class="sc-section sc-team-10d-trend-section" aria-labelledby="sc-team-trend-title"><div class="sc-section-heading"><div><h2 id="sc-team-trend-title">Försäljning-trend</h2><p>10-dagarsmåtten visas per kontaktvecka efter att hela utfallsfönstret passerat. Säljkopplat resultat krediteras kontaktveckan för kontaktattribuerade order och orderveckan för egna order utan kontaktmatchning.</p></div></div><p class="sc-team-order-filter-note">Period-, säljar- och kanalfilter begränsar inte grafen. Vald säljare markeras; lifecycle och segment följer filtren.</p><div class="sc-team-trend-tabs" role="tablist" aria-label="Välj försäljningstrend">${tabList}</div>${panels}</section>`;
+  }
+
+  function activityTrendsMarkup(trends) {
+    const view = ["all", "reached", "bom", "phone"].includes(state.activityTrendView) ? state.activityTrendView : "all";
+    const tabs = [
+      ["all", "Alla", { metricKey: "all", metricType: "count", drilldownMetric: null, title: "Alla mänskliga aktiviteter", valueLabel: "mänskliga aktiviteter" }],
+      ["reached", "Nådda besök", { metricKey: "reached_visits", metricType: "count", drilldownMetric: null, title: "Nådda besök", valueLabel: "nådda besök" }],
+      ["bom", "Bom", { metricKey: "bom", metricType: "count", drilldownMetric: null, title: "Bom", valueLabel: "bom" }],
+      ["phone", "Telefon", { metricKey: "phone", metricType: "count", drilldownMetric: null, title: "Telefon", valueLabel: "telefonsamtal" }],
+    ];
+    const tabList = tabs.map(([key, label]) => `<button type="button" role="tab" id="sc-activity-trend-tab-${key}" data-team-trend-view="${key}" data-trend-group="activity" aria-selected="${view === key}" aria-controls="sc-activity-trend-panel-${key}" tabindex="${view === key ? "0" : "-1"}">${label}</button>`).join("");
+    const panels = tabs.map(([key, _label, config]) => teamTrendPanelMarkup(trends, key, config, view, "activity")).join("");
+    return `<section class="sc-section sc-human-activity-trend-section" aria-labelledby="sc-activity-trend-title"><div class="sc-section-heading"><div><h2 id="sc-activity-trend-title">Mänskliga aktiviteter – trend</h2><p>Aktiviteter visas per säljare och helt avslutad ISO-vecka. Automatiska CRM-mejl ingår inte.</p></div></div><p class="sc-team-order-filter-note">Period-, säljar- och kanalfilter begränsar inte grafen. Vald säljare markeras; lifecycle och segment följer filtren.</p><div class="sc-team-trend-tabs" role="tablist" aria-label="Välj aktivitetstrend">${tabList}</div>${panels}</section>`;
   }
 
   function priorityProfileReasonLabel(reason) {
@@ -778,6 +820,7 @@
       teamComparisonMarkup(data.team_comparison || { sellers: [] }),
       coachingMarkup(data.coaching_cards || []),
       teamTrendsMarkup(data.team_10d_trends || { metrics: {} }),
+      activityTrendsMarkup(data.human_activity_trends || { metrics: {} }),
       priorityProfileMarkup(data.historical_priority_profile),
       diagnosticsMarkup(data),
       dataQualityDetailsMarkup(data.data_quality || {}),
@@ -798,9 +841,12 @@
     if (retry) return void loadSummary();
     const teamTrendTab = event.target.closest("[data-team-trend-view]");
     if (teamTrendTab) {
-      state.teamTrendView = teamTrendTab.dataset.teamTrendView;
+      const group = teamTrendTab.dataset.trendGroup || "sales";
+      if (group === "activity") state.activityTrendView = teamTrendTab.dataset.teamTrendView;
+      else state.teamTrendView = teamTrendTab.dataset.teamTrendView;
       if (state.data) renderDashboard(state.data);
-      document.getElementById(`sc-team-trend-tab-${state.teamTrendView}`)?.focus();
+      const active = group === "activity" ? state.activityTrendView : state.teamTrendView;
+      document.getElementById(`${group === "activity" ? "sc-activity" : "sc-team"}-trend-tab-${active}`)?.focus();
       return;
     }
     const diagnosticTab = event.target.closest("[data-diagnostic-tab]");

@@ -31,6 +31,21 @@ ATTRIBUTION_WINDOW_DAYS = 10
 MIN_RATE_SAMPLE = 10
 MIN_PRIORITY_COVERAGE = 0.70
 TEAM_ORDER_TREND_WEEKS = 16
+SALES_CONTRIBUTION_MODEL_VERSION = "sales_contribution_v1"
+SALES_CONTRIBUTION_DEFAULTS = {
+    "eur_sek": 10.77,
+    "kfp_per_dfp": 12.0,
+    "warehouse_distribution_sek_per_kfp": 3.50,
+    "stockfiller_fee_rate": 0.02,
+    "sku_eur_per_kfp": {
+        "10001": 1.43,
+        "10002": 1.71,
+        "10003": 1.39,
+        "10004": 1.71,
+        "10005": 1.54,
+        "10006": 1.43,
+    },
+}
 
 METRIC_DEFINITIONS = {
     "human_activities": {
@@ -127,13 +142,19 @@ METRIC_DEFINITIONS = {
         "drilldown_metric": "positive_to_order_10d",
     },
     "order_10d_count": {
-        "label": "Antal order inom 10 dagar",
+        "label": "Kontakter med orderutfall inom 10 dagar",
         "definition": "Antal berättigade nådda mänskliga kontakter i vald period som hittills har följts av en attribuerad order inom 0–10 dagar. Måttet är exakt täljaren i Kontakt – order inom 10 dagar. Varje kontakt räknas högst en gång.",
         "metric_type": "count",
         "unit": "orderutfall",
         "channels": ["visit", "phone", "email"],
         "window_days": ATTRIBUTION_WINDOW_DAYS,
         "drilldown_metric": "converted_order_10d",
+    },
+    "sales_linked_result": {
+        "label": "Säljkopplat resultat",
+        "definition": "Modellerat täckningsbidrag från order kopplade till säljarens kontakt inom 10 dagar samt säljarens egna order som saknar sådan kontaktmatchning. Samma order räknas aldrig två gånger.",
+        "metric_type": "currency",
+        "unit": "SEK",
     },
     "order_10d": {
         "label": "Kontakt – order inom 10 dagar",
@@ -464,6 +485,20 @@ def _number(value, default=None):
     return parsed if math.isfinite(parsed) else default
 
 
+def _strict_number(value, default=None):
+    """Parse a sheet number without silently discarding unexpected characters."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value) if math.isfinite(float(value)) else default
+    text = _text(value).replace("\xa0", "").replace(" ", "")
+    if not text or any(
+        not (char.isdigit() or char in ",.-") for char in text
+    ):
+        return default
+    if text.count("-") > 1 or ("-" in text and not text.startswith("-")):
+        return default
+    return _number(text, default)
+
+
 def _optional_bool(value):
     if isinstance(value, bool):
         return value
@@ -743,6 +778,92 @@ def _coached_sellers(users):
     return sellers
 
 
+def sales_contribution_config(settings=None):
+    """Return the central contribution model, using safe defaults for absent settings."""
+    settings = settings or {}
+
+    def configured_number(key, default, *, minimum=0, exclusive=False, maximum=None):
+        value = _number(settings.get(key))
+        valid_minimum = value is not None and (
+            value > minimum if exclusive else value >= minimum
+        )
+        return value if valid_minimum and (maximum is None or value <= maximum) else default
+
+    sku_costs = {}
+    for sku, default in SALES_CONTRIBUTION_DEFAULTS["sku_eur_per_kfp"].items():
+        sku_costs[sku] = configured_number(
+            f"sales_contribution_sku_{sku}_eur_per_kfp", default,
+            exclusive=True,
+        )
+    return {
+        "model_version": SALES_CONTRIBUTION_MODEL_VERSION,
+        "eur_sek": configured_number(
+            "sales_contribution_eur_sek",
+            SALES_CONTRIBUTION_DEFAULTS["eur_sek"],
+            exclusive=True,
+        ),
+        "kfp_per_dfp": configured_number(
+            "sales_contribution_kfp_per_dfp",
+            SALES_CONTRIBUTION_DEFAULTS["kfp_per_dfp"],
+            exclusive=True,
+        ),
+        "warehouse_distribution_sek_per_kfp": configured_number(
+            "sales_contribution_warehouse_distribution_sek_per_kfp",
+            SALES_CONTRIBUTION_DEFAULTS["warehouse_distribution_sek_per_kfp"],
+        ),
+        "stockfiller_fee_rate": configured_number(
+            "sales_contribution_stockfiller_fee_rate",
+            SALES_CONTRIBUTION_DEFAULTS["stockfiller_fee_rate"],
+            maximum=1,
+        ),
+        "sku_eur_per_kfp": sku_costs,
+    }
+
+
+def _active_seller_aliases(users):
+    """Map exact normalized aliases to active, non-admin seller identities."""
+    aliases = defaultdict(set)
+    for user in users or ():
+        user_name = _text(user.get("user_name"))
+        if (
+            not user_name
+            or _optional_bool(user.get("active")) is not True
+            or _optional_bool(user.get("admin")) is True
+        ):
+            continue
+        for value in (user_name, user.get("name")):
+            key = normalize_key(value)
+            if key:
+                aliases[key].add(user_name)
+    return aliases
+
+
+def resolve_order_seller(order, users):
+    """Resolve an own supplier order without substring or fuzzy matching."""
+    line_items = order.get("line_items") or ()
+    placed_as = [normalize_key(row.get("placed_as")) for row in line_items]
+    if not placed_as or any(not value for value in placed_as):
+        return "", "missing_placed_as"
+    if len(set(placed_as)) > 1:
+        return "", "conflicting_placed_as"
+    if placed_as[0] != "supplier":
+        return "", "placed_as_not_supplier"
+
+    placed_by = [normalize_key(row.get("placed_by")) for row in line_items]
+    if not placed_by or any(not value for value in placed_by):
+        return "", "missing_placed_by"
+    aliases = _active_seller_aliases(users)
+    resolved = []
+    for value in placed_by:
+        matches = aliases.get(value, set())
+        if len(matches) != 1:
+            return "", "ambiguous_placed_by" if len(matches) > 1 else "unknown_placed_by"
+        resolved.append(next(iter(matches)))
+    if len({normalize_key(value) for value in resolved}) != 1:
+        return "", "conflicting_placed_by"
+    return resolved[0], "exact_active_seller"
+
+
 def resolve_historical_seller(activity, users):
     aliases, canonical = _seller_aliases(users)
     stable = normalize_key(activity.get("sales_user_name"))
@@ -963,19 +1084,32 @@ def group_logical_orders(order_rows, customers):
             "dfp": 0.0,
             "volume_missing": True,
             "source_rows": [],
+            "line_items": [],
         })
         group["date"] = min(group["date"], order_date)
         group["total"] += total
         group["source_rows"].append(source_index)
+        group["line_items"].append({
+            "source_row": source_index,
+            "sku": _text(row.get("SKU") or row.get("sku")),
+            "total_weight": row.get("Total weight"),
+            "total": row.get("Total"),
+            "currency": _text(row.get("Currency") or row.get("currency")).upper(),
+            "placed_by": row.get("placedBy") or row.get("placed_by"),
+            "placed_as": row.get("placedAs") or row.get("placed_as"),
+        })
         if volume is not None:
             group["dfp"] += volume
             group["volume_missing"] = False
-    orders = sorted(
-        (row for row in grouped.values() if commercial_order(
-            row["total"], None if row["volume_missing"] else row["dfp"]
-        )), key=lambda row: (row["date"], row["order_id"])
+    all_orders = sorted(
+        grouped.values(), key=lambda row: (row["date"], row["order_id"])
     )
-    return {"orders": orders, "excluded": excluded}
+    for row in all_orders:
+        row["commercial_eligible"] = commercial_order(
+            row["total"], None if row["volume_missing"] else row["dfp"]
+        )
+    orders = [row for row in all_orders if row["commercial_eligible"]]
+    return {"orders": orders, "all_orders": all_orders, "excluded": excluded}
 
 
 def attribute_orders_to_contacts(activities, grouped_orders, *, generated_at, window_days=ATTRIBUTION_WINDOW_DAYS):
@@ -1047,6 +1181,233 @@ def attribute_orders_to_contacts(activities, grouped_orders, *, generated_at, wi
         "excluded_contacts": excluded_contacts,
         "maturity": maturity,
         "outcome_status": outcome_status,
+    }
+
+
+def calculate_order_tb(order, config=None):
+    """Calculate modeled contribution for every line, or reject the whole order."""
+    config = config or sales_contribution_config()
+    totals = {
+        "revenue_sek": 0.0,
+        "product_cost_sek": 0.0,
+        "warehouse_distribution_sek": 0.0,
+        "stockfiller_fee_sek": 0.0,
+        "dfp": 0.0,
+        "kfp": 0.0,
+    }
+    line_items = order.get("line_items") or ()
+    if not line_items:
+        return {
+            "computable": False,
+            "reason": "missing_order_lines",
+            "model_version": config["model_version"],
+        }
+    for line in line_items:
+        currency = _text(line.get("currency")).upper()
+        if currency != "SEK":
+            return {
+                "computable": False,
+                "reason": "non_sek_currency" if currency else "missing_currency",
+                "source_row": line.get("source_row"),
+                "model_version": config["model_version"],
+            }
+        sku = _text(line.get("sku"))
+        sku_cost = config["sku_eur_per_kfp"].get(sku)
+        if sku_cost is None:
+            return {
+                "computable": False,
+                "reason": "unknown_sku",
+                "sku": sku,
+                "source_row": line.get("source_row"),
+                "model_version": config["model_version"],
+            }
+        dfp = order_volume({"Total weight": line.get("total_weight")})
+        if dfp is None or dfp <= 0:
+            return {
+                "computable": False,
+                "reason": "invalid_total_weight",
+                "source_row": line.get("source_row"),
+                "model_version": config["model_version"],
+            }
+        revenue = _strict_number(line.get("total"))
+        if revenue is None or revenue < 0:
+            return {
+                "computable": False,
+                "reason": "invalid_total",
+                "source_row": line.get("source_row"),
+                "model_version": config["model_version"],
+            }
+        kfp = dfp * config["kfp_per_dfp"]
+        totals["revenue_sek"] += revenue
+        totals["product_cost_sek"] += kfp * sku_cost * config["eur_sek"]
+        totals["warehouse_distribution_sek"] += (
+            kfp * config["warehouse_distribution_sek_per_kfp"]
+        )
+        totals["stockfiller_fee_sek"] += revenue * config["stockfiller_fee_rate"]
+        totals["dfp"] += dfp
+        totals["kfp"] += kfp
+    tb = (
+        totals["revenue_sek"]
+        - totals["product_cost_sek"]
+        - totals["warehouse_distribution_sek"]
+        - totals["stockfiller_fee_sek"]
+    )
+    return {
+        "computable": True,
+        "reason": "",
+        "model_version": config["model_version"],
+        "tb_sek": round(tb, 2),
+        **{key: round(value, 4) for key, value in totals.items()},
+    }
+
+
+def build_sales_linked_results(
+    grouped_orders, attribution, activities, users, *, settings=None,
+):
+    """Credit each logical order once, preferring contact attribution over own order."""
+    config = sales_contribution_config(settings)
+    activity_by_contact = {
+        _text(row.get("contact_id")): row for row in activities or ()
+        if _text(row.get("contact_id"))
+    }
+    credited, excluded = [], []
+    currencies_by_identity = defaultdict(set)
+    for order in grouped_orders or ():
+        identity = (
+            order.get("customer_identity_key"), order.get("reference"),
+            order.get("date"),
+        )
+        currencies_by_identity[identity].add(_text(order.get("currency")).upper())
+
+    for order in grouped_orders or ():
+        order_id = _text(order.get("order_id"))
+        identity = (
+            order.get("customer_identity_key"), order.get("reference"),
+            order.get("date"),
+        )
+        if len(currencies_by_identity[identity]) > 1:
+            excluded.append({"order_id": order_id, "reason": "conflicting_currency"})
+            continue
+        contribution = calculate_order_tb(order, config)
+        if not contribution["computable"]:
+            excluded.append({
+                "order_id": order_id,
+                "reason": contribution["reason"],
+                **({"source_row": contribution["source_row"]} if contribution.get("source_row") is not None else {}),
+                **({"sku": contribution["sku"]} if "sku" in contribution else {}),
+            })
+            continue
+        if order.get("commercial_eligible") is False:
+            excluded.append({"order_id": order_id, "reason": "non_commercial_order"})
+            continue
+
+        contact_credit = attribution.get("order_to_contact", {}).get(order_id)
+        if contact_credit is not None:
+            seller = _text(contact_credit.get("sales_user_name"))
+            contact_id = _text(contact_credit.get("contact_id"))
+            contact = activity_by_contact.get(contact_id, {})
+            if not seller:
+                excluded.append({"order_id": order_id, "reason": "missing_contact_seller"})
+                continue
+            credited.append({
+                "seller": seller,
+                "order_id": order_id,
+                "source": "contact_10d",
+                "tb_sek": contribution["tb_sek"],
+                "dfp": contribution["dfp"],
+                "order_date": order.get("date"),
+                "credited_date": contact.get("contact_date"),
+                "credited_week": contact_credit.get("contact_week") or contact.get("contact_week"),
+                "contact_id": contact_id,
+                "lifecycle_at_contact": _text(contact.get("lifecycle_at_contact")),
+                "customer_segment_at_contact": _text(contact.get("customer_segment_at_contact")),
+                "contribution": contribution,
+            })
+            continue
+
+        seller, seller_quality = resolve_order_seller(order, users)
+        if not seller:
+            excluded.append({
+                "order_id": order_id,
+                "reason": seller_quality,
+            })
+            continue
+        credited.append({
+            "seller": seller,
+            "order_id": order_id,
+            "source": "own_order_unmatched",
+            "tb_sek": contribution["tb_sek"],
+            "dfp": contribution["dfp"],
+            "order_date": order.get("date"),
+            "credited_date": order.get("date"),
+            "credited_week": _iso_week(order["date"]),
+            "contact_id": "",
+            "lifecycle_at_contact": "",
+            "customer_segment_at_contact": "",
+            "contribution": contribution,
+        })
+    return {
+        "model_version": config["model_version"],
+        "currency": "SEK",
+        "config": config,
+        "credited_orders": credited,
+        "excluded_orders": excluded,
+        "metadata": {
+            "logical_order_count": len(grouped_orders or ()),
+            "credited_order_count": len(credited),
+            "excluded_order_count": len(excluded),
+            "deduplication_rule": "contact_10d_then_own_order_unmatched",
+        },
+    }
+
+
+def _filter_sales_linked_results(
+    sales_results, *, start, end, segment="all", lifecycle="all",
+):
+    filtered = []
+    historical_filter = segment != "all" or lifecycle != "all"
+    for item in sales_results.get("credited_orders", ()):
+        credited_date = item.get("credited_date")
+        if not credited_date or not (start <= credited_date <= end):
+            continue
+        if item.get("source") == "own_order_unmatched" and historical_filter:
+            continue
+        if item.get("source") == "contact_10d":
+            item_segment = _text(item.get("customer_segment_at_contact")).upper() or "missing"
+            item_lifecycle = normalize_key(item.get("lifecycle_at_contact")) or "missing"
+            if segment != "all" and item_segment != segment:
+                continue
+            if lifecycle != "all" and item_lifecycle != lifecycle:
+                continue
+        filtered.append(item)
+    return {
+        **sales_results,
+        "credited_orders": filtered,
+        "metadata": {
+            **sales_results.get("metadata", {}),
+            "filtered_credited_order_count": len(filtered),
+            "own_order_component_limited_by_historical_filter": historical_filter,
+        },
+    }
+
+
+def _sales_linked_metric(items):
+    contact_tb = sum(
+        item.get("tb_sek", 0) for item in items
+        if item.get("source") == "contact_10d"
+    )
+    own_tb = sum(
+        item.get("tb_sek", 0) for item in items
+        if item.get("source") == "own_order_unmatched"
+    )
+    return {
+        "value": round(contact_tb + own_tb, 2),
+        "currency": "SEK",
+        "contact_tb": round(contact_tb, 2),
+        "own_order_tb": round(own_tb, 2),
+        "credited_order_count": len(items),
+        "metric_type": "currency",
+        "model_version": SALES_CONTRIBUTION_MODEL_VERSION,
     }
 
 
@@ -1273,10 +1634,10 @@ def _order_10d_count(rate):
 
 
 def _team_10d_trends(
-    activities, attribution, sellers, *, generated_date, selected_seller="",
+    activities, attribution, sales_results, sellers, *, generated_date, selected_seller="",
     segment="all", lifecycle="all", weeks=TEAM_ORDER_TREND_WEEKS,
 ):
-    """Build the count and both live 10-day rates over complete ISO contact weeks."""
+    """Build sales outcome metrics over the existing mature weekly window."""
     maturity_cutoff = generated_date - timedelta(days=ATTRIBUTION_WINDOW_DAYS)
     latest_week_end = maturity_cutoff - timedelta(
         days=(maturity_cutoff.weekday() - 6) % 7
@@ -1310,7 +1671,23 @@ def _team_10d_trends(
             (normalize_key(row.get("sales_user_name")), row.get("contact_week"))
         ].append(row)
 
-    metric_keys = ("order_10d_count", "order_10d", "positive_to_order_10d")
+    trend_sales = _filter_sales_linked_results(
+        sales_results,
+        start=trend_start,
+        end=latest_week_end,
+        segment=segment,
+        lifecycle=lifecycle,
+    )
+    sales_by_seller_week = defaultdict(list)
+    for item in trend_sales["credited_orders"]:
+        sales_by_seller_week[
+            (normalize_key(item.get("seller")), item.get("credited_week"))
+        ].append(item)
+
+    metric_keys = (
+        "sales_linked_result", "order_10d_count", "order_10d",
+        "positive_to_order_10d",
+    )
     series_by_metric = {metric_key: [] for metric_key in metric_keys}
     for seller in sellers:
         seller_key = normalize_key(seller)
@@ -1321,6 +1698,19 @@ def _team_10d_trends(
                 attribution,
             )
             for metric_key in metric_keys:
+                if metric_key == "sales_linked_result":
+                    metric = _sales_linked_metric(
+                        sales_by_seller_week.get((seller_key, slot["week"]), [])
+                    )
+                    points_by_metric[metric_key].append({
+                        "week": slot["week"],
+                        "period": dict(slot["period"]),
+                        "status": "sufficient",
+                        "numerator": metric["credited_order_count"],
+                        "denominator": metric["credited_order_count"],
+                        **metric,
+                    })
+                    continue
                 if metric_key == "order_10d_count":
                     points_by_metric[metric_key].append({
                         "week": slot["week"],
@@ -1363,10 +1753,97 @@ def _team_10d_trends(
     }
 
 
-def _seller_comparison(rows, attribution, sellers):
+def _human_activity_trends(
+    activities, sellers, *, generated_date, selected_seller="", segment="all",
+    lifecycle="all", weeks=TEAM_ORDER_TREND_WEEKS,
+):
+    """Build canonical human activity counts through the last completed ISO week."""
+    latest_week_end = generated_date - timedelta(days=generated_date.weekday() + 1)
+    latest_week_start = latest_week_end - timedelta(days=6)
+    trend_start = latest_week_start - timedelta(weeks=weeks - 1)
+    week_axis = []
+    for offset in range(weeks):
+        week_start = trend_start + timedelta(weeks=offset)
+        week_end = week_start + timedelta(days=6)
+        week_axis.append({
+            "week": _iso_week(week_start),
+            "period": {"start": week_start.isoformat(), "end": week_end.isoformat()},
+        })
+    trend_rows = _filter_activities(
+        activities,
+        start=trend_start,
+        end=latest_week_end,
+        seller="",
+        channel="all",
+        segment=segment,
+        lifecycle=lifecycle,
+    )
+    rows_by_seller_week = defaultdict(list)
+    for row in trend_rows:
+        rows_by_seller_week[
+            (normalize_key(row.get("sales_user_name")), row.get("contact_week"))
+        ].append(row)
+
+    predicates = {
+        "all": lambda row: bool(row.get("is_human")),
+        "reached_visits": lambda row: (
+            row.get("is_human")
+            and row.get("contact_type_key") == "visit"
+            and row.get("result_class") in QUALIFIED_DIALOGUE_RESULTS
+        ),
+        "bom": lambda row: (
+            row.get("is_human")
+            and row.get("contact_type_key") == "visit"
+            and row.get("result_class") == "unreachable"
+        ),
+        "phone": lambda row: (
+            row.get("is_human") and row.get("contact_type_key") == "phone"
+        ),
+    }
+    metrics = {}
+    for metric_key, predicate in predicates.items():
+        series = []
+        for seller in sellers:
+            seller_key = normalize_key(seller)
+            points = []
+            for slot in week_axis:
+                value = sum(
+                    predicate(row)
+                    for row in rows_by_seller_week.get((seller_key, slot["week"]), ())
+                )
+                points.append({
+                    "week": slot["week"],
+                    "period": dict(slot["period"]),
+                    "value": value,
+                    "numerator": value,
+                    "denominator": value,
+                    "status": "sufficient",
+                })
+            series.append({"seller": seller, "points": points})
+        metrics[metric_key] = {
+            "metric_key": metric_key,
+            "metric_type": "count",
+            "series": series,
+        }
+    return {
+        "weeks": weeks,
+        "period": {"start": trend_start.isoformat(), "end": latest_week_end.isoformat()},
+        "latest_complete_week": _iso_week(latest_week_start),
+        "selected_seller": selected_seller,
+        "week_axis": week_axis,
+        "metrics": metrics,
+    }
+
+
+def _seller_comparison(rows, attribution, sellers, sales_results=None):
     result = []
+    credited = (sales_results or {}).get("credited_orders", ())
     for seller in sellers:
         aggregate = _aggregate_period([row for row in rows if normalize_key(row.get("sales_user_name")) == normalize_key(seller)], attribution)
+        seller_sales = [
+            item for item in credited
+            if normalize_key(item.get("seller")) == normalize_key(seller)
+        ]
         result.append({
             "seller": seller,
             "human_activities": len(aggregate["human"]),
@@ -1400,6 +1877,7 @@ def _seller_comparison(rows, attribution, sellers):
             "attributed_orders": len(aggregate["attributed"]),
             "waiting_outcome_count": len(aggregate["waiting"]),
             "order_10d_count": _order_10d_count(aggregate["rates"]["order_10d"]),
+            "sales_linked_result": _sales_linked_metric(seller_sales),
             **aggregate["rates"],
             "snapshot_coverage": _rate(
                 sum(
@@ -1470,7 +1948,10 @@ def _sufficient_median(sellers, metric):
     return statistics.median(values) if len(values) >= 2 else None
 
 
-def _data_quality(rows, canonical_result, order_result, attribution):
+def _data_quality(
+    rows, canonical_result, order_result, attribution, sales_results=None,
+    *, filtered_sales_results=None,
+):
     human = [row for row in rows if row.get("is_human")]
     secure = [row for row in human if row.get("customer_identity_key")]
     historical_seller = [row for row in human if row.get("sales_user_name")]
@@ -1543,6 +2024,10 @@ def _data_quality(rows, canonical_result, order_result, attribution):
         and comparable_percentile_rate["value"] >= MIN_PRIORITY_COVERAGE
         else "building"
     )
+    contribution_exclusions = defaultdict(int)
+    for item in (sales_results or {}).get("excluded_orders", ()):
+        contribution_exclusions[item.get("reason") or "excluded_order"] += 1
+    filtered_sales_results = filtered_sales_results or sales_results or {}
     return {
         "status": status,
         "core_analytics": {
@@ -1571,6 +2056,23 @@ def _data_quality(rows, canonical_result, order_result, attribution):
             "priority_percentile_coverage": comparable_percentile_rate,
             "message": "Historisk prioriteringsdata byggs upp från lanseringen och påverkar inte kärnanalysen av aktivitet och order.",
         },
+        "sales_contribution": {
+            "model_version": (sales_results or {}).get(
+                "model_version", SALES_CONTRIBUTION_MODEL_VERSION,
+            ),
+            "credited_order_count": len(
+                (filtered_sales_results or {}).get("credited_orders", ())
+            ),
+            "excluded_order_count": len(
+                (sales_results or {}).get("excluded_orders", ())
+            ),
+            "exclusion_reasons": dict(sorted(contribution_exclusions.items())),
+            "own_order_component_limited_by_historical_filter": (
+                (filtered_sales_results or {}).get("metadata", {}).get(
+                    "own_order_component_limited_by_historical_filter", False,
+                )
+            ),
+        },
         "secure_customer_identity": secure_identity,
         "historical_seller_identity": _rate(len(historical_seller), len(human), minimum=1),
         "standardized_activity": standardized_activity,
@@ -1593,7 +2095,7 @@ def _data_quality(rows, canonical_result, order_result, attribution):
 
 
 
-def build_sales_coaching_summary(*, activities, customers, users, order_rows, planned_activities=(), planning_suggestions=(), score_events=(), current_priorities=(), start, end, generated_at, seller="", channel="all", segment="all", lifecycle="all", score_version="", on_step=None):
+def build_sales_coaching_summary(*, activities, customers, users, order_rows, planned_activities=(), planning_suggestions=(), score_events=(), current_priorities=(), settings=None, start, end, generated_at, seller="", channel="all", segment="all", lifecycle="all", score_version="", on_step=None):
     start, end = _date(start), _date(end)
     generated = _datetime(generated_at) or datetime.now()
     normalization_started = clock.perf_counter()
@@ -1616,14 +2118,30 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
     attribution = attribute_orders_to_contacts(
         coached_activities, order_result["orders"], generated_at=generated
     )
+    sales_results = build_sales_linked_results(
+        order_result["all_orders"], attribution, coached_activities, users,
+        settings=settings,
+    )
     if on_step:
         on_step("calculation.sales_coaching.attribution", attribution_started, len(order_result["orders"]))
     aggregation_started = clock.perf_counter()
     rows = _filter_activities(coached_activities, start=start, end=end, seller=seller, channel=channel, segment=segment, lifecycle=lifecycle)
     team_rows = _filter_activities(coached_activities, start=start, end=end, seller="", channel="all", segment=segment, lifecycle=lifecycle)
+    team_sales_results = _filter_sales_linked_results(
+        sales_results, start=start, end=end, segment=segment, lifecycle=lifecycle,
+    )
     team_10d_trends = _team_10d_trends(
         coached_activities,
         attribution,
+        sales_results,
+        coached_sellers,
+        generated_date=generated.date(),
+        selected_seller=seller,
+        segment=segment,
+        lifecycle=lifecycle,
+    )
+    human_activity_trends = _human_activity_trends(
+        coached_activities,
         coached_sellers,
         generated_date=generated.date(),
         selected_seller=seller,
@@ -1635,6 +2153,13 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
     previous_team_rows = _filter_activities(
         coached_activities, start=comparison_start, end=comparison_end,
         seller="", channel="all", segment=segment, lifecycle=lifecycle,
+    )
+    previous_team_sales_results = _filter_sales_linked_results(
+        sales_results,
+        start=comparison_start,
+        end=comparison_end,
+        segment=segment,
+        lifecycle=lifecycle,
     )
     current, previous = _aggregate_period(rows, attribution), _aggregate_period(comparison_rows, attribution)
     for key, rate in current["rates"].items():
@@ -1682,9 +2207,12 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
             rate["comparisons"]["previous_period"] = previous_rate
 
     seller_options = coached_sellers
-    seller_comparison = _seller_comparison(team_rows, attribution, coached_sellers)
+    seller_comparison = _seller_comparison(
+        team_rows, attribution, coached_sellers, team_sales_results,
+    )
     previous_seller_comparison = _seller_comparison(
-        previous_team_rows, attribution, coached_sellers
+        previous_team_rows, attribution, coached_sellers,
+        previous_team_sales_results,
     )
     coaching_team_rows = team_rows
     previous_coaching_team_rows = previous_team_rows
@@ -1710,10 +2238,12 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
             lifecycle=lifecycle,
         )
         coaching_seller_comparison = _seller_comparison(
-            coaching_team_rows, attribution, coached_sellers
+            coaching_team_rows, attribution, coached_sellers,
+            team_sales_results,
         )
         previous_coaching_seller_comparison = _seller_comparison(
-            previous_coaching_team_rows, attribution, coached_sellers
+            previous_coaching_team_rows, attribution, coached_sellers,
+            previous_team_sales_results,
         )
     repeat_customers = defaultdict(list)
     for row in current["boms"]:
@@ -2250,7 +2780,10 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
     }
     for key in kpis:
         kpis[key].update(METRIC_DEFINITIONS[key])
-    data_quality = _data_quality(rows, canonical_result, order_result, attribution)
+    data_quality = _data_quality(
+        rows, canonical_result, order_result, attribution, sales_results,
+        filtered_sales_results=team_sales_results,
+    )
     if seller and selected_seller_metrics:
         signal_metrics = {
             **selected_seller_metrics,
@@ -2319,6 +2852,12 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
             },
         },
         "team_10d_trends": team_10d_trends,
+        "human_activity_trends": human_activity_trends,
+        "sales_linked_result": {
+            "model_version": sales_results["model_version"],
+            "currency": "SEK",
+            "metadata": team_sales_results["metadata"],
+        },
         "historical_priority_profile": _historical_priority_profile(seller_comparison),
         "funnel": {
             "attempts": len(current["sync"]),
