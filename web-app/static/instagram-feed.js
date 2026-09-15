@@ -47,16 +47,11 @@
       css.dataset.pbInstagramCss = 'true'; document.head.append(css);
     }
     const section = element('section', 'pb-ig-section');
-    section.setAttribute('aria-label', 'Polarbär hos er');
+    section.setAttribute('aria-label', 'Tagga och följ oss på Instagram @polarbar.se');
     const header = element('div', 'pb-ig-header');
     const copy = element('div');
-    copy.append(element('h2', 'pb-ig-title', 'Polarbär hos er'));
-    const intro = element('p', 'pb-ig-intro', 'Tagga ');
-    const profile = element('a', '', '@polarbar.se');
-    profile.href = 'https://www.instagram.com/polarbar.se/';
-    profile.target = '_blank'; profile.rel = 'noopener noreferrer';
-    intro.append(profile, document.createTextNode(' för chansen att synas här'));
-    copy.append(intro); header.append(copy);
+    copy.append(element('h2', 'pb-ig-title', 'Tagga och följ oss på Instagram @polarbar.se'));
+    header.append(copy);
     const controls = element('div', 'pb-ig-controls');
     const previous = element('button', 'pb-ig-arrow', '←');
     const next = element('button', 'pb-ig-arrow', '→');
