@@ -106,7 +106,8 @@ class SalesCoachingAccessTests(TestCase):
             {
                 "meta", "options", "data_quality", "metric_definitions", "kpis",
                 "seller_comparison", "team_comparison", "historical_priority_profile",
-                "team_10d_trends", "funnel", "outcome_10d",
+                "team_10d_trends", "human_activity_trends",
+                "sales_linked_result", "funnel", "outcome_10d",
                 "weekly_trend", "visit_efficiency", "channel_effectiveness",
                 "priority_allocation", "follow_up_discipline", "coaching_cards",
             },

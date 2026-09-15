@@ -13203,6 +13203,10 @@ def load_sales_coaching_summary(spreadsheet, filters):
     activities = get_contact_rows(spreadsheet)
     order_rows = get_order_rows(spreadsheet)
     users = get_user_rows(spreadsheet)
+    try:
+        settings = get_settings(spreadsheet)
+    except (WorksheetNotFound, AttributeError):
+        settings = {}
     planned_activities = optional_sales_coaching_rows(
         spreadsheet, PLANNED_ACTIVITIES_SHEET, PLANNED_ACTIVITY_COLUMNS
     )
@@ -13241,6 +13245,7 @@ def load_sales_coaching_summary(spreadsheet, filters):
         planning_suggestions=planning_suggestion_rows,
         score_events=score_event_rows,
         current_priorities=current_priorities,
+        settings=settings,
         generated_at=stockholm_now(),
         score_version=SCORE_VERSION,
         on_step=record_performance_step,

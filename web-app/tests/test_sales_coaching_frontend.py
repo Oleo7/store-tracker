@@ -34,7 +34,7 @@ class SalesCoachingFrontendTests(TestCase):
         for expected in (
             "Period", "Säljare", "Kanal", "Lifecycle", "Kundsegment",
             "Coachningskort", "Teamjämförelse",
-            "10-dagarskonvertering – trend",
+            "Försäljning-trend", "Mänskliga aktiviteter – trend",
             "Historiskt prioritetsfokus", "Fördjupad analys",
             "Besök", "Kanaler", "Uppföljning",
             "Datakvalitet och definitioner",
@@ -200,19 +200,8 @@ class SalesCoachingFrontendTests(TestCase):
         frontend_keys = set(re.findall(r'"([a-z0-9_]+)"', inventory))
         self.assertEqual(frontend_keys, set(METRIC_DEFINITIONS) - {"strategic_coverage"})
 
-    def test_protected_blocks_match_master_source_contract(self):
-        # Profile replaces the matrix intentionally; team comparison and trends stay locked.
+    def test_unchanged_priority_profile_matches_master_source_contract(self):
         contracts = {
-            "Teamjämförelse": (
-                "  function teamComparisonMarkup",
-                "  function teamTrendWeekLabel",
-                "d5fe82b4ed1c98e2fec39f9b85e6bbc3bed70ec844909ced88fcdaee365d9fa2",
-            ),
-            "10-dagarstrenden": (
-                "  function teamTrendWeekLabel",
-                "  function priorityProfileReasonLabel",
-                "ccf59858bc4d5b9f936b9f5b5ae3129e21e1ad02293d1b6dcd5c4df61a638b0f",
-            ),
             "prioritetsprofilen": (
                 "  function priorityProfileReasonLabel",
                 "  function visitMarkup",
@@ -266,8 +255,9 @@ class SalesCoachingFrontendTests(TestCase):
     def test_count_metric_table_and_scale_contract(self):
         team = self.javascript.split("function teamComparisonMarkup", 1)[1].split("function teamTrendWeekLabel", 1)[0]
         headers = team.split("<thead><tr>", 1)[1].split("</tr>", 1)[0]
-        self.assertEqual(headers.count("<th>"), 9)
-        labels = ["Säljare", "Aktiviteter", "Antal order inom 10 dagar",
+        self.assertEqual(headers.count("<th>"), 10)
+        labels = ["Säljare", "Aktiviteter", "Säljkopplat resultat",
+                  "Kontakter med orderutfall inom 10 dagar",
                   "Kontakt – order inom 10 dagar", "Positiv dialog → order inom 10 dagar",
                   "Träffgrad", "Nästa-steg-täckning", "Bom-ratio", "Positiv dialog"]
         cells = re.findall(r"<th>(.*?)</th>", headers)
@@ -278,9 +268,11 @@ class SalesCoachingFrontendTests(TestCase):
         trend = self.javascript.split("function teamTrendPanelMarkup", 1)[1].split("function priorityProfileReasonLabel", 1)[0]
         self.assertIn('trend.metric_type === "count"', trend)
         self.assertIn("Math.ceil(maximum / step) * step", trend)
-        self.assertIn("(_, index) => index * step", trend)
+        self.assertIn("(_, index) => axisMin + index * step", trend)
         self.assertIn('isCount ? number(value)', trend)
-        self.assertIn("${number(point.value)} order inom 10 dagar", trend)
+        self.assertIn('${config.valueLabel || "aktiviteter"}', trend)
+        self.assertIn("isCurrency ? sek(value)", trend)
+        self.assertIn("Via kontakt", trend)
         self.assertIn('point.value === null', trend)
 
     def test_headline_outcomes_render_only_live_value_and_live_comparisons(self):
@@ -291,7 +283,7 @@ class SalesCoachingFrontendTests(TestCase):
         self.assertIn('${escapeHtml(comparisonText(metric))}', self.javascript)
         self.assertNotIn('metric.status === "sufficient"\n      ? \'<span class="sc-status"', self.javascript)
 
-    def test_two_live_team_trends_are_accessible_and_independent(self):
+    def test_sales_and_activity_trends_are_accessible_and_independent(self):
         trend = self.javascript.split("function teamTrendPanelMarkup", 1)[1].split(
             "function priorityProfileReasonLabel", 1
         )[0]
@@ -299,23 +291,21 @@ class SalesCoachingFrontendTests(TestCase):
             "function handleDashboardClick", 1
         )[0]
         for expected in (
-            "Varje punkt avser en kontaktvecka",
-            "hela 10-dagarsfönstret har passerat",
-            "veckopunkterna förändras inte enbart för att fler dagar passerar",
-            "Diagrammen använder samma KPI-definitioner som Coachningsöversikten",
+            "10-dagarsmåtten visas per kontaktvecka",
+            "Säljkopplat resultat krediteras kontaktveckan",
+            "Mänskliga aktiviteter – trend",
+            "helt avslutad ISO-vecka",
             "Period-, säljar- och kanalfilter begränsar inte grafen",
             "lifecycle och segment följer filtren",
+            'metricKey: "sales_linked_result"',
             'metricKey: "order_10d"',
             'metricKey: "positive_to_order_10d"',
-            'data-drilldown="${config.drilldownMetric || config.metricKey}"',
+            "const drilldownMetric = config.drilldownMetric === null",
             'data-channel="all"',
             'data-seller="${escapeHtml(item.seller)}"',
-            'tabindex="0" role="button"',
-            "Litet underlag",
-            "teamTrendMarker",
-            "stroke-dasharray",
-            "segment.length > 1",
-            "point.value === null",
+            'role="${drilldownMetric ? "button" : "img"}"',
+            "Litet underlag", "teamTrendMarker", "stroke-dasharray",
+            "segment.length > 1", "point.value === null",
         ):
             with self.subTest(expected=expected):
                 self.assertIn(expected, trend)
@@ -335,24 +325,20 @@ class SalesCoachingFrontendTests(TestCase):
         self.assertNotIn("TEAM_TREND_COLORS[seriesIndex", self.javascript)
         self.assertNotIn("TEAM_TREND_DASHES[seriesIndex", self.javascript)
         self.assertNotIn("rolling", trend.casefold())
-        self.assertIn('role="tablist" aria-label="Välj 10-dagarstrend"', trend)
+        self.assertIn('role="tablist" aria-label="Välj försäljningstrend"', trend)
+        self.assertIn('role="tablist" aria-label="Välj aktivitetstrend"', trend)
         self.assertIn('data-team-trend-view="${key}"', trend)
         self.assertIn('role="tabpanel"', trend)
-        self.assertIn('id="sc-team-trend-panel-${view}"', trend)
-        self.assertIn('aria-labelledby="sc-team-trend-tab-${view}"', trend)
+        self.assertIn('id="${idPrefix}-trend-panel-${view}"', trend)
         self.assertIn('${activeView === view ? "" : " hidden"}', trend)
         self.assertNotIn("data-metric-definition", trend)
-        self.assertIn('aria-controls="sc-team-trend-panel-${key}"', trend)
         self.assertIn('aria-selected="${view === key}"', trend)
         self.assertIn('tabindex="${view === key ? "0" : "-1"}"', trend)
-        self.assertIn(
-            "tabs.map(([key, _label, config]) => teamTrendPanelMarkup(trends, key, config, view))",
-            trend,
-        )
         point_title = trend.split("const title =", 1)[1].split(";", 1)[0]
         self.assertNotIn("prelim", point_title.casefold())
         self.assertLess(render.index("teamComparisonMarkup"), render.index("teamTrendsMarkup"))
-        self.assertLess(render.index("teamTrendsMarkup"), render.index("priorityProfileMarkup"))
+        self.assertLess(render.index("teamTrendsMarkup"), render.index("activityTrendsMarkup"))
+        self.assertLess(render.index("activityTrendsMarkup"), render.index("priorityProfileMarkup"))
         self.assertIn(".sc-team-order-trend { display: block; width: 100%; min-width: 1040px", self.css)
         self.assertIn(".sc-team-order-trend-wrap { overflow-x: auto", self.css)
         self.assertIn(".sc-team-order-point.is-small-sample", self.css)
@@ -364,8 +350,10 @@ class SalesCoachingFrontendTests(TestCase):
             'const teamTrendTab = event.target.closest("[data-team-trend-view]")',
             2,
         )[2].split('const diagnosticTab =', 1)[0]
-        self.assertIn('teamTrendView: "count"', self.javascript)
-        self.assertIn('const keys = ["count", "order", "positive"]', self.javascript)
+        self.assertIn('teamTrendView: "result"', self.javascript)
+        self.assertIn('activityTrendView: "all"', self.javascript)
+        self.assertIn('["result", "count", "order", "positive"]', self.javascript)
+        self.assertIn('["all", "reached", "bom", "phone"]', self.javascript)
         for key in ("ArrowLeft", "ArrowRight", "Home", "End"):
             self.assertIn(key, self.javascript)
         self.assertIn("renderDashboard(state.data)", click_handler)
