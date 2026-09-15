@@ -15,7 +15,7 @@ from flask import Blueprint, Response, jsonify, request
 from flask_cors import cross_origin
 
 ORIGINS = ("https://polarbar.se", "https://www.polarbar.se")
-FIELDS = "id,permalink,media_type,timestamp,username"
+FIELDS = "id,permalink,media_type,timestamp,username,media_url,thumbnail_url"
 MIX = ("ugc", "ugc", "own")  # Change this tuple to change the default mix.
 log = logging.getLogger("store_tracker.instagram")
 
@@ -29,6 +29,22 @@ def integer(env, name, default, minimum, maximum):
         return max(minimum, min(maximum, int(env.get(name, default))))
     except (TypeError, ValueError):
         return default
+
+
+def safe_media_url(value):
+    """Allow only HTTPS image/video URLs served from Meta/Instagram CDNs."""
+    try:
+        url = urlsplit(str(value or ""))
+    except (TypeError, ValueError):
+        return ""
+    host = (url.hostname or "").lower()
+    allowed = (
+        host == "cdninstagram.com" or host.endswith(".cdninstagram.com") or
+        host == "fbcdn.net" or host.endswith(".fbcdn.net")
+    )
+    if url.scheme != "https" or not allowed or url.netloc != url.hostname:
+        return ""
+    return url.geturl()
 
 
 def normalize(raw, source):
@@ -53,6 +69,12 @@ def normalize(raw, source):
     username = raw.get("username", "")
     if isinstance(username, str) and re.fullmatch(r"[A-Za-z0-9_.]{1,30}", username):
         item["username"] = username
+    # VIDEO uses thumbnail_url for a lightweight poster. Images/carousels use media_url.
+    preview = safe_media_url(raw.get("thumbnail_url") if raw.get("media_type") == "VIDEO" else raw.get("media_url"))
+    if not preview:
+        preview = safe_media_url(raw.get("media_url"))
+    if preview:
+        item["preview_url"] = preview
     return item
 
 

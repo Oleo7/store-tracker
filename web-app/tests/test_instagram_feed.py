@@ -11,13 +11,14 @@ from unittest.mock import Mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import requests
 from flask import Flask
-from instagram_feed import FeedService, MetaClient, MetaError, create_blueprint, mix_feed, normalize
+from instagram_feed import FeedService, MetaClient, MetaError, create_blueprint, mix_feed, normalize, safe_media_url
 
 
 def media(number, source="own"):
     return normalize({"id": str(number), "permalink": f"https://www.instagram.com/p/TEST{number}/",
                       "timestamp": f"2026-08-{number % 28 + 1:02d}T12:00:00+0000",
-                      "media_type": "VIDEO", "username": "polarbar.se"}, source)
+                      "media_type": "VIDEO", "username": "polarbar.se",
+                      "thumbnail_url": f"https://scontent-test.cdninstagram.com/v/t51/test{number}.jpg"}, source)
 
 
 class InstagramTests(TestCase):
@@ -49,6 +50,15 @@ class InstagramTests(TestCase):
         self.assertIsNone(normalize(dict(row, timestamp="invalid"), "own"))
         self.assertNotIn("access_token", normalize(dict(row, access_token="secret"), "own"))
 
+    def test_preview_url_is_safe_and_prefers_video_thumbnail(self):
+        row = normalize({"id": "44", "permalink": "https://www.instagram.com/reel/ABC123/",
+                         "timestamp": "2026-09-15T10:00:00+00:00", "media_type": "VIDEO",
+                         "username": "creator", "media_url": "https://video.xx.fbcdn.net/v/video.mp4",
+                         "thumbnail_url": "https://scontent.cdninstagram.com/v/thumb.jpg"}, "ugc")
+        self.assertEqual(row["preview_url"], "https://scontent.cdninstagram.com/v/thumb.jpg")
+        self.assertEqual(safe_media_url("https://evil.example/image.jpg"), "")
+        self.assertEqual(safe_media_url("http://scontent.cdninstagram.com/image.jpg"), "")
+
     def test_default_eighteen_posts_and_configurable_limit(self):
         self.client.collection.side_effect = lambda account, edge, deadline: [
             media(n) for n in (range(1, 9) if edge == "media" else range(10, 26))]
@@ -56,6 +66,7 @@ class InstagramTests(TestCase):
         self.assertEqual(len(result), 18)
         self.assertEqual([r["source"] for r in result], ["ugc", "ugc", "own"] * 6)
         self.assertEqual(len({r["id"] for r in result}), 18)
+        self.assertTrue(all(r.get("preview_url") for r in result))
         self.service.env["INSTAGRAM_FEED_LIMIT"] = "9"
         self.assertEqual(len(self.service.feed()["items"]), 9)
         self.assertEqual(self.client.collection.call_count, 2)
@@ -107,6 +118,7 @@ class InstagramTests(TestCase):
         self.assertEqual(len(client.collection("123", "tags", time.monotonic() + 20)), 1)
         args = transport.get.call_args.kwargs
         self.assertEqual(args["params"]["after"], "cursor")
+        self.assertIn("thumbnail_url", args["params"]["fields"])
         self.assertNotIn("access_token", args["params"])
         self.assertEqual(args["headers"]["Authorization"], "Bearer secret")
         self.assertFalse(args["allow_redirects"])
