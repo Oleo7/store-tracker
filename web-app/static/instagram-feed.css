@@ -1,11 +1,9 @@
-.pb-instagram { min-height: 1px; width: 100%; }
+.pb-instagram { min-height: 1px; width: 100%; background: #fff; }
 .pb-instagram[hidden] { display: none !important; }
-.pb-instagram .pb-ig-section { max-width: 1440px; margin: 0 auto; padding: clamp(36px, 5vw, 72px) 0; color: #171717; font-family: inherit; }
+.pb-instagram .pb-ig-section { max-width: 1440px; margin: 0 auto; padding: clamp(36px, 5vw, 72px) 0; color: #171717; font-family: inherit; background: #fff; }
 .pb-instagram .pb-ig-header { display: flex; justify-content: space-between; align-items: end; gap: 24px; margin-bottom: 28px; }
-.pb-instagram .pb-ig-title { font-family: inherit; font-size: clamp(30px, 4vw, 54px); font-weight: 700; line-height: 1.08; letter-spacing: -.035em; margin: 0 0 12px; }
-.pb-instagram .pb-ig-intro { font: inherit; font-size: clamp(15px, 1.2vw, 18px); line-height: 1.5; margin: 0; }
+.pb-instagram .pb-ig-title { font-family: inherit; font-size: clamp(30px, 4vw, 54px); font-weight: 700; line-height: 1.08; letter-spacing: -.035em; margin: 0; }
 .pb-instagram a { color: inherit; }
-.pb-instagram .pb-ig-intro a { text-underline-offset: 3px; }
 .pb-instagram .pb-ig-controls { display: flex; gap: 8px; flex-shrink: 0; }
 .pb-instagram .pb-ig-arrow { font: inherit; font-size: 25px; border: 1px solid #e8b5a9; border-radius: 50%; background: #efb4a7; color: #171717; width: 48px; height: 48px; cursor: pointer; padding: 0; }
 .pb-instagram .pb-ig-arrow:disabled { opacity: .35; cursor: default; }
@@ -24,8 +22,7 @@
 @media (max-width: 700px) {
   .pb-instagram .pb-ig-section { padding: 30px 0 42px; }
   .pb-instagram .pb-ig-header { display: block; margin-bottom: 20px; }
-  .pb-instagram .pb-ig-title { font-size: clamp(30px, 9vw, 42px); margin-bottom: 10px; }
-  .pb-instagram .pb-ig-intro { font-size: 15px; max-width: 31ch; }
+  .pb-instagram .pb-ig-title { font-size: clamp(26px, 7.5vw, 36px); line-height: 1.12; }
   .pb-instagram .pb-ig-controls { display: none; }
   .pb-instagram .pb-ig-track { gap: 14px; margin-right: -1px; padding-bottom: 14px; scroll-padding-left: 0; }
   .pb-instagram .pb-ig-card { flex-basis: min(78vw, 320px); border-radius: 16px; }
