@@ -62,17 +62,16 @@ async function assertTabs(section, group, expectedLabels) {
       }
     });
 
-    await page.goto("http://127.0.0.1:5065/", { waitUntil: "domcontentloaded" });
-    const login = await page.evaluate(async () => {
-      const response = await fetch("/login", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ user_name: "admin", password: "secret" }),
-      });
-      return { ok: response.ok, body: await response.text() };
+    // Authenticate the shared browser context before the first page requests /session.
+    const login = await page.request.post("http://127.0.0.1:5065/login", {
+      data: { user_name: "admin", password: "secret" },
     });
-    if (!login.ok) throw new Error(`${mode}: harness login failed: ${login.body}`);
+    if (!login.ok()) throw new Error(`${mode}: harness login failed: ${await login.text()}`);
 
+
+    page.on("response", response => {
+      if (response.status() === 401) browserErrors.push(`Unexpected 401 after login: ${response.url()}`);
+    });
     await page.goto("http://127.0.0.1:5065/?sales_coaching=1&period=4&seller=olle", {
       waitUntil: "networkidle",
     });
@@ -111,7 +110,7 @@ async function assertTabs(section, group, expectedLabels) {
     }
     const olleRow = page.locator('.sc-comparison-table tbody tr', { has: page.locator('button[data-seller="olle"]') });
     const olleResultText = await olleRow.locator("td").nth(1).innerText();
-    if (!olleResultText.includes("kr") || !olleResultText.includes("Kontakt:") || !olleResultText.includes("Egna order:")) {
+    if (!olleResultText.includes("kr") || !olleResultText.includes("Via kontakt:") || !olleResultText.includes("Egna order utan kontakt:")) {
       throw new Error(`${mode}: result cell does not expose total and components: ${olleResultText}`);
     }
 
@@ -123,15 +122,21 @@ async function assertTabs(section, group, expectedLabels) {
     ]) {
       if (!salesCopy.includes(expected)) throw new Error(`${mode}: sales trend misses: ${expected}`);
     }
+    equal(await salesSection.locator('[role="tab"][aria-selected="true"]').innerText(), "DFP per vecka", "default sales tab");
+    for (const [view, target] of [["dfp", 400], ["result", 15000], ["linked-dfp", 120]]) {
+      equal(await salesSection.locator(`#sc-team-trend-panel-${view} .sc-trend-target`).getAttribute("data-target"), String(target), "reference level");
+    }
     await assertTabs(salesSection, "sales trend", [
-      "Säljkopplat resultat",
+      "DFP per vecka",
+      "Säljkopplat TB",
+      "Säljkopplade DFP per säljare/vecka",
       "Kontakter med orderutfall inom 10 dagar",
       "Kontakt → order",
       "Positiv dialog → order",
     ]);
     await salesSection.locator("#sc-team-trend-tab-result").click();
     const resultLabels = await salesSection.locator("#sc-team-trend-panel-result .sc-team-order-point").evaluateAll(points => points.map(point => point.getAttribute("aria-label")));
-    if (!resultLabels.some(label => label.includes("Säljkopplat resultat") && label.includes("Via kontakt") && label.includes("Egna order utan kontakt") && !label.includes("Säljkopplat resultat 0 kr"))) {
+    if (!resultLabels.some(label => label.includes("Säljkopplat TB") && label.includes("Via kontakt") && label.includes("Egna order utan kontakt") && !label.includes("Säljkopplat TB 0 kr"))) {
       throw new Error(`${mode}: result graph does not show a non-zero total with both component labels`);
     }
 

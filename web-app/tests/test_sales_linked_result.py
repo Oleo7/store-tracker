@@ -271,5 +271,70 @@ class SalesAndActivityTrendTests(TestCase):
         self.assertEqual(self.point(summary, "human_activity_trends", "phone", "johan", "2026-W33")["value"], 1)
 
 
+class SalesTrendV12Tests(TestCase):
+    def summary(self, *, seller="", segment="all"):
+        return build_sales_coaching_summary(
+            activities=[contact("linked", "2026-06-07 10:00", seller="daniel", customer_segment_at_contact="A"),
+                        contact("open", "2026-08-18 10:00", seller="johan"),
+                        contact("resolved-open", "2026-08-18 10:00", seller="daniel", customer_id="customer-2")],
+            customers=CUSTOMERS, users=USERS,
+            order_rows=[order_row("LINK", "2026-06-08", dfp="85", quantity="9999"),
+                        order_row("OWN", "2026-06-22", dfp="24"),
+                        order_row("RECENT", "2026-08-19", customer_id="customer-2"),
+                        order_row("BAD", "2026-06-23", sku="unknown"),
+                        order_row("OLD-BAD", "2025-01-01", sku="unknown"),
+                        order_row("INTERNAL", "2026-06-24", dfp="100", total="0")],
+            start="2026-06-01", end="2026-08-19", generated_at="2026-08-19 12:00",
+            seller=seller, segment=segment,
+        )
+
+    def test_total_uses_weight_order_week_and_is_independent_of_seller(self):
+        summary = self.summary()
+        trend = summary["team_10d_trends"]
+        total = trend["metrics"]["total_dfp"]
+        points = {p["week"]: p["value"] for p in total["series"][0]["points"]}
+        self.assertEqual(points["2026-W23"], 0)
+        self.assertEqual(points["2026-W24"], 85)
+        self.assertEqual(points["2026-W26"], 25)  # Commercial DFP includes unknown SKU, excludes internal order.
+        self.assertEqual(total, self.summary(seller="daniel")["team_10d_trends"]["metrics"]["total_dfp"])
+        self.assertEqual(total["target"], 400)
+
+    def test_linked_dfp_reuses_tb_credit_and_shared_axis(self):
+        trend = self.summary()["team_10d_trends"]
+        metrics = trend["metrics"]
+        self.assertEqual(metrics["sales_linked_dfp"]["target"], 120)
+        self.assertEqual(metrics["sales_linked_result"]["target"], 15000)
+        axis = [slot["week"] for slot in trend["week_axis"]]
+        for metric in metrics.values():
+            for series in metric["series"]:
+                self.assertEqual([p["week"] for p in series["points"]], axis)
+        total = 0
+        for dfp_series, tb_series in zip(metrics["sales_linked_dfp"]["series"], metrics["sales_linked_result"]["series"]):
+            for point, tb in zip(dfp_series["points"], tb_series["points"]):
+                self.assertEqual(point["credited_order_count"], tb["credited_order_count"])
+                self.assertEqual(point["value"], point["contact_dfp"] + point["own_order_dfp"])
+                total += point["value"]
+                if point["contact_dfp"]:
+                    self.assertEqual((dfp_series["seller"], point["week"], point["contact_dfp"]), ("daniel", "2026-W23", 85))
+                if point["own_order_dfp"]:
+                    self.assertEqual((dfp_series["seller"], point["week"], point["own_order_dfp"]), ("johan", "2026-W26", 24))
+        self.assertEqual(total, 109)
+
+    def test_quality_scope_and_open_windows_including_converted_contacts(self):
+        summary = self.summary()
+        quality = summary["data_quality"]["sales_contribution"]
+        self.assertEqual(quality["credited_order_count"], 3)
+        self.assertEqual(quality["excluded_order_count"], 2)
+        self.assertEqual(sum(quality["exclusion_reasons"].values()), 2)
+        self.assertEqual(quality["exclusion_reasons"]["unknown_sku"], 1)
+        for seller in summary["team_comparison"]["sellers"]:
+            self.assertEqual(seller["open_outcome_window_count"], 1)
+        filtered = self.summary(segment="B")["data_quality"]["sales_contribution"]
+        self.assertEqual(filtered["excluded_order_count"], 0)
+        self.assertEqual(filtered["exclusion_reasons"], {})
+        self.assertEqual(quality["config"]["eur_sek"], 10.77)
+        self.assertEqual(quality["config_hash"], self.summary()["data_quality"]["sales_contribution"]["config_hash"])
+
+
 if __name__ == "__main__":
     main()
