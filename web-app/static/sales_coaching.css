@@ -212,7 +212,10 @@ details[open] > summary .sc-disclosure-icon { transform: rotate(225deg) translat
 .sc-team-bar.is-converted-positive { background: #b7791f; }
 .sc-team-seller { overflow-wrap: anywhere; margin-top: 8px; font-size: 0.78rem; font-weight: 850; }
 .sc-rate-value { display: block; font-weight: 850; }
-.sc-comparison-table th:nth-child(3) { min-width: 145px; }
+.sc-result-value { display: block; white-space: nowrap; font-size: .96rem; font-weight: 900; }
+.sc-comparison-table { min-width: 1280px; }
+.sc-comparison-table th:nth-child(3) { min-width: 230px; }
+.sc-comparison-table th:nth-child(4) { min-width: 215px; }
 .sc-comparison-table small { display: block; margin-top: 3px; color: var(--sc-muted); white-space: nowrap; }
 .sc-comparison-table tr.is-selected { background: #fbf3f6; }
 .sc-card-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }

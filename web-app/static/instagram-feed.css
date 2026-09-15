@@ -1,0 +1,25 @@
+.pb-instagram { min-height: 1px; width: 100%; }
+.pb-instagram[hidden] { display: none !important; }
+.pb-instagram .pb-ig-section { max-width: 1440px; margin: 0 auto; padding: clamp(40px, 6vw, 88px) 0; color: #171717; font-family: inherit; }
+.pb-instagram .pb-ig-header { display: flex; justify-content: space-between; align-items: end; gap: 24px; margin-bottom: 32px; }
+.pb-instagram .pb-ig-title { font-family: inherit; font-size: clamp(30px, 4vw, 56px); font-weight: 700; line-height: 1.12; letter-spacing: -.035em; margin: 0 0 16px; }
+.pb-instagram .pb-ig-intro { font: inherit; font-size: clamp(15px, 1.3vw, 18px); line-height: 1.55; margin: 0; }
+.pb-instagram a { color: inherit; }
+.pb-instagram .pb-ig-intro a { text-underline-offset: 3px; }
+.pb-instagram .pb-ig-controls { display: flex; gap: 8px; flex-shrink: 0; }
+.pb-instagram .pb-ig-arrow { font: inherit; font-size: 25px; border: 1px solid #e8b5a9; border-radius: 50%; background: #efb4a7; color: #171717; width: 48px; height: 48px; cursor: pointer; padding: 0; }
+.pb-instagram .pb-ig-arrow:disabled { opacity: .35; cursor: default; }
+.pb-instagram :focus-visible { outline: 2px solid #171717; outline-offset: 4px; }
+.pb-instagram .pb-ig-track { display: flex; align-items: flex-start; gap: 24px; overflow-x: auto; overflow-y: hidden; scroll-snap-type: x proximity; overscroll-behavior-x: contain; scrollbar-width: thin; scrollbar-color: #e8b5a9 transparent; padding: 4px 0 20px; }
+.pb-instagram .pb-ig-card { flex: 0 0 min(380px, 100%); min-width: 0; scroll-snap-align: start; }
+.pb-instagram .pb-ig-frame { min-height: 600px; background: #faf8f7; border-radius: 4px; overflow: hidden; }
+.pb-instagram .instagram-media { margin: 0 !important; width: 100% !important; min-width: 0 !important; max-width: 100% !important; }
+.pb-instagram .pb-ig-frame iframe { width: 100% !important; min-width: 0 !important; max-width: 100% !important; }
+.pb-instagram .pb-ig-original { display: inline-block; font-size: 13px; margin-top: 12px; text-underline-offset: 3px; }
+.pb-instagram .pb-ig-unavailable .pb-ig-frame { min-height: 160px; }
+@media (max-width: 600px) {
+  .pb-instagram .pb-ig-header { display: block; margin-bottom: 24px; }
+  .pb-instagram .pb-ig-controls { margin-top: 20px; }
+  .pb-instagram .pb-ig-card { flex-basis: min(380px, 100%); }
+  .pb-instagram .pb-ig-frame { min-height: 560px; }
+}

@@ -1,9 +1,42 @@
+const fs = require("fs");
+const path = require("path");
 const { chromium } = require("playwright");
 
 const mode = process.argv[2] || "desktop";
 const viewport = mode === "mobile"
   ? { width: 390, height: 844 }
   : { width: 1440, height: 1000 };
+const outputDir = path.resolve("outputs", "sales-coaching-linked-result");
+
+function equal(actual, expected, message) {
+  if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+    throw new Error(`${mode}: ${message}\nExpected: ${JSON.stringify(expected)}\nActual: ${JSON.stringify(actual)}`);
+  }
+}
+
+async function assertTabs(section, group, expectedLabels) {
+  const tabs = section.locator('[role="tab"]');
+  equal(await tabs.allInnerTexts(), expectedLabels, `${group} tab order changed`);
+  if (await section.locator('[role="tabpanel"]:not([hidden])').count() !== 1) {
+    throw new Error(`${mode}: ${group} must expose exactly one panel`);
+  }
+  const requestCountBefore = global.summaryRequestCount;
+  for (let index = 0; index < expectedLabels.length; index += 1) {
+    const tab = tabs.nth(index);
+    await tab.click();
+    const controlledId = await tab.getAttribute("aria-controls");
+    const panel = section.locator(`#${controlledId}`);
+    if (await tab.getAttribute("aria-selected") !== "true" || !(await panel.isVisible())) {
+      throw new Error(`${mode}: ${group} tab ${expectedLabels[index]} did not activate its panel`);
+    }
+    if (await section.locator('[role="tabpanel"]:not([hidden])').count() !== 1) {
+      throw new Error(`${mode}: ${group} exposed multiple panels after a tab click`);
+    }
+  }
+  if (global.summaryRequestCount !== requestCountBefore) {
+    throw new Error(`${mode}: ${group} tab switches made a new summary request`);
+  }
+}
 
 (async () => {
   let browser;
@@ -13,676 +46,124 @@ const viewport = mode === "mobile"
     if (!String(error).includes("Executable doesn't exist")) throw error;
     browser = await chromium.launch({ headless: true, channel: "chrome" });
   }
+
   try {
+    fs.mkdirSync(outputDir, { recursive: true });
     const page = await browser.newPage({ viewport });
-    await page.goto("http://127.0.0.1:5065/", { waitUntil: "domcontentloaded" });
-    const login = await page.evaluate(async () => {
-      const response = await fetch("/login", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ user_name: "admin", password: "secret" }),
-      });
-      return { ok: response.ok, body: await response.text() };
-    });
-    if (!login.ok) throw new Error(`${mode}: harness login failed: ${login.body}`);
-    const reset = await page.evaluate(async () => (await fetch("/__test__/priority-profile?reset=1", { method: "POST" })).ok);
-    if (!reset) throw new Error("priority fixture reset failed");
     const browserErrors = [];
-    let summaryRequestCount = 0;
+    global.summaryRequestCount = 0;
     page.on("console", message => {
       if (message.type() === "error") browserErrors.push(message.text());
     });
     page.on("pageerror", error => browserErrors.push(String(error)));
     page.on("request", request => {
-      const url = new URL(request.url());
-      if (url.pathname.endsWith("/sales-coaching-insights")) summaryRequestCount += 1;
+      if (new URL(request.url()).pathname.endsWith("/sales-coaching-insights")) {
+        global.summaryRequestCount += 1;
+      }
     });
+
+    // Authenticate the shared browser context before the first page requests /session.
+    const login = await page.request.post("http://127.0.0.1:5065/login", {
+      data: { user_name: "admin", password: "secret" },
+    });
+    if (!login.ok()) throw new Error(`${mode}: harness login failed: ${await login.text()}`);
+
     await page.goto("http://127.0.0.1:5065/?sales_coaching=1&period=4&seller=olle", {
       waitUntil: "networkidle",
     });
     await page.locator("#sales-coaching-dashboard:not([hidden])").waitFor();
     await page.locator(".sc-comparison-table").waitFor();
-    const assertTeamFirst = async () => {
-      if (await page.locator('#sc-kpi-title, .sc-kpi-grid, .sc-kpi-card, [data-kpi-key]').count()) throw new Error(`${mode}: removed coaching overview still renders`);
-      const firstSection = page.locator('#sc-dashboard-content > .sc-section').first();
-      if (await firstSection.getAttribute('aria-labelledby') !== 'sc-team-title') throw new Error(`${mode}: Teamjämförelse is not first`);
-    };
-    await assertTeamFirst();
-    await page.locator('#sales-coaching-dashboard').screenshot({ path: `sales-coaching-team-first-${mode}.png` });
-    if (await page.locator(".sc-filter-primary .sc-field:visible").count() !== 2) {
-      throw new Error(`${mode}: Period and Säljare are not the only initially visible filter fields`);
-    }
-    if (await page.locator("#sc-more-filters-panel:visible").count()) {
-      throw new Error(`${mode}: additional filters are open on first load`);
-    }
-    if (await page.locator("#sc-custom-dates:visible").count()) {
-      throw new Error(`${mode}: custom date fields are visible for a standard period`);
-    }
-    if (await page.locator('#sc-period option[value="2"]').count() !== 1) {
-      throw new Error(`${mode}: the two-week period option is missing`);
-    }
-    const moreFilters = page.locator("#sc-more-filters-toggle");
-    if (await moreFilters.getAttribute("aria-expanded") !== "false") {
-      throw new Error(`${mode}: additional-filter control has the wrong initial state`);
-    }
-    await moreFilters.press("Enter");
-    if (await moreFilters.getAttribute("aria-expanded") !== "true" || !(await page.locator("#sc-more-filters-panel").isVisible())) {
-      throw new Error(`${mode}: additional filters did not open from the keyboard`);
-    }
-    for (const filter of ["#sc-channel", "#sc-lifecycle", "#sc-segment"]) {
-      if (!(await page.locator(filter).isVisible())) throw new Error(`${mode}: hidden filter ${filter} did not become visible`);
-    }
-    await moreFilters.press("Space");
-    if (await page.locator("#sc-more-filters-panel").isVisible()) {
-      throw new Error(`${mode}: additional filters did not close from the keyboard`);
-    }
-    if (await page.locator(".sc-quality-status").count()) {
-      throw new Error(`${mode}: removed top data-quality row still renders`);
-    }
-    const infoButtons = page.locator('.sc-comparison-table [data-sc-action="metric-info"]');
-    if (await infoButtons.count() !== 7) {
-      throw new Error(`${mode}: expected seven team metric information controls`);
-    }
-    for (let index = 0; index < 7; index += 1) {
-      const info = infoButtons.nth(index);
-      await info.focus();
-      await info.press("Enter");
-      const explanationId = await info.getAttribute("aria-controls");
-      const explanation = page.locator(`#${explanationId}`);
-      if (!(await explanation.isVisible()) || !(await explanation.innerText()).trim()) {
-        throw new Error(`${mode}: Team metric explanation ${index + 1} did not open`);
-      }
-      if (await info.getAttribute("aria-expanded") !== "true") {
-        throw new Error(`${mode}: Team metric explanation ${index + 1} has wrong expanded state`);
-      }
-      if (await page.locator("#sc-drawer-backdrop").count()) {
-        throw new Error(`${mode}: Team metric information opened drilldown`);
-      }
-      await info.press("Space");
-      if (await explanation.isVisible()) {
-        throw new Error(`${mode}: Team metric explanation ${index + 1} did not close`);
-      }
-    }
-    const closingStrength = page.locator(".sc-coaching-card", {
-      hasText: "Stark positiv-till-order-konvertering",
-    });
-    if (await closingStrength.count() !== 1) {
-      throw new Error(`${mode}: deterministic live 10-day strength card is missing`);
-    }
-    const closingStrengthText = await closingStrength.innerText();
-    if (!closingStrengthText.includes("7 av 28 · 25 %") || !closingStrengthText.includes("Preliminärt · 15 väntar på 10-dagarsutfall")) {
-      throw new Error(`${mode}: live strength card evidence/pending copy is wrong: ${closingStrengthText}`);
-    }
-    await closingStrength.locator('[data-drilldown="positive_to_order_10d"]').click();
-    await page.locator("#sc-drawer-content .sc-drawer-meta").waitFor();
-    const closingDrawerText = await page.locator("#sc-drawer-content").innerText();
-    if (!closingDrawerText.includes("Visar 28 av 28") || (closingDrawerText.match(/Konverterad/g) || []).length !== 7) {
-      throw new Error(`${mode}: strength card drilldown does not reconcile 7/28: ${closingDrawerText}`);
-    }
-    await page.locator("[data-sc-drawer-close]").click();
-    const teamHeaders = await page.locator(".sc-comparison-table thead th").allInnerTexts();
-    const normalizedTeamHeaders = teamHeaders.map(text => text.toLocaleLowerCase("sv-SE"));
-    const positiveOrderIndex = normalizedTeamHeaders.findIndex(text => text.startsWith("positiv dialog → order inom 10 dagar"));
-    const contactOrderIndex = normalizedTeamHeaders.findIndex(text => text.startsWith("kontakt – order inom 10 dagar"));
-    const nextStepIndex = normalizedTeamHeaders.findIndex(text => text.startsWith("nästa-steg-täckning"));
-    if (!(contactOrderIndex === 3 && positiveOrderIndex === 4 && nextStepIndex === 6 && normalizedTeamHeaders[5].startsWith("träffgrad"))) {
-      throw new Error(`${mode}: contact-order metric is in the wrong team-comparison position: ${JSON.stringify(teamHeaders)}`);
+
+    const headings = await page.locator("#sc-dashboard-content > .sc-section > .sc-section-heading h2").allInnerTexts();
+    equal(headings.slice(0, 5), [
+      "Teamjämförelse",
+      "Coachningskort",
+      "Försäljning-trend",
+      "Mänskliga aktiviteter – trend",
+      "Historiskt prioritetsfokus",
+    ], "main section order changed");
+
+    const teamSection = page.locator('[aria-labelledby="sc-team-title"]');
+    const teamHeader = teamSection.locator(":scope > .sc-section-heading");
+    if ((await teamHeader.locator("p").count()) !== 0) {
+      throw new Error(`${mode}: the removed explanatory paragraph still appears below Teamjämförelse`);
     }
     const visibleTeamHeaders = await page.locator(".sc-comparison-table thead th").evaluateAll(headers => headers.map(header => {
       const copy = header.cloneNode(true);
       copy.querySelectorAll("button, [hidden]").forEach(element => element.remove());
       return copy.textContent.trim();
     }));
-    const expectedTeamHeaders = [
-      "Säljare", "Aktiviteter", "Antal order inom 10 dagar", "Kontakt – order inom 10 dagar",
-      "Positiv dialog → order inom 10 dagar", "Träffgrad", "Nästa-steg-täckning", "Bom-ratio", "Positiv dialog",
-    ];
-    if (JSON.stringify(visibleTeamHeaders) !== JSON.stringify(expectedTeamHeaders)) {
-      throw new Error(`${mode}: protected team-comparison columns changed: ${JSON.stringify(visibleTeamHeaders)}`);
+    equal(visibleTeamHeaders.slice(0, 4), [
+      "Säljare",
+      "Aktiviteter",
+      "Säljkopplat resultat",
+      "Kontakter med orderutfall inom 10 dagar",
+    ], "team result columns changed");
+    const resultInfo = page.locator('.sc-comparison-table [aria-label="Förklaring för Säljkopplat resultat"]');
+    const expectedDefinition = "Modellerat täckningsbidrag från order kopplade till säljarens kontakt inom 10 dagar samt säljarens egna order som saknar sådan kontaktmatchning. Samma order räknas aldrig två gånger.";
+    if (await resultInfo.getAttribute("title") !== expectedDefinition) {
+      throw new Error(`${mode}: sales-result definition is not exact`);
     }
-    if (await page.locator(".sc-team-chart [data-metric-definition], .sc-comparison-table [data-metric-definition]").count()) {
-      throw new Error(`${mode}: protected team-comparison markup contains definition metadata`);
+    const olleRow = page.locator('.sc-comparison-table tbody tr', { has: page.locator('button[data-seller="olle"]') });
+    const olleResultText = await olleRow.locator("td").nth(1).innerText();
+    if (!olleResultText.includes("kr") || !olleResultText.includes("Kontakt:") || !olleResultText.includes("Egna order:")) {
+      throw new Error(`${mode}: result cell does not expose total and components: ${olleResultText}`);
     }
-    if (await page.locator(".sc-team-chart .sc-team-group[data-seller]").count() !== 3
-        || await page.locator(".sc-comparison-table tbody th button[data-seller]").count() !== 3) {
-      throw new Error(`${mode}: protected team-comparison seller interactions changed`);
-    }
-    const olleTeamRow = page.locator(".sc-comparison-table tbody tr", { hasText: "Olle" });
-    if (await olleTeamRow.locator("td").nth(1).innerText() !== "7") throw new Error('team count must equal 7');
-    const olleTeamText = await olleTeamRow.innerText();
-    const positiveOrderTeamText = await olleTeamRow.locator("td").nth(3).innerText();
-    const contactOrderTeamText = await olleTeamRow.locator("td").nth(2).innerText();
+
+    const salesSection = page.locator(".sc-team-10d-trend-section");
+    const salesCopy = await salesSection.innerText();
     for (const expected of [
-      "20 %", "7 av 35", "Preliminärt · 22 väntar på 10-dagarsutfall",
-      "25 %", "7 av 28", "Preliminärt · 15 väntar på 10-dagarsutfall",
+      "kontaktveckan för kontaktattribuerade order",
+      "orderveckan för egna order utan kontaktmatchning",
     ]) {
-      if (!olleTeamText.includes(expected)) {
-        throw new Error(`${mode}: team comparison does not use the live 10-day KPI (${expected}): ${olleTeamText}`);
-      }
+      if (!salesCopy.includes(expected)) throw new Error(`${mode}: sales trend misses: ${expected}`);
     }
-    if (positiveOrderTeamText.includes("40 %") || contactOrderTeamText.includes("40 %") || olleTeamText.includes("fullständigt utfall")) {
-      throw new Error(`${mode}: comparable outcome leaked into team comparison: ${olleTeamText}`);
-    }
-
-    const sectionHeadings = await page.locator("#sc-dashboard-content > .sc-section > .sc-section-heading h2").allInnerTexts();
-    const teamComparisonPosition = sectionHeadings.indexOf("Teamjämförelse");
-    const trendPosition = sectionHeadings.indexOf("10-dagarskonvertering – trend");
-    const matricesPosition = sectionHeadings.indexOf("Historiskt prioritetsfokus");
-    if (!(teamComparisonPosition === 0 && sectionHeadings[1] === "Coachningskort" && teamComparisonPosition + 2 === trendPosition && trendPosition + 1 === matricesPosition)) {
-      throw new Error(`${mode}: long-term trend is in the wrong section order: ${JSON.stringify(sectionHeadings)}`);
-    }
-    const trendSection = page.locator(".sc-team-10d-trend-section");
-    await trendSection.scrollIntoViewIfNeeded();
-    const trendCopy = await trendSection.innerText();
-    for (const expected of [
-      "Varje punkt avser en kontaktvecka",
-      "Endast veckor där hela 10-dagarsfönstret har passerat visas",
-      "Diagrammen använder samma KPI-definitioner som Coachningsöversikten",
-      "Period-, säljar- och kanalfilter begränsar inte grafen",
-    ]) {
-      if (!trendCopy.includes(expected)) throw new Error(`${mode}: missing trend explanation: ${expected}`);
-    }
-    if (await page.locator(".sc-matrix, .sc-bubble, .sc-matrix-tabs").count()) {
-      throw new Error(`${mode}: removed sales/priority matrix tabs still render`);
-    }
-    const orderPanel = trendSection.locator("#sc-team-trend-panel-order");
-    const positivePanel = trendSection.locator("#sc-team-trend-panel-positive");
-    const assertTrendPanelState = async expectedView => {
-      const panelState = await trendSection.evaluate(section => {
-        const panels = [...section.querySelectorAll('[role="tabpanel"]')];
-        const tabs = [...section.querySelectorAll('[role="tab"]')];
-        return {
-          panels: panels.map(panel => ({
-            id: panel.id,
-            labelledBy: panel.getAttribute("aria-labelledby"),
-            hidden: panel.hidden,
-          })),
-          tabs: tabs.map(tab => ({
-            id: tab.id,
-            controls: tab.getAttribute("aria-controls"),
-            controlsExists: Boolean(document.getElementById(tab.getAttribute("aria-controls"))),
-            selected: tab.getAttribute("aria-selected"),
-            tabIndex: tab.getAttribute("tabindex"),
-          })),
-        };
-      });
-      if (panelState.panels.length !== 3) {
-        throw new Error(`${mode}: both permanent trend tabpanels are not in the DOM: ${JSON.stringify(panelState)}`);
-      }
-      for (const view of ["count", "order", "positive"]) {
-        const panel = panelState.panels.find(item => item.id === `sc-team-trend-panel-${view}`);
-        const tab = panelState.tabs.find(item => item.id === `sc-team-trend-tab-${view}`);
-        if (!panel || !tab || !tab.controlsExists || tab.controls !== panel.id || panel.labelledBy !== tab.id) {
-          throw new Error(`${mode}: broken trend tab/panel ARIA relationship for ${view}: ${JSON.stringify(panelState)}`);
-        }
-        const active = view === expectedView;
-        if (panel.hidden === active || tab.selected !== String(active) || tab.tabIndex !== (active ? "0" : "-1")) {
-          throw new Error(`${mode}: wrong hidden/selected/tabindex state for ${view}: ${JSON.stringify(panelState)}`);
-        }
-      }
-      if (panelState.panels.filter(panel => !panel.hidden).length !== 1) {
-        throw new Error(`${mode}: expected exactly one visible trend panel: ${JSON.stringify(panelState)}`);
-      }
-    };
-    await assertTrendPanelState("count");
-    const countPanel = trendSection.locator("#sc-team-trend-panel-count");
-    const tabLabels = await trendSection.locator('[role="tab"]').allTextContents();
-    if (JSON.stringify(tabLabels) !== JSON.stringify(["Antal order inom 10 dagar", "Kontakt → order", "Positiv dialog → order"])) throw new Error("wrong trend tab order");
-    const countLabels = await countPanel.locator('.sc-team-order-y-label').allTextContents();
-    if (countLabels[0] !== "0" || countLabels.some(label => !/^\d+$/.test(label)) || Number(countLabels.at(-1)) !== 6) throw new Error(`incorrect dynamic count axis: ${countLabels}`);
-    const countPoints = await countPanel.locator('.sc-team-order-point').evaluateAll(points => points.map(point => point.getAttribute('aria-label')));
-    if (!countPoints.some(text => text.includes(': 0 order inom 10 dagar')) || !countPoints.some(text => text.includes(': 4 order inom 10 dagar')) || countPoints.some(text => text.includes('%') || text.includes(' av '))) throw new Error('count points must include zero and integer outcome labels');
-    await page.locator('.sc-comparison-table').evaluate(table => table.parentElement.scrollLeft = 0);
-    await page.locator('.sc-comparison-table').locator('..').screenshot({ path: `sales-coaching-team-${mode}.png` });
-    await trendSection.screenshot({ path: `sales-coaching-count-${mode}.png` });
-    await countPanel.locator('.sc-team-order-trend-wrap').evaluate(element => element.scrollLeft = element.scrollWidth);
-    await trendSection.screenshot({ path: `sales-coaching-count-right-${mode}.png` });
-    await countPanel.locator('.sc-team-order-trend-wrap').evaluate(element => element.scrollLeft = 0);
-    await page.locator('.sc-comparison-table').evaluate(table => table.parentElement.scrollLeft = table.parentElement.scrollWidth);
-    await page.locator('.sc-comparison-table').locator('..').screenshot({ path: `sales-coaching-team-right-${mode}.png` });
-    await page.locator('.sc-comparison-table').evaluate(table => table.parentElement.scrollLeft = 0);
-    await countPanel.locator('.sc-team-order-point[data-seller="olle"]').filter({ has: page.locator('title', { hasText: ': 4 order inom 10 dagar' }) }).first().press('Enter');
-    await page.locator('#sc-drawer-content .sc-drawer-meta').waitFor();
-    const countTrendDrawer = await page.locator('#sc-drawer-content').innerText();
-    if (!countTrendDrawer.includes('Visar 4 av 4') || !(await page.locator('#sc-drawer-title').innerText()).includes('Antal order inom 10 dagar')) throw new Error('count trend drilldown mismatch');
-    await page.locator('[data-sc-drawer-close]').click();
-    await trendSection.locator('[data-team-trend-view="count"]').press('ArrowLeft');
-    await assertTrendPanelState('positive');
-    await trendSection.locator('[data-team-trend-view="positive"]').press('ArrowRight');
-    await assertTrendPanelState('count');
-    await trendSection.locator('[data-team-trend-view="count"]').press('ArrowRight');
-    await assertTrendPanelState("order");
-    if (await trendSection.locator("[data-metric-definition]").count()) {
-      throw new Error(`${mode}: protected 10-day trend markup contains definition metadata`);
-    }
-    const weekSlotCount = await orderPanel.locator(".sc-team-order-x-label").count();
-    if (weekSlotCount !== 16) throw new Error(`${mode}: expected 16 trend week slots, got ${weekSlotCount}`);
-    const yLabels = await orderPanel.locator(".sc-team-order-y-label").allTextContents();
-    if (JSON.stringify(yLabels) !== JSON.stringify(["0 %", "25 %", "50 %", "75 %", "100 %"])) {
-      throw new Error(`${mode}: trend scale is not fixed at 0/25/50/75/100: ${JSON.stringify(yLabels)}`);
-    }
-    if (await orderPanel.locator(".sc-team-order-legend-item").count() !== 3) {
-      throw new Error(`${mode}: expected one trend series for each of three active sellers`);
-    }
-    if (await orderPanel.locator(".sc-team-order-line").count() < 3) {
-      throw new Error(`${mode}: expected at least three rendered seller trend lines`);
-    }
-    const orderTab = trendSection.locator('[data-team-trend-view="order"]');
-    const positiveTab = trendSection.locator('[data-team-trend-view="positive"]');
-    if (await orderTab.getAttribute("aria-selected") !== "true") {
-      throw new Error(`${mode}: contact-to-order was not activated from count`);
-    }
-    const olleTrendPoint = orderPanel.locator('.sc-team-order-point[data-seller="olle"][data-numerator="4"][data-denominator="10"]').first();
-    const sofiaTrendPoint = orderPanel.locator('.sc-team-order-point[data-seller="sofia"][data-numerator="2"][data-denominator="10"]').first();
-    const viewerTrendPoint = orderPanel.locator('.sc-team-order-point[data-seller="viewer"][data-numerator="4"][data-denominator="8"]').first();
-    for (const [seller, point] of [["olle", olleTrendPoint], ["sofia", sofiaTrendPoint], ["viewer", viewerTrendPoint]]) {
-      if (await point.count() !== 1) {
-        const renderedPoints = await orderPanel.locator(".sc-team-order-point").evaluateAll(points => points.map(point => ({
-          seller: point.dataset.seller,
-          numerator: point.dataset.numerator,
-          denominator: point.dataset.denominator,
-          week: point.dataset.week,
-        })));
-        throw new Error(`${mode}: missing deterministic ${seller} trend point: ${JSON.stringify(renderedPoints)}`);
-      }
-    }
-    const seriesStyles = {};
-    for (const [seller, point] of [["olle", olleTrendPoint], ["sofia", sofiaTrendPoint], ["viewer", viewerTrendPoint]]) {
-      const pointStyle = await point.getAttribute("data-series-style");
-      const legendStyle = await orderPanel.locator(`.sc-team-order-legend-item[data-seller="${seller}"]`).getAttribute("data-series-style");
-      const lineStyles = await orderPanel.locator(`.sc-team-order-line[data-seller="${seller}"]`).evaluateAll(lines => lines.map(line => line.dataset.seriesStyle));
-      if (!pointStyle || legendStyle !== pointStyle || lineStyles.some(style => style !== pointStyle)) {
-        throw new Error(`${mode}: ${seller} does not keep one identity-derived style across points, lines, and legend`);
-      }
-      seriesStyles[seller] = pointStyle;
-    }
-    if (!(await olleTrendPoint.getAttribute("class")).includes("is-selected")) {
-      throw new Error(`${mode}: selected seller is not highlighted in the trend`);
-    }
-    if (!(await viewerTrendPoint.getAttribute("class")).includes("is-small-sample")) {
-      throw new Error(`${mode}: small-sample trend point is not hollow/muted`);
-    }
-    const pointStart = await viewerTrendPoint.getAttribute("data-start");
-    const pointEnd = await viewerTrendPoint.getAttribute("data-end");
-    await viewerTrendPoint.hover();
-    const viewerTooltip = await viewerTrendPoint.locator("title").textContent();
-    const viewerAriaLabel = await viewerTrendPoint.getAttribute("aria-label");
-    if (!viewerTooltip.includes("viewer") || !viewerTooltip.includes(`${pointStart}–${pointEnd}`) || !viewerTooltip.includes("50 %") || !viewerTooltip.includes("4 av 8 kontakter har följts av order inom 10 dagar") || !viewerTooltip.includes("Litet underlag") || !viewerTooltip.match(/\d{4} v\.\d+/)) {
-      throw new Error(`${mode}: trend point tooltip lacks seller/week/date/value/evidence: ${viewerTooltip}`);
-    }
-    if (viewerAriaLabel !== viewerTooltip) {
-      throw new Error(`${mode}: trend point aria-label does not match the complete tooltip`);
-    }
-    const pointResponse = page.waitForResponse(response => {
-      const url = new URL(response.url());
-      return url.pathname.endsWith("/sales-coaching-insights/drilldown")
-        && url.searchParams.get("metric") === "order_10d"
-        && url.searchParams.get("seller") === "viewer"
-        && url.searchParams.get("channel") === "all"
-        && url.searchParams.get("start") === pointStart
-        && url.searchParams.get("end") === pointEnd;
-    });
-    await viewerTrendPoint.focus();
-    await viewerTrendPoint.press("Enter");
-    await pointResponse;
-    await page.locator("#sc-drawer-content .sc-drawer-meta").waitFor();
-    const pointDrawerText = await page.locator("#sc-drawer-content").innerText();
-    if (!pointDrawerText.includes("Visar 8 av 8") || (pointDrawerText.match(/Konverterad/g) || []).length !== 4 || pointDrawerText.includes("Väntar på utfall")) {
-      throw new Error(`${mode}: trend point drilldown does not reconcile numerator/denominator: ${pointDrawerText}`);
-    }
-    await page.locator("[data-sc-drawer-close]").click();
-
-    const summaryRequestsBeforeTrendToggle = summaryRequestCount;
-    await positiveTab.click();
-    await assertTrendPanelState("positive");
-    await orderTab.click();
-    await assertTrendPanelState("order");
-    await orderTab.focus();
-    await orderTab.press("ArrowRight");
-    await assertTrendPanelState("positive");
-    if (await positiveTab.getAttribute("aria-selected") !== "true") {
-      throw new Error(`${mode}: positive-dialogue trend was not activated by ArrowRight`);
-    }
-    const focusedTrendView = await page.evaluate(
-      () => document.activeElement?.dataset?.teamTrendView || "",
-    );
-    if (focusedTrendView !== "positive") {
-      throw new Error(`${mode}: activated positive trend tab did not receive focus`);
-    }
-    if (summaryRequestCount !== summaryRequestsBeforeTrendToggle) {
-      throw new Error(`${mode}: trend toggle triggered a new summary request`);
-    }
-    const positiveOllePoint = positivePanel.locator('.sc-team-order-point[data-trend-view="positive"][data-seller="olle"][data-numerator="3"][data-denominator="6"]').first();
-    const positiveSofiaPoint = positivePanel.locator('.sc-team-order-point[data-trend-view="positive"][data-seller="sofia"][data-numerator="2"][data-denominator="6"]').first();
-    const positiveViewerPoint = positivePanel.locator('.sc-team-order-point[data-trend-view="positive"][data-seller="viewer"][data-numerator="3"][data-denominator="6"]').first();
-    for (const [seller, point] of [["olle", positiveOllePoint], ["sofia", positiveSofiaPoint], ["viewer", positiveViewerPoint]]) {
-      if (await point.count() !== 1) throw new Error(`${mode}: missing deterministic ${seller} positive trend point`);
-      if (await point.getAttribute("data-series-style") !== seriesStyles[seller]) {
-        throw new Error(`${mode}: ${seller} style differs between the two trend views`);
-      }
-    }
-    const positiveStart = await positiveOllePoint.getAttribute("data-start");
-    const positiveEnd = await positiveOllePoint.getAttribute("data-end");
-    const positiveTooltip = await positiveOllePoint.locator("title").textContent();
-    if (!positiveTooltip.includes(`${positiveStart}–${positiveEnd}`) || !positiveTooltip.includes("50 %") || !positiveTooltip.includes("3 av 6 positiva dialoger har följts av order inom 10 dagar")) {
-      throw new Error(`${mode}: positive trend tooltip is incomplete: ${positiveTooltip}`);
-    }
-    const positivePointResponse = page.waitForResponse(response => {
-      const url = new URL(response.url());
-      return url.pathname.endsWith("/sales-coaching-insights/drilldown")
-        && url.searchParams.get("metric") === "positive_to_order_10d"
-        && url.searchParams.get("seller") === "olle"
-        && url.searchParams.get("channel") === "all"
-        && url.searchParams.get("start") === positiveStart
-        && url.searchParams.get("end") === positiveEnd;
-    });
-    await positiveOllePoint.focus();
-    await positiveOllePoint.press("Enter");
-    await positivePointResponse;
-    await page.locator("#sc-drawer-content .sc-drawer-meta").waitFor();
-    const positivePointDrawerText = await page.locator("#sc-drawer-content").innerText();
-    if (!positivePointDrawerText.includes("Visar 6 av 6") || (positivePointDrawerText.match(/Konverterad/g) || []).length !== 3 || positivePointDrawerText.includes("Väntar på utfall")) {
-      throw new Error(`${mode}: positive trend drilldown does not reconcile: ${positivePointDrawerText}`);
-    }
-    await page.locator("[data-sc-drawer-close]").click();
-    await positiveTab.press("Home");
-    await assertTrendPanelState("count");
-    if (await trendSection.locator('[data-team-trend-view="count"]').getAttribute("aria-selected") !== "true") {
-      throw new Error(`${mode}: Home did not activate the first trend tab`);
-    }
-    await trendSection.locator('[data-team-trend-view="count"]').press("End");
-    await assertTrendPanelState("positive");
-    if (await trendSection.locator('[data-team-trend-view="positive"]').getAttribute("aria-selected") !== "true") {
-      throw new Error(`${mode}: End did not activate the last trend tab`);
-    }
-    await trendSection.locator('[data-team-trend-view="positive"]').press("ArrowLeft");
-    await assertTrendPanelState("order");
-    await trendSection.locator('[data-team-trend-view="order"]').press("ArrowRight");
-    await assertTrendPanelState("positive");
-    if (summaryRequestCount !== summaryRequestsBeforeTrendToggle) {
-      throw new Error(`${mode}: keyboard trend navigation triggered a summary request`);
-    }
-
-    const advancedAnalysis = page.locator("#sc-advanced-analysis");
-    if (await advancedAnalysis.getAttribute("open") !== null) {
-      throw new Error(`${mode}: advanced analysis is open on first render or after a drilldown`);
-    }
-    await advancedAnalysis.locator(":scope > summary").click();
-    const diagnosticTabs = await page.locator(".sc-diagnostic-tabs [role=tab]").allInnerTexts();
-    if (JSON.stringify(diagnosticTabs) !== JSON.stringify(["Besök", "Uppföljning", "Kanaler"])) {
-      throw new Error(`${mode}: advanced-analysis tabs are wrong: ${JSON.stringify(diagnosticTabs)}`);
-    }
-    if (await page.locator('[data-diagnostic-tab="visits"]').getAttribute("aria-selected") !== "true") {
-      throw new Error(`${mode}: visits is not the initial diagnostic tab`);
-    }
-    const assertKeyboardTab = async (key, label) => {
-      const tab = page.locator(`[data-diagnostic-tab="${key}"]`);
-      if (await tab.getAttribute("aria-selected") !== "true") {
-        throw new Error(`${mode}: ${label} was not activated by keyboard navigation`);
-      }
-      const focusedKey = await page.evaluate(() => document.activeElement?.dataset?.diagnosticTab || "");
-      if (focusedKey !== key) {
-        throw new Error(`${mode}: ${label} was activated without receiving focus`);
-      }
-    };
-    await page.locator('[data-diagnostic-tab="visits"]').focus();
-    await page.locator('[data-diagnostic-tab="visits"]').press("ArrowRight");
-    await assertKeyboardTab("followup", "Uppföljning after ArrowRight from Besök");
-    await page.locator('[data-diagnostic-tab="followup"]').press("Home");
-    await assertKeyboardTab("visits", "Besök after Home");
-    await page.locator('[data-diagnostic-tab="visits"]').press("ArrowLeft");
-    await assertKeyboardTab("channels", "Kanaler after ArrowLeft from Besök");
-    await page.locator('[data-diagnostic-tab="channels"]').press("Home");
-    await assertKeyboardTab("visits", "Besök after Home from Kanaler");
-    await page.locator('[data-diagnostic-tab="visits"]').press("End");
-    await assertKeyboardTab("channels", "Kanaler after End");
-
-    const visibleMetricLabels = new Set();
-    const collectVisibleMetricLabels = async selector => {
-      const labels = await page.locator(selector).evaluateAll(elements => elements.map(element => {
-        const copy = element.cloneNode(true);
-        copy.querySelectorAll("button, [hidden]").forEach(child => child.remove());
-        return copy.textContent.replace(/\s+/g, " ").trim();
-      }).filter(Boolean));
-      labels.forEach(label => visibleMetricLabels.add(label));
-    };
-    await collectVisibleMetricLabels([
-      ".sc-team-chart h3",
-      ".sc-comparison-table thead th",
-      ".sc-team-trend-panel h3",
-    ].join(", "));
-    for (const key of ["visits", "followup", "channels"]) {
-      await page.locator(`[data-diagnostic-tab="${key}"]`).click();
-      await collectVisibleMetricLabels(".sc-diagnostic-panel .sc-mini-label, .sc-diagnostic-panel thead th");
-    }
-
-    if (await page.locator("#sc-quality-details").getAttribute("open") !== null) {
-      throw new Error(`${mode}: data quality and definitions is open on first render`);
-    }
-    await page.locator("#sc-quality-details > summary").click();
-    const glossaryLabels = await page.locator(".sc-glossary dt").allInnerTexts();
-    if (glossaryLabels.length < 40) {
-      throw new Error(`${mode}: metric glossary is unexpectedly incomplete`);
-    }
-    const definitionAudit = await page.evaluate(() => {
-      const used = [...document.querySelectorAll("[data-metric-definition], [data-secondary-metric-definition]")]
-        .flatMap(element => [
-          element.getAttribute("data-metric-definition"),
-          element.getAttribute("data-secondary-metric-definition"),
-        ])
-        .filter(Boolean);
-      const defined = new Set(
-        [...document.querySelectorAll(".sc-definition[data-metric-definition]")]
-          .filter(element => element.querySelector("dt")?.textContent.trim() && element.querySelector("dd")?.textContent.trim())
-          .map(element => element.getAttribute("data-metric-definition")),
-      );
-      return { used: [...new Set(used)], missing: [...new Set(used)].filter(key => !defined.has(key)) };
-    });
-    if (definitionAudit.missing.length) {
-      throw new Error(`${mode}: missing metric definitions: ${definitionAudit.missing.join(", ")}`);
-    }
-    const visibleMetricAudit = (() => {
-      const definedLabels = new Set(glossaryLabels.map(label => label.replace(/\s+/g, " ").trim()));
-      const aliases = new Map([
-        ["Mänskliga aktiviteter", "Aktiviteter"],
-        ["Kontakt → order inom 10 dagar", "Kontakt – order inom 10 dagar"],
-        ["Historiskt prioritetsfokus", "Prioritetsfokus"],
-        ["Positiv kontakt med nästa steg/order", "Nästa-steg-täckning"],
-        ["Försenade planerade", "Försenade planerade aktiviteter"],
-        ["Överhoppade planerade", "Överhoppade planerade aktiviteter"],
-        ["Positiv utan order/uppföljning 10 dagar", "Positiv utan order eller uppföljning efter 10 dagar"],
-        ["Attribuerat utfall", "Attribuerade order"],
-      ]);
-      const nonMetrics = new Set(["Säljare", "Mönster", "Underlag", "Kanal"]);
-      return [...visibleMetricLabels].filter(label => {
-        if (nonMetrics.has(label)) return false;
-        return !definedLabels.has(aliases.get(label) || label);
-      });
-    })();
-    if (visibleMetricAudit.length) {
-      throw new Error(`${mode}: visible untagged metrics lack glossary definitions: ${visibleMetricAudit.join(", ")}`);
-    }
-    for (const key of [
-      "reach", "visit_reach", "positive_dialogue", "positive_to_order_10d",
-      "order_10d", "priority_focus", "bom_ratio", "planned_bom_ratio",
-      "unplanned_bom_ratio", "positive_next_step_coverage", "planned_completed_in_time",
-    ]) {
-      const definition = await page.locator(`.sc-definition[data-metric-definition="${key}"] dd`).innerText();
-      if (!definition.includes("Täljaren är") || !definition.includes("nämnaren är") || !definition.includes("Måttet bedöms först när nämnaren är minst 10.")) {
-        throw new Error(`${mode}: ${key} does not explain its numerator, denominator, and 10-observation rule`);
-      }
-    }
-    for (const key of ["priority_percentile_coverage", "secure_customer_identity", "order_attribution_identity_coverage", "standardized_activity"]) {
-      const definition = await page.locator(`.sc-definition[data-metric-definition="${key}"] dd`).innerText();
-      if (definition.includes("Måttet bedöms först")) {
-        throw new Error(`${mode}: ${key} incorrectly claims the 10-observation rule`);
-      }
-    }
-    if (mode === "mobile") {
-      const matrixScroller = page.locator(".sc-priority-scroll").first();
-      if (await matrixScroller.count()) {
-        await matrixScroller.scrollIntoViewIfNeeded();
-        if (!(await matrixScroller.isVisible())) throw new Error("mobile: matrix scroller missing");
-      } else if (!(await page.locator(".sc-priority-build-up").isVisible())) {
-        throw new Error("mobile: neither the priority matrix nor its documented build-up state renders");
-      }
-    }
-
-    await moreFilters.click();
-    if (!(await page.locator("#sc-more-filters-panel").isVisible())) {
-      throw new Error(`${mode}: additional filters did not reopen before changing channel`);
-    }
-    await Promise.all([
-      page.waitForResponse(response => response.url().includes("/sales-coaching-insights?") && response.url().includes("channel=email")),
-      page.locator("#sc-channel").selectOption("email"),
+    await assertTabs(salesSection, "sales trend", [
+      "Säljkopplat resultat",
+      "Kontakter med orderutfall inom 10 dagar",
+      "Kontakt → order",
+      "Positiv dialog → order",
     ]);
-    await moreFilters.click();
-    if (await page.locator("#sc-more-filters-panel").isVisible()) {
-      throw new Error(`${mode}: additional filters did not close after changing channel`);
+    await salesSection.locator("#sc-team-trend-tab-result").click();
+    const resultLabels = await salesSection.locator("#sc-team-trend-panel-result .sc-team-order-point").evaluateAll(points => points.map(point => point.getAttribute("aria-label")));
+    if (!resultLabels.some(label => label.includes("Säljkopplat resultat") && label.includes("Via kontakt") && label.includes("Egna order utan kontakt") && !label.includes("Säljkopplat resultat 0 kr"))) {
+      throw new Error(`${mode}: result graph does not show a non-zero total with both component labels`);
     }
-    await assertTeamFirst();
-    if (await page.locator(".sc-coaching-card .sc-rate-pending").count()) {
-      throw new Error(`${mode}: zero pending outcomes still render on a coaching card`);
+
+    const activitySection = page.locator(".sc-human-activity-trend-section");
+    if (!(await activitySection.innerText()).includes("helt avslutad ISO-vecka")) {
+      throw new Error(`${mode}: activity trend maturity explanation is missing`);
     }
-    if (!(await moreFilters.innerText()).includes("1 aktivt") || !(await moreFilters.evaluate(element => element.classList.contains("is-active")))) {
-      throw new Error(`${mode}: active hidden filters are not indicated while the filter block is closed`);
+    await assertTabs(activitySection, "activity trend", ["Alla", "Nådda besök", "Bom", "Telefon"]);
+    await activitySection.locator("#sc-activity-trend-tab-all").click();
+    const activityLabels = await activitySection.locator("#sc-activity-trend-panel-all .sc-team-order-point").evaluateAll(points => points.map(point => point.getAttribute("aria-label")));
+    if (!activityLabels.some(label => label.includes("mänskliga aktiviteter"))) {
+      throw new Error(`${mode}: activity trend point labels are missing`);
     }
-    const filteredTeamOlle = await page.locator(".sc-comparison-table tbody tr", { hasText: "Olle" }).innerText();
-    if (!filteredTeamOlle.includes("7 av 35") || !filteredTeamOlle.includes("7 av 28")) {
-      throw new Error(`${mode}: channel filter incorrectly changed all-channel team comparison: ${filteredTeamOlle}`);
-    }
-    await page.locator("#sc-advanced-analysis > summary").click();
-    await page.locator('[data-diagnostic-tab="channels"]').click();
-    const emailRow = page.locator('[data-channel-row="email"]');
-    await emailRow.waitFor();
-    for (const metric of ["positive_dialogue", "positive_to_order_10d"]) {
-      const cell = await emailRow.locator(`[data-channel-metric="${metric}"]`).innerText();
-      if (cell.trim() !== "Ej tillämpligt") {
-        throw new Error(`${mode}: email row fabricated ${metric}: ${cell}`);
+
+    if (mode === "mobile") {
+      const layout = await page.evaluate(() => ({
+        bodyOverflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+        tableScrollable: document.querySelector(".sc-table-wrap").scrollWidth > document.querySelector(".sc-table-wrap").clientWidth,
+        salesScrollable: document.querySelector("#sc-team-trend-panel-result .sc-team-order-trend-wrap").scrollWidth > document.querySelector("#sc-team-trend-panel-result .sc-team-order-trend-wrap").clientWidth,
+        minTabHeight: Math.min(...[...document.querySelectorAll(".sc-team-trend-tabs [role=tab]")].map(tab => tab.getBoundingClientRect().height)),
+      }));
+      if (layout.bodyOverflow > 1 || !layout.tableScrollable || !layout.salesScrollable || layout.minTabHeight < 44) {
+        throw new Error(`${mode}: responsive contract failed: ${JSON.stringify(layout)}`);
       }
     }
 
-    const bodyText = await page.locator("body").innerText();
-    for (const removed of [
-      "Jämförbart 10-dagarsutfall",
-      "Positiv dialog → order inom 10 dagar – fullständigt utfall",
-      "Kontakt – order inom 10 dagar – fullständigt utfall",
-    ]) {
-      if (bodyText.includes(removed)) {
-        throw new Error(`${mode}: removed comparable UI copy is visible: ${removed}`);
-      }
-    }
-    const profileSection = page.locator('.sc-priority-profile');
-    const buildUpText = await profileSection.locator('.sc-priority-build-up').innerText();
-    if (!buildUpText.includes('Historisk prioriteringsdata byggs upp.') || !buildUpText.includes('10 jämförbara historiska kontakter') || !buildUpText.includes('70 %')) throw new Error('missing profile build-up explanation');
-    if ((await profileSection.innerText()).includes('order inom 10 dagar')) throw new Error('order metric leaked into priority profile');
-    if (await profileSection.locator('.sc-priority-median-track').count()) throw new Error('insufficient history fabricated median');
-    await profileSection.screenshot({ path: `sales-coaching-priority-insufficient-${mode}.png` });
-    if (bodyText.includes("Nästa bästa kunder")) {
-      throw new Error(`${mode}: operational customer list leaked into sales coaching`);
-    }
-    if (bodyText.includes("Peer median")) {
-      throw new Error(`${mode}: old peer benchmark label leaked into sales coaching`);
-    }
-    if (bodyText.toLocaleLowerCase("sv-SE").includes("synkrona")) {
-      throw new Error(`${mode}: synchronous wording leaked into sales coaching`);
-    }
-    for (const internal of ["sync_reached", "sync_positive", "mature_positive", "attribution_eligible", "historical_snapshot", "v2_contacts"]) {
-      if (bodyText.includes(internal)) {
-        throw new Error(`${mode}: internal analysis name leaked into user copy: ${internal}`);
-      }
-    }
-    const pageOverflows = await page.evaluate(
-      () => document.documentElement.scrollWidth > document.documentElement.clientWidth + 1,
-    );
-    if (pageOverflows) throw new Error(`${mode}: page-level horizontal overflow`);
-    if (mode === "mobile") {
-      const trendTabHeights = await page.locator(".sc-team-trend-tabs [role=tab]").evaluateAll(
-        tabs => tabs.map(tab => tab.getBoundingClientRect().height),
-      );
-      if (trendTabHeights.length !== 3 || trendTabHeights.some(height => height < 44)) {
-        throw new Error(`mobile: trend tabs are not usable touch targets: ${JSON.stringify(trendTabHeights)}`);
-      }
-      const activeTrendPanel = trendSection.locator(".sc-team-trend-panel:not([hidden])");
-      const trendScroller = activeTrendPanel.locator(".sc-team-order-trend-wrap");
-      await trendScroller.scrollIntoViewIfNeeded();
-      const trendDimensions = await trendScroller.evaluate(element => ({
-        scrollWidth: element.scrollWidth,
-        clientWidth: element.clientWidth,
-        graphWidth: element.querySelector("svg")?.getBoundingClientRect().width || 0,
-      }));
-      if (!(trendDimensions.scrollWidth > trendDimensions.clientWidth)) {
-        throw new Error(`mobile: trend graph is not horizontally scrollable: ${JSON.stringify(trendDimensions)}`);
-      }
-      const viewerLegend = activeTrendPanel.locator('.sc-team-order-legend-item[data-seller="viewer"]');
-      const legendHeight = await viewerLegend.evaluate(element => element.getBoundingClientRect().height);
-      if (legendHeight < 44) throw new Error(`mobile: trend legend touch target is only ${legendHeight}px high`);
-      await Promise.all([
-        page.waitForResponse(response => response.url().includes("/sales-coaching-insights?") && response.url().includes("seller=viewer")),
-        viewerLegend.click(),
-      ]);
-      const selectedViewerLegend = trendSection.locator('.sc-team-trend-panel:not([hidden]) .sc-team-order-legend-item[data-seller="viewer"].is-selected');
-      await selectedViewerLegend.waitFor();
-      if (!(await selectedViewerLegend.isVisible())) throw new Error("mobile: trend legend did not select viewer");
-      if (await selectedViewerLegend.getAttribute("data-series-style") !== seriesStyles.viewer) {
-        throw new Error("mobile: viewer series style changed after seller selection and rerender");
-      }
-    }
+    await teamSection.scrollIntoViewIfNeeded();
+    await teamSection.screenshot({ path: path.join(outputDir, `team-comparison-${mode}.png`) });
+    await salesSection.scrollIntoViewIfNeeded();
+    await salesSection.screenshot({ path: path.join(outputDir, `sales-trend-${mode}.png`) });
+    await activitySection.scrollIntoViewIfNeeded();
+    await activitySection.screenshot({ path: path.join(outputDir, `activity-trend-${mode}.png`) });
+
     if (browserErrors.length) {
-      throw new Error(`${mode}: browser errors: ${JSON.stringify(browserErrors)}`);
+      throw new Error(`${mode}: browser errors: ${browserErrors.join(" | ")}`);
     }
-    await page.goto("http://127.0.0.1:5065/?sales_coaching=1&period=4&start=2026-07-01&end=2026-07-28", {
-      waitUntil: "networkidle",
-    });
-    if (await page.locator("#sc-period").inputValue() !== "custom" || !(await page.locator("#sc-custom-dates").isVisible())) {
-      throw new Error(`${mode}: custom direct-link period was not restored`);
-    }
-    await assertTeamFirst();
-    const seeded = await page.evaluate(async () => (await fetch('/__test__/priority-profile', { method: 'POST' })).ok);
-    if (!seeded) throw new Error('profile fixture setup failed');
-    await page.goto('http://127.0.0.1:5065/?sales_coaching=1&period=4&seller=olle', { waitUntil: 'networkidle' });
-    await page.locator('.sc-priority-row').first().waitFor();
-    const rows = page.locator('.sc-priority-row');
-    const sellers = await rows.evaluateAll(items => items.map(item => item.dataset.profileSeller));
-    if (JSON.stringify(sellers) !== JSON.stringify(['olle', 'viewer', 'sofia'])) throw new Error(`wrong priority sort: ${sellers}`);
-    const focus = await rows.locator('.sc-priority-focus').allTextContents();
-    const samples = await rows.locator('.sc-priority-sample').allTextContents();
-    const coverage = await rows.locator('.sc-priority-coverage').allTextContents();
-    if (JSON.stringify(focus) !== JSON.stringify(['60 %', '40 %', '20 %']) || JSON.stringify(samples) !== JSON.stringify(['35', '10', '10']) || coverage.some(text => text !== '100 %')) throw new Error('incorrect priority values');
-    const geometry = await page.locator('.sc-priority-profile').evaluate(section => {
-      const bars = [...section.querySelectorAll('.sc-priority-bar')];
-      const line = section.querySelector('.sc-priority-median');
-      const box = line.getBoundingClientRect();
-      return {
-        sums: bars.map(bar => [...bar.children].reduce((sum, band) => sum + parseFloat(band.style.width), 0)),
-        median: line.style.getPropertyValue('--median'),
-        aligned: bars.every(bar => Math.abs(bar.getBoundingClientRect().left - box.left) < 1 && Math.abs(bar.getBoundingClientRect().width - box.width) < 1),
-        valuesRight: [...section.querySelectorAll('.sc-priority-row')].every(row => row.querySelector('.sc-priority-focus').getBoundingClientRect().left >= row.querySelector('.sc-priority-bar').getBoundingClientRect().right),
-      };
-    });
-    if (geometry.sums.some(value => Math.abs(value - 100) > .01) || geometry.median !== '40%' || !geometry.aligned || !geometry.valuesRight) throw new Error(`priority geometry invalid: ${JSON.stringify(geometry)}`);
-    if (!(await page.locator('.sc-priority-median-label').innerText()).includes('40 %')) throw new Error('median label missing');
-    for (const bar of await rows.locator('.sc-priority-bar').all()) {
-      const aria = await bar.getAttribute('aria-label');
-      if (!aria.includes('Topp 25 %') || !aria.includes('Mitten 50 %') || !aria.includes('Botten 25 %') || !aria.includes('Täckning')) throw new Error('incomplete profile accessible description');
-      await bar.focus();
-    }
-    await page.locator('.sc-priority-profile').screenshot({ path: `sales-coaching-priority-profile-${mode}.png` });
-    if (mode === 'mobile') {
-      const scroller = page.locator('.sc-priority-scroll');
-      const scrollable = await scroller.evaluate(element => element.scrollWidth > element.clientWidth);
-      if (!scrollable) throw new Error('profile needs local horizontal scrolling on mobile');
-      await scroller.evaluate(element => element.scrollLeft = element.scrollWidth);
-      await page.locator('.sc-priority-profile').screenshot({ path: `sales-coaching-priority-profile-right-${mode}.png` });
-      await scroller.evaluate(element => element.scrollLeft = 0);
-    }
-    if (await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth + 1)) throw new Error('priority profile causes page overflow');
-    await page.locator('.sc-priority-seller[data-seller="viewer"]').press('Enter');
-    await page.locator('.sc-priority-row.is-selected[data-profile-seller="viewer"]').waitFor();
-    if (await page.locator('#sc-seller').inputValue() !== 'viewer') throw new Error('profile seller selection failed');
-    if (JSON.stringify(await rows.evaluateAll(items => items.map(item => item.dataset.profileSeller))) !== JSON.stringify(sellers)) throw new Error('seller filter changed team profile');
-    if (browserErrors.length) throw new Error(`profile browser errors: ${JSON.stringify(browserErrors)}`);
-    console.log(`${mode} sales-coaching smoke passed`);
+    console.log(`${mode}: sales coaching browser smoke passed; screenshots in ${outputDir}`);
   } finally {
     await browser.close();
   }

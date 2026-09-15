@@ -145,9 +145,13 @@ if __name__ == "__main__":
                         "Order date": (contact_at.date() + timedelta(days=2)).isoformat(),
                         "Customer": customer["customer"],
                         "Customer number": customer["customer_number"],
+                        "placedBy": seller,
+                        "placedAs": "supplier",
+                        "SKU": "10001",
                         "Quantity": "1",
+                        "Total weight": "1",
                         "Unit": "DFP",
-                        "Total": "100",
+                        "Total": "500",
                         "Currency": "SEK",
                         "customer_id": customer["customer_id"],
                     })
@@ -165,9 +169,13 @@ if __name__ == "__main__":
             ).date().isoformat(),
             "Customer": customer["customer"],
             "Customer number": customer["customer_number"],
+            "placedBy": "olle",
+            "placedAs": "supplier",
+            "SKU": "10001",
             "Quantity": "1",
+            "Total weight": "1",
             "Unit": "DFP",
-            "Total": "100",
+            "Total": "500",
             "Currency": "SEK",
             "customer_id": customer["customer_id"],
         }
@@ -179,12 +187,117 @@ if __name__ == "__main__":
             trend_order.get(header, "") for header in order_headers
         ])
 
+    # One own supplier order without an eligible preceding contact makes the
+    # second component of Säljkopplat resultat visible in the browser fixture.
+    own_customer = {
+        "customer": "Smoke egen order",
+        "customer_id": "90000000-0000-4000-8000-999999999999",
+        "sales_person": "olle",
+        "customer_segment": "A",
+        "customer_number": "SMOKE-OWN-1",
+    }
+    customer_sheet.append_row([
+        own_customer.get(header, "") for header in customer_headers
+    ])
+    own_order = {
+        "Reference": "SMOKE-OWN-ORDER-1",
+        "Order date": (now.date() - timedelta(days=20)).isoformat(),
+        "Customer": own_customer["customer"],
+        "Customer number": own_customer["customer_number"],
+        "placedBy": "olle",
+        "placedAs": "supplier",
+        "SKU": "10002",
+        "Quantity": "1",
+        "Total weight": "2",
+        "Unit": "DFP",
+        "Total": "900",
+        "Currency": "SEK",
+        "customer_id": own_customer["customer_id"],
+    }
+    order_sheet.append_row([
+        own_order.get(header, "") for header in order_headers
+    ])
+
     app_module.app.config.update(
         SECRET_KEY="sales-coaching-browser-harness",
         TESTING=False,
     )
     app_module.get_spreadsheet_with_retry = lambda: spreadsheet
     initial_activity_values = [list(row) for row in activity_sheet.values]
+
+    # Test-only authenticated, section-focused pages let the local browser QA
+    # create deterministic screenshots without adding production-only switches.
+    auth_functions = app_module.app.before_request_funcs[None]
+    auth_index = next(
+        index for index, function in enumerate(auth_functions)
+        if function.__name__ == "require_authenticated_session"
+    )
+    original_auth = auth_functions[auth_index]
+
+    def harness_auth():
+        if app_module.request.endpoint in {
+            "browser_harness_login", "browser_harness_shot",
+        }:
+            return None
+        return original_auth()
+
+    auth_functions[auth_index] = harness_auth
+
+    @app_module.app.get("/__test__/login")
+    def browser_harness_login():
+        user = app_module.find_active_user(spreadsheet, "admin")
+        app_module.session.clear()
+        app_module.session.permanent = True
+        app_module.session["user"] = app_module.public_user(user)
+        next_url = str(app_module.request.args.get("next") or "/")
+        if not next_url.startswith("/") or next_url.startswith("//"):
+            next_url = "/"
+        response = app_module.Response(status=302)
+        response.headers["Location"] = next_url
+        return response
+
+    @app_module.app.get("/__test__/shot")
+    def browser_harness_shot():
+        html = (WEB_APP_DIR / "index.html").read_text(encoding="utf-8")
+        html = html.replace("</head>", """
+<style>
+body.qa-screenshot #session-control,
+body.qa-screenshot #view-insights > .header,
+body.qa-screenshot #insights-view-toggle,
+body.qa-screenshot #sc-filter-form { display: none !important; }
+body.qa-screenshot #view-insights { padding-top: 16px !important; }
+body.qa-screenshot #sales-coaching-dashboard { max-width: none !important; }
+body.qa-screenshot #sc-dashboard-content > .sc-section { margin: 0 !important; }
+body.qa-screenshot.qa-mobile,
+body.qa-screenshot.qa-mobile #view-insights { width: 390px !important; max-width: 390px !important; }
+</style>
+</head>""")
+        html = html.replace("</body>", """
+<script>
+(() => {
+  document.body.classList.add('qa-screenshot');
+  if (new URLSearchParams(location.search).get('mobile') === '1') {
+    document.body.classList.add('qa-mobile');
+  }
+  const keys = {
+    team: '[aria-labelledby="sc-team-title"]',
+    sales: '.sc-team-10d-trend-section',
+    activity: '.sc-human-activity-trend-section'
+  };
+  const selected = keys[new URLSearchParams(location.search).get('section')] || keys.team;
+  const timer = setInterval(() => {
+    const target = document.querySelector(selected);
+    if (!target) return;
+    document.querySelectorAll('#sc-dashboard-content > .sc-section').forEach(section => {
+      section.hidden = section !== target;
+    });
+    document.documentElement.dataset.qaReady = 'true';
+    clearInterval(timer);
+  }, 25);
+})();
+</script>
+</body>""")
+        return app_module.Response(html, content_type="text/html; charset=utf-8")
 
     # Test-only fixture switch: existing smoke starts with insufficient history.
     # Mutate only historical snapshot fields after its other assertions finish.

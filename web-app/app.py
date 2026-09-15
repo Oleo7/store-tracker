@@ -10,6 +10,7 @@ from flask import (
     session,
 )
 from flask_cors import CORS
+from instagram_feed import create_blueprint as create_instagram_blueprint
 from contextlib import contextmanager
 import gspread
 from gspread.exceptions import WorksheetNotFound
@@ -336,7 +337,8 @@ app.config.update(
         or application_environment() in PILOT_ENVIRONMENTS
     ),
 )
-CORS(app, supports_credentials=True)
+CORS(app, resources={r"^(?!/api/public/instagram-feed$|/api/webhooks/instagram$).*": {}}, supports_credentials=True)
+app.register_blueprint(create_instagram_blueprint())
 
 
 PERFORMANCE_LOGGER_NAME = "store_tracker.performance"
@@ -4693,7 +4695,7 @@ def build_sales_activity_for_email(spreadsheet, *, email_id, email_type,
 def require_authenticated_session():
     public_endpoints = {
         "index", "images", "static", "login", "get_session", "health",
-        "brevo_webhook", "brevo_reconcile"
+        "brevo_webhook", "brevo_reconcile", "instagram.feed", "instagram.webhook"
     }
     if request.method == "OPTIONS" or request.endpoint in public_endpoints:
         return None
@@ -13201,6 +13203,10 @@ def load_sales_coaching_summary(spreadsheet, filters):
     activities = get_contact_rows(spreadsheet)
     order_rows = get_order_rows(spreadsheet)
     users = get_user_rows(spreadsheet)
+    try:
+        settings = get_settings(spreadsheet)
+    except (WorksheetNotFound, AttributeError):
+        settings = {}
     planned_activities = optional_sales_coaching_rows(
         spreadsheet, PLANNED_ACTIVITIES_SHEET, PLANNED_ACTIVITY_COLUMNS
     )
@@ -13239,6 +13245,7 @@ def load_sales_coaching_summary(spreadsheet, filters):
         planning_suggestions=planning_suggestion_rows,
         score_events=score_event_rows,
         current_priorities=current_priorities,
+        settings=settings,
         generated_at=stockholm_now(),
         score_version=SCORE_VERSION,
         on_step=record_performance_step,
