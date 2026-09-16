@@ -1,8 +1,9 @@
+@font-face { font-family: "Polarbar Demi"; src: url("/static/Polarbar-Demi.woff2") format("woff2"); font-style: normal; font-weight: 600; font-display: swap; }
 .pb-instagram { min-height: 1px; width: 100%; background: #fff; }
 .pb-instagram[hidden] { display: none !important; }
 .pb-instagram .pb-ig-section { max-width: 1440px; margin: 0 auto; padding: clamp(36px, 5vw, 72px) 0; color: #171717; font-family: inherit; background: #fff; }
 .pb-instagram .pb-ig-header { display: flex; justify-content: space-between; align-items: end; gap: 24px; margin-bottom: 28px; }
-.pb-instagram .pb-ig-title { font-family: inherit; font-size: clamp(30px, 4vw, 54px); font-weight: 700; line-height: 1.08; letter-spacing: -.035em; margin: 0; }
+.pb-instagram .pb-ig-title { font-family: "Polarbar Demi", inherit; font-size: clamp(30px, 4vw, 54px); font-weight: 600; line-height: 1.08; letter-spacing: -.035em; margin: 0; }
 .pb-instagram a { color: inherit; }
 .pb-instagram .pb-ig-controls { display: flex; gap: 8px; flex-shrink: 0; }
 .pb-instagram .pb-ig-arrow { font: inherit; font-size: 25px; border: 1px solid #e8b5a9; border-radius: 50%; background: #efb4a7; color: #171717; width: 48px; height: 48px; cursor: pointer; padding: 0; }
