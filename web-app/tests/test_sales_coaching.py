@@ -1143,7 +1143,7 @@ class Team10dTrendTests(TestCase):
         for metric in trends["metrics"].values():
             self.assertEqual(
                 [point["week"] for point in metric["series"][0]["points"]],
-                axis,
+                [slot["week"] for slot in metric["week_axis"]] if metric["metric_key"] == "total_dfp" else axis,
             )
         self.assertNotIn("comparable", repr(trends))
 

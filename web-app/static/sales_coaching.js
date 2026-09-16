@@ -581,7 +581,9 @@
   function teamTrendPanelMarkup(trends, view, config, activeView, group = "sales") {
     const trend = trends?.metrics?.[config.metricKey] || {};
     const series = trend?.series || [];
-    const slots = trends?.week_axis?.length
+    const slots = trend.week_axis?.length
+      ? trend.week_axis
+      : trends?.week_axis?.length
       ? trends.week_axis
       : (series[0]?.points || []).map(point => ({ week: point.week, period: point.period }));
     const width = 1120, height = 360;

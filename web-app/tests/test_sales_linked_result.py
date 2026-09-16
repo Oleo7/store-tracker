@@ -298,6 +298,14 @@ class SalesTrendV12Tests(TestCase):
         self.assertEqual(points["2026-W26"], 25)  # Commercial DFP includes unknown SKU, excludes internal order.
         self.assertEqual(total, self.summary(seller="daniel")["team_10d_trends"]["metrics"]["total_dfp"])
         self.assertEqual(total["target"], 400)
+        self.assertEqual(total["week_axis"][:len(trend["week_axis"])], trend["week_axis"])
+        self.assertEqual(total["week_axis"][-1], {
+            "week": "2026-W34",
+            "period": {"start": "2026-08-17", "end": "2026-08-19"},
+        })
+        self.assertEqual(points["2026-W33"], 0)
+        self.assertEqual(points["2026-W34"], 1)
+        self.assertEqual(trend["latest_complete_week"], "2026-W32")
 
     def test_linked_dfp_reuses_tb_credit_and_shared_axis(self):
         trend = self.summary()["team_10d_trends"]
@@ -306,8 +314,11 @@ class SalesTrendV12Tests(TestCase):
         self.assertEqual(metrics["sales_linked_result"]["target"], 15000)
         axis = [slot["week"] for slot in trend["week_axis"]]
         for metric in metrics.values():
+            metric_axis = [slot["week"] for slot in metric.get("week_axis", trend["week_axis"])]
             for series in metric["series"]:
-                self.assertEqual([p["week"] for p in series["points"]], axis)
+                self.assertEqual([p["week"] for p in series["points"]], metric_axis)
+            if metric["metric_key"] != "total_dfp":
+                self.assertEqual(metric_axis, axis)
         total = 0
         for dfp_series, tb_series in zip(metrics["sales_linked_dfp"]["series"], metrics["sales_linked_result"]["series"]):
             for point, tb in zip(dfp_series["points"], tb_series["points"]):

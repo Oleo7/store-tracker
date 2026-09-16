@@ -1761,6 +1761,19 @@ def _team_10d_trends(
                 "points": points_by_metric[metric_key],
             })
 
+    # Order-date totals need no attribution delay; extend only their axis.
+    dfp_week_axis = list(week_axis)
+    next_week_start = latest_week_start + timedelta(weeks=1)
+    while next_week_start <= generated_date:
+        dfp_week_axis.append({
+            "week": _iso_week(next_week_start),
+            "period": {
+                "start": next_week_start.isoformat(),
+                "end": min(next_week_start + timedelta(days=6), generated_date).isoformat(),
+            },
+        })
+        next_week_start += timedelta(weeks=1)
+
     totals_by_week = defaultdict(float)
     for order in commercial_orders:
         if order.get("commercial_eligible"):
@@ -1768,7 +1781,7 @@ def _team_10d_trends(
     series_by_metric["total_dfp"] = [{"seller": "Försäljning, DFP", "points": [
         {"week": slot["week"], "period": dict(slot["period"]),
          "value": round(totals_by_week[slot["week"]], 4), "status": "sufficient"}
-        for slot in week_axis]}]
+        for slot in dfp_week_axis]}]
     metric_keys = ("total_dfp", *metric_keys)
     targets = {"total_dfp": WEEKLY_DFP_TARGET,
                "sales_linked_result": WEEKLY_SALES_LINKED_TB_TARGET_SEK,
@@ -1788,6 +1801,7 @@ def _team_10d_trends(
                 "metric_type": METRIC_DEFINITIONS[metric_key]["metric_type"],
                 "series": series_by_metric[metric_key],
                 "target": targets.get(metric_key),
+                **({"week_axis": dfp_week_axis} if metric_key == "total_dfp" else {}),
             }
             for metric_key in metric_keys
         },
