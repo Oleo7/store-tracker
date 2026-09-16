@@ -81,7 +81,7 @@
   }
   async function activate(root) {
     const data = await fetchFeed();
-    const items = Array.isArray(data.items) ? data.items.filter(valid).slice(0, 24) : [];
+    const items = Array.isArray(data.items) ? data.items.filter(valid).slice(0, 36) : [];
     if (!items.length) { root.hidden = true; return; }
     if (!document.querySelector('link[data-pb-instagram-css]')) {
       const css = element('link');
@@ -182,7 +182,7 @@
     };
     const startAutoplay = () => {
       if (reducedMotion || autoplayTimer || !sectionVisible || document.hidden || cards.length < 2) return;
-      autoplayTimer = setInterval(() => navigate(1, false), 4200);
+      autoplayTimer = setInterval(() => navigate(1, false), 2800);
     };
     const pauseAutoplay = () => {
       stopAutoplay();
