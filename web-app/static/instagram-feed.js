@@ -1,10 +1,11 @@
-/* Polarbär Instagram carousel. No requests until it approaches the viewport. */
+/* Polarbär Instagram carousel. Warm metadata early and load media before the section enters view. */
 (() => {
   'use strict';
   const script = document.currentScript;
   if (!script) return;
   const origin = new URL(script.src).origin;
   const reducedMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  let feedPromise = null;
   const element = (tag, className, text) => {
     const node = document.createElement(tag);
     if (className) node.className = className;
@@ -16,6 +17,56 @@
       /^https:\/\/www\.instagram\.com\/(p|reel|tv)\/[A-Za-z0-9_-]+\/$/.test(item.permalink) &&
       (!item.preview_url || /^https:\/\/[A-Za-z0-9.-]+\/(?:.*)$/.test(item.preview_url));
   }
+  function warmMediaOrigins(items) {
+    const origins = [];
+    for (const item of Array.isArray(items) ? items : []) {
+      if (!item?.preview_url) continue;
+      try {
+        const mediaOrigin = new URL(item.preview_url).origin;
+        if (!origins.includes(mediaOrigin)) origins.push(mediaOrigin);
+      } catch (_) { /* Invalid URLs are filtered later. */ }
+      if (origins.length >= 2) break;
+    }
+    for (const mediaOrigin of origins) {
+      if ([...document.querySelectorAll('link[data-pb-instagram-preconnect]')].some(link => link.href === mediaOrigin + '/')) continue;
+      const preconnect = element('link');
+      preconnect.rel = 'preconnect';
+      preconnect.href = mediaOrigin;
+      preconnect.crossOrigin = 'anonymous';
+      preconnect.dataset.pbInstagramPreconnect = 'true';
+      document.head.append(preconnect);
+    }
+  }
+  function fetchFeed() {
+    if (feedPromise) return feedPromise;
+    feedPromise = (async () => {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 35000);
+      try {
+        const response = await fetch(origin + '/api/public/instagram-feed', {
+          credentials: 'omit', signal: controller.signal, mode: 'cors'
+        });
+        if (!response.ok) throw new Error('feed_unavailable');
+        const data = await response.json();
+        warmMediaOrigins(data.items);
+        return data;
+      } catch (error) {
+        feedPromise = null;
+        throw error;
+      } finally {
+        clearTimeout(timeout);
+      }
+    })();
+    return feedPromise;
+  }
+  function scheduleFeedWarmup() {
+    const warm = () => fetchFeed().catch(() => {});
+    if ('requestIdleCallback' in window) {
+      window.requestIdleCallback(warm, {timeout: 1600});
+    } else {
+      setTimeout(warm, 1000);
+    }
+  }
   function mount(root) {
     if (root.dataset.pbMounted) return;
     root.dataset.pbMounted = 'true';
@@ -25,20 +76,11 @@
       if (!entries.some(entry => entry.isIntersecting)) return;
       observer.disconnect();
       activate(root).catch(() => { root.hidden = true; });
-    }, {rootMargin: '400px 0px'});
+    }, {rootMargin: '1600px 0px'});
     observer.observe(root);
   }
   async function activate(root) {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 35000);
-    let data;
-    try {
-      const response = await fetch(origin + '/api/public/instagram-feed', {
-        credentials: 'omit', signal: controller.signal, mode: 'cors'
-      });
-      if (!response.ok) throw new Error('feed_unavailable');
-      data = await response.json();
-    } finally { clearTimeout(timeout); }
+    const data = await fetchFeed();
     const items = Array.isArray(data.items) ? data.items.filter(valid).slice(0, 24) : [];
     if (!items.length) { root.hidden = true; return; }
     if (!document.querySelector('link[data-pb-instagram-css]')) {
@@ -74,10 +116,14 @@
       const media = element('div', 'pb-ig-media');
       if (item.preview_url) {
         const image = element('img', 'pb-ig-image');
-        image.src = item.preview_url;
+        const reveal = () => image.classList.add('is-loaded');
+        image.addEventListener('load', reveal, {once: true});
         image.alt = item.username ? `Instagram-inlägg från @${item.username}` : 'Instagram-inlägg';
-        image.loading = index < 2 ? 'eager' : 'lazy';
+        image.loading = index < 4 ? 'eager' : 'lazy';
+        if (index < 2) image.setAttribute('fetchpriority', 'high');
         image.decoding = 'async';
+        image.src = item.preview_url;
+        if (image.complete) reveal();
         media.append(image);
       } else {
         media.append(element('div', 'pb-ig-placeholder', 'Visa på Instagram'));
@@ -166,5 +212,6 @@
     updateButtons();
     startAutoplay();
   }
+  scheduleFeedWarmup();
   document.querySelectorAll('[data-polarbar-instagram]').forEach(mount);
 })();
