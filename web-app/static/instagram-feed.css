@@ -11,8 +11,9 @@
 .pb-instagram .pb-ig-track { display: flex; align-items: stretch; gap: 20px; overflow-x: auto; overflow-y: hidden; scroll-snap-type: x mandatory; overscroll-behavior-x: contain; scrollbar-width: thin; scrollbar-color: #e8b5a9 transparent; padding: 4px 0 18px; -webkit-overflow-scrolling: touch; }
 .pb-instagram .pb-ig-card { flex: 0 0 clamp(260px, 24vw, 330px); min-width: 0; scroll-snap-align: start; text-decoration: none; border-radius: 18px; overflow: hidden; background: #fff; box-shadow: 0 8px 28px rgba(0,0,0,.08); transition: transform .2s ease, box-shadow .2s ease; }
 .pb-instagram .pb-ig-card:hover { transform: translateY(-2px); box-shadow: 0 12px 34px rgba(0,0,0,.11); }
-.pb-instagram .pb-ig-media { position: relative; aspect-ratio: 4 / 5; overflow: hidden; background: #f3efec; }
-.pb-instagram .pb-ig-image { display: block; width: 100%; height: 100%; object-fit: cover; }
+.pb-instagram .pb-ig-media { position: relative; aspect-ratio: 4 / 5; overflow: hidden; background: linear-gradient(145deg,#f5f2ef,#ebe7e3); }
+.pb-instagram .pb-ig-image { display: block; width: 100%; height: 100%; object-fit: cover; opacity: 0; transition: opacity .22s ease; }
+.pb-instagram .pb-ig-image.is-loaded { opacity: 1; }
 .pb-instagram .pb-ig-placeholder { display: grid; place-items: center; width: 100%; height: 100%; padding: 24px; text-align: center; font-size: 15px; background: linear-gradient(145deg,#f7efeb,#ece5df); }
 .pb-instagram .pb-ig-play { position: absolute; inset: 50% auto auto 50%; transform: translate(-50%,-50%); display: grid; place-items: center; width: 58px; height: 58px; border-radius: 50%; background: rgba(255,255,255,.9); color: #171717; font-size: 22px; padding-left: 3px; box-shadow: 0 6px 20px rgba(0,0,0,.16); }
 .pb-instagram .pb-ig-badge { position: absolute; top: 12px; right: 12px; display: grid; place-items: center; width: 34px; height: 34px; border-radius: 50%; background: rgba(255,255,255,.9); font-size: 21px; line-height: 1; }
@@ -30,6 +31,6 @@
   .pb-instagram .pb-ig-meta { padding: 12px 13px 13px; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .pb-instagram .pb-ig-card { transition: none; }
+  .pb-instagram .pb-ig-card, .pb-instagram .pb-ig-image { transition: none; }
   .pb-instagram .pb-ig-track { scroll-behavior: auto; }
 }
