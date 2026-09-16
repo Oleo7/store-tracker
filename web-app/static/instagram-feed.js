@@ -159,7 +159,7 @@
 
     let autoplayTimer = null;
     let resumeTimer = null;
-    let sectionVisible = true;
+    let sectionVisible = false;
     const stepSize = () => {
       const style = getComputedStyle(track);
       const gap = parseFloat(style.columnGap || style.gap || '0') || 0;
