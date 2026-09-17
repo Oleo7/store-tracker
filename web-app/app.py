@@ -2279,7 +2279,7 @@ def normalize_planning_contact_type(value):
 
 def normalize_planning_appointment_confirmed(value, contact_type):
     return bool(
-        normalize_planning_contact_type(contact_type) == "visit"
+        normalize_planning_contact_type(contact_type) in {"visit", "phone"}
         and is_yes(value)
     )
 
@@ -8537,8 +8537,9 @@ def update_planning_activity(activity_id):
                     effective_contact_type,
                 ) else "N"
             )
-        if effective_contact_type != "visit":
+        if effective_contact_type not in {"visit", "phone"}:
             updates["appointment_confirmed"] = "N"
+        if effective_contact_type != "visit":
             updates["picking_help"] = "N"
         if "scheduled_at" in data:
             scheduled_at = parse_planning_datetime(data.get("scheduled_at"))

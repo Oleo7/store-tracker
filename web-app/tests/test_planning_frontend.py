@@ -227,7 +227,7 @@ class PlanningFrontendContractTests(TestCase):
         )
         self.assertIsNotNone(normalizer)
         self.assertIn("planningTruthy(source.appointment_confirmed)", normalizer.group(1))
-        self.assertIn('contactType === "visit"', normalizer.group(1))
+        self.assertIn('["visit", "phone"].includes(contactType) && planningTruthy(source.appointment_confirmed)', normalizer.group(1))
         self.assertIn('id="planning-editor-appointment"', self.html)
         self.assertIn("planningEditorActivity?.appointment_confirmed", self.html)
         sync = re.search(
@@ -236,11 +236,12 @@ class PlanningFrontendContractTests(TestCase):
             flags=re.DOTALL,
         )
         self.assertIsNotNone(sync)
-        self.assertIn('contactType === "visit"', sync.group(1))
+        self.assertIn('["visit", "phone"].includes(contactType)', sync.group(1))
+        self.assertIn('pickingHelpField.hidden = contactType !== "visit"', sync.group(1))
         self.assertIn("checkbox.checked = false", sync.group(1))
         self.assertIn("syncPlanningEditorAppointment(event.target.value)", self.html)
         self.assertIn(
-            'appointment_confirmed: contactType === "visit" && document.getElementById("planning-editor-appointment").checked',
+            'appointment_confirmed: ["visit", "phone"].includes(contactType) && document.getElementById("planning-editor-appointment").checked',
             self.html,
         )
 
@@ -256,10 +257,11 @@ class PlanningFrontendContractTests(TestCase):
             flags=re.DOTALL,
         )
         self.assertIsNotNone(followup_sync)
-        self.assertIn('value === "visit"', followup_sync.group(1))
+        self.assertIn('["visit", "phone"].includes(contactType)', followup_sync.group(1))
+        self.assertIn('pickingHelpField.hidden = contactType !== "visit"', followup_sync.group(1))
         self.assertIn("checkbox.checked = false", followup_sync.group(1))
         self.assertIn(
-            'appointment_confirmed: followupType === "visit" && document.getElementById("f-followup-appointment").checked',
+            'appointment_confirmed: ["visit", "phone"].includes(followupType) && document.getElementById("f-followup-appointment").checked',
             self.html,
         )
         card = re.search(
@@ -269,6 +271,8 @@ class PlanningFrontendContractTests(TestCase):
         )
         self.assertIsNotNone(card)
         self.assertIn('" appointment-confirmed"', card.group(1))
+        self.assertIn('["visit", "phone"].includes(activity.contact_type) && activity.appointment_confirmed', card.group(1))
+        self.assertIn('${["visit", "phone"].includes(activity.contact_type) && activity.appointment_confirmed ?', self.html)
         self.assertIn('"Tidsbokat med butiken"', card.group(1))
         self.assertIn(".planning-activity-card.appointment-confirmed", self.html)
         self.assertIn(
