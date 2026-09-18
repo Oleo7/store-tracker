@@ -274,6 +274,37 @@ class CustomerGuidanceTests(TestCase):
         )
         self.assertTrue(updated["customer_guidance"]["can_contact_now"])
 
+    def test_stored_suggestion_state_cannot_fake_or_hide_planning_status(self):
+        base = scored(customers=[customer(segment="A")])[0]
+        stale_planned = apply_workflow_suppressions(
+            [base], {"store-1": "suggestion_planned"}
+        )[0]
+        self.assertEqual(
+            stale_planned["customer_guidance"]["status_key"], "act_now"
+        )
+
+        future = {
+            "planned_activity_id": "future",
+            "customer_id": "store-1",
+            "sales_person": "Olle",
+            "contact_type": "phone",
+            "scheduled_at": "2026-08-11 09:00",
+            "status": "planned",
+        }
+        really_planned = scored(
+            customers=[customer(segment="A")], planned=[future]
+        )[0]
+        after_snooze_overlay = apply_workflow_suppressions(
+            [really_planned], {"store-1": "snoozed"}
+        )[0]
+        self.assertEqual(
+            after_snooze_overlay["customer_guidance"]["status_key"], "planned"
+        )
+        self.assertEqual(
+            after_snooze_overlay["customer_guidance"]["planned_activity_id"],
+            "future",
+        )
+
     def test_non_actionable_statuses_do_not_recommend_contact_channel(self):
         waiting = self.guidance(
             customers=[customer(segment="A")],
