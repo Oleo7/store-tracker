@@ -693,6 +693,10 @@ class PlanningSuggestionService:
                         events,
                         "suggestion_reopened",
                         self._live_event_row(updated, candidate),
+                        request_id=(
+                            f"persistent-reopen:{suggestion_id}:"
+                            f"{changes['revision']}"
+                        ),
                         before="resolved",
                         after="pending",
                         resolved_by_type="persistent_a_prospect",
