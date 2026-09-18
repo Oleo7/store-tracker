@@ -1922,9 +1922,15 @@ def apply_workflow_suppressions(priority_customers, suppressions):
             # A snoozed/dismissed suggestion must never hide a real missed
             # follow-up, and a real future booking should keep its concrete
             # date/type instead of being replaced by generic suggestion state.
-            if guidance.get("status_key") in {
-                "data_missing", "planned", "overdue_followup"
-            }:
+            # Likewise, a stored suggestion marked "planned" is not enough to
+            # make the customer green if the actual planned activity is gone;
+            # planned_activities / follow_up_date remain the source of truth.
+            if (
+                reason == "suggestion_planned"
+                or guidance.get("status_key") in {
+                    "data_missing", "planned", "overdue_followup"
+                }
+            ):
                 result.append(updated)
                 continue
             updated["recommendation_eligible"] = False
