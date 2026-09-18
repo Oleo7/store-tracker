@@ -1,0 +1,28 @@
+name: Guidance integrity workbench
+
+on:
+  push:
+    branches: [codex/guidance-delivery-integrity]
+    paths: [.github/workflows/guidance-integrity-workbench.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Collect isolated source and dependency wheels
+        run: |
+          mkdir -p /tmp/guidance-workbench/wheels
+          pip download -r web-app/requirements.txt -d /tmp/guidance-workbench/wheels
+          git archive HEAD | gzip > /tmp/guidance-workbench/source.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: guidance-workbench-source
+          path: /tmp/guidance-workbench
+          retention-days: 1
