@@ -1373,9 +1373,18 @@ def build_customer_guidance(
         email_available=email_available,
         visible=True,
     ) or {}
-    recommended_contact_type = planned_contact_type or channel.get(
-        "recommended_contact_type", ""
-    )
+    if status_key == "planned":
+        # A planned status should describe the actual booking, not invent a
+        # fallback channel for legacy date-only follow-ups.
+        recommended_contact_type = planned_contact_type
+    elif status_key in {"act_now", "overdue_followup"}:
+        recommended_contact_type = planned_contact_type or channel.get(
+            "recommended_contact_type", ""
+        )
+    else:
+        # "Avvakta" / "Ingen åtgärd nu" must not read like an instruction to
+        # call or visit the customer.
+        recommended_contact_type = ""
     return {
         "focus_key": focus_key,
         "focus_label": FOCUS_LABELS[focus_key],
@@ -1494,17 +1503,25 @@ def build_priority_customers(
         segment = _segment_value(customer)
         defaults = _segment_defaults(benchmarks, segment)
         order_count = int(order.get("order_count") or 0)
-        completed_dates = sorted(d for d in order.get("delivery_dates", ()) if d <= today)
+        delivery_dates = sorted(order.get("delivery_dates") or ())
+        completed_dates = [d for d in delivery_dates if d <= today]
+        future_dates = [d for d in delivery_dates if d > today]
         delivery_count = len(completed_dates) if "delivery_dates" in order else int(order.get("delivery_count") or order_count)
         history_index = 100 if delivery_count >= 2 else 60 if delivery_count == 1 else 0
         first_order_sku_count = int(order.get("first_order_sku_count") or 0)
-        future_delivery = order.get("last_delivery_date")
-        last_delivery = (
-            completed_dates[-1]
-            if completed_dates
-            else None if "delivery_dates" in order
-            else order.get("last_delivery_date")
-        )
+        if "delivery_dates" in order:
+            future_delivery = future_dates[0] if future_dates else None
+            last_delivery = completed_dates[-1] if completed_dates else None
+        else:
+            recorded_delivery = order.get("last_delivery_date")
+            future_delivery = (
+                recorded_delivery
+                if recorded_delivery and recorded_delivery > today else None
+            )
+            last_delivery = (
+                recorded_delivery
+                if recorded_delivery and recorded_delivery <= today else None
+            )
         last_order = order.get("last_order_date")
         days_since_delivery = (today - last_delivery).days if last_delivery else None
 
@@ -1900,6 +1917,16 @@ def apply_workflow_suppressions(priority_customers, suppressions):
             or ""
         ).strip()
         if reason:
+            guidance = dict(updated.get("customer_guidance") or {})
+            # Explicit operational state has precedence over workflow state.
+            # A snoozed/dismissed suggestion must never hide a real missed
+            # follow-up, and a real future booking should keep its concrete
+            # date/type instead of being replaced by generic suggestion state.
+            if guidance.get("status_key") in {
+                "data_missing", "planned", "overdue_followup"
+            }:
+                result.append(updated)
+                continue
             updated["recommendation_eligible"] = False
             updated["recommendation_suppression_reason"] = reason
             updated["planning_status_text"] = {
@@ -1907,7 +1934,6 @@ def apply_workflow_suppressions(priority_customers, suppressions):
                 "dismissed": "Samma beslutsunderlag markerat Ej relevant",
                 "suggestion_planned": "Rekommendationsaktivitet planerad",
             }.get(reason, updated.get("planning_status_text") or reason)
-            guidance = dict(updated.get("customer_guidance") or {})
             if guidance:
                 if reason == "suggestion_planned":
                     guidance.update({
