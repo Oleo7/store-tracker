@@ -1,0 +1,77 @@
+name: Build seller booking identity correction
+on:
+  push:
+    branches: [work/seller-booking-fix-20260918]
+    paths:
+      - .github/workflows/seller-booking-fix-build.yml
+      - .maintenance/apply_seller_booking_fix.py
+      - web-app/tests/test_seller_booking_identity.py
+permissions:
+  contents: write
+jobs:
+  correction:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: web-app/requirements.txt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Apply exact guarded source changes
+        run: python .maintenance/apply_seller_booking_fix.py
+      - name: Install dependencies
+        run: pip install -r web-app/requirements.txt
+      - name: Compile and check diff
+        run: |
+          python -m compileall -q web-app
+          git diff --check
+          python - <<'PY'
+          import re
+          from pathlib import Path
+          html = Path('web-app/index.html').read_text()
+          scripts = re.findall(r'<script\b[^>]*>(.*?)</script>', html, re.S | re.I)
+          Path('/tmp/store-tracker-inline.js').write_text('\n'.join(scripts))
+          PY
+          node --check /tmp/store-tracker-inline.js
+      - name: Focused identity and booking regressions
+        run: python -m unittest discover -s web-app/tests -p test_seller_booking_identity.py -v
+      - name: Complete existing Python suite
+        run: python -m unittest discover -s web-app/tests -p 'test_*.py'
+      - name: Publish only the four-file correction to a new review branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          base=58070697b5efb2260bf76bc5412fc4f8bd6aaa0f
+          target=fix/seller-booking-identity
+          current_master=$(git ls-remote origin refs/heads/master | cut -f1)
+          test "$current_master" = "$base"
+          test -z "$(git ls-remote origin refs/heads/$target)"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          export GIT_INDEX_FILE="$RUNNER_TEMP/clean-release-index"
+          git read-tree "$base"
+          git add web-app/app.py web-app/priority.py web-app/index.html web-app/tests/test_seller_booking_identity.py
+          tree=$(git write-tree)
+          commit=$(printf '%s\n' 'Fix seller identity matching for customer guidance and booking' | git commit-tree "$tree" -p "$base")
+          unset GIT_INDEX_FILE
+          git diff --stat "$base" "$commit"
+          test "$(git diff --name-only "$base" "$commit" | wc -l)" -eq 4
+          git diff --name-only "$base" "$commit" | grep -Ev '^(web-app/(app.py|priority.py|index.html|tests/test_seller_booking_identity.py))$' && exit 1 || true
+          git push origin "$commit:refs/heads/$target"
+          mkdir -p /tmp/seller-booking-correction
+          git archive --format=zip "$commit" -o /tmp/seller-booking-correction/source.zip
+          printf '%s\n' "$commit" > /tmp/seller-booking-correction/commit.txt
+          git diff "$base" "$commit" > /tmp/seller-booking-correction/correction.diff
+          printf 'Verified correction commit: `%s` on `%s`. No merge or deployment.\n' "$commit" "$target" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: seller-booking-correction
+          path: /tmp/seller-booking-correction
+          retention-days: 3
