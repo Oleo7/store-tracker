@@ -185,6 +185,14 @@ class CustomerGuidanceTests(TestCase):
             first_hash, app_module.priority_decision_context_hash(with_order, "olle")
         )
 
+    def test_a_prospect_context_changes_when_strategic_segment_changes(self):
+        strategic = scored(customers=[customer(segment="A")])[0]
+        ordinary = scored(customers=[customer(segment="B")])[0]
+        self.assertNotEqual(
+            app_module.priority_decision_context_hash(strategic, "olle"),
+            app_module.priority_decision_context_hash(ordinary, "olle"),
+        )
+
     def test_first_future_order_removes_a_prospect_and_waits_for_delivery(self):
         rows = [
             order("future-a", TODAY + timedelta(days=5), ordered=TODAY),
@@ -197,6 +205,17 @@ class CustomerGuidanceTests(TestCase):
         self.assertEqual(item["customer_guidance"]["reason_code"], "future_delivery")
         self.assertEqual(item["latest_delivery_date"], "")
         self.assertEqual(item["next_delivery_date"], "2026-08-15")
+
+    def test_next_delivery_is_nearest_future_delivery(self):
+        item = scored(
+            customers=[customer(segment="A")],
+            orders=[
+                order("later", TODAY + timedelta(days=12), ordered=TODAY),
+                order("nearer", TODAY + timedelta(days=5), ordered=TODAY),
+            ],
+        )[0]
+        self.assertEqual(item["next_delivery_date"], "2026-08-15")
+        self.assertEqual(item["latest_delivery_date"], "")
 
     def test_future_plan_replaces_overdue_status_for_manual_and_suggestion_sources(self):
         missed = {
@@ -236,6 +255,35 @@ class CustomerGuidanceTests(TestCase):
         )
         self.assertEqual(today_guidance["status_key"], "act_now")
         self.assertEqual(tomorrow_guidance["status_key"], "overdue_followup")
+
+    def test_workflow_snooze_never_hides_real_overdue_followup(self):
+        missed = {
+            "planned_activity_id": "missed",
+            "customer_id": "store-1",
+            "sales_person": "Olle",
+            "contact_type": "phone",
+            "scheduled_at": "2026-08-09 09:00",
+            "status": "planned",
+        }
+        base = scored(customers=[customer(segment="A")], planned=[missed])[0]
+        updated = apply_workflow_suppressions(
+            [base], {"store-1": "snoozed"}
+        )[0]
+        self.assertEqual(
+            updated["customer_guidance"]["status_key"], "overdue_followup"
+        )
+        self.assertTrue(updated["customer_guidance"]["can_contact_now"])
+
+    def test_non_actionable_statuses_do_not_recommend_contact_channel(self):
+        waiting = self.guidance(
+            customers=[customer(segment="A")],
+            contacts=[contact(NOW - timedelta(days=1))],
+        )
+        idle = self.guidance(customers=[customer(segment="C")])
+        self.assertEqual(waiting["status_key"], "wait")
+        self.assertEqual(waiting["recommended_contact_type"], "")
+        self.assertEqual(idle["status_key"], "idle")
+        self.assertEqual(idle["recommended_contact_type"], "")
 
     def test_terminal_activities_do_not_leave_green_status(self):
         for status in ("completed", "cancelled", "skipped"):
