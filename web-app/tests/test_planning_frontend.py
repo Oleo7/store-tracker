@@ -40,6 +40,67 @@ class PlanningFrontendContractTests(TestCase):
         self.assertIn("contactRetryPayload = payload", self.html)
         self.assertIn("Försök slutföra sparningen", self.html)
 
+    def test_workflow_mutations_refresh_customer_guidance_and_planning(self):
+        refresher = re.search(
+            r"async function refreshWorkflowViews\(\{ planning = false, recommendation = false \} = \{\}\) \{(.*?)\n  \}",
+            self.html,
+            flags=re.DOTALL,
+        )
+        self.assertIsNotNone(refresher)
+        self.assertIn("loadInsights()", refresher.group(1))
+        self.assertIn("loadPlanningWeek()", refresher.group(1))
+        self.assertIn("loadPlanningRecommendation({", refresher.group(1))
+
+        load_week = re.search(
+            r"async function loadPlanningWeek\(\) \{(.*?)\n  \}",
+            self.html,
+            flags=re.DOTALL,
+        )
+        self.assertIsNotNone(load_week)
+        self.assertIn("await loadPlanningRecommendation()", load_week.group(1))
+
+        mutation = re.search(
+            r"async function mutateVisibleRecommendation\(action\) \{(.*?)\n  \}",
+            self.html,
+            flags=re.DOTALL,
+        )
+        self.assertIsNotNone(mutation)
+        self.assertIn("await refreshWorkflowViews()", mutation.group(1))
+
+        status_update = re.search(
+            r"async function updatePlanningActivityStatus\(activity, status\) \{(.*?)\n  \}",
+            self.html,
+            flags=re.DOTALL,
+        )
+        self.assertIsNotNone(status_update)
+        self.assertIn(
+            "await refreshWorkflowViews({ planning: true })",
+            status_update.group(1),
+        )
+
+        editor_save = re.search(
+            r"async function savePlanningEditor\(event\) \{(.*?)\n  \}",
+            self.html,
+            flags=re.DOTALL,
+        )
+        self.assertIsNotNone(editor_save)
+        self.assertIn("await refreshWorkflowViews()", editor_save.group(1))
+        self.assertIn(
+            "await refreshWorkflowViews({ planning: true })",
+            editor_save.group(1),
+        )
+
+        drag_save = re.search(
+            r"async function planningCommitDraggedActivity\(activity, targetMinutes\) \{(.*?)\n  \}",
+            self.html,
+            flags=re.DOTALL,
+        )
+        self.assertIsNotNone(drag_save)
+        self.assertIn(
+            "await refreshWorkflowViews({ planning: true })",
+            drag_save.group(1),
+        )
+
     def test_planning_patch_flows_send_optimistic_version(self):
         self.assertIn(
             "payload.expected_updated_at = planningEditorActivity.updated_at",

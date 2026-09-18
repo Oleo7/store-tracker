@@ -144,9 +144,12 @@ from planning_suggestions import (
     SUGGESTION_COLUMNS,
     SuggestionError,
     build_phase1_stub_candidates,
+    candidate_suggestion_ids,
     decision_context_hash,
     deterministic_suggestion_id,
+    legacy_decision_context_hash_v1,
     mutation_fingerprint as suggestion_mutation_fingerprint,
+    preferred_compatible_suggestion,
     public_suggestion,
 )
 from sheets_availability import SheetReadCache, read_with_retry
@@ -3346,42 +3349,60 @@ def planning_suggestion_sort_key(item):
     )
 
 
-def priority_decision_context_hash(priority, owner_name):
-    """Keep A-prospect state stable until owner, segment, or order facts change."""
+def priority_decision_context_inputs(priority, owner_name):
+    """Return stable facts used by current and historical context schemas."""
     guidance = priority.get("customer_guidance") or {}
     persistent_a_prospect = guidance.get("focus_key") == "a_prospect"
-    return decision_context_hash(
-        owner=owner_name,
-        customer_id=priority.get("customer_id"),
-        lifecycle=(
+    return {
+        "owner": owner_name,
+        "customer_id": priority.get("customer_id"),
+        "lifecycle": (
             priority.get("decision_context_lifecycle")
             or priority.get("lifecycle")
         ),
-        order_count=priority.get("order_count"),
-        latest_order_reference=priority.get("latest_order_reference"),
-        latest_order_date=(
+        "order_count": priority.get("order_count"),
+        "latest_order_reference": priority.get("latest_order_reference"),
+        "latest_order_date": (
             priority.get("latest_delivery_date")
             or priority.get("latest_order_date")
         ),
-        latest_contact_id=(
-            "" if persistent_a_prospect else priority.get("latest_human_contact_id")
+        "latest_contact_id": (
+            "" if persistent_a_prospect
+            else priority.get("latest_human_contact_id")
         ),
-        latest_contact_result=(
-            "" if persistent_a_prospect else priority.get("latest_contact_result")
+        "latest_contact_result": (
+            "" if persistent_a_prospect
+            else priority.get("latest_contact_result")
         ),
-        latest_contact_date=(
-            "" if persistent_a_prospect else priority.get("latest_human_contact_date")
+        "latest_contact_date": (
+            "" if persistent_a_prospect
+            else priority.get("latest_human_contact_date")
         ),
-        active_email_intent_event=(
+        "active_email_intent_event": (
             priority.get("decision_context_email_event")
             if "decision_context_email_event" in priority
             else priority.get("active_email_intent_event")
         ),
-        # Segment is part of the persistent A-prospect business context so an
-        # A->B/C or B/C->A reclassification cannot inherit stale workflow
-        # state. Other suggestion types keep their existing IDs.
-        segment=priority.get("segment") if persistent_a_prospect else "",
+        "segment": priority.get("segment") if persistent_a_prospect else "",
+    }
+
+
+def priority_decision_context_hash(priority, owner_name):
+    """Keep A-prospect state stable until owner, segment, or order facts change."""
+    return decision_context_hash(
+        **priority_decision_context_inputs(priority, owner_name)
     )
+
+
+def priority_compatible_decision_context_hashes(priority, owner_name):
+    """Accept pre-segment hashes without changing the canonical current hash."""
+    inputs = priority_decision_context_inputs(priority, owner_name)
+    legacy_inputs = {
+        key: value for key, value in inputs.items() if key != "segment"
+    }
+    legacy = legacy_decision_context_hash_v1(**legacy_inputs)
+    current = decision_context_hash(**inputs)
+    return [legacy] if legacy and legacy != current else []
 
 
 def planning_suggestion_candidates(spreadsheet, owner, activity_rows=()):
@@ -3433,6 +3454,11 @@ def planning_suggestion_candidates(spreadsheet, owner, activity_rows=()):
             )
             candidates.append({
                 "decision_context_hash": context_hash,
+                "compatible_decision_context_hashes": (
+                    priority_compatible_decision_context_hashes(
+                        priority, owner.get("user_name")
+                    )
+                ),
                 "customer_id": priority.get("customer_id"),
                 "customer_key": (
                     priority.get("customer_number")
@@ -6836,14 +6862,13 @@ def priority_workflow_suppressions(spreadsheet, priority_customers):
         app.logger.exception("Could not load suggestion suppression state")
         return {}
 
-    by_identity = {
-        (
+    by_identity = defaultdict(list)
+    for _index, row in stored:
+        by_identity[(
             normalize_key(row.get("user_name")),
             str(row.get("customer_id") or "").strip(),
             str(row.get("decision_context_hash") or "").strip(),
-        ): row
-        for _index, row in stored
-    }
+        )].append(row)
     now = stockholm_now().astimezone(STOCKHOLM_ZONE)
     suppressions = {}
     for priority in priority_customers:
@@ -6852,7 +6877,38 @@ def priority_workflow_suppressions(spreadsheet, priority_customers):
         if not customer_id or not owner_name:
             continue
         context_hash = priority_decision_context_hash(priority, owner_name)
-        row = by_identity.get((normalize_key(owner_name), customer_id, context_hash))
+        compatible_hashes = priority_compatible_decision_context_hashes(
+            priority, owner_name
+        )
+        canonical_rows = by_identity.get(
+            (normalize_key(owner_name), customer_id, context_hash), []
+        )
+        legacy_rows = []
+        current_trigger = str(
+            priority.get("primary_trigger_key")
+            or priority.get("primary_trigger_type")
+            or ""
+        ).strip().casefold()
+        for compatible_hash in compatible_hashes:
+            for stored_row in by_identity.get(
+                (normalize_key(owner_name), customer_id, compatible_hash), []
+            ):
+                stored_trigger = str(
+                    stored_row.get("primary_trigger_key")
+                    or stored_row.get("primary_trigger_type")
+                    or ""
+                ).strip().casefold()
+                # Segment was absent from the historic hash. Require the same
+                # concrete trigger before adopting that old row so A<->B/C
+                # reclassification cannot inherit stale workflow state.
+                if stored_trigger == current_trigger:
+                    legacy_rows.append(stored_row)
+        row = preferred_compatible_suggestion(
+            canonical_rows + legacy_rows,
+            canonical_id=deterministic_suggestion_id(
+                owner_name, customer_id, context_hash
+            ),
+        )
         status = str((row or {}).get("status") or "").strip().casefold()
         if status == "snoozed":
             due = parse_planning_instant((row or {}).get("snooze_until"))
@@ -7176,13 +7232,35 @@ def suggestion_queue_payload(
 
 
 def suggestion_candidates_by_id(owner, candidates):
-    return {
-        deterministic_suggestion_id(
-            owner.get("user_name"), candidate.get("customer_id"),
-            candidate.get("decision_context_hash")
-        ): candidate
-        for candidate in candidates
-    }
+    result = {}
+    for candidate in candidates:
+        for suggestion_id in candidate_suggestion_ids(owner, candidate):
+            result[suggestion_id] = candidate
+    return result
+
+
+def suggestion_candidate_for_id(
+    owner, candidates, suggestion_id, *, stored_row=None
+):
+    candidate = suggestion_candidates_by_id(owner, candidates).get(suggestion_id)
+    if not candidate or stored_row is None:
+        return candidate
+    canonical_id = deterministic_suggestion_id(
+        owner.get("user_name"),
+        candidate.get("customer_id"),
+        candidate.get("decision_context_hash"),
+    )
+    if str(suggestion_id or "").strip() == canonical_id:
+        return candidate
+    stored_trigger = normalize_key(
+        stored_row.get("primary_trigger_key")
+        or stored_row.get("primary_trigger_type")
+    )
+    current_trigger = normalize_key(
+        candidate.get("primary_trigger_key")
+        or candidate.get("primary_trigger_type")
+    )
+    return candidate if stored_trigger == current_trigger else None
 
 
 def planned_suggestion_payload_matches(
@@ -7349,10 +7427,12 @@ def mutate_planning_suggestion(suggestion_id, action):
             write_planned_activity_snapshot(spreadsheet)
         )
         activity_rows = [item for _index, item in indexed_activities]
-        live_candidate = suggestion_candidates_by_id(
+        live_candidate = suggestion_candidate_for_id(
             owner,
             planning_suggestion_candidates(spreadsheet, owner, activity_rows),
-        ).get(suggestion_id)
+            suggestion_id,
+            stored_row=row,
+        )
         if (
             action == "dismiss"
             and ((live_candidate or {}).get("customer_guidance") or {}).get(
@@ -7503,9 +7583,12 @@ def plan_planning_suggestion(suggestion_id):
             live_candidates = planning_suggestion_candidates(
                 spreadsheet, owner, activity_rows
             )
-            live_candidate = suggestion_candidates_by_id(
-                owner, live_candidates
-            ).get(suggestion_id)
+            live_candidate = suggestion_candidate_for_id(
+                owner,
+                live_candidates,
+                suggestion_id,
+                stored_row=(suggestion if expected_revision > 0 else None),
+            )
             live_candidate_is_actionable = bool(
                 live_candidate
                 and not live_candidate.get("externally_suppressed")

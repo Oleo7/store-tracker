@@ -7316,12 +7316,12 @@
         planningData = null;
         if (formReturnView === "planning") {
           showView("planning");
-          await loadPlanningWeek();
+          await refreshWorkflowViews({ planning: true });
         } else {
           showView("detail");
           refreshStats(currentCustomer);
+          await refreshWorkflowViews();
         }
-        loadInsights();
         if (followupInsights) loadFollowupInsights(document.getElementById("insights-responsible").value);
       } else if (res.status === 409 && result?.error === "ambiguous_planned_activity") {
         openAmbiguousContactActivityDialog(payload, result.candidates);
@@ -7770,6 +7770,19 @@
     }
   }
 
+  async function refreshWorkflowViews({ planning = false, recommendation = false } = {}) {
+    const tasks = [loadInsights()];
+    if (planning) {
+      // loadPlanningWeek also refreshes Nästa åtgärd before it resolves.
+      tasks.push(loadPlanningWeek());
+    } else if (recommendation) {
+      tasks.push(loadPlanningRecommendation({
+        previewLimit: planningRecommendationPreviewLimit,
+      }));
+    }
+    await Promise.allSettled(tasks);
+  }
+
   function replaceWithNextRecommendation(response) {
     planningRecommendationPreviewLimit = Number(response?.preview_limit || 10);
     planningRecommendation = response?.next_suggestion || null;
@@ -7846,6 +7859,7 @@
         }
       );
       replaceWithNextRecommendation(payload);
+      await refreshWorkflowViews();
       showToast({
         snooze: "Rekommendationen är snoozad i 7 dagar",
         dismiss: "Rekommendationen markerades som ej relevant",
@@ -7889,7 +7903,7 @@
         }
       );
       showToast("Rekommendationen är återupptagen");
-      await loadPlanningRecommendation({ previewLimit: planningRecommendationPreviewLimit });
+      await refreshWorkflowViews({ recommendation: true });
     } catch (error) {
       showToast(error.message || "Rekommendationen kunde inte återupptas");
     } finally {
@@ -7992,7 +8006,7 @@
         .map(normalizePlanningUser)
         .filter(user => user.user_name);
       renderPlanning();
-      loadPlanningRecommendation();
+      await loadPlanningRecommendation();
       resumePlanningRoutePreviewRecovery();
     } catch (error) {
       if (requestSerial !== planningLoadSerial) return;
@@ -8570,6 +8584,7 @@
       planningReplaceActivity(activityId, serverActivity);
       if (planningDragRetry?.activityId === activityId) planningDragRetry = null;
       showToast(`Aktiviteten flyttades till ${targetTime}`);
+      await refreshWorkflowViews({ planning: true });
     } catch (error) {
       planningReplaceActivity(activityId, original);
       if (["revision_conflict", "planning_changed"].includes(error.code)) {
@@ -9163,8 +9178,9 @@
           renderPlanningWeekStrip();
         }
         replaceWithNextRecommendation(result);
+        await refreshWorkflowViews();
       } else {
-        await loadPlanningWeek();
+        await refreshWorkflowViews({ planning: true });
       }
     } catch (error) {
       showPlanningEditorError(error.message || "Aktiviteten kunde inte sparas.");
@@ -9323,7 +9339,7 @@
       planningStatusRequestIds.delete(requestKey);
       closePlanningModal();
       showToast(status === "planned" ? "Aktiviteten återställdes" : status === "skipped" ? "Aktiviteten hoppades över" : "Aktiviteten avbokades");
-      await loadPlanningWeek();
+      await refreshWorkflowViews({ planning: true });
     } catch (error) {
       buttons.forEach(button => button.disabled = false);
       const alert = document.createElement("div");
@@ -9839,7 +9855,7 @@
       });
       closePlanningModal();
       showToast("Dagen fylldes med ruttens aktiviteter");
-      await loadPlanningWeek();
+      await refreshWorkflowViews({ planning: true });
     } catch (error) {
       errorTarget.textContent = error.message || "Rutten kunde inte sparas i planeringen.";
       errorTarget.classList.add("visible");
@@ -9870,7 +9886,11 @@
       planningData = null;
       const count = Number(result.imported_count ?? result.activity_count ?? result.activities?.length ?? 0);
       showToast(count ? `${count} ruttstopp sparades i Planering` : "Rutten sparades i Planering");
-      if (document.getElementById("view-planning").classList.contains("active")) await loadPlanningWeek();
+      if (document.getElementById("view-planning").classList.contains("active")) {
+        await refreshWorkflowViews({ planning: true });
+      } else {
+        await refreshWorkflowViews();
+      }
     } catch (error) {
       showToast(error.message || "Rutten kunde inte sparas i Planering");
     } finally {
