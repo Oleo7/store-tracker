@@ -7239,6 +7239,30 @@ def suggestion_candidates_by_id(owner, candidates):
     return result
 
 
+def suggestion_candidate_for_id(
+    owner, candidates, suggestion_id, *, stored_row=None
+):
+    candidate = suggestion_candidates_by_id(owner, candidates).get(suggestion_id)
+    if not candidate or stored_row is None:
+        return candidate
+    canonical_id = deterministic_suggestion_id(
+        owner.get("user_name"),
+        candidate.get("customer_id"),
+        candidate.get("decision_context_hash"),
+    )
+    if str(suggestion_id or "").strip() == canonical_id:
+        return candidate
+    stored_trigger = normalize_key(
+        stored_row.get("primary_trigger_key")
+        or stored_row.get("primary_trigger_type")
+    )
+    current_trigger = normalize_key(
+        candidate.get("primary_trigger_key")
+        or candidate.get("primary_trigger_type")
+    )
+    return candidate if stored_trigger == current_trigger else None
+
+
 def planned_suggestion_payload_matches(
     activity, *, customer_id, contact_type, scheduled_at, note,
     appointment_confirmed=False, picking_help=False,
@@ -7403,10 +7427,12 @@ def mutate_planning_suggestion(suggestion_id, action):
             write_planned_activity_snapshot(spreadsheet)
         )
         activity_rows = [item for _index, item in indexed_activities]
-        live_candidate = suggestion_candidates_by_id(
+        live_candidate = suggestion_candidate_for_id(
             owner,
             planning_suggestion_candidates(spreadsheet, owner, activity_rows),
-        ).get(suggestion_id)
+            suggestion_id,
+            stored_row=row,
+        )
         if (
             action == "dismiss"
             and ((live_candidate or {}).get("customer_guidance") or {}).get(
@@ -7557,9 +7583,12 @@ def plan_planning_suggestion(suggestion_id):
             live_candidates = planning_suggestion_candidates(
                 spreadsheet, owner, activity_rows
             )
-            live_candidate = suggestion_candidates_by_id(
-                owner, live_candidates
-            ).get(suggestion_id)
+            live_candidate = suggestion_candidate_for_id(
+                owner,
+                live_candidates,
+                suggestion_id,
+                stored_row=(suggestion if expected_revision > 0 else None),
+            )
             live_candidate_is_actionable = bool(
                 live_candidate
                 and not live_candidate.get("externally_suppressed")
