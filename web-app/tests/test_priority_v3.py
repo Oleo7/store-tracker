@@ -47,8 +47,8 @@ class FirstOrderPhase3Tests(TestCase):
         expected = {
             7: ("first_order_onboarding", 43),
             10: ("first_order_onboarding", 43),
-            11: ("", 28),
-            23: ("", 28),
+            11: ("first_order_reorder", 28),
+            23: ("first_order_reorder", 28),
             24: ("first_order_reorder", 83),
             30: ("first_order_reorder", 83),
             31: ("first_order_reorder", 98),
@@ -138,7 +138,7 @@ class DialogueAndStrategicPhase3Tests(TestCase):
         today = date(2026, 7, 20)
         existing = customer("Existing", "existing", "C")
         existing_orders = [
-            sku_order("E1", "Existing", "2026-07-01", 20, "existing", "S1")
+            sku_order("E1", "Existing", "2026-07-15", 20, "existing", "S1")
         ]
         for days, expected in ((2, ""), (3, "positive_dialogue_followup")):
             with self.subTest(kind="existing", days=days):

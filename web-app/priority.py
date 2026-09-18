@@ -22,7 +22,7 @@ SCORE_VERSION = os.environ.get("PRIORITY_SCORING_POLICY", "v2.2").strip()
 if SCORE_VERSION not in SCORING_POLICIES:
     raise ValueError("PRIORITY_SCORING_POLICY must be v2.1 or v2.2")
 
-GUIDANCE_VERSION = "1.0"
+GUIDANCE_VERSION = "1.1"
 
 
 def normalize_customer_key(value: str) -> str:
@@ -261,9 +261,14 @@ def build_order_features(order_rows: list[dict]) -> dict:
                 "dfp": 0.0,
                 "sales": 0.0,
                 "volume_known": False,
+                "delivery_volume_complete": True,
                 "skus": set(),
             },
         )
+        if dfp is None or delivery_date != order["delivery_date"]:
+            # Do not present a partial total, or attach several delivery dates
+            # to the final date of an inconsistent logical order.
+            order["delivery_volume_complete"] = False
         if dfp is not None:
             order["dfp"] += dfp
             order["volume_known"] = True
@@ -298,6 +303,21 @@ def build_order_features(order_rows: list[dict]) -> dict:
         latest_order = (customer_orders or identity_orders)[-1]
         order_dates = [o["order_date"] for o in customer_orders if o.get("order_date")]
         delivery_dates = sorted({o["delivery_date"] for o in customer_orders if o.get("delivery_date")})
+        # Match the existing unique-delivery-date grain, across references.
+        # A missing row/order volume makes that delivery total unknown, not zero.
+        # This map is additive: it does not alter scoring or historical fields.
+        delivery_orders = defaultdict(list)
+        for delivery_order in customer_orders:
+            if delivery_order.get("delivery_date"):
+                delivery_orders[delivery_order["delivery_date"]].append(delivery_order)
+        delivery_dfp_by_date = {
+            day.isoformat(): (
+                _clean_number(sum(o["dfp"] for o in rows))
+                if all(o["dfp"] is not None and o["delivery_volume_complete"] for o in rows)
+                else None
+            )
+            for day, rows in delivery_orders.items()
+        }
         known_volumes = [o["dfp"] for o in customer_orders if o["dfp"] is not None]
         total_dfp = sum(known_volumes) if known_volumes else None
         total_sales = sum(o["sales"] for o in customer_orders)
@@ -367,6 +387,7 @@ def build_order_features(order_rows: list[dict]) -> dict:
             "last_delivery_date": latest_order.get("delivery_date") if customer_orders else None,
             "latest_order_reference": latest_order.get("reference", ""),
             "delivery_dates": delivery_dates,
+            "delivery_dfp_by_date": delivery_dfp_by_date,
             "delivery_gaps": gaps,
             "latest_order_dfp": _clean_number(latest_dfp),
             "latest_order_value": _clean_number(latest_sales),
@@ -1000,7 +1021,11 @@ def _active_email_intent(
     proposal_label = str(
         email_feature.get("email_followup_proposal_label") or "Påminnelse"
     ).strip()
-    reason = f"Följ upp {intent['engagement_label']} – {proposal_label}"
+    engagement_label = intent["engagement_label"]
+    reason = (
+        f"{engagement_label[0].upper() + engagement_label[1:]} för {age} dagar sedan"
+        f" · {proposal_label} · ingen senare order"
+    )
     return {
         "trigger": trigger if ready else "",
         "event_id": event_id,
@@ -1013,12 +1038,35 @@ def _active_email_intent(
     }
 
 
+def _guidance_date(value, today=None):
+    """Format a known date, retaining the year when it would be ambiguous."""
+    months = ("jan", "feb", "mar", "apr", "maj", "jun", "jul", "aug", "sep", "okt", "nov", "dec")
+    text = f"{value.day} {months[value.month - 1]}"
+    return f"{text} {value.year}" if today is None or value.year != today.year else text
+
+
+# Action labels are presentation only; primary triggers still decide priority.
+TRIGGER_ACTIONS = {
+    "first_order_onboarding": ("check_placement", "Kontrollera placering och start"),
+    "first_order_reorder": ("secure_repeat_purchase", "Säkra återköpet"),
+    "established_reorder_due": ("secure_next_order", "Säkra nästa order"),
+    "stockfiller_click_followup": ("follow_up_order_interest", "Följ upp beställningsintresset"),
+    "product_sheet_click_followup": ("follow_up_product_interest", "Följ upp produktintresset"),
+    "positive_dialogue_followup": ("follow_up_dialogue", "Följ upp dialogen"),
+    "repeat_reactivation_due": ("reactivate_customer", "Återaktivera kunden"),
+    "single_order_reactivation_due": ("reactivate_customer", "Återaktivera kunden"),
+    "strategic_contact_due": ("contact_customer", "Ta ny kontakt"),
+    "legacy_missed_followup": ("reschedule_followup", "Planera om uppföljningen"),
+}
+
+
 def _phase3_trigger_snapshot(
     *, lifecycle, order_count, delivery_count, days_since_delivery, segment,
     first_order_sku_count, value_index, overdue_days, latest_contact_class,
     days_since_contact, has_order_after_latest_contact,
     has_current_explicit_follow_up, priority_score,
     active_email_intent=None, legacy_missed_followup=False,
+    expected_next=None, today=None,
 ):
     triggers = []
     reasons = {}
@@ -1032,8 +1080,10 @@ def _phase3_trigger_snapshot(
 
     if lifecycle == "established" and overdue_days is not None and overdue_days >= 0:
         triggers.append("established_reorder_due")
-        reasons["established_reorder_due"] = _v2_primary_reason(
-            lifecycle, overdue_days, days_since_contact
+        reasons["established_reorder_due"] = (
+            "established_reorder_due",
+            f"Beräknad nästa order {_guidance_date(expected_next, today)}"
+            if expected_next else "Beräknad återköpstid har passerat",
         )
 
     if lifecycle == "first_order" and delivery_count == 1:
@@ -1045,18 +1095,15 @@ def _phase3_trigger_snapshot(
         )
         if 7 <= days <= 10 and onboarding_risk:
             triggers.append("first_order_onboarding")
-            reason = (
-                "Första ordern hade endast 1 SKU"
-                if first_order_sku_count == 1
-                else "Onboarding efter första leverans"
-            )
+            reason = f"Första leverans för {days} dagar sedan – planera uppföljning"
             reasons["first_order_onboarding"] = (
                 "first_order_onboarding", reason
             )
-        elif 24 <= days <= 90:
+        elif 11 <= days <= 90:
             triggers.append("first_order_reorder")
             reasons["first_order_reorder"] = (
-                "first_order_reorder", "Dags att följa upp andra ordern"
+                "first_order_reorder",
+                f"{days} dagar sedan första leveransen · dags att säkra andra köpet",
             )
 
     positive_dialogue = (
@@ -1069,7 +1116,8 @@ def _phase3_trigger_snapshot(
     if positive_dialogue:
         triggers.append("positive_dialogue_followup")
         reasons["positive_dialogue_followup"] = (
-            "positive_dialogue_followup", "Följ upp positiv dialog"
+            "positive_dialogue_followup",
+            f"Positiv dialog för {days_since_contact} dagar sedan · ingen senare order",
         )
 
     if lifecycle == "reactivation" and delivery_count > 0 and (
@@ -1078,8 +1126,14 @@ def _phase3_trigger_snapshot(
         trigger = ("repeat_reactivation_due" if delivery_count >= 2
                    else "single_order_reactivation_due")
         triggers.append(trigger)
-        reasons[trigger] = (trigger, "Återaktivera tidigare återkommande kund"
-                            if delivery_count >= 2 else "Återaktivera kund efter första ordern")
+        history_text = (
+            "Tidigare återkommande kund" if delivery_count >= 2 else "En tidigare leverans"
+        )
+        delivery_text = (
+            f"{days_since_delivery} dagar sedan senaste leveransen"
+            if days_since_delivery is not None else "kunden behöver återaktiveras"
+        )
+        reasons[trigger] = (trigger, f"{history_text} · {delivery_text}")
 
     strategic_due = (
         lifecycle in {"prospect", "reactivation"}
@@ -1127,6 +1181,13 @@ def _phase3_trigger_snapshot(
     )
     primary = next((key for key in precedence if key in triggers), "")
     reason_code, reason_text = reasons.get(primary, ("", ""))
+    if primary == "a_prospect_due":
+        # Enrich the explanation, not the persistent A-prospect trigger/context.
+        # Only live, eligible signals may be used as supporting evidence.
+        signal = email_trigger or ("positive_dialogue_followup" if positive_dialogue else "")
+        signal_text = reasons.get(signal, ("", ""))[1]
+        if signal_text:
+            reason_text = f"{reason_text} · {signal_text}"
     return {
         "primary_trigger_type": primary,
         "primary_trigger_key": primary,
@@ -1217,7 +1278,7 @@ def build_customer_guidance(
     latest_contact_class, days_since_contact, latest_human_contact,
     latest_follow_up_date, follow_up_resolved, has_order_after_latest_contact,
     activity_state, primary_trigger, active_email_intent, business_email_intent,
-    suppression, status_text, now,
+    suppression, status_text, now, primary_reason_text="",
 ):
     """Build the shared, presentation-ready decision without changing score."""
     has_future_delivery = bool(future_delivery and future_delivery > now.date())
@@ -1334,38 +1395,27 @@ def build_customer_guidance(
             reason_text = "Tidigare förslag dolt"
             action_key = "resume_suggestion"
             action_label = "Återuppta förslag"
-    elif follow_up_today or primary_trigger:
+    elif follow_up_today:
+        # A due-date explanation requires an actual unresolved date due today.
+        # A simultaneous commercial signal must not replace the real commitment.
         status_key = "act_now"
-        reason_code = primary_trigger or "follow_up_due_today"
-        if primary_trigger == "first_order_onboarding":
-            action_key, action_label = "check_placement", "Kontrollera placering och start"
-            reason_text = "Första leveransen behöver en tidig kontroll"
-        elif primary_trigger == "first_order_reorder":
-            action_key, action_label = "secure_repeat_purchase", "Säkra återköpet"
-            reason_text = f"{int(days_since_delivery or 0)} dagar sedan första leveransen"
-        elif primary_trigger == "established_reorder_due":
-            action_key, action_label = "secure_next_order", "Säkra nästa order"
-            reason_text = (
-                f"Beräknad nästa order {expected_next.isoformat()}"
-                if expected_next else "Beräknad återköpstid har passerat"
-            )
-        elif focus_key == "a_prospect":
+        reason_code = "follow_up_due_today"
+        action_key, action_label = "follow_up_today", "Följ upp idag"
+        reason_text = "Uttrycklig uppföljning förfaller i dag"
+    elif primary_trigger:
+        status_key = "act_now"
+        reason_code = primary_trigger
+        reason_text = primary_reason_text or "Aktuell signal behöver följas upp"
+        if focus_key == "a_prospect":
             action_key, action_label = "advance_first_order", "Ta nästa steg mot första ordern"
-            if positive_signal:
-                reason_text = "Strategisk kund · positiv dialog · ingen tidigare order"
-            elif qualified_email_signal:
-                reason_text = "Strategisk kund · kvalificerad mejlsignal · ingen tidigare order"
-            else:
-                reason_text = "Strategisk kund · ingen tidigare order"
-        elif focus_key == "reactivation":
-            action_key, action_label = "reactivate_customer", "Återaktivera kunden"
-            reason_text = "Tidigare köpande kund behöver återaktiveras"
         elif focus_key == "warm_opportunity":
             action_key, action_label = "follow_up_opportunity", "Följ upp möjligheten"
-            reason_text = "Aktuell köpsignal utan registrerad order"
         else:
-            action_key, action_label = "follow_up_today", "Följ upp idag"
-            reason_text = "Uttrycklig uppföljning förfaller i dag"
+            # Do not replace a click/dialogue with a lifecycle-based explanation.
+            # Unknown future triggers get a neutral action, never an invented due date.
+            action_key, action_label = TRIGGER_ACTIONS.get(
+                primary_trigger, ("follow_up_customer", "Följ upp kunden")
+            )
     else:
         status_key = "idle"
         action_key = "none"
@@ -1401,7 +1451,12 @@ def build_customer_guidance(
         recommended_contact_type = ""
     return {
         "focus_key": focus_key,
-        "focus_label": FOCUS_LABELS[focus_key],
+        "focus_label": (
+            "En leverans, 11–90 dagar sedan"
+            if focus_key == "second_purchase" and delivery_count == 1
+            and days_since_delivery is not None and 11 <= days_since_delivery <= 90
+            else FOCUS_LABELS[focus_key]
+        ),
         "status_key": status_key,
         "status_label": STATUS_LABELS[status_key],
         "action_key": action_key,
@@ -1741,6 +1796,8 @@ def build_priority_customers(
             priority_score=priority_score,
             active_email_intent=active_email_intent,
             legacy_missed_followup=legacy_missed_followup,
+            expected_next=expected_next,
+            today=today,
         )
         reason_code = trigger_snapshot["primary_reason_code"]
         reason_text = trigger_snapshot["primary_reason_text"]
@@ -1826,6 +1883,7 @@ def build_priority_customers(
             has_order_after_latest_contact=has_order_after_latest_contact,
             activity_state=activity_state,
             primary_trigger=trigger_snapshot["primary_trigger_type"],
+            primary_reason_text=trigger_snapshot["primary_reason_text"],
             active_email_intent=active_email_intent,
             business_email_intent=business_email_intent,
             suppression=suppression,
@@ -1885,6 +1943,12 @@ def build_priority_customers(
             "latest_order_reference": str(order.get("latest_order_reference") or ""),
             "latest_order_date": _iso_date(last_order),
             "latest_delivery_date": _iso_date(last_delivery),
+            "latest_delivery_dfp": (order.get("delivery_dfp_by_date") or {}).get(
+                _iso_date(last_delivery)
+            ) if last_delivery else None,
+            "next_delivery_dfp": (order.get("delivery_dfp_by_date") or {}).get(
+                _iso_date(future_delivery)
+            ) if future_delivery else None,
             "next_delivery_date": (
                 _iso_date(future_delivery)
                 if future_delivery and future_delivery > today else ""
