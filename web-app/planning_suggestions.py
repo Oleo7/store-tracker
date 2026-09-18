@@ -1137,21 +1137,27 @@ def build_phase1_stub_candidates(owner, customers, contacts=(), orders=()):
         ]
         latest_order = customer_orders[-1] if customer_orders else {}
         latest_contact = customer_contacts[-1] if customer_contacts else {}
-        context_hash = decision_context_hash(
-            owner=owner.get("user_name"),
-            customer_id=customer_id,
-            lifecycle="phase1_test",
-            order_count=len(customer_orders),
-            latest_order_reference=latest_order.get("Reference"),
-            latest_order_date=(
+        context_inputs = {
+            "owner": owner.get("user_name"),
+            "customer_id": customer_id,
+            "lifecycle": "phase1_test",
+            "order_count": len(customer_orders),
+            "latest_order_reference": latest_order.get("Reference"),
+            "latest_order_date": (
                 latest_order.get("Delivery date") or latest_order.get("Order date")
             ),
-            latest_contact_id=latest_contact.get("contact_id"),
-            latest_contact_result=latest_contact.get("result"),
-            latest_contact_date=latest_contact.get("date_time"),
-        )
+            "latest_contact_id": latest_contact.get("contact_id"),
+            "latest_contact_result": latest_contact.get("result"),
+            "latest_contact_date": latest_contact.get("date_time"),
+        }
+        context_hash = decision_context_hash(**context_inputs)
+        legacy_context_hash = legacy_decision_context_hash_v1(**context_inputs)
         results.append({
             "decision_context_hash": context_hash,
+            "compatible_decision_context_hashes": (
+                [legacy_context_hash]
+                if legacy_context_hash != context_hash else []
+            ),
             "customer_id": customer_id,
             "customer_key": _text(customer.get("customer_number")) or customer_name,
             "customer_row": customer.get("row") or "",
