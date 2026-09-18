@@ -1838,6 +1838,13 @@
       padding: 12px 12px 44px;
     }
 
+    .list-guidance-help {
+      margin: 8px 2px 0;
+      color: var(--pb-muted);
+      font-size: 0.72rem;
+      line-height: 1.35;
+    }
+
     .customer-card {
       position: relative;
       border: 2px solid #c8cdd7;
@@ -1923,6 +1930,46 @@
       color: var(--pb-ink);
     }
 
+    .guidance-badges {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-bottom: 7px;
+    }
+
+    .guidance-badge {
+      display: inline-flex;
+      align-items: center;
+      min-height: 23px;
+      padding: 3px 8px;
+      border: 1px solid var(--pb-border);
+      border-radius: 999px;
+      background: #fff;
+      color: var(--pb-ink);
+      font-size: 0.68rem;
+      font-weight: 850;
+      letter-spacing: 0.02em;
+      text-transform: uppercase;
+    }
+
+    .guidance-badge.focus-a-prospect {
+      border-color: rgba(53,89,131,0.24);
+      background: var(--pb-blue-soft);
+      color: var(--pb-blue);
+    }
+
+    .guidance-badge.status-critical {
+      border-color: #efb8c2;
+      background: #fff3f4;
+      color: #9c2842;
+    }
+
+    .guidance-badge.status-planned {
+      border-color: #b9dfc9;
+      background: #effaf4;
+      color: #236b42;
+    }
+
     .card-reason {
       margin-top: 2px;
       font-size: 0.72rem;
@@ -1935,8 +1982,8 @@
       background: #fff3f4;
     }
 
-    .next-action-yellow {
-      background: #fff8d6;
+    .next-action-neutral {
+      background: #fff;
     }
 
     .next-action-green {
@@ -1986,8 +2033,8 @@
       font-weight: 850;
     }
 
-    .card-date-followup.today {
-      color: #934513;
+    .card-date-followup.planned {
+      color: #236b42;
       font-weight: 850;
     }
 
@@ -3841,7 +3888,7 @@
       <button class="chip" id="chip-region">Region</button>
       <button class="chip" id="chip-city">Stad</button>
       <button class="chip" id="chip-segment">Segment</button>
-      <button class="chip" id="chip-priority">Prio</button>
+      <button class="chip" id="chip-focus">Fokus</button>
       <button class="chip" id="chip-risk">Risk</button>
       <button class="chip" id="chip-latest-contact">Senast kontakt</button>
       <button class="chip" id="chip-delivery">Senast Leverans</button>
@@ -3851,6 +3898,7 @@
     <div id="clear-filters-row" style="display:none">
       <button class="chip chip-clear" id="clear-filters-btn">✕ Rensa filter</button>
     </div>
+    <p class="list-guidance-help">Sorterat efter poäng. Fokus visar affärsspår, status visar läget. En viktig kund kan vara högt rankad men redan planerad.</p>
   </div>
 
   <div class="list-body" id="customer-list">
@@ -4667,7 +4715,7 @@
   }
 
   // ── Multi-select filter state ──
-  const filterState = { segment: new Set(), city: new Set(), region: new Set(), priority: new Set(), risk: new Set(), delivery: new Set(), latestContact: new Set(), emailProposal: new Set() };
+  const filterState = { segment: new Set(), city: new Set(), region: new Set(), focus: new Set(), risk: new Set(), delivery: new Set(), latestContact: new Set(), emailProposal: new Set() };
 
   async function loadInsights({
     render = true,
@@ -4735,7 +4783,7 @@
     segment:     "Segment",
     city:        "Stad",
     region:      "Region",
-    priority:    "Prio",
+    focus:       "Fokus",
     risk:        "Risk",
     delivery:    "Senast Leverans",
     latestContact: "Senast kontakt",
@@ -4745,13 +4793,14 @@
     segment:     "chip-segment",
     city:        "chip-city",
     region:      "chip-region",
-    priority:    "chip-priority",
+    focus:       "chip-focus",
     risk:        "chip-risk",
     delivery:    "chip-delivery",
     latestContact: "chip-latest-contact",
     emailProposal: "chip-email-proposal",
   };
-  const _sheetValues = { segment: [], city: [], region: [], priority: ["Hög prio", "Medel prio", "Låg prio"], risk: [], delivery: [], latestContact: ["<1 månad", "1-2 månader", ">3 månader", "Saknar kontakt"], emailProposal: ["Påminnelse", "Återaktivering", "Nykund"] };
+  const FOCUS_LABELS = ["Återaktivering", "Återköp", "Andra köpet", "A-prospekt", "Varm möjlighet", "Övrigt"];
+  const _sheetValues = { segment: [], city: [], region: [], focus: FOCUS_LABELS.slice(), risk: [], delivery: [], latestContact: ["<1 månad", "1-2 månader", ">3 månader", "Saknar kontakt"], emailProposal: ["Påminnelse", "Återaktivering", "Nykund"] };
 
   // ── Filter modal ──
   const _customerFieldMap = {
@@ -4762,7 +4811,7 @@
 
   function getAvailableValues(key) {
     // Insight-based filters are not cascaded
-    if (key === "priority" || key === "risk" || key === "delivery" || key === "latestContact" || key === "emailProposal") return _sheetValues[key];
+    if (key === "focus" || key === "risk" || key === "delivery" || key === "latestContact" || key === "emailProposal") return _sheetValues[key];
     // Apply all active filters except the one being opened
     let base = customers;
     for (const [k, field] of Object.entries(_customerFieldMap)) {
@@ -4834,12 +4883,12 @@
   });
 
   function buildInsightDropdowns() {
-    _sheetValues.priority = ["Hög prio", "Medel prio", "Låg prio"];
+    _sheetValues.focus = FOCUS_LABELS.slice();
     _sheetValues.risk = ["Aktiv", "Bevaka", "Risk", "Hög risk", "Återaktivering krävs"];
     _sheetValues.delivery = [...new Set(
       Object.values(insights).map(i => i.latest_delivery_month).filter(Boolean)
     )].sort().reverse();
-    updateChip("priority");
+    updateChip("focus");
     updateChip("risk");
     updateChip("delivery");
     updateChip("latestContact");
@@ -4851,12 +4900,12 @@
     _sheetValues.segment     = unique("customer_segment");
     _sheetValues.city        = unique("city");
     _sheetValues.region      = unique("region_google");
-    _sheetValues.priority    = ["Hög prio", "Medel prio", "Låg prio"];
+    _sheetValues.focus       = FOCUS_LABELS.slice();
     _sheetValues.latestContact = ["<1 månad", "1-2 månader", ">3 månader", "Saknar kontakt"];
     updateChip("segment");
     updateChip("city");
     updateChip("region");
-    updateChip("priority");
+    updateChip("focus");
     updateChip("latestContact");
   }
 
@@ -4962,30 +5011,52 @@
     );
   }
 
-  // Urgency is a presentation concern; keep backend tones unchanged.
-  function getNextActionColorClass(tone) {
-    if (tone === "urgent") return "next-action-red";
-    if (tone === "low") return "next-action-green";
-    return "next-action-yellow";
+  function getCustomerGuidance(customerOrInsight) {
+    const insight = customerOrInsight?.customer_guidance
+      ? customerOrInsight
+      : getCustomerInsight(customerOrInsight);
+    return insight?.customer_guidance || {};
+  }
+
+  function getGuidanceStatusClass(statusKey) {
+    if (statusKey === "act_now" || statusKey === "overdue_followup") return "status-critical";
+    if (statusKey === "planned") return "status-planned";
+    return "status-neutral";
+  }
+
+  function getNextActionColorClass(statusKey) {
+    if (statusKey === "act_now" || statusKey === "overdue_followup") return "next-action-red";
+    if (statusKey === "planned") return "next-action-green";
+    return "next-action-neutral";
+  }
+
+  function guidanceContactLabel(value) {
+    return { visit: "Besök", phone: "Telefon", email: "Mejl" }[value] || "";
   }
 
   function getNextActionHtml(c) {
     const insight = getCustomerInsight(c);
-    const action = insight.next_action || {};
-    const actionLabel = action.label || "Ingen rekommendation";
-    const channel = {
-      "besök": "Besök",
-      "telefon": "Telefon",
-      "email": "Email",
-      "avvakta": "Avvakta",
-    }[insight.recommended_channel] || "Avvakta";
-
-    const toneClass = getNextActionColorClass(action.tone);
+    const guidance = getCustomerGuidance(insight);
+    if (!guidance.focus_key || !guidance.status_key) {
+      return `
+        <div class="next-action next-action-neutral">
+          <div class="guidance-badges"><span class="guidance-badge status-neutral">Data saknas</span></div>
+          <div class="next-action-label">Vägledning kunde inte beräknas</div>
+          <div class="card-reason">Ladda om kundunderlaget innan du agerar.</div>
+        </div>`;
+    }
+    const toneClass = getNextActionColorClass(guidance.status_key);
+    const focusClass = guidance.focus_key === "a_prospect" ? "focus-a-prospect" : "";
+    const channel = guidanceContactLabel(guidance.recommended_contact_type);
 
     return `
       <div class="next-action ${toneClass}">
-        <div class="next-action-label">Nästa: ${esc(actionLabel)} · ${esc(channel)}</div>
-        <div class="card-reason">Status: ${esc(action.reason || "Ingen förklaring tillgänglig")}</div>
+        <div class="guidance-badges">
+          <span class="guidance-badge ${focusClass}">${esc(guidance.focus_label)}</span>
+          <span class="guidance-badge ${getGuidanceStatusClass(guidance.status_key)}">${esc(guidance.status_label)}</span>
+        </div>
+        <div class="next-action-label">${esc(guidance.action_label || "Ingen rekommendation")}${channel ? ` · ${esc(channel)}` : ""}</div>
+        <div class="card-reason">${esc(guidance.reason_text || "Ingen förklaring tillgänglig")}</div>
       </div>
     `;
   }
@@ -4995,10 +5066,7 @@
     const score = hasPriorityScore(ins)
       ? Number(ins.priority_score).toLocaleString("sv-SE", { maximumFractionDigits: 1 })
       : "—";
-    const level = hasPriorityScore(ins) && ins.priority_level
-      ? ins.priority_level
-      : "Prioritet saknas";
-    return `<div class="priority-summary">${esc(score)} poäng · ${esc(level)}</div>`;
+    return `<div class="priority-summary">${esc(score)} poäng</div>`;
   }
 
   function getPotentialHtml(c) {
@@ -5019,21 +5087,27 @@
 
   function getCardDatesHtml(c) {
     const ins = getCustomerInsight(c);
+    const guidance = getCustomerGuidance(ins);
     const delivery = getCardDateHtml(ins.latest_delivery_date);
+    const nextDelivery = getCardDateHtml(ins.next_delivery_date);
     const contact = getCardDateHtml(ins.latest_contact_date || c.latest_contact_date);
-    const followUpDate = String(ins.latest_follow_up_date || "").trim().slice(0, 10);
+    const followUpDate = String(guidance.next_contact_at || ins.latest_follow_up_date || "").trim().slice(0, 10);
     let followUp = "";
-    if (ins.missad_uppfoljning && followUpDate) {
+    if (guidance.status_key === "overdue_followup" && followUpDate) {
       followUp = `<span class="card-date-followup missed">Uppföljning ${getCardDateHtml(followUpDate)}</span>`;
-    } else if (ins.follow_up_due && followUpDate === getStockholmRouteDate()) {
-      followUp = `<span class="card-date-followup today">Uppföljning ${getCardDateHtml(followUpDate)} · idag</span>`;
+    } else if (guidance.status_key === "planned" && followUpDate) {
+      followUp = `<span class="card-date-followup planned">Nästa kontakt ${getCardDateHtml(followUpDate)}</span>`;
     }
+    const deliveryLabel = guidance.focus_key === "second_purchase" ? "Första leverans" : "Senaste leverans";
+    const volume = guidance.focus_key === "second_purchase" ? ins.first_delivery_dfp : ins.latest_order_dfp;
+    const volumeText = Number.isFinite(Number(volume)) && Number(volume) > 0 ? ` · ${Number(volume).toLocaleString("sv-SE", { maximumFractionDigits: 1 })} DFP` : "";
 
     return `
       <div class="card-dates">
-        <span class="card-date-primary">Leverans ${delivery}</span>
+        <span class="card-date-primary">${deliveryLabel} ${delivery}${volumeText}</span>
         <span class="card-date-secondary">
           <span>Kontakt ${contact}</span>
+          ${ins.next_delivery_date ? `<span>Nästa leverans ${nextDelivery}</span>` : ""}
           ${followUp}
         </span>
       </div>
@@ -5041,17 +5115,36 @@
   }
 
   function getPriorityCardClass(c) {
-    if (!hasPriorityScore(getCustomerInsight(c))) return "priority-neutral";
-    return `priority-${getPriorityLevelClass(getCustomerInsight(c).priority_level)}`;
+    return getCustomerGuidance(c).status_key ? "guidance-card" : "priority-neutral";
   }
 
   function getCustomerCardAriaLabel(c, routeStop = null) {
     const ins = getCustomerInsight(c);
+    const guidance = getCustomerGuidance(ins);
     const score = hasPriorityScore(ins) ? `${ins.priority_score} poäng` : "poäng saknas";
-    const level = hasPriorityScore(ins) ? (ins.priority_level || "prioritet saknas") : "prioritet saknas";
-    const action = ins.next_action?.label || "ingen rekommendation";
+    const focus = guidance.focus_label || "fokus saknas";
+    const status = guidance.status_label || "status saknas";
+    const action = guidance.action_label || "ingen rekommendation";
     const prefix = routeStop ? `Stopp ${routeStop.sequence}. ` : "";
-    return `${prefix}${c.customer}. ${score}. ${level}. Nästa: ${action}.`;
+    return `${prefix}${c.customer}. ${score}. Fokus: ${focus}. Status: ${status}. Nästa: ${action}.`;
+  }
+
+  function getCardPlanningButtonHtml(c) {
+    if (isCancelledCustomer(c) || !currentUserCanPlan()) return "";
+    const guidance = getCustomerGuidance(c);
+    if (!guidance.status_key || guidance.status_key === "data_missing") return "";
+    let label = "";
+    if (guidance.status_key === "planned") {
+      label = guidance.planned_activity_id
+        ? "Öppna planering"
+        : "Komplettera planering";
+    } else if (guidance.status_key === "overdue_followup") {
+      label = "Planera om";
+    } else if (guidance.status_key === "act_now") {
+      label = "Planera kontakt";
+    }
+    if (!label) return "";
+    return `<button class="planning-card-plan-btn" type="button" data-plan-row="${c.row}" data-planned-activity-id="${escAttr(guidance.planned_activity_id || "")}" data-plan-date="${escAttr(String(guidance.next_contact_at || "").slice(0, 10))}">${label}</button>`;
   }
 
   function getListSignature() {
@@ -5118,9 +5211,9 @@
     if (filterState.segment.size)     filtered = filtered.filter(c => filterState.segment.has(c.customer_segment));
     if (filterState.city.size)        filtered = filtered.filter(c => filterState.city.has(c.city));
     if (filterState.region.size)      filtered = filtered.filter(c => filterState.region.has(c.region_google));
-    if (filterState.priority.size) filtered = filtered.filter(c => {
+    if (filterState.focus.size) filtered = filtered.filter(c => {
       const ins = getCustomerInsight(c);
-      return filterState.priority.has(ins?.priority_level || "");
+      return filterState.focus.has(ins?.customer_guidance?.focus_label || "");
     });
     if (filterState.risk.size) filtered = filtered.filter(c => {
       const ins = getCustomerInsight(c);
@@ -5876,7 +5969,7 @@
           ${getNextActionHtml(c)}
           ${getPotentialHtml(c)}
           ${getCardDatesHtml(c)}
-          ${isCancelledCustomer(c) || !currentUserCanPlan() ? "" : `<button class="planning-card-plan-btn" type="button" data-plan-row="${c.row}">Planera kontakt</button>`}
+          ${getCardPlanningButtonHtml(c)}
         </div>`;
     }).join("") + (remainingCount > 0
       ? `<button class="load-more-btn" id="load-more-btn">Visa fler (${remainingCount} kvar)</button>`
@@ -5900,7 +5993,17 @@
       button.addEventListener("click", async event => {
         event.stopPropagation();
         const customer = customers.find(item => Number(item.row) === Number(button.dataset.planRow));
-        if (customer) await openPlanningEditorForCustomer(customer);
+        if (!customer) return;
+        const activityId = String(button.dataset.plannedActivityId || "");
+        if (activityId) {
+          await openPlanningView({ date: button.dataset.planDate || "" });
+          openPlanningActivityDetail(activityId);
+          return;
+        }
+        await openPlanningEditorForCustomer(
+          customer,
+          button.dataset.planDate || ""
+        );
       });
     });
 
@@ -7578,18 +7681,43 @@
       document.getElementById("planning-overdue-skip")?.addEventListener("click", () => updatePlanningActivityStatus(planningRecommendation, "skipped"));
       return;
     }
+    const guidance = planningRecommendation.customer_guidance || {};
+    if (planningRecommendation.status === "dismissed") {
+      section.innerHTML = `
+        <div class="planning-recommendation-heading">TIDIGARE FÖRSLAG</div>
+        <div class="planning-recommendation-card">
+          <div class="guidance-badges">
+            <span class="guidance-badge focus-a-prospect">${esc(guidance.focus_label || "A-prospekt")}</span>
+            <span class="guidance-badge status-neutral">Tidigare förslag dolt</span>
+          </div>
+          <button class="planning-recommendation-customer" id="planning-recommendation-customer" type="button" ${disabled}>${esc(planningRecommendation.customer || "Okänd kund")}</button>
+          <div class="planning-recommendation-reason">Möjligheten finns kvar, men det historiska beslutet har bevarats.</div>
+          <div class="planning-recommendation-actions">
+            <button class="planning-compact-btn primary" id="planning-recommendation-resume" type="button" ${disabled}>Återuppta förslag</button>
+          </div>
+        </div>`;
+      document.getElementById("planning-recommendation-customer")?.addEventListener("click", openRecommendationCustomer);
+      document.getElementById("planning-recommendation-resume")?.addEventListener("click", resumePlanningRecommendation);
+      return;
+    }
+    const isAProspect = guidance.focus_key === "a_prospect";
     section.innerHTML = `
       <div class="planning-recommendation-heading">NÄSTA ÅTGÄRD</div>
       <div class="planning-recommendation-card">
+        <div class="guidance-badges">
+          <span class="guidance-badge ${isAProspect ? "focus-a-prospect" : ""}">${esc(guidance.focus_label || "Fokus saknas")}</span>
+          <span class="guidance-badge ${getGuidanceStatusClass(guidance.status_key)}">${esc(guidance.status_label || "Agera nu")}</span>
+        </div>
         <button class="planning-recommendation-customer" id="planning-recommendation-customer" type="button" ${disabled}>${esc(planningRecommendation.customer || "Okänd kund")}</button>
-        <div class="planning-recommendation-reason">${esc(planningRecommendation.reason_text || "")}</div>
+        <div class="planning-recommendation-priority">${esc(planningRecommendation.action_label || guidance.action_label || "Följ upp kunden")}</div>
+        <div class="planning-recommendation-reason">${esc(guidance.reason_text || planningRecommendation.reason_text || "")}</div>
         ${planningRecommendationContactContext(planningRecommendation.contact_context)}
         <div class="planning-recommendation-channel">Förslag: ${esc(PLANNING_CONTACT_TYPES[planningRecommendation.recommended_contact_type]?.label || "Besök")}</div>
         <div class="planning-recommendation-actions">
           <button class="planning-compact-btn primary" id="planning-recommendation-contact" type="button" ${disabled || !planningRecommendation.can_call ? "disabled" : ""}>Ring nu</button>
           <button class="planning-compact-btn" id="planning-recommendation-plan" type="button" ${disabled}>Planera</button>
-          <button class="planning-compact-btn" id="planning-recommendation-snooze" type="button" ${disabled}>Snooza</button>
-          <button class="planning-compact-btn danger" id="planning-recommendation-dismiss" type="button" ${disabled}>Dölj detta förslag</button>
+          <button class="planning-compact-btn" id="planning-recommendation-snooze" type="button" ${disabled}>Snooza 7 dagar</button>
+          ${isAProspect ? "" : `<button class="planning-compact-btn danger" id="planning-recommendation-dismiss" type="button" ${disabled}>Dölj detta förslag</button>`}
         </div>
       </div>`;
     document.getElementById("planning-recommendation-customer")?.addEventListener("click", openRecommendationCustomer);
@@ -7717,7 +7845,11 @@
         }
       );
       replaceWithNextRecommendation(payload);
-      showToast(action === "snooze" ? "Rekommendationen är snoozad i 7 dagar" : "Rekommendationen markerades som ej relevant");
+      showToast({
+        snooze: "Rekommendationen är snoozad i 7 dagar",
+        dismiss: "Rekommendationen markerades som ej relevant",
+        resume: "Rekommendationen är återupptagen",
+      }[action] || "Rekommendationen har uppdaterats");
     } catch (error) {
       showToast(error.message || "Rekommendationen kunde inte sparas");
       renderPlanningRecommendation();
@@ -7735,6 +7867,37 @@
     return mutateVisibleRecommendation("dismiss");
   }
 
+  function resumePlanningRecommendation() {
+    return mutateVisibleRecommendation("resume");
+  }
+
+  async function resumePlanningSuggestionItem(suggestion) {
+    if (planningRecommendationLoading || !suggestion?.suggestion_id) return;
+    planningRecommendationLoading = true;
+    renderPlanningRecommendation();
+    try {
+      await planningFetchJson(
+        `/planning/suggestions/${encodeURIComponent(suggestion.suggestion_id)}/resume`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            client_request_id: planningClientRequestId("suggestion-resume"),
+            expected_revision: Number(suggestion.revision || 1),
+          }),
+        }
+      );
+      showToast("Rekommendationen är återupptagen");
+      await loadPlanningRecommendation({ previewLimit: planningRecommendationPreviewLimit });
+    } catch (error) {
+      showToast(error.message || "Rekommendationen kunde inte återupptas");
+    } finally {
+      planningRecommendationLoading = false;
+      renderPlanningRecommendation();
+      renderPlanningCandidates();
+    }
+  }
+
   function openPlanningView({ date = "" } = {}) {
     const targetDate = planningDateFromKey(date) ? date : (planningSelectedDate || planningTodayKey());
     planningSelectedDate = targetDate;
@@ -7748,8 +7911,11 @@
     return loadPlanningWeek();
   }
 
-  async function openPlanningEditorForCustomer(customer) {
+  async function openPlanningEditorForCustomer(customer, suggestedDate = "") {
     if (!customer) return;
+    const targetDate = planningDateFromKey(suggestedDate)
+      ? suggestedDate
+      : (planningSelectedDate || planningTodayKey());
     if (userIsAdmin()) {
       if (!planningData?.available_users?.length) {
         await openPlanningView();
@@ -7770,7 +7936,7 @@
     }
     openPlanningEditor({
       customer,
-      date: planningSelectedDate || planningTodayKey(),
+      date: targetDate,
     });
   }
 
@@ -8464,11 +8630,22 @@
           </div>
         </div>`;
       }
+      if (suggestion.status === "dismissed") {
+        return `<div class="planning-backlog-item">
+          <div>
+            <button class="planning-backlog-customer" type="button" data-planning-preview-customer="${index}">${esc(suggestion.customer || "Okänd kund")}</button>
+            <div class="planning-backlog-meta">Tidigare A-prospektförslag dolt</div>
+          </div>
+          <button class="planning-compact-btn" type="button" data-planning-preview-resume="${index}">Återuppta</button>
+        </div>`;
+      }
+      const guidance = suggestion.customer_guidance || {};
       const channel = PLANNING_CONTACT_TYPES[suggestion.recommended_contact_type]?.label || "Besök";
       return `<div class="planning-backlog-item">
         <div>
           <button class="planning-backlog-customer" type="button" data-planning-preview-customer="${index}">${esc(suggestion.customer || "Okänd kund")}</button>
-          <div class="planning-backlog-meta">${esc(suggestion.reason_text || "")} · ${esc(channel)}</div>
+          <div class="planning-backlog-meta">${esc(guidance.focus_label || "")} · ${esc(suggestion.action_label || guidance.action_label || "")} · ${esc(channel)}</div>
+          <div class="planning-backlog-meta">${esc(guidance.reason_text || suggestion.reason_text || "")}</div>
         </div>
         <button class="planning-compact-btn" type="button" data-planning-preview-plan="${index}">Planera</button>
       </div>`;
@@ -8492,6 +8669,11 @@
     target.querySelectorAll("[data-planning-preview-plan]").forEach(button => {
       button.addEventListener("click", () => openRecommendationPlanner(
         visible[Number(button.dataset.planningPreviewPlan)]
+      ));
+    });
+    target.querySelectorAll("[data-planning-preview-resume]").forEach(button => {
+      button.addEventListener("click", () => resumePlanningSuggestionItem(
+        visible[Number(button.dataset.planningPreviewResume)]
       ));
     });
     target.querySelectorAll("[data-planning-overdue-action]").forEach(button => {
@@ -10365,14 +10547,6 @@
         `).join("")}
       </tr>
     `;
-  }
-
-  function getPriorityLevelClass(level) {
-    return {
-      "Hög prio": "high",
-      "Medel prio": "medium",
-      "Låg prio": "low",
-    }[level] || "neutral";
   }
 
   document.getElementById("insights-mode-btn").addEventListener("click", openFollowupInsights);

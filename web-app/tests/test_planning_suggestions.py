@@ -423,3 +423,135 @@ class PlanningSuggestionProductionGuardTests(TestCase):
                 self.assertFalse(app_module.planning_suggestion_stub_enabled())
         finally:
             app_module.app.config.pop("PLANNING_SUGGESTIONS_STUB", None)
+
+
+class PersistentAProspectSuggestionTests(PlanningApiTestCase):
+    def current(self):
+        response = self.client.get("/planning/suggestions")
+        self.assertEqual(response.status_code, 200, response.get_json())
+        return response.get_json()
+
+    def test_new_a_prospect_can_snooze_but_not_be_permanently_hidden(self):
+        suggestion = self.current()["suggestion"]
+        self.assertEqual(
+            suggestion["customer_guidance"]["focus_key"], "a_prospect"
+        )
+
+        dismissed = self.client.post(
+            f"/planning/suggestions/{suggestion['suggestion_id']}/dismiss",
+            json={
+                "client_request_id": "reject-a-dismiss",
+                "expected_revision": suggestion["revision"],
+            },
+        )
+        self.assertEqual(dismissed.status_code, 409, dismissed.get_json())
+        self.assertEqual(
+            dismissed.get_json()["code"], "a_prospect_requires_snooze"
+        )
+
+        snoozed = self.client.post(
+            f"/planning/suggestions/{suggestion['suggestion_id']}/snooze",
+            json={
+                "client_request_id": "snooze-a-prospect",
+                "expected_revision": suggestion["revision"],
+            },
+        )
+        self.assertEqual(snoozed.status_code, 200, snoozed.get_json())
+        stored = self.spreadsheet.worksheet(SUGGESTIONS_SHEET).dict_rows()[0]
+        self.assertEqual(stored["status"], "snoozed")
+        self.assertEqual(
+            app_module.parse_planning_instant(stored["snooze_until"]),
+            NOW + timedelta(days=7),
+        )
+
+    def test_resolved_a_prospect_reopens_after_contact_pause(self):
+        suggestion = self.current()["suggestion"]
+        self.assertEqual(
+            suggestion["customer_guidance"]["focus_key"], "a_prospect"
+        )
+
+        saved = self.client.post(
+            "/customers/Butik%20A/contacts",
+            json={
+                "client_request_id": "a-prospect-contact",
+                "date_time": "2026-07-27 10:15",
+                "contact_channel": "Telefon",
+                "result": "Neutral",
+                "comment": "Kontakt genomförd utan order",
+                "customer_contact_person": "Klara",
+            },
+        )
+        self.assertEqual(saved.status_code, 200, saved.get_json())
+        stored = next(
+            row
+            for row in self.spreadsheet.worksheet(SUGGESTIONS_SHEET).dict_rows()
+            if row["suggestion_id"] == suggestion["suggestion_id"]
+        )
+        self.assertEqual(stored["status"], "resolved")
+        self.assertEqual(stored["resolved_by_type"], "contact")
+
+        later = NOW + timedelta(days=3)
+        owner = {"user_name": "olle", "name": "Olle"}
+        with (
+            patch.object(app_module, "stockholm_now", return_value=later),
+            patch.object(app_module, "stockholm_today", return_value=later.date()),
+        ):
+            activities = self.planning_rows()
+            candidates = app_module.planning_suggestion_candidates(
+                self.spreadsheet, owner, activities
+            )
+            app_module.planning_suggestion_service(self.spreadsheet).queue(
+                owner,
+                candidates,
+                activity_rows=activities,
+            )
+
+        reopened = next(
+            row
+            for row in self.spreadsheet.worksheet(SUGGESTIONS_SHEET).dict_rows()
+            if row["suggestion_id"] == suggestion["suggestion_id"]
+        )
+        self.assertEqual(reopened["status"], "pending")
+        self.assertEqual(reopened["resolved_by_type"], "")
+
+    def test_historical_hidden_a_prospect_is_visible_and_explicitly_resumable(self):
+        suggestion = self.current()["suggestion"]
+        owner = {"user_name": "olle", "name": "Olle"}
+        candidates = app_module.planning_suggestion_candidates(
+            self.spreadsheet, owner
+        )
+        live = next(
+            item for item in candidates
+            if item["customer_id"] == suggestion["customer_id"]
+        )
+        service = app_module.planning_suggestion_service(self.spreadsheet)
+        service.transition(
+            suggestion["suggestion_id"],
+            owner_name="olle",
+            action="dismiss",
+            expected_revision=suggestion["revision"],
+            request_id="historical-dismiss",
+            fingerprint=mutation_fingerprint(
+                "dismiss", suggestion["suggestion_id"], "historical-dismiss"
+            ),
+            live_candidate=live,
+        )
+
+        hidden = self.current()["suggestion"]
+        self.assertEqual(hidden["suggestion_id"], suggestion["suggestion_id"])
+        self.assertEqual(hidden["status"], "dismissed")
+        self.assertEqual(
+            hidden["customer_guidance"]["reason_text"], "Tidigare förslag dolt"
+        )
+
+        resumed = self.client.post(
+            f"/planning/suggestions/{hidden['suggestion_id']}/resume",
+            json={
+                "client_request_id": "resume-historical-a",
+                "expected_revision": hidden["revision"],
+            },
+        )
+        self.assertEqual(resumed.status_code, 200, resumed.get_json())
+        self.assertEqual(
+            resumed.get_json()["next_suggestion"]["status"], "pending"
+        )

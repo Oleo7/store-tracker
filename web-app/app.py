@@ -381,6 +381,7 @@ PERFORMANCE_ENDPOINTS = {
     "/planning/suggestions",
     "/planning/suggestions/<suggestion_id>/snooze",
     "/planning/suggestions/<suggestion_id>/dismiss",
+    "/planning/suggestions/<suggestion_id>/resume",
     "/planning/suggestions/<suggestion_id>/plan",
     "/planning/route-apply",
     "/planning/route-import",
@@ -3344,6 +3345,44 @@ def planning_suggestion_sort_key(item):
     )
 
 
+def priority_decision_context_hash(priority, owner_name):
+    """Keep A-prospect state stable until owner, segment, or order facts change."""
+    guidance = priority.get("customer_guidance") or {}
+    persistent_a_prospect = guidance.get("focus_key") == "a_prospect"
+    return decision_context_hash(
+        owner=owner_name,
+        customer_id=priority.get("customer_id"),
+        lifecycle=(
+            priority.get("decision_context_lifecycle")
+            or priority.get("lifecycle")
+        ),
+        order_count=priority.get("order_count"),
+        latest_order_reference=priority.get("latest_order_reference"),
+        latest_order_date=(
+            priority.get("latest_delivery_date")
+            or priority.get("latest_order_date")
+        ),
+        latest_contact_id=(
+            "" if persistent_a_prospect else priority.get("latest_human_contact_id")
+        ),
+        latest_contact_result=(
+            "" if persistent_a_prospect else priority.get("latest_contact_result")
+        ),
+        latest_contact_date=(
+            "" if persistent_a_prospect else priority.get("latest_human_contact_date")
+        ),
+        active_email_intent_event=(
+            priority.get("decision_context_email_event")
+            if "decision_context_email_event" in priority
+            else priority.get("active_email_intent_event")
+        ),
+        # Segment is part of the persistent A-prospect business context so an
+        # A->B/C or B/C->A reclassification cannot inherit stale workflow
+        # state. Other suggestion types keep their existing IDs.
+        segment=priority.get("segment") if persistent_a_prospect else "",
+    )
+
+
 def planning_suggestion_candidates(spreadsheet, owner, activity_rows=()):
     if planning_suggestion_stub_enabled():
         customers = get_customer_rows(spreadsheet)
@@ -3382,28 +3421,14 @@ def planning_suggestion_candidates(spreadsheet, owner, activity_rows=()):
             primary_trigger = str(
                 priority.get("primary_trigger_type") or ""
             ).strip()
+            guidance = priority.get("customer_guidance") or {}
             recommendation_visible = bool(
-                primary_trigger and priority.get("recommendation_eligible")
+                primary_trigger
+                and priority.get("recommendation_eligible")
+                and guidance.get("can_contact_now")
             )
-            context_hash = decision_context_hash(
-                owner=owner.get("user_name"),
-                customer_id=priority.get("customer_id"),
-                lifecycle=(
-                    priority.get("decision_context_lifecycle")
-                    or priority.get("lifecycle")
-                ),
-                order_count=priority.get("order_count"),
-                latest_order_reference=priority.get("latest_order_reference"),
-                latest_order_date=(
-                    priority.get("latest_delivery_date")
-                    or priority.get("latest_order_date")
-                ),
-                latest_contact_id=priority.get("latest_human_contact_id"),
-                latest_contact_result=priority.get("latest_contact_result"),
-                latest_contact_date=priority.get("latest_human_contact_date"),
-                active_email_intent_event=priority.get(
-                    "active_email_intent_event"
-                ),
+            context_hash = priority_decision_context_hash(
+                priority, owner.get("user_name")
             )
             candidates.append({
                 "decision_context_hash": context_hash,
@@ -3437,22 +3462,28 @@ def planning_suggestion_candidates(spreadsheet, owner, activity_rows=()):
                 "recommendation_eligible": priority.get("recommendation_eligible"),
                 "recommendation_suppression_reason": suppression,
                 "reason_code": priority.get("primary_reason_code"),
-                "reason_text": priority.get("primary_reason_text"),
+                "reason_text": (
+                    guidance.get("reason_text")
+                    or priority.get("primary_reason_text")
+                ),
+                "action_label": guidance.get("action_label", ""),
+                "customer_guidance": guidance,
                 "primary_trigger_type": primary_trigger or "scoring_context",
                 "primary_trigger_key": primary_trigger or "scoring_context",
                 "covered_trigger_keys": priority.get("covered_trigger_keys") or [],
                 "trigger_precedence": {
-                    "stockfiller_click_followup": 1,
-                    "product_sheet_click_followup": 2,
-                    "email_open_followup": 3,
-                    "established_reorder_due": 4,
-                    "first_order_onboarding": 5,
-                    "first_order_reorder": 6,
-                    "positive_dialogue_followup": 7,
-                    "repeat_reactivation_due": 8,
-                    "single_order_reactivation_due": 9,
-                    "strategic_contact_due": 10,
-                    "legacy_missed_followup": 11,
+                    "a_prospect_due": 1,
+                    "stockfiller_click_followup": 2,
+                    "product_sheet_click_followup": 3,
+                    "email_open_followup": 4,
+                    "established_reorder_due": 5,
+                    "first_order_onboarding": 6,
+                    "first_order_reorder": 7,
+                    "positive_dialogue_followup": 8,
+                    "repeat_reactivation_due": 9,
+                    "single_order_reactivation_due": 10,
+                    "strategic_contact_due": 11,
+                    "legacy_missed_followup": 12,
                 }.get(primary_trigger, 99),
                 "externally_suppressed": not recommendation_visible,
                 "overdue_days": priority.get("overdue_days"),
@@ -6794,26 +6825,7 @@ def priority_workflow_suppressions(spreadsheet, priority_customers):
         owner_name = owners.get(normalize_key(priority.get("sales_person")), "")
         if not customer_id or not owner_name:
             continue
-        context_hash = decision_context_hash(
-            owner=owner_name,
-            customer_id=customer_id,
-            lifecycle=(
-                priority.get("decision_context_lifecycle")
-                or priority.get("lifecycle")
-            ),
-            order_count=priority.get("order_count"),
-            latest_order_reference=priority.get("latest_order_reference"),
-            latest_order_date=(
-                priority.get("latest_delivery_date")
-                or priority.get("latest_order_date")
-            ),
-            latest_contact_id=priority.get("latest_human_contact_id"),
-            latest_contact_result=priority.get("latest_contact_result"),
-            latest_contact_date=priority.get("latest_human_contact_date"),
-            active_email_intent_event=priority.get(
-                "active_email_intent_event"
-            ),
-        )
+        context_hash = priority_decision_context_hash(priority, owner_name)
         row = by_identity.get((normalize_key(owner_name), customer_id, context_hash))
         status = str((row or {}).get("status") or "").strip().casefold()
         if status == "snoozed":
@@ -6947,8 +6959,11 @@ def get_customer_insights():
         risk = calculate_customer_risk(count, lo, ld_check, today)
 
         ld = latest_delivery.get(name)
-        latest_delivery_date = format_date_value(ld)
         priority = priority_by_name.get(normalize_key(name), {})
+        latest_delivery_date = (
+            priority.get("latest_delivery_date", "")
+            if priority else format_date_value(ld)
+        )
         missad = bool(priority.get("missad_uppfoljning", False))
         customer = customers_by_name.get(normalize_key(name), {"customer": name})
         has_prior_order = bool(priority.get("order_count", 0) or name in order_references)
@@ -7001,12 +7016,17 @@ def get_customer_insights():
             "recommended_action": priority.get("recommended_action", ""),
             "reasons": priority.get("reasons", []),
             "next_action": priority.get("next_action", {}),
+            "customer_guidance": priority.get("customer_guidance", {}),
             "order_count": priority.get("order_count", 0),
+            "delivery_count": priority.get("delivery_count", 0),
             "first_order_sku_count": priority.get("first_order_sku_count", 0),
             "total_dfp": priority.get("total_dfp"),
             "expected_order_dfp": priority.get("expected_order_dfp"),
             "latest_order_date": priority.get("latest_order_date", ""),
+            "latest_order_dfp": priority.get("latest_order_dfp"),
+            "first_delivery_dfp": priority.get("first_delivery_dfp"),
             "latest_delivery_date": latest_delivery_date,
+            "next_delivery_date": priority.get("next_delivery_date", ""),
             "latest_delivery_month": latest_delivery_date[:7] if latest_delivery_date else "",  # "YYYY-MM"
             "expected_cycle_days": priority.get("expected_cycle_days"),
             "expected_cycle_source": priority.get("expected_cycle_source", ""),
@@ -7307,6 +7327,17 @@ def mutate_planning_suggestion(suggestion_id, action):
             owner,
             planning_suggestion_candidates(spreadsheet, owner, activity_rows),
         ).get(suggestion_id)
+        if (
+            action == "dismiss"
+            and ((live_candidate or {}).get("customer_guidance") or {}).get(
+                "focus_key"
+            ) == "a_prospect"
+        ):
+            return planning_error(
+                "a_prospect_requires_snooze",
+                "A-prospekt kan snoozas i sju dagar men inte döljas permanent.",
+                409,
+            )
         fingerprint = suggestion_mutation_fingerprint(
             action, suggestion_id, client_request_id
         )
@@ -7349,6 +7380,11 @@ def snooze_planning_suggestion(suggestion_id):
 @app.route("/planning/suggestions/<suggestion_id>/dismiss", methods=["POST"])
 def dismiss_planning_suggestion(suggestion_id):
     return mutate_planning_suggestion(suggestion_id, "dismiss")
+
+
+@app.route("/planning/suggestions/<suggestion_id>/resume", methods=["POST"])
+def resume_planning_suggestion(suggestion_id):
+    return mutate_planning_suggestion(suggestion_id, "reopen")
 
 
 @app.route("/planning/suggestions/<suggestion_id>/plan", methods=["POST"])

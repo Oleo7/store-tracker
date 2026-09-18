@@ -144,7 +144,7 @@ class PlanningFrontendContractTests(TestCase):
         self.assertIn('id="planning-recommendation"', self.html)
         self.assertIn('<div class="planning-recommendation-heading">NÄSTA ÅTGÄRD</div>', self.html)
         self.assertNotIn("planningRecommendationPendingCount} kvar", self.html)
-        for label in ("Ring nu", "Planera", "Snooza", "Dölj detta förslag"):
+        for label in ("Ring nu", "Planera", "Snooza 7 dagar", "Dölj detta förslag"):
             self.assertIn(f">{label}</button>", self.html)
         render = re.search(
             r"function renderPlanningRecommendation\(.*?\) \{(.*?)\n  \}",
@@ -158,7 +158,7 @@ class PlanningFrontendContractTests(TestCase):
         self.assertIn("!planningRecommendation.can_call", render.group(1))
         button_positions = [
             render.group(1).index(f">{label}</button>")
-            for label in ("Ring nu", "Planera", "Snooza", "Dölj detta förslag")
+            for label in ("Ring nu", "Planera", "Snooza 7 dagar", "Dölj detta förslag")
         ]
         self.assertEqual(button_positions, sorted(button_positions))
         self.assertIn("Kalendern och övrig planering fungerar fortfarande", self.html)

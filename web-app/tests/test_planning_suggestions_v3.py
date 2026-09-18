@@ -109,7 +109,7 @@ class PlanningSuggestionV3IntegrationTests(PlanningApiTestCase):
             [item["primary_trigger_type"] for item in candidates], expected
         )
         self.assertEqual(
-            [item["trigger_precedence"] for item in candidates], [7, 8, 9, 10, 11]
+            [item["trigger_precedence"] for item in candidates], [8, 9, 10, 11, 12]
         )
 
     def test_live_trigger_and_plan_attribution_follow_current_candidate(self):
@@ -129,7 +129,7 @@ class PlanningSuggestionV3IntegrationTests(PlanningApiTestCase):
             current = self.client.get("/planning/suggestions").get_json()["suggestion"]
             self.assertEqual(current["suggestion_id"], onboarding["suggestion_id"])
             self.assertEqual(current["trigger_key"], "first_order_reorder")
-            self.assertEqual(current["reason_text"], "Dags att följa upp andra ordern")
+            self.assertEqual(current["reason_text"], "24 dagar sedan första leveransen")
             planned = self.client.post(
                 f"/planning/suggestions/{current['suggestion_id']}/plan",
                 json={
@@ -232,12 +232,12 @@ class PlanningSuggestionV3IntegrationTests(PlanningApiTestCase):
 
         suggestion = payload["suggestion"]
         self.assertEqual(payload["pending_count"], 1)
-        self.assertEqual(suggestion["trigger_key"], "strategic_contact_due")
+        self.assertEqual(suggestion["trigger_key"], "a_prospect_due")
         rows = self.spreadsheet.worksheet(SUGGESTIONS_SHEET).dict_rows()
         self.assertEqual(len(rows), 1)
         self.assertEqual(
             json.loads(rows[0]["covered_trigger_keys_json"]),
-            ["strategic_contact_due"],
+            ["a_prospect_due"],
         )
 
         self._append_contact("2026-07-20 10:00:00", "Neutral", "later-contact")
@@ -245,5 +245,5 @@ class PlanningSuggestionV3IntegrationTests(PlanningApiTestCase):
         with today_patch, now_patch:
             self.client.get("/planning/suggestions")
         old = self.spreadsheet.worksheet(SUGGESTIONS_SHEET).dict_rows()[0]
-        self.assertEqual(old["status"], "resolved")
-        self.assertEqual(old["resolved_by_type"], "business_context")
+        self.assertEqual(old["status"], "pending")
+        self.assertEqual(old["resolved_by_type"], "")

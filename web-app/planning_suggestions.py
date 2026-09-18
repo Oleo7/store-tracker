@@ -118,7 +118,8 @@ def _canonical_hash(payload):
 def decision_context_hash(*, owner, customer_id, lifecycle="", order_count=0,
                           latest_order_reference="", latest_order_date="",
                           latest_contact_id="", latest_contact_result="",
-                          latest_contact_date="", active_email_intent_event=""):
+                          latest_contact_date="", active_email_intent_event="",
+                          segment=""):
     """Hash stable business facts only; never live score, copy, or wall time."""
     return _canonical_hash({
         "owner": _key(owner),
@@ -131,6 +132,10 @@ def decision_context_hash(*, owner, customer_id, lifecycle="", order_count=0,
         "latest_contact_result": _key(latest_contact_result),
         "latest_contact_date": _text(latest_contact_date),
         "active_email_intent_event": _text(active_email_intent_event),
+        # Only callers that intentionally need segment-sensitive context pass
+        # this value. Keeping the default empty preserves IDs for unrelated
+        # suggestion types.
+        "segment": _key(segment),
     })
 
 
@@ -291,6 +296,8 @@ def public_suggestion(row, live_candidate=None):
         "reason_text": _text(
             candidate.get("reason_text") or row.get("reason_text_at_creation")
         ),
+        "action_label": _text(candidate.get("action_label")),
+        "customer_guidance": candidate.get("customer_guidance") or {},
         "recommended_contact_type": _text(
             candidate.get("recommended_contact_type")
             or row.get("recommended_contact_type") or "phone"
@@ -651,17 +658,74 @@ class PlanningSuggestionService:
                             after=changes.get("status", before)
                         )
 
-            visible = []
+            # A strategic A-prospect is a persistent opportunity. A completed
+            # contact/activity/email resolves that individual episode, but once
+            # the normal contact/cooldown suppression has expired the same
+            # opportunity must return until an order, segment change, owner
+            # change, or deactivation changes the business context.
             for suggestion_id, candidate in ordered:
-                if candidate.get("externally_suppressed"):
-                    continue
                 stored_entry = stored_by_id.get(suggestion_id)
+                if not stored_entry or candidate.get("externally_suppressed"):
+                    continue
+                row_index, row = stored_entry
+                guidance = candidate.get("customer_guidance") or {}
+                if (
+                    _key(row.get("status")) == "resolved"
+                    and _key(guidance.get("focus_key")) == "a_prospect"
+                    and _key(row.get("resolved_by_type"))
+                    in {"contact", "activity", "email"}
+                ):
+                    changes = {
+                        "status": "pending",
+                        "resolved_at": "",
+                        "resolved_by_type": "",
+                        "resolved_by_id": "",
+                        "revision": _revision(row) + 1,
+                        "updated_at": _timestamp(self.now),
+                        "last_evaluated_at": _timestamp(self.now),
+                    }
+                    _update(
+                        sheet, row_index, headers, changes, self.invalidator
+                    )
+                    updated = {**row, **changes}
+                    stored_by_id[suggestion_id] = (row_index, updated)
+                    self._event(
+                        events,
+                        "suggestion_reopened",
+                        self._live_event_row(updated, candidate),
+                        request_id=(
+                            f"persistent-reopen:{suggestion_id}:"
+                            f"{changes['revision']}"
+                        ),
+                        before="resolved",
+                        after="pending",
+                        resolved_by_type="persistent_a_prospect",
+                    )
+
+            visible = []
+            dismissed_a_prospects = []
+            for suggestion_id, candidate in ordered:
+                stored_entry = stored_by_id.get(suggestion_id)
+                if candidate.get("externally_suppressed"):
+                    if stored_entry:
+                        _row_index, row = stored_entry
+                        guidance = candidate.get("customer_guidance") or {}
+                        if (
+                            _key(row.get("status")) == "dismissed"
+                            and _key(guidance.get("focus_key")) == "a_prospect"
+                        ):
+                            dismissed_a_prospects.append(
+                                (suggestion_id, candidate, row)
+                            )
+                    continue
                 if not stored_entry:
                     visible.append((suggestion_id, candidate, None))
                     continue
                 _row_index, row = stored_entry
                 if _key(row.get("status")) == "pending":
                     visible.append((suggestion_id, candidate, row))
+
+            visible.extend(dismissed_a_prospects)
 
             pending_count = len(visible)
             if not visible:
@@ -815,7 +879,7 @@ class PlanningSuggestionService:
                 "plan": {"pending"},
                 "resolve": ACTIVE_STATUSES,
                 "expire": ACTIVE_STATUSES,
-                "reopen": {"planned"},
+                "reopen": {"planned", "dismissed"},
             }
             if before not in allowed[action]:
                 raise SuggestionError(
@@ -854,7 +918,10 @@ class PlanningSuggestionService:
                 event_type = "suggestion_expired"
             elif action == "reopen":
                 changes["planned_activity_id"] = ""
-                event_type = "linked_activity_cancelled"
+                event_type = (
+                    "suggestion_resumed"
+                    if before == "dismissed" else "linked_activity_cancelled"
+                )
             _update(sheet, row_index, headers, changes, self.invalidator)
             updated = {**row, **changes}
             event_row = self._live_event_row(updated, live_candidate)
