@@ -514,6 +514,116 @@ class PersistentAProspectSuggestionTests(PlanningApiTestCase):
         self.assertEqual(reopened["status"], "pending")
         self.assertEqual(reopened["resolved_by_type"], "")
 
+    def _rewrite_suggestion_as_pre_segment_context(self, suggestion):
+        owner = {"user_name": "olle", "name": "Olle"}
+        candidate = next(
+            item
+            for item in app_module.planning_suggestion_candidates(
+                self.spreadsheet, owner, self.planning_rows()
+            )
+            if item["customer_id"] == suggestion["customer_id"]
+        )
+        legacy_hashes = candidate.get("compatible_decision_context_hashes") or []
+        self.assertTrue(legacy_hashes)
+        legacy_hash = legacy_hashes[0]
+        legacy_id = app_module.deterministic_suggestion_id(
+            owner["user_name"], suggestion["customer_id"], legacy_hash
+        )
+        sheet = self.spreadsheet.worksheet(SUGGESTIONS_SHEET)
+        rows = sheet.dict_rows()
+        row_offset = next(
+            index
+            for index, row in enumerate(rows, start=2)
+            if row["suggestion_id"] == suggestion["suggestion_id"]
+        )
+        app_module.update_sheet_row(
+            sheet,
+            row_offset,
+            sheet.row_values(1),
+            {
+                "suggestion_id": legacy_id,
+                "decision_context_hash": legacy_hash,
+            },
+        )
+        return legacy_id
+
+    def test_pre_segment_snooze_is_preserved_in_queue_and_customer_list(self):
+        suggestion = self.current()["suggestion"]
+        snoozed = self.client.post(
+            f"/planning/suggestions/{suggestion['suggestion_id']}/snooze",
+            json={
+                "client_request_id": "legacy-schema-snooze",
+                "expected_revision": suggestion["revision"],
+            },
+        )
+        self.assertEqual(snoozed.status_code, 200, snoozed.get_json())
+        legacy_id = self._rewrite_suggestion_as_pre_segment_context(suggestion)
+
+        insights = self.client.get("/customer-insights")
+        self.assertEqual(insights.status_code, 200, insights.get_json())
+        butik = insights.get_json()["butik a"]
+        self.assertEqual(
+            butik["recommendation_suppression_reason"], "snoozed"
+        )
+        self.assertEqual(
+            butik["customer_guidance"]["status_key"], "wait"
+        )
+
+        queue = self.current()
+        self.assertNotEqual(
+            (queue.get("suggestion") or {}).get("customer_id"),
+            suggestion["customer_id"],
+        )
+        stored = [
+            row
+            for row in self.spreadsheet.worksheet(SUGGESTIONS_SHEET).dict_rows()
+            if row["customer_id"] == suggestion["customer_id"]
+        ]
+        self.assertEqual(len(stored), 1)
+        self.assertEqual(stored[0]["suggestion_id"], legacy_id)
+        self.assertEqual(stored[0]["status"], "snoozed")
+
+    def test_pre_segment_a_prospect_state_does_not_survive_segment_change(self):
+        suggestion = self.current()["suggestion"]
+        snoozed = self.client.post(
+            f"/planning/suggestions/{suggestion['suggestion_id']}/snooze",
+            json={
+                "client_request_id": "legacy-schema-before-segment-change",
+                "expected_revision": suggestion["revision"],
+            },
+        )
+        self.assertEqual(snoozed.status_code, 200, snoozed.get_json())
+        legacy_id = self._rewrite_suggestion_as_pre_segment_context(suggestion)
+
+        customer_sheet = self.spreadsheet.worksheet("customers_enriched")
+        customer_rows = customer_sheet.dict_rows()
+        customer_offset = next(
+            index
+            for index, row in enumerate(customer_rows, start=2)
+            if row["customer_id"] == suggestion["customer_id"]
+        )
+        app_module.update_sheet_row(
+            customer_sheet,
+            customer_offset,
+            customer_sheet.row_values(1),
+            {"customer_segment": "B"},
+        )
+
+        insights = self.client.get("/customer-insights")
+        self.assertEqual(insights.status_code, 200, insights.get_json())
+        butik = insights.get_json()["butik a"]
+        self.assertNotEqual(
+            butik["recommendation_suppression_reason"], "snoozed"
+        )
+
+        self.current()
+        old = next(
+            row
+            for row in self.spreadsheet.worksheet(SUGGESTIONS_SHEET).dict_rows()
+            if row["suggestion_id"] == legacy_id
+        )
+        self.assertIn(old["status"], {"resolved", "expired"})
+
     def test_historical_hidden_a_prospect_is_visible_and_explicitly_resumable(self):
         suggestion = self.current()["suggestion"]
         owner = {"user_name": "olle", "name": "Olle"}
