@@ -118,7 +118,8 @@ def _canonical_hash(payload):
 def decision_context_hash(*, owner, customer_id, lifecycle="", order_count=0,
                           latest_order_reference="", latest_order_date="",
                           latest_contact_id="", latest_contact_result="",
-                          latest_contact_date="", active_email_intent_event=""):
+                          latest_contact_date="", active_email_intent_event="",
+                          segment=""):
     """Hash stable business facts only; never live score, copy, or wall time."""
     return _canonical_hash({
         "owner": _key(owner),
@@ -131,6 +132,10 @@ def decision_context_hash(*, owner, customer_id, lifecycle="", order_count=0,
         "latest_contact_result": _key(latest_contact_result),
         "latest_contact_date": _text(latest_contact_date),
         "active_email_intent_event": _text(active_email_intent_event),
+        # Only callers that intentionally need segment-sensitive context pass
+        # this value. Keeping the default empty preserves IDs for unrelated
+        # suggestion types.
+        "segment": _key(segment),
     })
 
 
@@ -652,6 +657,46 @@ class PlanningSuggestionService:
                             events, event_type, row, before=before,
                             after=changes.get("status", before)
                         )
+
+            # A strategic A-prospect is a persistent opportunity. A completed
+            # contact/activity/email resolves that individual episode, but once
+            # the normal contact/cooldown suppression has expired the same
+            # opportunity must return until an order, segment change, owner
+            # change, or deactivation changes the business context.
+            for suggestion_id, candidate in ordered:
+                stored_entry = stored_by_id.get(suggestion_id)
+                if not stored_entry or candidate.get("externally_suppressed"):
+                    continue
+                row_index, row = stored_entry
+                guidance = candidate.get("customer_guidance") or {}
+                if (
+                    _key(row.get("status")) == "resolved"
+                    and _key(guidance.get("focus_key")) == "a_prospect"
+                    and _key(row.get("resolved_by_type"))
+                    in {"contact", "activity", "email"}
+                ):
+                    changes = {
+                        "status": "pending",
+                        "resolved_at": "",
+                        "resolved_by_type": "",
+                        "resolved_by_id": "",
+                        "revision": _revision(row) + 1,
+                        "updated_at": _timestamp(self.now),
+                        "last_evaluated_at": _timestamp(self.now),
+                    }
+                    _update(
+                        sheet, row_index, headers, changes, self.invalidator
+                    )
+                    updated = {**row, **changes}
+                    stored_by_id[suggestion_id] = (row_index, updated)
+                    self._event(
+                        events,
+                        "suggestion_reopened",
+                        self._live_event_row(updated, candidate),
+                        before="resolved",
+                        after="pending",
+                        resolved_by_type="persistent_a_prospect",
+                    )
 
             visible = []
             dismissed_a_prospects = []
