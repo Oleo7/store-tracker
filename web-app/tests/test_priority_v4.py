@@ -390,7 +390,10 @@ class Phase4LegacyFollowupTests(TestCase):
                 item = scored(
                     today=date(2026, 8, 5), orders=orders, contacts=[positive]
                 )[0]
-                self.assertEqual(item["primary_trigger_type"], "positive_dialogue_followup")
+                self.assertEqual(
+                    item["primary_trigger_type"],
+                    "first_order_reorder" if orders else "positive_dialogue_followup",
+                )
                 self.assertIn("positive_dialogue_followup", item["covered_trigger_keys"])
                 self.assertIn("legacy_missed_followup", item["covered_trigger_keys"])
                 self.assertEqual(item["intent_timing"], baseline["intent_timing"] + modifier)

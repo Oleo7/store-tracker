@@ -43,3 +43,5 @@ jobs:
         run: node web-app/tests/sales_coaching_browser_smoke.cjs desktop
       - name: Mobile browser smoke
         run: node web-app/tests/sales_coaching_browser_smoke.cjs mobile
+      - name: Guidance and delivery browser regressions
+        run: node web-app/tests/guidance_integrity_browser_smoke.cjs

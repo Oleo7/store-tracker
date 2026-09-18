@@ -156,7 +156,8 @@ class ChannelAndEmailIntentTests(TestCase):
                     self.assertEqual(item["primary_trigger_type"], trigger)
                     self.assertEqual(
                         item["primary_reason_text"],
-                        f"Följ upp {engagement_label} – {proposal_label}",
+                        f"{engagement_label.capitalize()} för 3 dagar sedan"
+                        f" · {proposal_label} · ingen senare order",
                     )
                     channel = recommend_contact_channel(
                         lifecycle=item["lifecycle"], trigger_key=trigger,
@@ -273,7 +274,7 @@ class ChannelAndEmailIntentTests(TestCase):
         self.assertEqual(item["primary_trigger_type"], "repeat_reactivation_due")
         self.assertEqual(
             item["primary_reason_text"],
-            "Återaktivera tidigare återkommande kund",
+            "Tidigare återkommande kund · 164 dagar sedan senaste leveransen",
         )
         self.assertEqual(channel["recommended_contact_type"], "phone")
 

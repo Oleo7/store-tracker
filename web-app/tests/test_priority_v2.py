@@ -162,7 +162,10 @@ class ScoringV2Tests(TestCase):
 
         self.assertEqual(context_identity(due), context_identity(late))
         self.assertNotEqual(due["priority_score"], late["priority_score"])
-        self.assertNotEqual(due["primary_reason_text"], late["primary_reason_text"])
+        # The same predicted date stays factual while urgency/score ages.
+        self.assertEqual(due["primary_reason_text"], "Beräknad nästa order 2 mar")
+        self.assertEqual(due["primary_reason_text"], late["primary_reason_text"])
+        self.assertNotEqual(due["overdue_days"], late["overdue_days"])
 
     def test_established_context_is_stable_across_day_90_to_reactivation(self):
         customers = [customer("Boundary repeat", "repeat-boundary")]

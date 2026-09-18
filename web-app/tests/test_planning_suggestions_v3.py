@@ -129,7 +129,7 @@ class PlanningSuggestionV3IntegrationTests(PlanningApiTestCase):
             current = self.client.get("/planning/suggestions").get_json()["suggestion"]
             self.assertEqual(current["suggestion_id"], onboarding["suggestion_id"])
             self.assertEqual(current["trigger_key"], "first_order_reorder")
-            self.assertEqual(current["reason_text"], "24 dagar sedan första leveransen")
+            self.assertEqual(current["reason_text"], "24 dagar sedan första leveransen · dags att säkra andra köpet")
             planned = self.client.post(
                 f"/planning/suggestions/{current['suggestion_id']}/plan",
                 json={

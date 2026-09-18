@@ -4799,7 +4799,16 @@
     latestContact: "chip-latest-contact",
     emailProposal: "chip-email-proposal",
   };
-  const FOCUS_LABELS = ["Återaktivering", "Återköp", "Andra köpet", "A-prospekt", "Varm möjlighet", "Övrigt"];
+  const FOCUS_KEYS_BY_LABEL = {
+    "Återaktivering": "reactivation", "Återköp": "repeat_purchase",
+    "Andra köpet": "second_purchase", "A-prospekt": "a_prospect",
+    "Varm möjlighet": "warm_opportunity", "Övrigt": "other",
+  };
+  const FOCUS_LABELS = Object.keys(FOCUS_KEYS_BY_LABEL);
+
+  function getFilterOptionValue(key, label) {
+    return key === "focus" ? FOCUS_KEYS_BY_LABEL[label] : label;
+  }
   const _sheetValues = { segment: [], city: [], region: [], focus: FOCUS_LABELS.slice(), risk: [], delivery: [], latestContact: ["<1 månad", "1-2 månader", ">3 månader", "Saknar kontakt"], emailProposal: ["Påminnelse", "Återaktivering", "Nykund"] };
 
   // ── Filter modal ──
@@ -4828,7 +4837,7 @@
     const body = document.getElementById("filter-modal-body");
     body.innerHTML = filtered.map(v => `
       <label class="filter-option">
-        <input type="checkbox" value="${escAttr(v)}" ${state.has(v) ? "checked" : ""} />
+        <input type="checkbox" value="${escAttr(getFilterOptionValue(_sheetKey, v))}" ${state.has(getFilterOptionValue(_sheetKey, v)) ? "checked" : ""} />
         ${esc(v)}
       </label>
     `).join("");
@@ -5079,17 +5088,32 @@
     return `<div class="potential-summary">Potential: ca ${esc(text)} DFP</div>`;
   }
 
-  function getCardDateHtml(value) {
+  function getCardDateHtml(value, compact = false) {
     const date = String(value || "").trim().slice(0, 10);
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return "—";
-    return `<time datetime="${escAttr(date)}">${esc(date)}</time>`;
+    const parsed = new Date(`${date}T12:00:00Z`);
+    if (!Number.isFinite(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== date) return "—";
+    let label = date;
+    if (compact) {
+      const months = ["jan", "feb", "mar", "apr", "maj", "jun", "jul", "aug", "sep", "okt", "nov", "dec"];
+      const currentYear = new Intl.DateTimeFormat("sv-SE", { timeZone: "Europe/Stockholm", year: "numeric" }).format(new Date());
+      label = `${parsed.getUTCDate()} ${months[parsed.getUTCMonth()]}${date.slice(0, 4) === currentYear ? "" : ` ${date.slice(0, 4)}`}`;
+    }
+    return `<time datetime="${escAttr(date)}" title="${escAttr(date)}">${esc(label)}</time>`;
+  }
+
+  function getDeliveryVolumeText(date, volume) {
+    if (getCardDateHtml(date) === "—" || volume == null || typeof volume === "boolean") return "";
+    const number = Number(volume);
+    return Number.isFinite(number) && number > 0
+      ? ` · ${number.toLocaleString("sv-SE", { maximumFractionDigits: 1 })} DFP` : "";
   }
 
   function getCardDatesHtml(c) {
     const ins = getCustomerInsight(c);
     const guidance = getCustomerGuidance(ins);
-    const delivery = getCardDateHtml(ins.latest_delivery_date);
-    const nextDelivery = getCardDateHtml(ins.next_delivery_date);
+    const delivery = getCardDateHtml(ins.latest_delivery_date, true);
+    const nextDelivery = getCardDateHtml(ins.next_delivery_date, true);
     const contact = getCardDateHtml(ins.latest_contact_date || c.latest_contact_date);
     const followUpDate = String(guidance.next_contact_at || ins.latest_follow_up_date || "").trim().slice(0, 10);
     let followUp = "";
@@ -5098,16 +5122,16 @@
     } else if (guidance.status_key === "planned" && followUpDate) {
       followUp = `<span class="card-date-followup planned">Nästa kontakt ${getCardDateHtml(followUpDate)}</span>`;
     }
-    const deliveryLabel = guidance.focus_key === "second_purchase" ? "Första leverans" : "Senaste leverans";
-    const volume = guidance.focus_key === "second_purchase" ? ins.first_delivery_dfp : ins.latest_order_dfp;
-    const volumeText = Number.isFinite(Number(volume)) && Number(volume) > 0 ? ` · ${Number(volume).toLocaleString("sv-SE", { maximumFractionDigits: 1 })} DFP` : "";
+    const deliveryLabel = Number(ins.delivery_count) === 1 ? "Första leverans" : "Senaste leverans";
+    const volumeText = getDeliveryVolumeText(ins.latest_delivery_date, ins.latest_delivery_dfp);
+    const nextVolumeText = getDeliveryVolumeText(ins.next_delivery_date, ins.next_delivery_dfp);
 
     return `
       <div class="card-dates">
         <span class="card-date-primary">${deliveryLabel} ${delivery}${volumeText}</span>
         <span class="card-date-secondary">
           <span>Kontakt ${contact}</span>
-          ${ins.next_delivery_date ? `<span>Nästa leverans ${nextDelivery}</span>` : ""}
+          ${ins.next_delivery_date ? `<span>Nästa leverans ${nextDelivery}${nextVolumeText}</span>` : ""}
           ${followUp}
         </span>
       </div>
@@ -5213,7 +5237,7 @@
     if (filterState.region.size)      filtered = filtered.filter(c => filterState.region.has(c.region_google));
     if (filterState.focus.size) filtered = filtered.filter(c => {
       const ins = getCustomerInsight(c);
-      return filterState.focus.has(ins?.customer_guidance?.focus_label || "");
+      return filterState.focus.has(ins?.customer_guidance?.focus_key || "");
     });
     if (filterState.risk.size) filtered = filtered.filter(c => {
       const ins = getCustomerInsight(c);
@@ -7728,13 +7752,20 @@
     document.getElementById("planning-recommendation-dismiss")?.addEventListener("click", dismissPlanningRecommendation);
   }
 
+  function getPlainDeliveryText(date, volume) {
+    const dateText = getCardDateHtml(date, true).replace(/<[^>]*>/g, "");
+    return `${dateText}${getDeliveryVolumeText(date, volume)}`;
+  }
+
   function planningRecommendationContactContext(context = {}) {
     const lines = [];
     if (context.date) lines.push(`Senaste kontakt ${context.date}: ${context.result || ""}`);
     if (context.comment) lines.push(context.comment);
     const person = [context.contact_person, context.phone].filter(Boolean).join(" · ");
     if (person) lines.push(person);
-    if (context.latest_order_dfp != null) lines.push(`Senaste order: ${context.latest_order_dfp} DFP`);
+    // Current delivery facts replace the ambiguous legacy latest-order total.
+    if (context.latest_delivery_date) lines.push(`Senaste leverans ${getPlainDeliveryText(context.latest_delivery_date, context.latest_delivery_dfp)}`);
+    if (context.next_delivery_date) lines.push(`Nästa leverans ${getPlainDeliveryText(context.next_delivery_date, context.next_delivery_dfp)}`);
     if (context.follow_up) lines.push(`Uppföljning: ${context.follow_up}`);
     return lines.map(line => `<div class="planning-recommendation-channel">${esc(String(line))}</div>`).join("");
   }
