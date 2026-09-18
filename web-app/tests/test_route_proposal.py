@@ -1121,8 +1121,8 @@ class FrontendRouteProposalFlowTests(TestCase):
         self.assertIn("getPotentialHtml(c)", self.html)
         self.assertIn("getCardDatesHtml(c)", self.html)
         self.assertIn("getCustomerCardAriaLabel(c, routeStop)", self.html)
-        self.assertIn('"besök": "Besök"', self.html)
-        self.assertIn('"telefon": "Telefon"', self.html)
+        self.assertIn('visit: "Besök"', self.html)
+        self.assertIn('phone: "Telefon"', self.html)
         self.assertIn("Potential ej beräknad", self.html)
         self.assertNotIn("Missad uppföljning</span>", self.html)
 

@@ -291,6 +291,8 @@ def public_suggestion(row, live_candidate=None):
         "reason_text": _text(
             candidate.get("reason_text") or row.get("reason_text_at_creation")
         ),
+        "action_label": _text(candidate.get("action_label")),
+        "customer_guidance": candidate.get("customer_guidance") or {},
         "recommended_contact_type": _text(
             candidate.get("recommended_contact_type")
             or row.get("recommended_contact_type") or "phone"
@@ -652,16 +654,29 @@ class PlanningSuggestionService:
                         )
 
             visible = []
+            dismissed_a_prospects = []
             for suggestion_id, candidate in ordered:
-                if candidate.get("externally_suppressed"):
-                    continue
                 stored_entry = stored_by_id.get(suggestion_id)
+                if candidate.get("externally_suppressed"):
+                    if stored_entry:
+                        _row_index, row = stored_entry
+                        guidance = candidate.get("customer_guidance") or {}
+                        if (
+                            _key(row.get("status")) == "dismissed"
+                            and _key(guidance.get("focus_key")) == "a_prospect"
+                        ):
+                            dismissed_a_prospects.append(
+                                (suggestion_id, candidate, row)
+                            )
+                    continue
                 if not stored_entry:
                     visible.append((suggestion_id, candidate, None))
                     continue
                 _row_index, row = stored_entry
                 if _key(row.get("status")) == "pending":
                     visible.append((suggestion_id, candidate, row))
+
+            visible.extend(dismissed_a_prospects)
 
             pending_count = len(visible)
             if not visible:
@@ -815,7 +830,7 @@ class PlanningSuggestionService:
                 "plan": {"pending"},
                 "resolve": ACTIVE_STATUSES,
                 "expire": ACTIVE_STATUSES,
-                "reopen": {"planned"},
+                "reopen": {"planned", "dismissed"},
             }
             if before not in allowed[action]:
                 raise SuggestionError(
@@ -854,7 +869,10 @@ class PlanningSuggestionService:
                 event_type = "suggestion_expired"
             elif action == "reopen":
                 changes["planned_activity_id"] = ""
-                event_type = "linked_activity_cancelled"
+                event_type = (
+                    "suggestion_resumed"
+                    if before == "dismissed" else "linked_activity_cancelled"
+                )
             _update(sheet, row_index, headers, changes, self.invalidator)
             updated = {**row, **changes}
             event_row = self._live_event_row(updated, live_candidate)

@@ -198,23 +198,25 @@ class DialogueAndStrategicPhase3Tests(TestCase):
         never = priorities(
             [customer("Strategic", "strategic", "A")], today=date(2026, 7, 20)
         )[0]
-        self.assertEqual(never["primary_trigger_type"], "strategic_contact_due")
-        self.assertEqual(never["primary_reason_text"], "Strategisk kund – aldrig kontaktad")
+        self.assertEqual(never["primary_trigger_type"], "a_prospect_due")
+        self.assertEqual(never["customer_guidance"]["focus_key"], "a_prospect")
+        self.assertEqual(never["customer_guidance"]["status_key"], "act_now")
 
         recent = priorities(
             [customer("Strategic", "strategic", "A")],
             contacts=[contact("Strategic", "2026-06-20 09:00", "Neutral", "recent")],
             today=date(2026, 7, 20),
         )[0]
-        self.assertEqual(recent["primary_trigger_type"], "")
+        self.assertEqual(recent["primary_trigger_type"], "a_prospect_due")
+        self.assertEqual(recent["customer_guidance"]["status_key"], "act_now")
 
         stale = priorities(
             [customer("Strategic", "strategic", "A")],
             contacts=[contact("Strategic", "2026-06-01 09:00", "Neutral", "stale")],
             today=date(2026, 7, 20),
         )[0]
-        self.assertEqual(stale["primary_trigger_type"], "strategic_contact_due")
-        self.assertIn("49 dagar", stale["primary_reason_text"])
+        self.assertEqual(stale["primary_trigger_type"], "a_prospect_due")
+        self.assertEqual(stale["customer_guidance"]["status_key"], "act_now")
 
         negative = priorities(
             [customer("Strategic", "strategic", "A")],
@@ -241,7 +243,8 @@ class DialogueAndStrategicPhase3Tests(TestCase):
                 "contact_type": "phone",
             }],
         )[0]
-        self.assertEqual(planned["primary_trigger_type"], "strategic_contact_due")
+        self.assertEqual(planned["primary_trigger_type"], "a_prospect_due")
+        self.assertEqual(planned["customer_guidance"]["status_key"], "planned")
         self.assertFalse(planned["recommendation_eligible"])
         self.assertEqual(
             planned["recommendation_suppression_reason"],
@@ -255,7 +258,8 @@ class DialogueAndStrategicPhase3Tests(TestCase):
         followup = priorities(
             [customer_row], contacts=[followup_contact], today=today
         )[0]
-        self.assertEqual(followup["primary_trigger_type"], "strategic_contact_due")
+        self.assertEqual(followup["primary_trigger_type"], "a_prospect_due")
+        self.assertEqual(followup["customer_guidance"]["status_key"], "planned")
         self.assertFalse(followup["recommendation_eligible"])
         self.assertEqual(
             followup["recommendation_suppression_reason"], "explicit_follow_up"
@@ -319,8 +323,8 @@ class DialogueAndStrategicPhase3Tests(TestCase):
         )[0]
         self.assertEqual(
             reactivation["covered_trigger_keys"],
-            ["strategic_contact_due"],
+            ["a_prospect_due"],
         )
         self.assertEqual(
-            reactivation["primary_trigger_type"], "strategic_contact_due"
+            reactivation["primary_trigger_type"], "a_prospect_due"
         )

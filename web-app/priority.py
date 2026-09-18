@@ -5,6 +5,7 @@ from datetime import date, datetime, time, timedelta
 import re
 import os
 from commercial_orders import order_volume, commercial_order
+from contact_channel import recommend_contact_channel
 from statistics import median
 import unicodedata
 import uuid
@@ -20,6 +21,8 @@ SCORING_POLICIES = {
 SCORE_VERSION = os.environ.get("PRIORITY_SCORING_POLICY", "v2.2").strip()
 if SCORE_VERSION not in SCORING_POLICIES:
     raise ValueError("PRIORITY_SCORING_POLICY must be v2.1 or v2.2")
+
+GUIDANCE_VERSION = "1.0"
 
 
 def normalize_customer_key(value: str) -> str:
@@ -850,28 +853,59 @@ def expected_reorder_cycle(delivery_dates, segment_median=28) -> int | None:
     return int(_clamp(round(cycle), 14, 75))
 
 
-def _future_activity_index(planned_activities, today, now=None):
-    result = {}
+def _planned_activity_index(planned_activities):
+    """Index open activities without collapsing future and overdue state."""
+    result = defaultdict(list)
     for row in planned_activities or ():
         if str(row.get("status") or "planned").strip().casefold() != "planned":
             continue
-        if str(row.get("source_suggestion_id") or "").strip():
-            continue
         scheduled_at = parse_datetime(row.get("scheduled_at"))
-        scheduled = scheduled_at.date() if scheduled_at else None
-        if now and scheduled_at and scheduled_at.replace(tzinfo=None) < now.replace(tzinfo=None):
+        if not scheduled_at:
             continue
-        if not scheduled or scheduled < today:
-            continue
-        keys = {
-            str(row.get("customer_id") or "").strip(),
-            normalize_customer_key(row.get("customer")),
-        } - {""}
+        customer_id = str(row.get("customer_id") or "").strip()
+        keys = {f"id:{customer_id}"} if customer_id else set()
+        if not customer_id:
+            customer_key = normalize_customer_key(row.get("customer"))
+            if customer_key:
+                keys.add(f"name:{customer_key}")
         for key in keys:
-            current = result.get(key)
-            if current is None or scheduled < current["date"]:
-                result[key] = {"date": scheduled, "row": row}
+            result[key].append({"scheduled_at": scheduled_at, "row": row})
+    for matches in result.values():
+        matches.sort(key=lambda item: (
+            item["scheduled_at"].replace(tzinfo=None),
+            str(item["row"].get("planned_activity_id") or ""),
+        ))
     return result
+
+
+def _planned_activity_state(
+    index, *, customer_id, customer_key, sales_person, latest_human_contact, now,
+):
+    """Return the effective future plan and unresolved overdue commitment."""
+    matches = index.get(f"id:{customer_id}", ()) if customer_id else ()
+    if not matches and customer_key:
+        matches = index.get(f"name:{customer_key}", ())
+    owner_key = normalize_customer_key(sales_person)
+    current = now.replace(tzinfo=None)
+    latest_human = (
+        latest_human_contact.replace(tzinfo=None)
+        if latest_human_contact else None
+    )
+    future = []
+    overdue = []
+    for item in matches:
+        row_owner = normalize_customer_key(item["row"].get("sales_person"))
+        if row_owner and owner_key and row_owner != owner_key:
+            continue
+        scheduled = item["scheduled_at"].replace(tzinfo=None)
+        if scheduled >= current:
+            future.append(item)
+        elif not latest_human or latest_human <= scheduled:
+            overdue.append(item)
+    return {
+        "future": future[0] if future else None,
+        "overdue": overdue[0] if overdue and not future else None,
+    }
 
 
 def _v2_lifecycle(order_count, days_since_delivery, overdue_days):
@@ -966,7 +1000,7 @@ def _active_email_intent(
 
 
 def _phase3_trigger_snapshot(
-    *, lifecycle, delivery_count, days_since_delivery, segment,
+    *, lifecycle, order_count, delivery_count, days_since_delivery, segment,
     first_order_sku_count, value_index, overdue_days, latest_contact_class,
     days_since_contact, has_order_after_latest_contact,
     has_current_explicit_follow_up, priority_score,
@@ -974,6 +1008,13 @@ def _phase3_trigger_snapshot(
 ):
     triggers = []
     reasons = {}
+
+    a_prospect_due = lifecycle == "prospect" and order_count == 0 and segment == "A"
+    if a_prospect_due:
+        triggers.append("a_prospect_due")
+        reasons["a_prospect_due"] = (
+            "a_prospect_due", "Strategisk kund utan tidigare order"
+        )
 
     if lifecycle == "established" and overdue_days is not None and overdue_days >= 0:
         triggers.append("established_reorder_due")
@@ -1028,6 +1069,7 @@ def _phase3_trigger_snapshot(
 
     strategic_due = (
         lifecycle in {"prospect", "reactivation"}
+        and not a_prospect_due
         and (segment == "A" or priority_score >= 70)
         and (days_since_contact is None or days_since_contact > 45)
     )
@@ -1056,6 +1098,7 @@ def _phase3_trigger_snapshot(
         )
 
     precedence = (
+        "a_prospect_due",
         "stockfiller_click_followup",
         "product_sheet_click_followup",
         "email_open_followup",
@@ -1101,6 +1144,258 @@ def _v2_primary_reason(lifecycle, overdue_days, days_since_contact):
     if days_since_contact is None:
         return "prospect_timing", "Prospekt – aldrig kontaktat"
     return "prospect_timing", f"Prospekt – {days_since_contact} dagar sedan kontakt"
+
+
+FOCUS_LABELS = {
+    "reactivation": "Återaktivering",
+    "repeat_purchase": "Återköp",
+    "second_purchase": "Andra köpet",
+    "a_prospect": "A-prospekt",
+    "warm_opportunity": "Varm möjlighet",
+    "other": "Övrigt",
+}
+
+STATUS_LABELS = {
+    "overdue_followup": "Missad uppföljning",
+    "act_now": "Agera nu",
+    "planned": "Planerad",
+    "wait": "Avvakta",
+    "idle": "Ingen åtgärd nu",
+    "data_missing": "Data saknas",
+}
+
+
+def _activity_contact_type(row):
+    value = normalize_customer_key((row or {}).get("contact_type"))
+    return {
+        "telefon": "phone", "phone": "phone",
+        "mejl": "email", "email": "email",
+        "besok": "visit", "besök": "visit", "visit": "visit",
+    }.get(value, value or "")
+
+
+def _contact_type_label(value):
+    return {
+        "phone": "Telefon", "email": "Mejl", "visit": "Besök",
+    }.get(str(value or "").strip().casefold(), "Kontakt")
+
+
+def _focus_key(
+    *, lifecycle, segment, order_count, delivery_count, has_future_delivery,
+    positive_signal, qualified_email_signal,
+):
+    if lifecycle == "reactivation" and not has_future_delivery:
+        return "reactivation"
+    if delivery_count >= 2:
+        return "repeat_purchase"
+    if delivery_count == 1 or order_count > 0:
+        return "second_purchase"
+    if segment == "A" and order_count == 0:
+        return "a_prospect"
+    if order_count == 0 and (positive_signal or qualified_email_signal):
+        return "warm_opportunity"
+    return "other"
+
+
+def build_customer_guidance(
+    *, customer, lifecycle, segment, order_count, delivery_count,
+    days_since_delivery, expected_next, overdue_days, future_delivery,
+    latest_contact_class, days_since_contact, latest_human_contact,
+    latest_follow_up_date, follow_up_resolved, has_order_after_latest_contact,
+    activity_state, primary_trigger, active_email_intent, business_email_intent,
+    suppression, status_text, now,
+):
+    """Build the shared, presentation-ready decision without changing score."""
+    has_future_delivery = bool(future_delivery and future_delivery > now.date())
+    positive_signal = bool(
+        latest_contact_class == "Positiv"
+        and not has_order_after_latest_contact
+        and days_since_contact is not None
+        and 0 <= days_since_contact <= 30
+    )
+    qualified_email_signal = bool(
+        (business_email_intent or {}).get("ready")
+        or (business_email_intent or {}).get("waiting")
+    )
+    focus_key = _focus_key(
+        lifecycle=lifecycle,
+        segment=segment,
+        order_count=order_count,
+        delivery_count=delivery_count,
+        has_future_delivery=has_future_delivery,
+        positive_signal=positive_signal,
+        qualified_email_signal=qualified_email_signal,
+    )
+
+    future_activity = (activity_state or {}).get("future")
+    overdue_activity = (activity_state or {}).get("overdue")
+    future_follow_up = bool(
+        latest_follow_up_date
+        and latest_follow_up_date > now.date()
+        and not follow_up_resolved
+    )
+    overdue_follow_up = bool(
+        latest_follow_up_date
+        and latest_follow_up_date < now.date()
+        and not follow_up_resolved
+        and not has_order_after_latest_contact
+    )
+    follow_up_today = bool(
+        latest_follow_up_date
+        and latest_follow_up_date == now.date()
+        and not follow_up_resolved
+    )
+
+    next_contact_at = None
+    overdue_activity_id = ""
+    planned_contact_type = ""
+    waiting_until = None
+    reason_code = ""
+    reason_text = ""
+    action_key = ""
+    action_label = ""
+
+    invalid_identity = not str(customer.get("customer_id") or "").strip() or not str(
+        customer.get("sales_person") or ""
+    ).strip()
+    if invalid_identity:
+        status_key = "data_missing"
+        reason_code = "invalid_customer_identity"
+        reason_text = "Kundidentitet eller ansvarig säljare saknas"
+        action_key = "review_data"
+        action_label = "Kontrollera kunddata"
+    elif future_activity or future_follow_up:
+        status_key = "planned"
+        action_key = "open_planning"
+        action_label = "Nästa kontakt"
+        if future_activity:
+            row = future_activity["row"]
+            scheduled = future_activity["scheduled_at"]
+            planned_contact_type = _activity_contact_type(row)
+            next_contact_at = scheduled.isoformat(timespec="minutes")
+            reason_code = "future_planned_activity"
+            reason_text = (
+                f"{_contact_type_label(planned_contact_type)} planerad "
+                f"{scheduled.strftime('%Y-%m-%d %H:%M')}"
+            )
+        else:
+            next_contact_at = latest_follow_up_date.isoformat()
+            reason_code = "future_follow_up_date"
+            reason_text = (
+                f"Uppföljning planerad {latest_follow_up_date.isoformat()} · Tid ej satt"
+            )
+    elif overdue_activity or overdue_follow_up:
+        status_key = "overdue_followup"
+        action_key = "reschedule_followup"
+        action_label = "Planera om uppföljningen"
+        if overdue_activity:
+            row = overdue_activity["row"]
+            scheduled = overdue_activity["scheduled_at"]
+            planned_contact_type = _activity_contact_type(row)
+            overdue_activity_id = str(row.get("planned_activity_id") or "").strip()
+            reason_code = "overdue_planned_activity"
+            reason_text = (
+                f"{_contact_type_label(planned_contact_type)} skulle ha genomförts "
+                f"{scheduled.strftime('%Y-%m-%d %H:%M')}"
+            )
+        else:
+            reason_code = "overdue_explicit_follow_up"
+            reason_text = (
+                f"Uttrycklig uppföljning {latest_follow_up_date.isoformat()} har passerat"
+            )
+    elif suppression:
+        status_key = "wait"
+        action_key = "wait"
+        action_label = "Avvakta"
+        reason_code = suppression
+        reason_text = status_text or suppression
+        if suppression == "future_delivery" and future_delivery:
+            waiting_until = future_delivery.isoformat()
+            reason_text = f"Väntar på leverans {waiting_until}"
+        elif suppression == "recent_human_contact" and latest_human_contact:
+            waiting_until = (latest_human_contact.date() + timedelta(days=3)).isoformat()
+        elif suppression == "negative_contact_cooldown" and latest_human_contact:
+            waiting_until = (latest_human_contact.date() + timedelta(days=60)).isoformat()
+        elif suppression == "dismissed":
+            reason_text = "Tidigare förslag dolt"
+            action_key = "resume_suggestion"
+            action_label = "Återuppta förslag"
+    elif follow_up_today or primary_trigger:
+        status_key = "act_now"
+        reason_code = primary_trigger or "follow_up_due_today"
+        if primary_trigger == "first_order_onboarding":
+            action_key, action_label = "check_placement", "Kontrollera placering och start"
+            reason_text = "Första leveransen behöver en tidig kontroll"
+        elif primary_trigger == "first_order_reorder":
+            action_key, action_label = "secure_repeat_purchase", "Säkra återköpet"
+            reason_text = f"{int(days_since_delivery or 0)} dagar sedan första leveransen"
+        elif primary_trigger == "established_reorder_due":
+            action_key, action_label = "secure_next_order", "Säkra nästa order"
+            reason_text = (
+                f"Beräknad nästa order {expected_next.isoformat()}"
+                if expected_next else "Beräknad återköpstid har passerat"
+            )
+        elif focus_key == "a_prospect":
+            action_key, action_label = "advance_first_order", "Ta nästa steg mot första ordern"
+            if positive_signal:
+                reason_text = "Strategisk kund · positiv dialog · ingen tidigare order"
+            elif qualified_email_signal:
+                reason_text = "Strategisk kund · kvalificerad mejlsignal · ingen tidigare order"
+            else:
+                reason_text = "Strategisk kund · ingen tidigare order"
+        elif focus_key == "reactivation":
+            action_key, action_label = "reactivate_customer", "Återaktivera kunden"
+            reason_text = "Tidigare köpande kund behöver återaktiveras"
+        elif focus_key == "warm_opportunity":
+            action_key, action_label = "follow_up_opportunity", "Följ upp möjligheten"
+            reason_text = "Aktuell köpsignal utan registrerad order"
+        else:
+            action_key, action_label = "follow_up_today", "Följ upp idag"
+            reason_text = "Uttrycklig uppföljning förfaller i dag"
+    else:
+        status_key = "idle"
+        action_key = "none"
+        action_label = "Ingen åtgärd nu"
+        reason_code = "no_current_trigger"
+        reason_text = "Ingen aktuell trigger eller planerad kontakt"
+
+    email_available = bool(
+        str(customer.get("email") or "").strip()
+        or str(customer.get("email_last_order") or "").strip()
+    )
+    channel = recommend_contact_channel(
+        lifecycle=lifecycle,
+        overdue_days=overdue_days,
+        trigger_key=primary_trigger,
+        segment=segment,
+        has_human_contact=bool(latest_human_contact),
+        phone=customer.get("phone"),
+        email_available=email_available,
+        visible=True,
+    ) or {}
+    recommended_contact_type = planned_contact_type or channel.get(
+        "recommended_contact_type", ""
+    )
+    return {
+        "focus_key": focus_key,
+        "focus_label": FOCUS_LABELS[focus_key],
+        "status_key": status_key,
+        "status_label": STATUS_LABELS[status_key],
+        "action_key": action_key,
+        "action_label": action_label,
+        "reason_code": reason_code,
+        "reason_text": reason_text,
+        "recommended_contact_type": recommended_contact_type,
+        "next_contact_at": next_contact_at,
+        "waiting_until": waiting_until,
+        "overdue_activity_id": overdue_activity_id,
+        "planned_activity_id": (
+            str(future_activity["row"].get("planned_activity_id") or "").strip()
+            if future_activity else ""
+        ),
+        "can_contact_now": status_key in {"act_now", "overdue_followup"},
+        "guidance_version": GUIDANCE_VERSION,
+    }
 
 
 def build_priority_customers(
@@ -1152,7 +1447,8 @@ def build_priority_customers(
         identity_indices=order_indices,
         ambiguous_master_names=ambiguous_master_names,
     )
-    future_activities = _future_activity_index(planned_activities, today, now)
+    activity_index = _planned_activity_index(planned_activities)
+    guidance_now = now or datetime.combine(today, time.min)
     represented_source_contact_ids = {
         str(row.get("source_contact_id") or "").strip()
         for row in planned_activities or ()
@@ -1203,7 +1499,12 @@ def build_priority_customers(
         history_index = 100 if delivery_count >= 2 else 60 if delivery_count == 1 else 0
         first_order_sku_count = int(order.get("first_order_sku_count") or 0)
         future_delivery = order.get("last_delivery_date")
-        last_delivery = completed_dates[-1] if completed_dates else order.get("last_delivery_date")
+        last_delivery = (
+            completed_dates[-1]
+            if completed_dates
+            else None if "delivery_dates" in order
+            else order.get("last_delivery_date")
+        )
         last_order = order.get("last_order_date")
         days_since_delivery = (today - last_delivery).days if last_delivery else None
 
@@ -1240,11 +1541,17 @@ def build_priority_customers(
         )
         has_current_explicit_follow_up = bool(
             has_unresolved_follow_up
-            and latest_follow_up_date >= today
+            and latest_follow_up_date > today
         )
-        activity = future_activities.get(customer_id) or future_activities.get(
-            customer_key
+        activity_state = _planned_activity_state(
+            activity_index,
+            customer_id=customer_id,
+            customer_key=customer_key,
+            sales_person=sales_person,
+            latest_human_contact=contact.get("latest_human_contact_datetime"),
+            now=guidance_now,
         )
+        activity = activity_state["future"]
         has_order_after_latest_contact = bool(
             latest_human_date and last_order and last_order >= latest_human_date
         )
@@ -1253,6 +1560,13 @@ def build_priority_customers(
             contact.get("latest_human_contact_datetime"),
             last_order,
             blocked=bool(activity or has_current_explicit_follow_up),
+            today=today,
+        )
+        business_email_intent = _active_email_intent(
+            email_feature,
+            contact.get("latest_human_contact_datetime"),
+            last_order,
+            blocked=False,
             today=today,
         )
         lifecycle = _v2_lifecycle(delivery_count, days_since_delivery, overdue_days)
@@ -1332,7 +1646,10 @@ def build_priority_customers(
                 activity["row"].get("planned_activity_id") or ""
             ).strip()
             activity_type = str(activity["row"].get("contact_type") or "Aktivitet").strip()
-            status_text = f"{activity_type.capitalize()} planerad {activity['date'].isoformat()}"
+            status_text = (
+                f"{activity_type.capitalize()} planerad "
+                f"{activity['scheduled_at'].strftime('%Y-%m-%d %H:%M')}"
+            )
         elif has_current_explicit_follow_up:
             suppression = "explicit_follow_up"
             status_text = f"Uppföljning beslutad {latest_follow_up_date.isoformat()}"
@@ -1374,6 +1691,7 @@ def build_priority_customers(
         )
         trigger_snapshot = _phase3_trigger_snapshot(
             lifecycle=lifecycle,
+            order_count=order_count,
             delivery_count=delivery_count,
             days_since_delivery=days_since_delivery,
             segment=segment,
@@ -1454,6 +1772,30 @@ def build_priority_customers(
             email_signal=email_signal,
             today=today,
         )
+        customer_guidance = build_customer_guidance(
+            customer=customer,
+            lifecycle=lifecycle,
+            segment=segment,
+            order_count=order_count,
+            delivery_count=delivery_count,
+            days_since_delivery=days_since_delivery,
+            expected_next=expected_next,
+            overdue_days=overdue_days,
+            future_delivery=future_delivery,
+            latest_contact_class=latest_contact_class,
+            days_since_contact=days_since_contact,
+            latest_human_contact=contact.get("latest_human_contact_datetime"),
+            latest_follow_up_date=latest_follow_up_date,
+            follow_up_resolved=follow_up_resolved,
+            has_order_after_latest_contact=has_order_after_latest_contact,
+            activity_state=activity_state,
+            primary_trigger=trigger_snapshot["primary_trigger_type"],
+            active_email_intent=active_email_intent,
+            business_email_intent=business_email_intent,
+            suppression=suppression,
+            status_text=status_text,
+            now=guidance_now,
+        )
         result.append({
             "row": customer.get("row"),
             "customer_id": customer_id,
@@ -1479,6 +1821,10 @@ def build_priority_customers(
             "primary_trigger_key": trigger_snapshot["primary_trigger_key"],
             "covered_trigger_keys": trigger_snapshot["covered_trigger_keys"],
             "active_email_intent_event": active_email_intent.get("event_id", ""),
+            "decision_context_email_event": (
+                "" if customer_guidance["focus_key"] == "a_prospect"
+                else active_email_intent.get("event_id", "")
+            ),
             "email_intent_trigger": active_email_intent.get("trigger", ""),
             "planning_status_text": status_text,
             "priority_level": _priority_level(priority_score),
@@ -1486,6 +1832,7 @@ def build_priority_customers(
             "recommended_action": _recommended_action(priority_type),
             "recommended_channel": _recommended_channel(next_action.get("action_type")),
             "next_action": next_action,
+            "customer_guidance": customer_guidance,
             "reasons": [status_text or reason_text],
             "order_count": order_count,
             "delivery_count": delivery_count,
@@ -1497,10 +1844,15 @@ def build_priority_customers(
             ),
             "expected_order_value": _clean_number(expected_order_value),
             "latest_order_dfp": order.get("latest_order_dfp"),
+            "first_delivery_dfp": order.get("first_delivery_dfp"),
             "latest_order_volume_missing": order.get("latest_order_dfp") is None,
             "latest_order_reference": str(order.get("latest_order_reference") or ""),
             "latest_order_date": _iso_date(last_order),
             "latest_delivery_date": _iso_date(last_delivery),
+            "next_delivery_date": (
+                _iso_date(future_delivery)
+                if future_delivery and future_delivery > today else ""
+            ),
             "days_since_delivery": days_since_delivery,
             "expected_cycle_days": expected_cycle,
             "expected_cycle_source": expected_cycle_source,
@@ -1555,6 +1907,37 @@ def apply_workflow_suppressions(priority_customers, suppressions):
                 "dismissed": "Samma beslutsunderlag markerat Ej relevant",
                 "suggestion_planned": "Rekommendationsaktivitet planerad",
             }.get(reason, updated.get("planning_status_text") or reason)
+            guidance = dict(updated.get("customer_guidance") or {})
+            if guidance:
+                if reason == "suggestion_planned":
+                    guidance.update({
+                        "status_key": "planned",
+                        "status_label": STATUS_LABELS["planned"],
+                        "action_key": "open_planning",
+                        "action_label": "Nästa kontakt",
+                        "reason_code": reason,
+                        "reason_text": "Nästa kontakt är planerad",
+                        "can_contact_now": False,
+                    })
+                else:
+                    guidance.update({
+                        "status_key": "wait",
+                        "status_label": STATUS_LABELS["wait"],
+                        "action_key": (
+                            "resume_suggestion" if reason == "dismissed" else "wait"
+                        ),
+                        "action_label": (
+                            "Återuppta förslag" if reason == "dismissed" else "Avvakta"
+                        ),
+                        "reason_code": reason,
+                        "reason_text": (
+                            "Tidigare förslag dolt"
+                            if reason == "dismissed"
+                            else updated["planning_status_text"]
+                        ),
+                        "can_contact_now": False,
+                    })
+                updated["customer_guidance"] = guidance
         result.append(updated)
     return result
 

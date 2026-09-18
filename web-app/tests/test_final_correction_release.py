@@ -190,7 +190,7 @@ class ChannelAndEmailIntentTests(TestCase):
             waiting["recommendation_suppression_reason"],
             "",
         )
-        self.assertEqual(ready["primary_trigger_type"], "strategic_contact_due")
+        self.assertEqual(ready["primary_trigger_type"], "a_prospect_due")
         self.assertEqual(
             waiting["active_email_intent_event"], ready["active_email_intent_event"]
         )
