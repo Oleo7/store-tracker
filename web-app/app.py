@@ -3376,6 +3376,10 @@ def priority_decision_context_hash(priority, owner_name):
             if "decision_context_email_event" in priority
             else priority.get("active_email_intent_event")
         ),
+        # Segment is part of the persistent A-prospect business context so an
+        # A->B/C or B/C->A reclassification cannot inherit stale workflow
+        # state. Other suggestion types keep their existing IDs.
+        segment=priority.get("segment") if persistent_a_prospect else "",
     )
 
 
