@@ -620,20 +620,36 @@ class PlanningSuggestionService:
                 compatible_ids = candidate_suggestion_ids(owner, candidate)
                 if not compatible_ids:
                     continue
-                for suggestion_id in compatible_ids:
+                canonical_id = compatible_ids[0]
+                accepted_ids = [canonical_id]
+                current_trigger = _key(
+                    candidate.get("primary_trigger_key")
+                    or candidate.get("primary_trigger_type")
+                )
+                for legacy_id in compatible_ids[1:]:
+                    stored_entry = stored_by_id.get(legacy_id)
+                    if not stored_entry:
+                        continue
+                    stored_trigger = _key(
+                        stored_entry[1].get("primary_trigger_key")
+                        or stored_entry[1].get("primary_trigger_type")
+                    )
+                    if stored_trigger == current_trigger:
+                        accepted_ids.append(legacy_id)
+                for suggestion_id in accepted_ids:
                     candidate_by_id[suggestion_id] = candidate
                 stored_candidates = [
                     stored_by_id[suggestion_id][1]
-                    for suggestion_id in compatible_ids
+                    for suggestion_id in accepted_ids
                     if suggestion_id in stored_by_id
                 ]
                 preferred = preferred_compatible_suggestion(
                     stored_candidates,
-                    canonical_id=compatible_ids[0],
+                    canonical_id=canonical_id,
                 )
                 effective_id = (
                     _text(preferred.get("suggestion_id"))
-                    if preferred else compatible_ids[0]
+                    if preferred else canonical_id
                 )
                 ordered.append((effective_id, candidate))
 
@@ -868,15 +884,32 @@ class PlanningSuggestionService:
         with self.lock_context():
             sheet, events, headers, stored = self.snapshot()
             row = self._candidate_row(owner, candidate)
-            compatible_ids = set(candidate_suggestion_ids(owner, candidate))
-            matches = [
-                existing for _index, existing in stored
-                if _text(existing.get("suggestion_id")) in compatible_ids
-                and _key(existing.get("user_name")) == _key(owner.get("user_name"))
-            ]
+            compatible_ids = candidate_suggestion_ids(owner, candidate)
+            canonical_id = compatible_ids[0] if compatible_ids else row["suggestion_id"]
+            current_trigger = _key(
+                candidate.get("primary_trigger_key")
+                or candidate.get("primary_trigger_type")
+            )
+            matches = []
+            for _index, existing in stored:
+                existing_id = _text(existing.get("suggestion_id"))
+                if (
+                    existing_id not in compatible_ids
+                    or _key(existing.get("user_name"))
+                    != _key(owner.get("user_name"))
+                ):
+                    continue
+                if existing_id != canonical_id:
+                    stored_trigger = _key(
+                        existing.get("primary_trigger_key")
+                        or existing.get("primary_trigger_type")
+                    )
+                    if stored_trigger != current_trigger:
+                        continue
+                matches.append(existing)
             if matches:
                 existing = preferred_compatible_suggestion(
-                    matches, canonical_id=row["suggestion_id"]
+                    matches, canonical_id=canonical_id
                 )
                 if _text(existing.get("customer_id")) != row["customer_id"]:
                     raise SuggestionError(
