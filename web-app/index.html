@@ -5133,12 +5133,16 @@
     if (isCancelledCustomer(c) || !currentUserCanPlan()) return "";
     const guidance = getCustomerGuidance(c);
     if (!guidance.status_key || guidance.status_key === "data_missing") return "";
-    const labels = {
-      planned: "Öppna planering",
-      overdue_followup: "Planera om",
-      act_now: "Planera kontakt",
-    };
-    const label = labels[guidance.status_key];
+    let label = "";
+    if (guidance.status_key === "planned") {
+      label = guidance.planned_activity_id
+        ? "Öppna planering"
+        : "Komplettera planering";
+    } else if (guidance.status_key === "overdue_followup") {
+      label = "Planera om";
+    } else if (guidance.status_key === "act_now") {
+      label = "Planera kontakt";
+    }
     if (!label) return "";
     return `<button class="planning-card-plan-btn" type="button" data-plan-row="${c.row}" data-planned-activity-id="${escAttr(guidance.planned_activity_id || "")}" data-plan-date="${escAttr(String(guidance.next_contact_at || "").slice(0, 10))}">${label}</button>`;
   }
@@ -5996,7 +6000,10 @@
           openPlanningActivityDetail(activityId);
           return;
         }
-        await openPlanningEditorForCustomer(customer);
+        await openPlanningEditorForCustomer(
+          customer,
+          button.dataset.planDate || ""
+        );
       });
     });
 
@@ -7904,8 +7911,11 @@
     return loadPlanningWeek();
   }
 
-  async function openPlanningEditorForCustomer(customer) {
+  async function openPlanningEditorForCustomer(customer, suggestedDate = "") {
     if (!customer) return;
+    const targetDate = planningDateFromKey(suggestedDate)
+      ? suggestedDate
+      : (planningSelectedDate || planningTodayKey());
     if (userIsAdmin()) {
       if (!planningData?.available_users?.length) {
         await openPlanningView();
@@ -7926,7 +7936,7 @@
     }
     openPlanningEditor({
       customer,
-      date: planningSelectedDate || planningTodayKey(),
+      date: targetDate,
     });
   }
 
