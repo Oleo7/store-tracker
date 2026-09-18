@@ -5996,6 +5996,7 @@
         if (!customer) return;
         const activityId = String(button.dataset.plannedActivityId || "");
         if (activityId) {
+          if (!await selectPlanningOwnerForCustomer(customer)) return;
           await openPlanningView({ date: button.dataset.planDate || "" });
           openPlanningActivityDetail(activityId);
           return;
@@ -7911,28 +7912,39 @@
     return loadPlanningWeek();
   }
 
+  async function selectPlanningOwnerForCustomer(customer) {
+    if (!customer) return false;
+    if (!userIsAdmin()) return true;
+    if (!planningData?.available_users?.length) {
+      await openPlanningView();
+    }
+    const responsibleKey = normalizeRouteIdentity(customer.sales_person);
+    const matches = (planningData?.available_users || [])
+      .map(normalizePlanningUser)
+      .filter(user => user.user_name && responsibleKey &&
+        [user.user_name, user.name].some(value =>
+          normalizeRouteIdentity(value) === responsibleKey
+        )
+      );
+    // Match only declared aliases and never select the first of ambiguous names.
+    if (matches.length !== 1) {
+      showView("planning");
+      showToast("Kundens ansvariga säljare kunde inte identifieras entydigt. Kontrollera kundens säljare.");
+      return false;
+    }
+    planningSelectedUserName = matches[0].user_name;
+    return true;
+  }
+
   async function openPlanningEditorForCustomer(customer, suggestedDate = "") {
     if (!customer) return;
     const targetDate = planningDateFromKey(suggestedDate)
       ? suggestedDate
       : (planningSelectedDate || planningTodayKey());
-    if (userIsAdmin()) {
-      if (!planningData?.available_users?.length) {
-        await openPlanningView();
-      }
-      const responsibleKey = normalizeRouteIdentity(customer.sales_person);
-      const responsible = (planningData?.available_users || [])
-        .map(normalizePlanningUser)
-        .find(user => normalizeRouteIdentity(user.name) === responsibleKey);
-      if (!responsible) {
-        showView("planning");
-        showToast("Välj en aktiv säljare i Planering innan kontakten bokas.");
-        return;
-      }
-      if (planningSelectedUserName !== responsible.user_name) {
-        planningSelectedUserName = responsible.user_name;
-        await loadPlanningWeek();
-      }
+    const previousOwner = planningSelectedUserName;
+    if (!await selectPlanningOwnerForCustomer(customer)) return;
+    if (userIsAdmin() && planningSelectedUserName !== previousOwner) {
+      await loadPlanningWeek();
     }
     openPlanningEditor({
       customer,
