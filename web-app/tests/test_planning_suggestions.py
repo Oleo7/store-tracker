@@ -464,6 +464,56 @@ class PersistentAProspectSuggestionTests(PlanningApiTestCase):
             NOW + timedelta(days=7),
         )
 
+    def test_resolved_a_prospect_reopens_after_contact_pause(self):
+        suggestion = self.current()["suggestion"]
+        self.assertEqual(
+            suggestion["customer_guidance"]["focus_key"], "a_prospect"
+        )
+
+        saved = self.client.post(
+            "/customers/Butik%20A/contacts",
+            json={
+                "client_request_id": "a-prospect-contact",
+                "date_time": "2026-07-27 10:15",
+                "contact_channel": "Telefon",
+                "result": "Neutral",
+                "comment": "Kontakt genomförd utan order",
+                "customer_contact_person": "Klara",
+            },
+        )
+        self.assertEqual(saved.status_code, 200, saved.get_json())
+        stored = next(
+            row
+            for row in self.spreadsheet.worksheet(SUGGESTIONS_SHEET).dict_rows()
+            if row["suggestion_id"] == suggestion["suggestion_id"]
+        )
+        self.assertEqual(stored["status"], "resolved")
+        self.assertEqual(stored["resolved_by_type"], "contact")
+
+        later = NOW + timedelta(days=3)
+        owner = {"user_name": "olle", "name": "Olle"}
+        with (
+            patch.object(app_module, "stockholm_now", return_value=later),
+            patch.object(app_module, "stockholm_today", return_value=later.date()),
+        ):
+            activities = self.planning_rows()
+            candidates = app_module.planning_suggestion_candidates(
+                self.spreadsheet, owner, activities
+            )
+            app_module.planning_suggestion_service(self.spreadsheet).queue(
+                owner,
+                candidates,
+                activity_rows=activities,
+            )
+
+        reopened = next(
+            row
+            for row in self.spreadsheet.worksheet(SUGGESTIONS_SHEET).dict_rows()
+            if row["suggestion_id"] == suggestion["suggestion_id"]
+        )
+        self.assertEqual(reopened["status"], "pending")
+        self.assertEqual(reopened["resolved_by_type"], "")
+
     def test_historical_hidden_a_prospect_is_visible_and_explicitly_resumable(self):
         suggestion = self.current()["suggestion"]
         owner = {"user_name": "olle", "name": "Olle"}
