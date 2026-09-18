@@ -115,13 +115,14 @@ def _canonical_hash(payload):
     return hashlib.sha256(encoded).hexdigest()
 
 
-def decision_context_hash(*, owner, customer_id, lifecycle="", order_count=0,
-                          latest_order_reference="", latest_order_date="",
-                          latest_contact_id="", latest_contact_result="",
-                          latest_contact_date="", active_email_intent_event="",
-                          segment=""):
-    """Hash stable business facts only; never live score, copy, or wall time."""
-    return _canonical_hash({
+def _decision_context_payload_v1(
+    *, owner, customer_id, lifecycle="", order_count=0,
+    latest_order_reference="", latest_order_date="", latest_contact_id="",
+    latest_contact_result="", latest_contact_date="",
+    active_email_intent_event="",
+):
+    """Original stable context payload used before segment-aware A-prospects."""
+    return {
         "owner": _key(owner),
         "customer_id": _text(customer_id),
         "lifecycle": _key(lifecycle),
@@ -132,11 +133,52 @@ def decision_context_hash(*, owner, customer_id, lifecycle="", order_count=0,
         "latest_contact_result": _key(latest_contact_result),
         "latest_contact_date": _text(latest_contact_date),
         "active_email_intent_event": _text(active_email_intent_event),
-        # Only callers that intentionally need segment-sensitive context pass
-        # this value. Keeping the default empty preserves IDs for unrelated
-        # suggestion types.
-        "segment": _key(segment),
-    })
+    }
+
+
+def legacy_decision_context_hash_v1(
+    *, owner, customer_id, lifecycle="", order_count=0,
+    latest_order_reference="", latest_order_date="", latest_contact_id="",
+    latest_contact_result="", latest_contact_date="",
+    active_email_intent_event="",
+):
+    """Hash a pre-segment decision context for read-only compatibility."""
+    return _canonical_hash(_decision_context_payload_v1(
+        owner=owner,
+        customer_id=customer_id,
+        lifecycle=lifecycle,
+        order_count=order_count,
+        latest_order_reference=latest_order_reference,
+        latest_order_date=latest_order_date,
+        latest_contact_id=latest_contact_id,
+        latest_contact_result=latest_contact_result,
+        latest_contact_date=latest_contact_date,
+        active_email_intent_event=active_email_intent_event,
+    ))
+
+
+def decision_context_hash(*, owner, customer_id, lifecycle="", order_count=0,
+                          latest_order_reference="", latest_order_date="",
+                          latest_contact_id="", latest_contact_result="",
+                          latest_contact_date="", active_email_intent_event="",
+                          segment=""):
+    """Hash stable business facts only; never live score, copy, or wall time."""
+    payload = _decision_context_payload_v1(
+        owner=owner,
+        customer_id=customer_id,
+        lifecycle=lifecycle,
+        order_count=order_count,
+        latest_order_reference=latest_order_reference,
+        latest_order_date=latest_order_date,
+        latest_contact_id=latest_contact_id,
+        latest_contact_result=latest_contact_result,
+        latest_contact_date=latest_contact_date,
+        active_email_intent_event=active_email_intent_event,
+    )
+    # Keep the current schema stable. Compatibility with rows created before
+    # this field existed is handled explicitly through compatible hashes.
+    payload["segment"] = _key(segment)
+    return _canonical_hash(payload)
 
 
 def deterministic_suggestion_id(owner, customer_id, context_hash):
@@ -153,6 +195,49 @@ def mutation_fingerprint(action, suggestion_id, request_id, payload=None):
         "client_request_id": _text(request_id),
         "payload": payload or {},
     })
+
+
+def candidate_suggestion_ids(owner, candidate):
+    """Return canonical ID followed by accepted historical IDs."""
+    hashes = [
+        _text(candidate.get("decision_context_hash")),
+        *[
+            _text(value)
+            for value in candidate.get("compatible_decision_context_hashes", ())
+        ],
+    ]
+    result = []
+    seen = set()
+    for context_hash in hashes:
+        if not context_hash or context_hash in seen:
+            continue
+        seen.add(context_hash)
+        result.append(deterministic_suggestion_id(
+            owner.get("user_name"),
+            candidate.get("customer_id"),
+            context_hash,
+        ))
+    return result
+
+
+def preferred_compatible_suggestion(rows, canonical_id=""):
+    """Prefer explicit user state when duplicate schema-era IDs coexist."""
+    candidates = [row for row in rows if row]
+    if not candidates:
+        return None
+
+    def sort_key(row):
+        status = _key(row.get("status"))
+        explicit = bool(_text(row.get("last_mutation_request_id"))) or status in {
+            "snoozed", "dismissed", "planned"
+        }
+        return (
+            int(explicit),
+            _text(row.get("updated_at")),
+            int(_text(row.get("suggestion_id")) == _text(canonical_id)),
+        )
+
+    return max(candidates, key=sort_key)
 
 
 def _revision(row):
@@ -532,12 +617,25 @@ class PlanningSuggestionService:
                 if not customer_id or customer_id in seen_customer_ids:
                     continue
                 seen_customer_ids.add(customer_id)
-                suggestion_id = deterministic_suggestion_id(
-                    owner.get("user_name"), candidate.get("customer_id"),
-                    candidate.get("decision_context_hash")
+                compatible_ids = candidate_suggestion_ids(owner, candidate)
+                if not compatible_ids:
+                    continue
+                for suggestion_id in compatible_ids:
+                    candidate_by_id[suggestion_id] = candidate
+                stored_candidates = [
+                    stored_by_id[suggestion_id][1]
+                    for suggestion_id in compatible_ids
+                    if suggestion_id in stored_by_id
+                ]
+                preferred = preferred_compatible_suggestion(
+                    stored_candidates,
+                    canonical_id=compatible_ids[0],
                 )
-                candidate_by_id[suggestion_id] = candidate
-                ordered.append((suggestion_id, candidate))
+                effective_id = (
+                    _text(preferred.get("suggestion_id"))
+                    if preferred else compatible_ids[0]
+                )
+                ordered.append((effective_id, candidate))
 
             current_customer_ids = {
                 _text(candidate.get("customer_id"))
@@ -770,29 +868,32 @@ class PlanningSuggestionService:
         with self.lock_context():
             sheet, events, headers, stored = self.snapshot()
             row = self._candidate_row(owner, candidate)
+            compatible_ids = set(candidate_suggestion_ids(owner, candidate))
             matches = [
                 existing for _index, existing in stored
-                if _text(existing.get("suggestion_id")) == row["suggestion_id"]
+                if _text(existing.get("suggestion_id")) in compatible_ids
+                and _key(existing.get("user_name")) == _key(owner.get("user_name"))
             ]
-            if len(matches) > 1:
-                raise SuggestionError(
-                    "duplicate_suggestion_id",
-                    "Rekommendationen finns i flera exemplar och måste granskas.",
-                    409,
-                )
             if matches:
-                existing = matches[0]
-                if _key(existing.get("user_name")) != _key(owner.get("user_name")):
+                existing = preferred_compatible_suggestion(
+                    matches, canonical_id=row["suggestion_id"]
+                )
+                if _text(existing.get("customer_id")) != row["customer_id"]:
                     raise SuggestionError(
-                        "suggestion_not_found",
-                        "Rekommendationen kunde inte hittas.",
-                        404,
+                        "suggestion_stale",
+                        "Rekommendationens kund eller affärskontext har ändrats.",
+                        409,
                     )
-                if (
-                    _text(existing.get("customer_id")) != row["customer_id"]
-                    or _text(existing.get("decision_context_hash"))
-                    != row["decision_context_hash"]
-                ):
+                accepted_hashes = {
+                    _text(candidate.get("decision_context_hash")),
+                    *[
+                        _text(value)
+                        for value in candidate.get(
+                            "compatible_decision_context_hashes", ()
+                        )
+                    ],
+                }
+                if _text(existing.get("decision_context_hash")) not in accepted_hashes:
                     raise SuggestionError(
                         "suggestion_stale",
                         "Rekommendationens kund eller affärskontext har ändrats.",
