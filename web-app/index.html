@@ -2033,8 +2033,8 @@
       font-weight: 850;
     }
 
-    .card-date-followup.today {
-      color: #934513;
+    .card-date-followup.planned {
+      color: #236b42;
       font-weight: 850;
     }
 
@@ -5096,7 +5096,7 @@
     if (guidance.status_key === "overdue_followup" && followUpDate) {
       followUp = `<span class="card-date-followup missed">Uppföljning ${getCardDateHtml(followUpDate)}</span>`;
     } else if (guidance.status_key === "planned" && followUpDate) {
-      followUp = `<span class="card-date-followup today">Nästa kontakt ${getCardDateHtml(followUpDate)}</span>`;
+      followUp = `<span class="card-date-followup planned">Nästa kontakt ${getCardDateHtml(followUpDate)}</span>`;
     }
     const deliveryLabel = guidance.focus_key === "second_purchase" ? "Första leverans" : "Senaste leverans";
     const volume = guidance.focus_key === "second_purchase" ? ins.first_delivery_dfp : ins.latest_order_dfp;
