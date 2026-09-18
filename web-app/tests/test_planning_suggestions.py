@@ -583,6 +583,99 @@ class PersistentAProspectSuggestionTests(PlanningApiTestCase):
         self.assertEqual(stored[0]["suggestion_id"], legacy_id)
         self.assertEqual(stored[0]["status"], "snoozed")
 
+    def test_explicit_legacy_state_wins_if_canonical_duplicate_exists(self):
+        suggestion = self.current()["suggestion"]
+        snoozed = self.client.post(
+            f"/planning/suggestions/{suggestion['suggestion_id']}/snooze",
+            json={
+                "client_request_id": "legacy-state-before-duplicate",
+                "expected_revision": suggestion["revision"],
+            },
+        )
+        self.assertEqual(snoozed.status_code, 200, snoozed.get_json())
+        legacy_id = self._rewrite_suggestion_as_pre_segment_context(suggestion)
+
+        owner = {"user_name": "olle", "name": "Olle"}
+        candidate = next(
+            item
+            for item in app_module.planning_suggestion_candidates(
+                self.spreadsheet, owner, self.planning_rows()
+            )
+            if item["customer_id"] == suggestion["customer_id"]
+        )
+        service = app_module.planning_suggestion_service(self.spreadsheet)
+        canonical = service._candidate_row(owner, candidate)
+        sheet = self.spreadsheet.worksheet(SUGGESTIONS_SHEET)
+        headers = sheet.row_values(1)
+        sheet.append_row([canonical.get(header, "") for header in headers])
+
+        insights = self.client.get("/customer-insights")
+        self.assertEqual(insights.status_code, 200, insights.get_json())
+        butik = insights.get_json()["butik a"]
+        self.assertEqual(
+            butik["recommendation_suppression_reason"], "snoozed"
+        )
+
+        current = self.current()
+        self.assertNotEqual(
+            (current.get("suggestion") or {}).get("customer_id"),
+            suggestion["customer_id"],
+        )
+        rows = [
+            row
+            for row in sheet.dict_rows()
+            if row["customer_id"] == suggestion["customer_id"]
+        ]
+        self.assertEqual(len(rows), 2)
+        legacy = next(row for row in rows if row["suggestion_id"] == legacy_id)
+        self.assertEqual(legacy["status"], "snoozed")
+
+    def test_pre_segment_planned_link_can_cancel_and_reopen(self):
+        suggestion = self.current()["suggestion"]
+        planned = self.client.post(
+            f"/planning/suggestions/{suggestion['suggestion_id']}/plan",
+            json={
+                "client_request_id": "legacy-plan-before-schema-change",
+                "expected_suggestion_revision": suggestion["revision"],
+                "customer_id": suggestion["customer_id"],
+                "contact_type": "phone",
+                "scheduled_at": "2026-07-30T09:00:00+02:00",
+                "note": "Historisk planering",
+            },
+        )
+        self.assertIn(planned.status_code, {200, 201}, planned.get_json())
+        activity = planned.get_json()["activity"]
+        legacy_id = self._rewrite_suggestion_as_pre_segment_context(suggestion)
+
+        activity_sheet = self.spreadsheet.worksheet("planned_activities")
+        activity_rows = activity_sheet.dict_rows()
+        activity_offset = next(
+            index
+            for index, row in enumerate(activity_rows, start=2)
+            if row["planned_activity_id"] == activity["planned_activity_id"]
+        )
+        app_module.update_sheet_row(
+            activity_sheet,
+            activity_offset,
+            activity_sheet.row_values(1),
+            {"source_suggestion_id": legacy_id},
+        )
+
+        cancelled = self.client.patch(
+            f"/planning/activities/{activity['planned_activity_id']}",
+            json={
+                "client_request_id": "cancel-pre-segment-plan",
+                "expected_revision": activity["revision"],
+                "status": "cancelled",
+            },
+        )
+        self.assertEqual(cancelled.status_code, 200, cancelled.get_json())
+
+        reopened = self.current()["suggestion"]
+        self.assertEqual(reopened["customer_id"], suggestion["customer_id"])
+        self.assertEqual(reopened["suggestion_id"], legacy_id)
+        self.assertEqual(reopened["status"], "pending")
+
     def test_pre_segment_a_prospect_state_does_not_survive_segment_change(self):
         suggestion = self.current()["suggestion"]
         snoozed = self.client.post(
