@@ -770,6 +770,7 @@ READ_CACHE_TITLES = {
 }
 PRIORITY_SNAPSHOT_CACHE_TITLES = frozenset({
     "customers_enriched",
+    "users",
     "order_rows",
     "sales_activities",
     "email_messages",
@@ -6480,8 +6481,20 @@ def build_current_priority_snapshot(
     today,
     planned_activity_rows=(),
     responsible=None,
+    users=None,
 ):
     """Calculate the authoritative priority snapshot used by all endpoints."""
+    planning_owner_user_names = None
+    if users is not None:
+        # Reuse the same active, unambiguous name/user_name resolution as other
+        # planning flows. Passing users explicitly avoids any per-customer IO.
+        planning_owner_user_names = {}
+        for customer in customers:
+            customer_id = str(customer.get("customer_id") or "").strip()
+            owner = canonical_owner_for_customer(None, customer, users=users)
+            planning_owner_user_names[customer_id] = str(
+                (owner or {}).get("user_name") or ""
+            ).strip()
     order_features = build_order_features(order_rows)
     contact_features = build_contact_features(contact_rows, order_features)
     email_engagement_by_customer = build_email_engagement_snapshot(
@@ -6497,6 +6510,7 @@ def build_current_priority_snapshot(
         email_features=email_engagement_by_customer,
         planned_activities=planned_activity_rows,
         now=stockholm_now(),
+        planning_owner_user_names=planning_owner_user_names,
     )
     if responsible:
         responsible_key = normalize_key(responsible)
@@ -6518,6 +6532,8 @@ def priority_planned_activity_signature(rows):
             ).strip(),
             "customer_id": str(row.get("customer_id") or "").strip(),
             "customer": str(row.get("customer") or "").strip(),
+            "user_name": normalize_key(row.get("user_name")),
+            "sales_person": normalize_key(row.get("sales_person")),
             "status": str(row.get("status") or "").strip().casefold(),
             "scheduled_at": planning_datetime_text(row.get("scheduled_at")),
             "source_suggestion_id": str(
@@ -6605,6 +6621,15 @@ def get_authoritative_priority_snapshot(
         message_rows, recipient_rows, _events = get_email_rows(
             spreadsheet, include_events=False
         )
+        # Resolve calendar ownership from one cached users snapshot. Old
+        # installations without a users sheet retain the exact-match fallback;
+        # genuine read errors still surface rather than fabricating status.
+        users = None
+        if planned_activity_rows:
+            try:
+                users = get_user_rows(spreadsheet)
+            except (WorksheetNotFound, AttributeError):
+                pass
         priorities, email_snapshot = build_current_priority_snapshot(
             customers=customers,
             order_rows=order_rows,
@@ -6613,6 +6638,7 @@ def get_authoritative_priority_snapshot(
             recipient_rows=recipient_rows,
             today=today,
             planned_activity_rows=planned_activity_rows or (),
+            users=users,
         )
         payload = {
             "priorities": priorities,

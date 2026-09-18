@@ -880,6 +880,7 @@ def _planned_activity_index(planned_activities):
 
 def _planned_activity_state(
     index, *, customer_id, customer_key, sales_person, latest_human_contact, now,
+    owner_user_name=None,
 ):
     """Return the effective future plan and unresolved overdue commitment."""
     matches = index.get(f"id:{customer_id}", ()) if customer_id else ()
@@ -894,9 +895,22 @@ def _planned_activity_state(
     future = []
     overdue = []
     for item in matches:
-        row_owner = normalize_customer_key(item["row"].get("sales_person"))
-        if row_owner and owner_key and row_owner != owner_key:
-            continue
+        if owner_user_name is not None:
+            # Production resolves the current customer owner through users once
+            # per snapshot. Match the booking's canonical login, never its
+            # display name (which may be old or formatted differently).
+            canonical_owner = normalize_customer_key(owner_user_name)
+            booking_owner = normalize_customer_key(item["row"].get("user_name"))
+            if not canonical_owner or booking_owner != canonical_owner:
+                continue
+        else:
+            # Compatibility for pure/legacy callers without a users snapshot.
+            # An explicit booking login still takes precedence over display text.
+            row_owner = normalize_customer_key(
+                item["row"].get("user_name") or item["row"].get("sales_person")
+            )
+            if row_owner and owner_key and row_owner != owner_key:
+                continue
         scheduled = item["scheduled_at"].replace(tzinfo=None)
         if scheduled >= current:
             future.append(item)
@@ -1419,6 +1433,7 @@ def build_priority_customers(
     workflow_suppressions: dict | None = None,
     scoring_version: str = SCORE_VERSION,
     now: datetime | None = None,
+    planning_owner_user_names: dict[str, str] | None = None,
 ) -> list[dict]:
     """Build the authoritative current score for every active, in-scope customer."""
     if str(scoring_version or "").strip().casefold() == "legacy":
@@ -1567,6 +1582,10 @@ def build_priority_customers(
             sales_person=sales_person,
             latest_human_contact=contact.get("latest_human_contact_datetime"),
             now=guidance_now,
+            owner_user_name=(
+                planning_owner_user_names.get(customer_id, "")
+                if planning_owner_user_names is not None else None
+            ),
         )
         activity = activity_state["future"]
         has_order_after_latest_contact = bool(
