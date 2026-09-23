@@ -2645,6 +2645,31 @@ class SnapshotAndAggregateTests(TestCase):
         self.assertEqual(discipline["skipped"], 1)
         self.assertEqual(discipline["cancelled_excluded"], 1)
 
+    def test_superseded_history_does_not_lower_planning_kpis(self):
+        completed_contact = activity(
+            "completed-plan-contact", "2026-08-02 10:00", result="Neutral"
+        )
+        base_plans = [
+            {"planned_activity_id": "open-plan", "scheduled_at": "2026-08-01T10:00:00", "status": "planned", "user_name": "olle", "customer_id": "customer-1"},
+            {"planned_activity_id": "completed-plan", "scheduled_at": "2026-08-02T10:00:00", "status": "completed", "completed_contact_id": "completed-plan-contact", "user_name": "olle", "customer_id": "customer-1"},
+        ]
+        superseded = {
+            "planned_activity_id": "historic-superseded",
+            "scheduled_at": "2026-08-01T09:00:00",
+            "status": "superseded",
+            "user_name": "olle",
+            "customer_id": "customer-1",
+        }
+        before = self.summary(
+            [completed_contact], planned_activities=base_plans
+        )["follow_up_discipline"]
+        after = self.summary(
+            [completed_contact], planned_activities=[*base_plans, superseded]
+        )["follow_up_discipline"]
+        self.assertEqual(after["accountable_planned"], before["accountable_planned"])
+        self.assertEqual(after["planned_completed_in_time"], before["planned_completed_in_time"])
+        self.assertEqual(after["overdue_rate"], before["overdue_rate"])
+
     def test_planned_completion_uses_exact_instants_and_date_only_fallback(self):
         completion_times = {
             "before": "2026-08-10T09:59:00",

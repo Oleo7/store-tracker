@@ -441,6 +441,33 @@ class PlanningApiTestCase(TestCase):
 
 
 class PlanningHelperTests(TestCase):
+    def test_public_superseded_activity_stays_terminal(self):
+        self.assertIn("superseded", app_module.PLANNING_STATUSES)
+        public = app_module.public_planned_activity({
+            "planned_activity_id": "historic-plan",
+            "status": "superseded",
+            "scheduled_at": "2026-07-26T09:00:00+02:00",
+            "contact_type": "phone",
+        }, now=NOW)
+        self.assertEqual(public["status"], "superseded")
+        self.assertEqual(public["display_status"], "superseded")
+        self.assertFalse(public["overdue"])
+
+    def test_superseded_activity_is_absent_from_open_action_queue(self):
+        active, overdue = app_module.active_planned_activity_queue_state(
+            [{
+                "planned_activity_id": "historic-plan",
+                "user_name": "olle",
+                "customer_id": "customer-1",
+                "status": "superseded",
+                "scheduled_at": "2026-07-26T09:00:00+02:00",
+            }],
+            {"user_name": "olle"},
+            now=NOW,
+        )
+        self.assertEqual(active, set())
+        self.assertEqual(overdue, [])
+
     def test_stockholm_datetime_normalizes_utc_and_rejects_dst_gap(self):
         utc = app_module.parse_planning_datetime("2026-07-28T07:30:00Z")
         nonexistent = app_module.parse_planning_datetime("2026-03-29T02:30")
@@ -1784,6 +1811,18 @@ class PlanningContactCompletionTests(PlanningApiTestCase):
         self.assertEqual(calendar["activities"][0]["status"], "superseded")
         self.assertEqual(calendar["days"]["2026-07-26"]["planned"], 0)
         self.assertEqual(calendar["days"]["2026-07-26"]["activity_count"], 0)
+        mutation = self.client.patch(
+            "/planning/activities/past-plan",
+            json={
+                "client_request_id": "restore-superseded",
+                "expected_revision": int(row["revision"]),
+                "status": "planned",
+            },
+        )
+        self.assertEqual(mutation.status_code, 409, mutation.get_json())
+        self.assertEqual(
+            mutation.get_json()["error"], "superseded_activity_immutable"
+        )
 
     def test_future_plan_after_contact_stays_planned(self):
         self.append_planning_row(
