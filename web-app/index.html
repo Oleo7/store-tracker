@@ -3195,6 +3195,7 @@
     .planning-activity-card.status-overdue { --planning-status: #c33b55; background: #fff9fa; }
     .planning-activity-card.status-skipped { --planning-status: var(--pb-mango); background: #fffcf7; }
     .planning-activity-card.status-cancelled { --planning-status: #aaa1a8; opacity: 0.68; }
+    .planning-activity-card.status-superseded { --planning-status: #aaa1a8; opacity: 0.68; }
     .planning-activity-card.status-planned.contact-phone { --planning-status: #7597bd; background: #fbfdff; }
     .planning-activity-card.status-planned.contact-email { --planning-status: #c98aa8; background: #fffafd; }
     .planning-activity-card.status-planned.picking-help { --planning-status: #7a61b8; background: #f7f3ff; }
@@ -4546,6 +4547,7 @@
     completed: "Genomförd",
     skipped: "Överhoppad",
     cancelled: "Avbokad",
+    superseded: "Ersatt av kontakt",
     overdue: "Försenad",
   });
 
@@ -7547,7 +7549,7 @@
       contact_type: contactType,
       scheduled_at: String(source.scheduled_at ?? source.start_at ?? source.estimated_at ?? "").trim(),
       note: String(source.note ?? source.comment ?? "").trim(),
-      status: ["planned", "completed", "skipped", "cancelled"].includes(source.status)
+      status: ["planned", "completed", "skipped", "cancelled", "superseded"].includes(source.status)
         ? source.status
         : "planned",
       source: ["manual", "follow_up", "route"].includes(source.source) ? source.source : "manual",
@@ -8163,8 +8165,9 @@
     document.getElementById("planning-date-jump").value = planningSelectedDate;
     document.getElementById("planning-week-strip").innerHTML = weekDates.map(dateKey => {
       const summary = planningDaySummary(dateKey);
-      const activeCount = Number(summary.activity_count ?? summary.display_count) ||
-        planningAgendaItemsForDate(dateKey).filter(activity => activity.status !== "cancelled").length;
+      const summaryCount = Number(summary.activity_count ?? summary.display_count);
+      const activeCount = Number.isFinite(summaryCount) ? summaryCount :
+        planningAgendaItemsForDate(dateKey).filter(activity => !["cancelled", "superseded"].includes(activity.status)).length;
       const date = planningDateFromKey(dateKey);
       const dayName = new Intl.DateTimeFormat("sv-SE", { weekday: "short", timeZone: "UTC" })
         .format(date).replace(".", "");
@@ -8186,7 +8189,7 @@
   }
 
   function planningStatusSummary(activities) {
-    const counts = { planned: 0, overdue: 0, completed: 0, skipped: 0, cancelled: 0, unplanned: 0 };
+    const counts = { planned: 0, overdue: 0, completed: 0, skipped: 0, cancelled: 0, superseded: 0, unplanned: 0 };
     activities.forEach(activity => {
       if (activity.unplanned) {
         counts.unplanned += 1;
@@ -8201,6 +8204,7 @@
     if (counts.completed) parts.push(`${counts.completed} genomförda`);
     if (counts.unplanned) parts.push(`${counts.unplanned} oplanerade`);
     if (counts.skipped) parts.push(`${counts.skipped} överhoppade`);
+    if (counts.superseded) parts.push(`${counts.superseded} ersatta`);
     if (!parts.length && counts.cancelled) parts.push(`${counts.cancelled} avbokade`);
     return parts.join(" · ");
   }
@@ -9255,7 +9259,7 @@
     const dateKey = planningDateKeyFromIso(activity.scheduled_at);
     const time = planningTimeFromIso(activity.scheduled_at);
     const timeLabel = activity.time_is_estimated ? `ca ${time}` : time;
-    const terminal = activity.status === "completed" || activity.status === "cancelled";
+    const terminal = ["completed", "cancelled", "superseded"].includes(activity.status);
     const plannedActions = !terminal && activity.status === "planned" ? `
       <button class="planning-compact-btn primary" type="button" data-planning-detail-action="log">Logga kontakt</button>
       <button class="planning-compact-btn" type="button" data-planning-detail-action="edit">Redigera / flytta</button>
@@ -10791,7 +10795,7 @@
     return planningActivitiesForDate(dateKey)
       .filter(activity =>
         activity.contact_type === "visit" &&
-        !["cancelled", "skipped"].includes(activity.status)
+        !["cancelled", "skipped", "superseded"].includes(activity.status)
       )
       .map(activity => planningCustomerForItem(activity))
       .filter(customer => {

@@ -459,7 +459,7 @@ class PlanningFrontendContractTests(TestCase):
         self.assertIn("function planningVisitStopsForDate(dateKey)", self.html)
         self.assertIn('activity.contact_type === "visit"', self.html)
         self.assertIn(
-            '!["cancelled", "skipped"].includes(activity.status)',
+            '!["cancelled", "skipped", "superseded"].includes(activity.status)',
             self.html,
         )
         self.assertIn("routeInMapStops = [...visitStops]", self.html)

@@ -1759,8 +1759,153 @@ class PlanningContactCompletionTests(PlanningApiTestCase):
             row["planned_activity_id"]: row for row in self.planning_rows()
         }
         self.assertEqual(by_id[phone["planned_activity_id"]]["status"], "completed")
-        self.assertEqual(by_id[visit["planned_activity_id"]]["status"], "planned")
+        self.assertEqual(by_id[visit["planned_activity_id"]]["status"], "superseded")
         self.assertEqual(by_id[visit["planned_activity_id"]]["completed_contact_id"], "")
+
+    def test_later_human_contact_supersedes_past_plan_and_keeps_history(self):
+        self.append_planning_row(
+            planned_activity_id="past-plan",
+            scheduled_at="2026-07-26T09:00:00+02:00",
+        )
+        response = self.client.post(
+            "/customers/Butik%20A/contacts",
+            json=self.direct_contact_payload(date_time="2026-07-27 10:00"),
+        )
+        self.assertEqual(response.status_code, 200, response.get_json())
+        row = self.planning_rows()[0]
+        self.assertEqual(row["status"], "superseded")
+        self.assertEqual(int(row["revision"]), 2)
+        self.assertEqual(row["completed_contact_id"], "")
+        self.assertEqual(row["planned_activity_id"], "past-plan")
+        self.assertFalse(app_module.public_planned_activity(row, now=NOW)["overdue"])
+        calendar = self.client.get(
+            "/planning/activities?start=2026-07-26&end=2026-07-26"
+        ).get_json()
+        self.assertEqual(calendar["activities"][0]["status"], "superseded")
+        self.assertEqual(calendar["days"]["2026-07-26"]["planned"], 0)
+        self.assertEqual(calendar["days"]["2026-07-26"]["activity_count"], 0)
+
+    def test_future_plan_after_contact_stays_planned(self):
+        self.append_planning_row(
+            planned_activity_id="future-plan",
+            scheduled_at="2026-07-28T09:00:00+02:00",
+        )
+        response = self.client.post(
+            "/customers/Butik%20A/contacts",
+            json=self.direct_contact_payload(date_time="2026-07-27 10:00"),
+        )
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertEqual(self.planning_rows()[0]["status"], "planned")
+
+    def test_later_same_day_plan_is_not_auto_linked_or_superseded(self):
+        self.append_planning_row(
+            planned_activity_id="later-today",
+            scheduled_at="2026-07-27T11:00:00+02:00",
+        )
+        response = self.client.post(
+            "/customers/Butik%20A/contacts",
+            json=self.direct_contact_payload(date_time="2026-07-27 10:00"),
+        )
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertEqual(self.contact_rows()[0]["planned_activity_id"], "")
+        self.assertEqual(self.planning_rows()[0]["status"], "planned")
+
+    def test_later_contact_supersedes_all_old_plans(self):
+        for activity_id, scheduled in (
+            ("old-1", "2026-07-25T09:00:00+02:00"),
+            ("old-2", "2026-07-26T09:00:00+02:00"),
+        ):
+            self.append_planning_row(
+                planned_activity_id=activity_id, scheduled_at=scheduled
+            )
+        response = self.client.post(
+            "/customers/Butik%20A/contacts",
+            json=self.direct_contact_payload(date_time="2026-07-27 10:00"),
+        )
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertEqual(
+            {row["planned_activity_id"]: row["status"] for row in self.planning_rows()},
+            {"old-1": "superseded", "old-2": "superseded"},
+        )
+
+    def test_later_contact_does_not_touch_other_customer(self):
+        self.append_planning_row(
+            planned_activity_id="other-customer",
+            customer_row=4,
+            scheduled_at="2026-07-26T09:00:00+02:00",
+        )
+        response = self.client.post(
+            "/customers/Butik%20A/contacts",
+            json=self.direct_contact_payload(date_time="2026-07-27 10:00"),
+        )
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertEqual(self.planning_rows()[0]["status"], "planned")
+
+    def test_later_contact_does_not_change_terminal_activities(self):
+        for status in ("completed", "cancelled", "skipped", "superseded"):
+            self.append_planning_row(
+                planned_activity_id=f"terminal-{status}",
+                scheduled_at="2026-07-26T09:00:00+02:00",
+                status=status,
+            )
+        response = self.client.post(
+            "/customers/Butik%20A/contacts",
+            json=self.direct_contact_payload(date_time="2026-07-27 10:00"),
+        )
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertEqual(
+            {row["planned_activity_id"]: row["status"] for row in self.planning_rows()},
+            {f"terminal-{status}": status
+             for status in ("completed", "cancelled", "skipped", "superseded")},
+        )
+
+    def test_no_later_human_contact_leaves_plan_open(self):
+        self.append_planning_row(
+            planned_activity_id="unresolved-plan",
+            scheduled_at="2026-07-26T09:00:00+02:00",
+        )
+        self.append_contact_row(
+            customer_id="11111111-1111-4111-8111-111111111111",
+            date_time="2026-07-25 10:00",
+        )
+        self.assertEqual(
+            app_module.reconcile_superseded_planned_activities(
+                self.spreadsheet, self.contact_rows(), apply=True
+            ),
+            [],
+        )
+        self.assertEqual(self.planning_rows()[0]["status"], "planned")
+
+    def test_reconciliation_ignores_crm_email_and_is_idempotent(self):
+        self.append_planning_row(
+            planned_activity_id="email-only-plan",
+            scheduled_at="2026-07-26T09:00:00+02:00",
+        )
+        self.append_contact_row(
+            customer_id="11111111-1111-4111-8111-111111111111",
+            date_time="2026-07-27 10:00",
+            activity_source="crm_email",
+        )
+        self.assertEqual(
+            app_module.reconcile_superseded_planned_activities(
+                self.spreadsheet, self.contact_rows(), apply=True
+            ), [],
+        )
+        self.append_contact_row(
+            customer_id="11111111-1111-4111-8111-111111111111",
+            date_time="2026-07-27 10:01",
+            contact_id="human-later",
+        )
+        self.assertEqual(
+            app_module.reconcile_superseded_planned_activities(
+                self.spreadsheet, self.contact_rows(), apply=True
+            ), ["email-only-plan"],
+        )
+        self.assertEqual(
+            app_module.reconcile_superseded_planned_activities(
+                self.spreadsheet, self.contact_rows(), apply=True
+            ), [],
+        )
 
     def test_direct_auto_link_replay_is_idempotent(self):
         activity = self.append_planning_row(

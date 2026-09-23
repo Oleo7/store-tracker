@@ -2471,7 +2471,7 @@ def build_sales_coaching_summary(*, activities, customers, users, order_rows, pl
 
     def is_accountable_planned(row):
         status = normalize_key(row.get("status"))
-        if status == "cancelled":
+        if status in {"cancelled", "superseded"}:
             return False
         if status in {"completed", "skipped"}:
             return True

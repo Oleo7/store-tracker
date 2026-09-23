@@ -2631,6 +2631,7 @@ class SnapshotAndAggregateTests(TestCase):
             {"planned_activity_id": "future-completed", "scheduled_at": "2026-08-20T18:00:00", "status": "completed", "completed_contact_id": "completed-early", "user_name": "olle", "customer_id": "customer-1"},
             {"planned_activity_id": "future-skipped", "scheduled_at": "2026-08-20T18:00:00", "status": "skipped", "user_name": "olle", "customer_id": "customer-1"},
             {"planned_activity_id": "future-cancelled", "scheduled_at": "2026-08-20T18:00:00", "status": "cancelled", "user_name": "olle", "customer_id": "customer-1"},
+            {"planned_activity_id": "past-superseded", "scheduled_at": "2026-08-01T10:00:00", "status": "superseded", "user_name": "olle", "customer_id": "customer-1"},
         ]
 
         discipline = self.summary(rows, planned_activities=planned)["follow_up_discipline"]
