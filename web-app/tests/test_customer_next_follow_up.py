@@ -127,6 +127,14 @@ class CustomerNextFollowUpTests(PlanningApiTestCase):
 
         self.assertIsNone(payload["next_follow_up"])
 
+    def test_superseded_activity_is_not_a_next_follow_up_reminder(self):
+        self.append_planning_row(
+            planned_activity_id="superseded-reminder",
+            scheduled_at="2026-07-29T09:00:00+02:00",
+            status="superseded",
+        )
+        self.assertIsNone(self.get_stats()["next_follow_up"])
+
     def test_planned_activity_wins_same_calendar_day(self):
         self.append_contact_row(
             contact_id="legacy-same-day",

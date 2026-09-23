@@ -49,7 +49,9 @@ from priority import (
     build_contact_features,
     build_order_features,
     build_priority_customers,
+    is_human_contact,
     normalize_customer_key,
+    parse_datetime as parse_priority_datetime,
 )
 from sales_coaching import (
     ANALYTICS_SNAPSHOT_VERSION,
@@ -679,7 +681,7 @@ PLANNING_CONTACT_DURATIONS = {
     "phone": 10,
     "email": 10,
 }
-PLANNING_STATUSES = {"planned", "completed", "skipped", "cancelled"}
+PLANNING_STATUSES = {"planned", "completed", "skipped", "cancelled", "superseded"}
 PLANNING_SOURCES = {"manual", "follow_up", "route", "system_suggestion"}
 PLANNING_PREVIEW_MAX_AGE_SECONDS = 30 * 60
 PLANNING_ROUTE_START_HOUR = 9
@@ -1244,6 +1246,69 @@ def write_planned_activity_snapshot(spreadsheet):
             expected_columns=PLANNED_ACTIVITY_COLUMNS,
         )
         return sheet, headers, rows
+
+
+def superseded_planned_activity_candidates(activity_rows, contact_rows):
+    """Find open plans overtaken by a later human contact for the same ID."""
+    latest_by_customer = {}
+    linked_activity_ids = set()
+    for contact in contact_rows:
+        if not is_human_contact(contact):
+            continue
+        linked_id = str(contact.get("planned_activity_id") or "").strip()
+        if linked_id:
+            linked_activity_ids.add(linked_id)
+        customer_id = str(contact.get("customer_id") or "").strip()
+        contacted = parse_planning_datetime(
+            contact.get("date_time"), preserve_seconds=True
+        )
+        if contacted is None:
+            legacy = parse_priority_datetime(contact.get("date_time"))
+            if legacy is not None:
+                contacted = (
+                    legacy.replace(tzinfo=STOCKHOLM_ZONE)
+                    if legacy.tzinfo is None else legacy.astimezone(STOCKHOLM_ZONE)
+                )
+        if not customer_id or contacted is None:
+            continue
+        previous = latest_by_customer.get(customer_id)
+        if previous is None or contacted > previous:
+            latest_by_customer[customer_id] = contacted
+
+    candidates = []
+    for row_index, row in activity_rows:
+        if str(row.get("status") or "planned").strip().casefold() != "planned":
+            continue
+        activity_id = str(row.get("planned_activity_id") or "").strip()
+        if not activity_id or activity_id in linked_activity_ids:
+            continue
+        customer_id = str(row.get("customer_id") or "").strip()
+        contacted = latest_by_customer.get(customer_id)
+        scheduled = parse_planning_datetime(
+            row.get("scheduled_at"), preserve_seconds=True
+        )
+        if customer_id and contacted and scheduled and scheduled < contacted:
+            candidates.append((row_index, row))
+    return candidates
+
+
+def reconcile_superseded_planned_activities(spreadsheet, contact_rows, *, apply=False):
+    """Idempotent read or write pass under the planning mutation lock."""
+    with planning_write_lock():
+        if apply:
+            sheet, headers, activities = write_planned_activity_snapshot(spreadsheet)
+        else:
+            sheet, headers, activities = read_planned_activity_snapshot(spreadsheet)
+        candidates = superseded_planned_activity_candidates(activities, contact_rows)
+        if apply and sheet is not None:
+            for row_index, row in candidates:
+                update_sheet_row(sheet, row_index, headers, {
+                    "status": "superseded",
+                    "revision": planning_revision(row) + 1,
+                    "updated_at": next_planning_updated_at(row.get("updated_at")),
+                })
+        return [str(row.get("planned_activity_id") or "").strip()
+                for _row_index, row in candidates]
 
 
 def get_saved_route_proposal(spreadsheet, user_name, route_date):
@@ -3602,6 +3667,10 @@ def sync_suggestion_from_activity(spreadsheet, activity, *, request_id):
             action = "resolve"
         elif status in {"cancelled", "skipped"} and suggestion_status == "planned":
             action = "reopen"
+        elif status == "superseded" and suggestion_status in {
+            "pending", "snoozed", "planned"
+        }:
+            action = "resolve"
         else:
             return
         fingerprint = suggestion_mutation_fingerprint(
@@ -3881,7 +3950,7 @@ def resolve_contact_planned_activity(
     client_request_id="",
 ):
     """Read-only, conservative resolver for direct customer-card contacts."""
-    contact_at = parse_planning_datetime(date_time)
+    contact_at = parse_planning_datetime(date_time, preserve_seconds=True)
     if not customer_id or contact_at is None:
         return {"kind": "no_match"}
     contact_date = contact_at.astimezone(STOCKHOLM_ZONE).date()
@@ -3927,6 +3996,9 @@ def resolve_contact_planned_activity(
             is_same_activity_context(row)
             and str(row.get("status") or "planned").strip().casefold()
             == "planned"
+            and parse_planning_datetime(
+                row.get("scheduled_at"), preserve_seconds=True
+            ) <= contact_at
             and not str(row.get("completed_contact_id") or "").strip()
         )
     ]
@@ -4089,7 +4161,10 @@ def planning_day_summaries(
             if parse_planning_datetime(item.get("scheduled_at"))
             and parse_planning_datetime(item.get("scheduled_at")).date() == current
         ]
-        active = [item for item in day_items if item.get("status") != "cancelled"]
+        active = [
+            item for item in day_items
+            if item.get("status") not in {"cancelled", "superseded"}
+        ]
         day_unplanned = [
             item
             for item in unplanned_contacts
@@ -4116,6 +4191,7 @@ def planning_day_summaries(
             "completed": sum(item.get("status") == "completed" for item in active),
             "skipped": sum(item.get("status") == "skipped" for item in active),
             "cancelled": sum(item.get("status") == "cancelled" for item in day_items),
+            "superseded": sum(item.get("status") == "superseded" for item in day_items),
             "overdue": sum(bool(item.get("overdue")) for item in active),
         }
         summaries.append(summary)
@@ -8622,17 +8698,17 @@ def update_planning_activity(activity_id):
                 409,
                 activity=public_planned_activity(current),
             )
-        if current_status in {"completed", "cancelled"}:
+        if current_status in {"completed", "cancelled", "superseded"}:
             return planning_error(
                 (
-                    "completed_activity_immutable"
-                    if current_status == "completed"
-                    else "cancelled_activity_immutable"
+                    f"{current_status}_activity_immutable"
                 ),
                 (
-                    "En genomförd aktivitet kan inte ändras."
-                    if current_status == "completed"
-                    else "En inställd aktivitet kan inte ändras."
+                    {
+                        "completed": "En genomförd aktivitet kan inte ändras.",
+                        "cancelled": "En inställd aktivitet kan inte ändras.",
+                        "superseded": "En ersatt aktivitet kan inte ändras.",
+                    }[current_status]
                 ),
                 409,
             )
@@ -8726,6 +8802,12 @@ def update_planning_activity(activity_id):
                 return planning_error(
                     "completion_requires_contact",
                     "Logga kontakten för att markera aktiviteten som genomförd.",
+                    409,
+                )
+            if status == "superseded":
+                return planning_error(
+                    "superseded_requires_contact",
+                    "Aktiviteten ersätts automatiskt av en senare kontakt.",
                     409,
                 )
             updates["status"] = status
@@ -14052,6 +14134,7 @@ def add_contact(customer_name):
         if str(planned_row.get("status") or "").strip().casefold() in {
             "cancelled",
             "skipped",
+            "superseded",
         }:
             return planning_error(
                 "activity_not_active",
@@ -14271,7 +14354,7 @@ def add_contact(customer_name):
             live_completed_id = str(
                 planned_row.get("completed_contact_id") or ""
             ).strip()
-            if live_status in {"cancelled", "skipped"}:
+            if live_status in {"cancelled", "skipped", "superseded"}:
                 return planning_error(
                     "activity_not_active",
                     "Aktiviteten är inte längre aktiv.",
@@ -14531,6 +14614,19 @@ def add_contact(customer_name):
                     "step": "complete_activity",
                     "message": str(exc)[:200],
                 })
+
+        try:
+            reconcile_superseded_planned_activities(
+                spreadsheet,
+                [existing_contact if duplicate_contact else row_data],
+                apply=True,
+            )
+        except Exception as exc:
+            app.logger.exception("Contact saved but old plans could not be superseded")
+            partial_errors.append({
+                "step": "supersede_activities",
+                "message": str(exc)[:200],
+            })
 
         if follow_up_enabled and customer:
             try:

@@ -354,6 +354,72 @@ class PlanningSuggestionApiTests(PlanningApiTestCase):
         self.assertEqual(stored["status"], "resolved")
         self.assertEqual(stored["resolved_by_type"], "contact")
 
+    def test_superseded_linked_activity_resolves_suggestion(self):
+        suggestion = self.current()["suggestion"]
+        planned = self.client.post(
+            f"/planning/suggestions/{suggestion['suggestion_id']}/plan",
+            json={
+                "client_request_id": "plan-before-supersede",
+                "expected_suggestion_revision": suggestion["revision"],
+                "customer_id": suggestion["customer_id"],
+                "contact_type": "phone",
+                "scheduled_at": "2026-07-30T09:00:00+02:00",
+                "note": "",
+            },
+        )
+        self.assertEqual(planned.status_code, 201, planned.get_json())
+        sheet = self.spreadsheet.worksheet(app_module.PLANNED_ACTIVITIES_SHEET)
+        sheet.update_cell(
+            2, app_module.PLANNED_ACTIVITY_COLUMNS.index("status") + 1,
+            "superseded",
+        )
+        app_module.invalidate_sheet_for_write(sheet)
+
+        self.current()
+        stored = next(
+            row for row in self.spreadsheet.worksheet(SUGGESTIONS_SHEET).dict_rows()
+            if row["suggestion_id"] == suggestion["suggestion_id"]
+        )
+        self.assertEqual(stored["status"], "resolved")
+        self.assertEqual(stored["resolved_by_type"], "activity")
+        self.assertEqual(
+            stored["resolved_by_id"], planned.get_json()["activity"]["planned_activity_id"]
+        )
+
+    def test_later_contact_supersedes_linked_plan_and_resolves_suggestion(self):
+        suggestion = self.current()["suggestion"]
+        planned = self.client.post(
+            f"/planning/suggestions/{suggestion['suggestion_id']}/plan",
+            json={
+                "client_request_id": "plan-before-later-contact",
+                "expected_suggestion_revision": suggestion["revision"],
+                "customer_id": suggestion["customer_id"],
+                "contact_type": "phone",
+                "scheduled_at": "2026-07-30T09:00:00+02:00",
+                "note": "",
+            },
+        )
+        self.assertEqual(planned.status_code, 201, planned.get_json())
+        contact = self.client.post(
+            "/customers/Butik%20A/contacts",
+            json={
+                "client_request_id": "later-contact-resolves-suggestion",
+                "customer_id": suggestion["customer_id"],
+                "date_time": "2026-07-31 10:00",
+                "contact_channel": "Telefon",
+                "result": "Positiv",
+                "comment": "Senare kontakt",
+            },
+        )
+        self.assertEqual(contact.status_code, 200, contact.get_json())
+        self.assertEqual(self.planning_rows()[0]["status"], "superseded")
+        stored = next(
+            row for row in self.spreadsheet.worksheet(SUGGESTIONS_SHEET).dict_rows()
+            if row["suggestion_id"] == suggestion["suggestion_id"]
+        )
+        self.assertEqual(stored["status"], "resolved")
+        self.assertEqual(stored["resolved_by_type"], "contact")
+
     def test_new_business_context_resolves_planned_suggestion(self):
         suggestion = self.current()["suggestion"]
         planned = self.client.post(

@@ -100,6 +100,17 @@ def suggestion_identity(item):
 
 
 class Phase4EmailIntentTests(TestCase):
+    def test_superseded_plan_does_not_change_priority_or_scoring(self):
+        baseline = scored(today=date(2026, 8, 2))[0]
+        with_history = scored(today=date(2026, 8, 2), planned=[{
+            "planned_activity_id": "historic-plan",
+            "customer_id": "cid-1",
+            "user_name": "olle",
+            "scheduled_at": "2026-08-04T09:00:00",
+            "status": "superseded",
+        }])[0]
+        self.assertEqual(with_history, baseline)
+
     def snapshot(self, kind, today=date(2026, 8, 2), customers=None):
         messages, recipients = email_rows(kind=kind)
         result = app_module.build_email_engagement_snapshot(

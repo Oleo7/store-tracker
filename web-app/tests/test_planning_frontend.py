@@ -306,6 +306,30 @@ class PlanningFrontendContractTests(TestCase):
             self.html,
         )
 
+    def test_superseded_activity_keeps_status_without_actions(self):
+        normalizer = re.search(
+            r"function normalizePlanningActivity\(activity\) \{(.*?)\n  \}",
+            self.html, flags=re.DOTALL,
+        )
+        self.assertIsNotNone(normalizer)
+        self.assertIn(
+            '["planned", "completed", "skipped", "cancelled", "superseded"].includes(source.status)',
+            normalizer.group(1),
+        )
+        self.assertIn('superseded: "Ersatt av kontakt"', self.html)
+        self.assertIn(
+            '["completed", "cancelled", "superseded"].includes(activity.status)',
+            self.html,
+        )
+        self.assertIn(
+            '!["cancelled", "superseded"].includes(activity.status)',
+            self.html,
+        )
+        self.assertIn(
+            '!["cancelled", "skipped", "superseded"].includes(activity.status)',
+            self.html,
+        )
+
     def test_followup_calendar_accessibility_and_detail_show_appointments(self):
         self.assertIn('id="f-followup-appointment"', self.html)
         self.assertIn(
@@ -459,7 +483,7 @@ class PlanningFrontendContractTests(TestCase):
         self.assertIn("function planningVisitStopsForDate(dateKey)", self.html)
         self.assertIn('activity.contact_type === "visit"', self.html)
         self.assertIn(
-            '!["cancelled", "skipped"].includes(activity.status)',
+            '!["cancelled", "skipped", "superseded"].includes(activity.status)',
             self.html,
         )
         self.assertIn("routeInMapStops = [...visitStops]", self.html)

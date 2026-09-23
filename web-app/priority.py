@@ -420,6 +420,14 @@ def build_order_features(order_rows: list[dict]) -> dict:
     }
 
 
+def is_human_contact(row: dict) -> bool:
+    """Use the same CRM-email exclusion as contact feature calculation."""
+    return not (
+        bool(str(row.get("email_id") or "").strip())
+        or normalize_customer_key(row.get("activity_source")) == "crm_email"
+    )
+
+
 def build_contact_features(sales_activities: list[dict], order_features: dict) -> dict:
     activities_by_customer = defaultdict(list)
     contact_count_30d = defaultdict(int)
@@ -450,8 +458,7 @@ def build_contact_features(sales_activities: list[dict], order_features: dict) -
                 "sort_key": (contact_dt, idx),
                 "datetime": contact_dt,
                 "row": row,
-                "is_email": bool(str(row.get("email_id") or "").strip())
-                or normalize_customer_key(row.get("activity_source")) == "crm_email",
+                "is_email": not is_human_contact(row),
                 "follow_up_date": parse_date(row.get("follow_up_date")),
                 "customer_id": customer_id,
                 "customer_number": str(row.get("customer_number") or "").strip(),

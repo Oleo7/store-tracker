@@ -744,6 +744,14 @@ class PlanningSuggestionService:
                             "resolved_by_id": _text(activity.get("planned_activity_id")),
                         }
                         event_type = "suggestion_resolved"
+                    elif activity_status == "superseded":
+                        changes = {
+                            "status": "resolved",
+                            "resolved_at": _timestamp(self.now),
+                            "resolved_by_type": "activity",
+                            "resolved_by_id": _text(activity.get("planned_activity_id")),
+                        }
+                        event_type = "suggestion_resolved"
                 elif status in ACTIVE_STATUSES and suggestion_id not in candidate_by_id:
                     if same_customer_has_new_context:
                         changes = {
