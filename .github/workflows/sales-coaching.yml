@@ -22,8 +22,10 @@ jobs:
         run: pip install -r web-app/requirements.txt
       - name: Compile Python
         run: python -m compileall -q web-app
-      - name: Run complete Python test suite
+      - name: Run web-app Python test suite
         run: python -m unittest discover -s web-app/tests -p 'test_*.py'
+      - name: Run repository root test suite
+        run: python -m unittest discover -s tests -p 'test_*.py'
       - name: Run sales-coaching frontend contract tests
         run: python -m unittest web-app.tests.test_sales_coaching_frontend
       - name: Install browser runtime
