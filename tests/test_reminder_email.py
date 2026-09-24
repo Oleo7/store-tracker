@@ -1,6 +1,6 @@
 import sys
 import unittest
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -697,10 +697,10 @@ class TimelineAndWebhookTests(unittest.TestCase):
     def test_timeline_aggregates_events_and_attributes_day_ten_only_once(self):
         sheets = self._sheets()
         orders = [
-            {"Customer": "Butiken", "Reference": "ORDER-0", "Order date": "2026-07-02", "Total": "75", "Currency": "SEK", "Unit": "DFP", "Quantity": "1"},
-            {"Customer": "Butiken", "Reference": "ORDER-1", "Order date": "2026-07-11", "Total": "100", "Currency": "SEK", "Unit": "DFP", "Quantity": "2"},
-            {"Customer": "Butiken", "Reference": "ORDER-1", "Order date": "2026-07-11", "Total": "50", "Currency": "SEK", "Unit": "DFP", "Quantity": "1"},
-            {"Customer": "Butiken", "Reference": "ORDER-2", "Order date": "2026-07-12", "Total": "80", "Currency": "SEK", "Unit": "DFP", "Quantity": "1"},
+            {"Customer": "Butiken", "Reference": "ORDER-0", "Order date": "2026-07-02", "Total": "75", "Total weight": "1", "Currency": "SEK", "Unit": "DFP", "Quantity": "1"},
+            {"Customer": "Butiken", "Reference": "ORDER-1", "Order date": "2026-07-11", "Total": "100", "Total weight": "2", "Currency": "SEK", "Unit": "DFP", "Quantity": "2"},
+            {"Customer": "Butiken", "Reference": "ORDER-1", "Order date": "2026-07-11", "Total": "50", "Total weight": "1", "Currency": "SEK", "Unit": "DFP", "Quantity": "1"},
+            {"Customer": "Butiken", "Reference": "ORDER-2", "Order date": "2026-07-12", "Total": "80", "Total weight": "1", "Currency": "SEK", "Unit": "DFP", "Quantity": "1"},
         ]
         timeline = app_module.build_customer_timeline("Butiken", orders, [], sheets)
         types = [item["event_type"] for item in timeline]
@@ -915,15 +915,15 @@ class EmailPerformanceTests(unittest.TestCase):
         orders = [
             {
                 "Customer": "Butik A", "Reference": "ORDER-A", "Order date": "2026-07-15",
-                "Total": "100", "Currency": "SEK", "Unit": "DFP", "Quantity": "2",
+                "Total": "100", "Total weight": "2", "Currency": "SEK", "Unit": "DFP", "Quantity": "2",
             },
             {
                 "Customer": "Butik A", "Reference": "ORDER-A", "Order date": "2026-07-15",
-                "Total": "50", "Currency": "SEK", "Unit": "DFP", "Quantity": "1",
+                "Total": "50", "Total weight": "1", "Currency": "SEK", "Unit": "DFP", "Quantity": "1",
             },
             {
                 "Customer": "Butik B", "Reference": "ORDER-B", "Order date": "2026-07-12",
-                "Total": "80", "Currency": "SEK", "Unit": "DFP", "Quantity": "1",
+                "Total": "80", "Total weight": "1", "Currency": "SEK", "Unit": "DFP", "Quantity": "1",
             },
         ]
 
@@ -1057,19 +1057,19 @@ class EmailPerformanceTests(unittest.TestCase):
         rows = [
             {
                 "Customer": "Butik A", "Reference": "ZERO", "Order date": "2026-07-02",
-                "Total": "0", "Currency": "SEK", "Unit": "DFP", "Quantity": "0",
+                "Total": "0", "Total weight": "0", "Currency": "SEK", "Unit": "DFP", "Quantity": "0",
             },
             {
                 "Customer": "Butik A", "Reference": "RETURN", "Order date": "2026-07-03",
-                "Total": "-100", "Currency": "SEK", "Unit": "DFP", "Quantity": "-2",
+                "Total": "-100", "Total weight": "-2", "Currency": "SEK", "Unit": "DFP", "Quantity": "-2",
             },
             {
                 "Customer": "Butik A", "Reference": "REUSED", "Order date": "2026-07-04",
-                "Total": "100", "Currency": "SEK", "Unit": "DFP", "Quantity": "2",
+                "Total": "100", "Total weight": "2", "Currency": "SEK", "Unit": "DFP", "Quantity": "2",
             },
             {
                 "Customer": "Butik A", "Reference": "REUSED", "Order date": "2026-07-05",
-                "Total": "150", "Currency": "SEK", "Unit": "DFP", "Quantity": "3",
+                "Total": "150", "Total weight": "3", "Currency": "SEK", "Unit": "DFP", "Quantity": "3",
             },
         ]
 
@@ -1095,7 +1095,7 @@ class EmailPerformanceTests(unittest.TestCase):
         self.assertIn("recipient.last_opened_at", html)
         self.assertIn("recipient.product_sheet_last_clicked_at", html)
         self.assertIn("recipient.stockfiller_last_clicked_at", html)
-        self.assertIn('<span class="card-date-primary">Leverans ${delivery}</span>', html)
+        self.assertIn('<span class="card-date-primary">${deliveryLabel} ${delivery}${volumeText}</span>', html)
         self.assertIn('<span class="card-date-secondary">', html)
         self.assertNotIn("match[1].slice(2)", html)
 
@@ -1125,9 +1125,10 @@ class EmailPriorityScoringTests(unittest.TestCase):
         }
 
     def test_automated_email_updates_latest_contact_but_preserves_human_signals(self):
+        today = date.today()
         activities = [
             {
-                "date_time": "2026-07-20 10:00:00",
+                "date_time": f"{(today - timedelta(days=4)).isoformat()} 10:00:00",
                 "customer": "Butiken",
                 "result": "Positiv",
                 "contact_channel": "Telefon",
@@ -1135,7 +1136,7 @@ class EmailPriorityScoringTests(unittest.TestCase):
                 "email_id": "",
             },
             {
-                "date_time": "2026-07-24 09:00:00",
+                "date_time": f"{today.isoformat()} 09:00:00",
                 "customer": "Butiken",
                 "result": "Mejlförslag skickat – Påminnelse",
                 "contact_channel": "Mejl",
@@ -1145,7 +1146,7 @@ class EmailPriorityScoringTests(unittest.TestCase):
 
         features = app_module.build_contact_features(activities, {})
 
-        self.assertEqual(features["butiken"]["latest_contact_date"], date(2026, 7, 24))
+        self.assertEqual(features["butiken"]["latest_contact_date"], today)
         self.assertEqual(features["butiken"]["latest_contact_class"], "Positiv")
         self.assertEqual(features["butiken"]["latest_freezer_fields"], ("polarbar",))
         self.assertEqual(features["butiken"]["contact_count_30d"], 2)
@@ -1364,6 +1365,9 @@ class EmailInsightsEndpointTests(unittest.TestCase):
         ])
         orders = FakeWorksheet("order_rows", app_module.ORDER_COLUMNS, [])
         contacts = FakeWorksheet("sales_activities", app_module.CONTACT_COLUMNS, [])
+        activities = FakeWorksheet(
+            "planned_activities", app_module.PLANNED_ACTIVITY_COLUMNS, []
+        )
         users = FakeWorksheet("users", USER_COLUMNS, [
             {
                 "user_name": "Sofia", "name": "Sofia Andersson",
@@ -1409,8 +1413,11 @@ class EmailInsightsEndpointTests(unittest.TestCase):
             },
         ])
         events = FakeWorksheet("email_events", EMAIL_EVENTS_COLUMNS, [])
+        suggestions = FakeWorksheet(SUGGESTIONS_SHEET, SUGGESTION_COLUMNS, [])
+        score_events = FakeWorksheet(SCORE_EVENTS_SHEET, SCORE_EVENT_COLUMNS, [])
         self.spreadsheet = FakeSpreadsheet([
-            customers, orders, contacts, users, messages, recipients, events,
+            customers, orders, contacts, activities, users, messages, recipients,
+            events, suggestions, score_events,
         ])
         app_module.app.config.update(TESTING=True, SECRET_KEY="test-secret")
         app_module._email_sheets_cache = None
@@ -1426,7 +1433,7 @@ class EmailInsightsEndpointTests(unittest.TestCase):
         with self.client.session_transaction() as flask_session:
             flask_session["user"] = {
                 "user_name": "olle", "name": "Olle", "role": "Account Manager",
-                "email": "olle@eatpolarbar.com", "phone": "070",
+                "email": "olle@eatpolarbar.com", "phone": "070", "admin": True,
             }
 
     def tearDown(self):
@@ -1531,6 +1538,10 @@ class ReminderSendRouteTests(unittest.TestCase):
         app_module.app.config.update(TESTING=True, SECRET_KEY="test-secret")
         self.spreadsheet_patcher = patch.object(app_module, "get_spreadsheet_with_retry", return_value=self.spreadsheet)
         self.spreadsheet_patcher.start()
+        self.today_patcher = patch.object(
+            app_module, "stockholm_today", return_value=date(2026, 7, 22)
+        )
+        self.today_patcher.start()
         self.client = app_module.app.test_client()
         with self.client.session_transaction() as flask_session:
             flask_session["user"] = {
@@ -1539,6 +1550,7 @@ class ReminderSendRouteTests(unittest.TestCase):
             }
 
     def tearDown(self):
+        self.today_patcher.stop()
         self.spreadsheet_patcher.stop()
 
     def _draft(self):
@@ -1841,6 +1853,14 @@ class ReminderSendRouteTests(unittest.TestCase):
         self.assertTrue(response.get_json()["ok"])
 
     def test_hard_bounced_address_is_unselected_and_cannot_be_forced(self):
+        # Recipient delivery history is scoped through its parent email message.
+        app_module.append_dict_row(
+            self.spreadsheet.worksheet("email_messages"), EMAIL_MESSAGES_COLUMNS, {
+                "email_id": "old", "customer": "Butiken", "email_type": "reminder",
+                "sender_name": "Olle", "is_test": "N", "status": "sent",
+                "sent_at": "2026-01-01 09:00:00",
+            }
+        )
         app_module.append_dict_row(self.spreadsheet.worksheet("email_recipients"), EMAIL_RECIPIENTS_COLUMNS, {
             "email_id": "old", "customer": "Butiken", "intended_email": "anna@example.com",
             "bounce_type": "hardbounce",
