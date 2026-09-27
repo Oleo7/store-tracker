@@ -10,18 +10,14 @@ import threading
 import time
 from urllib.parse import urlsplit
 
-import requests
 from flask import Blueprint, Response, jsonify, request
 from flask_cors import cross_origin
+from meta_client import MetaClient, MetaError
 
 ORIGINS = ("https://polarbar.se", "https://www.polarbar.se")
 FIELDS = "id,permalink,media_type,timestamp,username,media_url,thumbnail_url"
 MIX = ("ugc", "ugc", "own")  # Change this tuple to change the default mix.
 log = logging.getLogger("store_tracker.instagram")
-
-
-class MetaError(Exception):
-    """Safe error classification. Never include upstream text or request URLs."""
 
 
 def integer(env, name, default, minimum, maximum):
@@ -100,35 +96,44 @@ def mix_feed(own, ugc, limit=18, pattern=MIX):
     return result
 
 
-class MetaClient:
-    def __init__(self, env=None, transport=None):
-        self.env = os.environ if env is None else env
-        self.transport = transport or requests
+class InstagramMetaClient(MetaClient):
+    def _ig_id(self, value):
+        identifier = str(value or "")
+        if not re.fullmatch(r"\d{1,40}", identifier):
+            raise MetaError("invalid_id")
+        return identifier
 
-    def get(self, path, params, deadline):
-        token = self.env.get("INSTAGRAM_ACCESS_TOKEN", "")
-        version = self.env.get("INSTAGRAM_GRAPH_API_VERSION", "v26.0")
-        if not token or not re.fullmatch(r"v\d+\.0", version):
-            raise MetaError("not_configured")
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise MetaError("timeout")
-        try:
-            response = self.transport.get(
-                f"https://graph.facebook.com/{version}/{path}", params=params,
-                headers={"Authorization": "Bearer " + token},
-                timeout=(min(3, remaining), min(15, remaining)), allow_redirects=False,
-            )
-            if response.status_code != 200:
-                raise MetaError("upstream_http_" + str(response.status_code))
-            body = response.json()
-            if not isinstance(body, dict) or "error" in body:
-                raise MetaError("invalid_response")
-            return body
-        except requests.Timeout:
-            raise MetaError("timeout") from None
-        except (requests.RequestException, ValueError):
-            raise MetaError("network_or_json_error") from None
+    def _page(self, path, fields, *, limit=100, after=None):
+        if not isinstance(limit, int) or not 1 <= limit <= 100:
+            raise MetaError("invalid_limit")
+        params = {"fields": fields, "limit": limit}
+        if after:
+            if not isinstance(after, str) or not re.fullmatch(r"[A-Za-z0-9_=-]{1,500}", after):
+                raise MetaError("invalid_cursor")
+            params["after"] = after
+        body = self.get(path, params)
+        if not isinstance(body.get("data"), list):
+            raise MetaError("invalid_collection")
+        paging = body.get("paging") or {}
+        if paging.get("next"):
+            self.safe_next(paging["next"])
+        cursor = (paging.get("cursors") or {}).get("after")
+        return {"data": body["data"], "after": cursor if paging.get("next") else None}
+
+    def list_own_media(self, *, limit=100, after=None):
+        account = self._ig_id(self.env.get("INSTAGRAM_ACCOUNT_ID"))
+        return self._page(f"{account}/media", "id,caption,media_type,permalink,timestamp,username", limit=limit, after=after)
+
+    def get_media(self, media_id):
+        row = self.get(self._ig_id(media_id), {"fields": "id,caption,media_type,permalink,timestamp,username"})
+        expected = self.env.get("INSTAGRAM_USERNAME", "polarbar.se").casefold()
+        if str(row.get("id")) != str(media_id) or str(row.get("username", "")).casefold() != expected:
+            raise MetaError("media_not_owned")
+        return row
+
+    def list_comments(self, media_id, *, limit=100, after=None):
+        self.get_media(media_id)
+        return self._page(f"{self._ig_id(media_id)}/comments", "id,text,timestamp,username,like_count", limit=limit, after=after)
 
     def collection(self, account, edge, deadline):
         result, after, seen = [], None, set()
@@ -163,6 +168,8 @@ class MetaClient:
         # Only publish an item when the API also supplies an embeddable permalink.
         detail = self.get(str(media_id), {"fields": FIELDS}, deadline)
         return normalize(detail, "ugc")
+
+MetaClient = InstagramMetaClient
 
 
 class FeedService:
