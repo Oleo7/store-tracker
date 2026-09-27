@@ -11,6 +11,9 @@ from flask import (
 )
 from flask_cors import CORS
 from instagram_feed import create_blueprint as create_instagram_blueprint
+from meta_ads import AdsService
+from meta_ads_api import SheetsChangeStore, create_blueprint as create_meta_ads_blueprint
+from meta_giveaway import GiveawayService, GiveawayStore, create_blueprint as create_meta_instagram_blueprint
 from contextlib import contextmanager
 import gspread
 from gspread.exceptions import WorksheetNotFound
@@ -14757,6 +14760,22 @@ def add_contact(customer_name):
 @app.route("/config")
 def config():
     return jsonify({"mapsApiKey": os.environ.get("GOOGLE_MAPS_API_KEY", "")})
+
+
+_meta_ads_store = SheetsChangeStore(
+    get_spreadsheet_with_retry, get_or_create_worksheet, find_sheet_row,
+    append_dict_row, update_sheet_row,
+)
+app.register_blueprint(create_meta_ads_blueprint(
+    AdsService(_meta_ads_store), current_user, user_is_admin,
+))
+_meta_giveaway_store = GiveawayStore(
+    get_spreadsheet_with_retry, get_or_create_worksheet, find_sheet_row,
+    append_dict_row, append_dict_rows, worksheet_to_dicts,
+)
+app.register_blueprint(create_meta_instagram_blueprint(
+    GiveawayService(_meta_giveaway_store), current_user, user_is_admin,
+))
 
 
 if __name__ == "__main__":

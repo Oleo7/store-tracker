@@ -12,6 +12,8 @@ services:
         sync: false
       - key: INSTAGRAM_ACCOUNT_ID
         sync: false
+      - key: INSTAGRAM_USERNAME
+        value: "polarbar.se"
       - key: INSTAGRAM_APP_SECRET
         sync: false
       - key: INSTAGRAM_WEBHOOK_VERIFY_TOKEN
@@ -22,6 +24,18 @@ services:
         value: "v26.0"
       - key: INSTAGRAM_FEED_LIMIT
         value: "36"
+      - key: META_AD_ACCOUNT_ID
+        value: "1689435278682373"
+      - key: META_ADS_ACCESS_TOKEN
+        sync: false
+      - key: META_ADS_WRITE_ENABLED
+        value: "false"
+      - key: META_ADS_CHANGE_TTL_SECONDS
+        value: "1800"
+      - key: META_ADS_MAX_DAILY_BUDGET_MINOR
+        sync: false
+      - key: META_ADS_MAX_LIFETIME_BUDGET_MINOR
+        sync: false
       - key: APP_ENV
         value: production
       - key: WEB_CONCURRENCY
