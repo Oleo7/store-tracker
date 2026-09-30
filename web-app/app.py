@@ -10361,7 +10361,7 @@ def build_route_optimization_inputs(
             if normalize_planning_appointment_confirmed(
                 row.get("appointment_confirmed"),
                 row.get("contact_type"),
-            ) or not is_yes(row.get("time_is_estimated"))
+            )
             else None
         )
         if fixed_at is not None:
