@@ -44,6 +44,8 @@ Postal code           -> postcode
 
 Only the target columns `name`, `address`, `city`, and `postcode` are cleared and rewritten. Template columns such as description, state, country, phone, website, hours, and image columns are left unchanged.
 
+Existing target rows whose `name` contains `Gigaboks` (case-insensitive, anywhere in the name) are protected. The sync never clears or writes these rows, keeping all their columns and their row positions intact, even with no recent CRM orders. Other stores fill the available rows around them. CRM entries with the same normalized name as a protected store are skipped so the manually maintained store is not duplicated or replaced. Verification includes the protected stores; the reported Storepoint row count includes them and excludes empty gaps.
+
 ## Date Window
 
 By default, the job includes rows whose `Delivery date` is between Europe/Stockholm today minus 3 calendar months and today, inclusive.

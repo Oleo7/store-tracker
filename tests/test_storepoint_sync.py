@@ -145,6 +145,48 @@ class StorepointSyncTests(TestCase):
         self.assertTrue(result.dry_run)
         self.assertEqual(client.spreadsheets["target"].worksheet("storepoint_template_49b0fd29731a").values, target_values)
 
+    def test_sync_preserves_all_seven_gigaboks_rows_in_place(self):
+        for source_count in (0, 2, 20):
+            with self.subTest(source_count=source_count):
+                source_values = [
+                    ["Delivery date", "Customer", "Address", "Number", "Postal code", "City"],
+                    *[["2026-06-01", f"Store {index}", "Street", "1", "00123", "City"]
+                      for index in range(source_count)],
+                    ["2026-06-01", "Gigaboks 0", "CRM address", "9", "99999", "CRM city"],
+                ]
+                target_values = [["postcode", "description", "name", "city", "country", "address"]]
+                protected = {}
+                for index in range(7):
+                    target_values.append(["99999", "old", "Stale store", "Old city", "SE", "Old address"])
+                    name = f"Gigaboks {index}" if index < 5 else f"Butik gIGaBoKs {index}"
+                    row = ["00123", f"Manual {index}", name, "Oslo", "NO", f"Manual address {index}"]
+                    protected[len(target_values)] = row[:]
+                    target_values.append(row)
+                target_values.append(["99999", "old", "Stale tail", "Old city", "SE", "Old address"])
+                target_sheet = FakeWorksheet(target_values)
+                client = FakeClient({
+                    "source": FakeSpreadsheet({"order_rows": FakeWorksheet(source_values)}),
+                    "target": FakeSpreadsheet({"storepoint_template_49b0fd29731a": target_sheet}),
+                })
+                config = StorepointConfig(source_sheet_key="source", target_sheet_key="target", google_credentials={})
+
+                dry_run = sync_storepoint_customers(config, dry_run=True, today=date(2026, 6, 11), client=client)
+                self.assertEqual(target_sheet.values, target_values)
+                self.assertEqual(dry_run.unique_rows, source_count + 7)
+                result = sync_storepoint_customers(config, today=date(2026, 6, 11), client=client)
+                self.assertEqual(result.unique_rows, source_count + 7)
+                for index, row in protected.items():
+                    self.assertEqual(target_sheet.values[index], row)
+                names = [row[2] for row in target_sheet.values[1:] if len(row) > 2 and row[2]]
+                self.assertEqual(len(names), source_count + 7)
+                self.assertNotIn("Stale store", names)
+                self.assertNotIn("Stale tail", names)
+                for first_row, last_row in target_sheet.written_ranges:
+                    self.assertFalse(any(first_row <= index + 1 <= last_row for index in protected))
+                after_first_sync = target_sheet.get_all_values()
+                sync_storepoint_customers(config, today=date(2026, 6, 11), client=client)
+                self.assertEqual(target_sheet.values, after_first_sync)
+
 
 class FakeClient:
     def __init__(self, spreadsheets):
@@ -166,6 +208,7 @@ class FakeWorksheet:
     def __init__(self, values):
         self.values = [row[:] for row in values]
         self.row_count = len(values)
+        self.written_ranges = []
 
     def get_all_values(self, **kwargs):
         return [row[:] for row in self.values]
@@ -178,13 +221,19 @@ class FakeWorksheet:
     def batch_clear(self, ranges):
         for range_name in ranges:
             start_col, end_col = _parse_open_range(range_name)
-            for row_index in range(1, len(self.values)):
+            first_row = _parse_bounded_range_start(range_name)[1]
+            right = range_name.split(":")[1]
+            end_digits = right[len(right.rstrip("0123456789")) :]
+            last_row = int(end_digits) if end_digits else len(self.values)
+            self.written_ranges.append((first_row, last_row))
+            for row_index in range(first_row - 1, last_row):
                 _ensure_width(self.values[row_index], end_col + 1)
                 for col_index in range(start_col, end_col + 1):
                     self.values[row_index][col_index] = ""
 
     def update(self, values, range_name="A1", raw=True):
         start_col, start_row = _parse_bounded_range_start(range_name)
+        self.written_ranges.append((start_row, start_row + len(values) - 1))
         while len(self.values) < start_row - 1 + len(values):
             self.values.append([])
         for row_offset, row_values in enumerate(values):

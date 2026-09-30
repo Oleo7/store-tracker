@@ -139,10 +139,16 @@ def sync_storepoint_customers(
     target_values = target_sheet.get_all_values()
     target_headers = target_values[0] if target_values else []
     target_indexes = require_columns(target_headers, TARGET_COLUMNS, config.target_worksheet)
+    protected_rows = {
+        index: StorepointRow(*(text(cell_at(row, target_indexes[column])) for column in TARGET_COLUMNS))
+        for index, row in enumerate(target_values[1:])
+        if "gigaboks" in text(cell_at(row, target_indexes["name"])).casefold()
+    }
+    output_rows = preserve_protected_rows(output_rows, protected_rows)
     stale_rows = count_stale_target_rows(target_values, target_indexes, len(output_rows))
 
     if not dry_run:
-        write_target_rows(target_sheet, target_indexes, output_rows)
+        write_target_rows(target_sheet, target_indexes, output_rows, set(protected_rows))
         verify_target_rows(target_sheet, target_indexes, output_rows)
 
     return StorepointResult(
@@ -152,7 +158,7 @@ def sync_storepoint_customers(
         date_window=window,
         source_rows=len(source_rows),
         filtered_rows=filtered_rows,
-        unique_rows=len(output_rows),
+        unique_rows=sum(bool(row.name) for row in output_rows),
         stale_rows=stale_rows,
     )
 
@@ -187,11 +193,43 @@ def build_storepoint_rows(rows: Iterable[dict[str, Any]], window: DateWindow) ->
     return output_rows, filtered_rows
 
 
-def write_target_rows(target_sheet, target_indexes: dict[str, int], output_rows: list[StorepointRow]) -> None:
+def preserve_protected_rows(
+    output_rows: list[StorepointRow], protected_rows: dict[int, StorepointRow]
+) -> list[StorepointRow]:
+    if not protected_rows:
+        return output_rows
+
+    protected_names = {normalize_header(row.name) for row in protected_rows.values()}
+    pending = iter(row for row in output_rows if normalize_header(row.name) not in protected_names)
+    result = []
+    for index in range(max(protected_rows) + 1):
+        if index in protected_rows:
+            result.append(protected_rows[index])
+        else:
+            result.append(next(pending, StorepointRow("", "", "", "")))
+    result.extend(pending)
+    return result
+
+
+def write_target_rows(
+    target_sheet, target_indexes: dict[str, int], output_rows: list[StorepointRow],
+    protected_rows: set[int] | None = None,
+) -> None:
+    protected_rows = protected_rows or set()
     ensure_target_rows(target_sheet, len(output_rows) + 1)
 
     for start_index, end_index in contiguous_index_groups(target_indexes[column] for column in TARGET_COLUMNS):
-        target_sheet.batch_clear([open_ended_range(start_index, end_index)])
+        if protected_rows:
+            ranges = [
+                bounded_range(start_index, end_index, end - start + 1, start + 2)
+                for start, end in contiguous_index_groups(
+                    index for index in range(target_sheet.row_count - 1) if index not in protected_rows
+                )
+            ]
+            if ranges:
+                target_sheet.batch_clear(ranges)
+        else:
+            target_sheet.batch_clear([open_ended_range(start_index, end_index)])
 
     if not output_rows:
         return
@@ -211,11 +249,14 @@ def write_target_rows(target_sheet, target_indexes: dict[str, int], output_rows:
                     for column_index in range(start_index, end_index + 1)
                 ]
             )
-        target_sheet.update(
-            values=values,
-            range_name=bounded_range(start_index, end_index, len(output_rows)),
-            raw=True,
-        )
+        for start, end in contiguous_index_groups(
+            index for index in range(len(output_rows)) if index not in protected_rows
+        ):
+            target_sheet.update(
+                values=values[start : end + 1],
+                range_name=bounded_range(start_index, end_index, end - start + 1, start + 2),
+                raw=True,
+            )
 
 
 def verify_target_rows(target_sheet, target_indexes: dict[str, int], expected_rows: list[StorepointRow]) -> None:
@@ -363,13 +404,13 @@ def open_ended_range(start_index: int, end_index: int) -> str:
     return f"{start}2:{end}"
 
 
-def bounded_range(start_index: int, end_index: int, row_count: int) -> str:
+def bounded_range(start_index: int, end_index: int, row_count: int, first_row: int = 2) -> str:
     start = column_name(start_index)
     end = column_name(end_index)
-    last_row = row_count + 1
+    last_row = first_row + row_count - 1
     if start == end:
-        return f"{start}2:{start}{last_row}"
-    return f"{start}2:{end}{last_row}"
+        return f"{start}{first_row}:{start}{last_row}"
+    return f"{start}{first_row}:{end}{last_row}"
 
 
 def column_name(zero_based_index: int) -> str:
