@@ -918,6 +918,96 @@ class RouteOptimizationIntegrationTests(TestCase):
         self.assertEqual(bad_error[1], 422)
         self.assertEqual(bad_error[0].get_json()["code"], "route_required_coordinate_untrusted")
 
+    def test_unconfirmed_planned_visit_is_required_but_not_time_locked(self):
+        planned = self.spreadsheet.worksheet(app_module.PLANNED_ACTIVITIES_SHEET)
+        rows = [
+            {
+                "planned_activity_id": "unconfirmed",
+                "user_name": "olle", "sales_person": "Olle",
+                "customer_id": "11111111-1111-4111-8111-111111111111",
+                "customer_row": 2, "customer": "Butik A", "contact_type": "visit",
+                "scheduled_at": "2026-10-02T09:00:00+02:00",
+                "appointment_confirmed": "N", "time_is_estimated": "N",
+                "status": "planned", "source": "manual", "revision": 1,
+            },
+            {
+                "planned_activity_id": "confirmed",
+                "user_name": "olle", "sales_person": "Olle",
+                "customer_id": "33333333-3333-4333-8333-333333333333",
+                "customer_row": 4, "customer": "Butik C", "contact_type": "visit",
+                "scheduled_at": "2026-10-02T11:00:00+02:00",
+                "appointment_confirmed": "Y", "time_is_estimated": "N",
+                "status": "planned", "source": "manual", "revision": 1,
+            },
+        ]
+        planned.values.extend([
+            [row.get(header, "") for header in app_module.PLANNED_ACTIVITY_COLUMNS]
+            for row in rows
+        ])
+        gps_start = app_module.Coordinate(56.55555, 12.44444)
+
+        def build_inputs():
+            with patch.object(
+                app_module, "get_authoritative_priority_snapshot",
+                return_value=self.priority_snapshot(),
+            ):
+                inputs, error = app_module.build_route_optimization_inputs(
+                    spreadsheet=self.spreadsheet,
+                    owner={"user_name": "olle", "name": "Olle"},
+                    route_date=datetime(2026, 10, 2).date(),
+                    start=gps_start,
+                )
+            self.assertIsNone(error)
+            return inputs
+
+        inputs = build_inputs()
+        shipments = {item["activity_id"]: item for item in inputs["shipments"]}
+        self.assertEqual(set(shipments), {"unconfirmed", "confirmed"})
+        self.assertIs(shipments["unconfirmed"]["required"], True)
+        self.assertIsNone(shipments["unconfirmed"]["fixed_at"])
+        self.assertIs(shipments["confirmed"]["required"], True)
+        self.assertEqual(
+            shipments["confirmed"]["fixed_at"],
+            datetime(2026, 10, 2, 11, 0, tzinfo=STOCKHOLM),
+        )
+
+        request = build_optimize_tours_request(
+            run_id="confirmed-time-test", owner_user_name="olle",
+            route_start=inputs["route_start_at"], start=inputs["start"],
+            shipments=inputs["shipments"], fixed_breaks=inputs["fixed_breaks"],
+        )
+        rendered = {
+            item["label"].split(":", 1)[1]: item
+            for item in request["model"]["shipments"]
+        }
+        for activity_id in ("unconfirmed", "confirmed"):
+            self.assertNotIn("penaltyCost", rendered[shipments[activity_id]["customer_id"]])
+        self.assertNotIn(
+            "timeWindows", rendered[shipments["unconfirmed"]["customer_id"]]["pickups"][0]
+        )
+        self.assertEqual(
+            rendered[shipments["confirmed"]["customer_id"]]["pickups"][0]["timeWindows"],
+            [{"startTime": "2026-10-02T08:45:00Z", "endTime": "2026-10-02T09:15:00Z"}],
+        )
+        self.assertEqual(
+            request["model"]["vehicles"][0]["startLocation"],
+            {"latitude": gps_start.latitude, "longitude": gps_start.longitude},
+        )
+        self.assertEqual(
+            request["model"]["vehicles"][0]["endLocation"],
+            {"latitude": gps_start.latitude, "longitude": gps_start.longitude},
+        )
+
+        estimated_column = app_module.PLANNED_ACTIVITY_COLUMNS.index("time_is_estimated")
+        planned.values[1][estimated_column] = "Y"
+        estimated_inputs = build_inputs()
+        estimated = next(
+            item for item in estimated_inputs["shipments"]
+            if item["activity_id"] == "unconfirmed"
+        )
+        self.assertIs(estimated["required"], True)
+        self.assertIsNone(estimated["fixed_at"])
+
     def test_t14_preview_is_ledger_only_and_candidate_rows_do_not_restrict(self):
         snapshot = self.priority_snapshot()
         captured = {}
