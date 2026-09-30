@@ -420,7 +420,7 @@ class AnchorAwareRouteTests(TestCase):
         self.assertLessEqual(len(scheduled), 15)
         self.assertLess(
             app_module.parse_planning_datetime(timeline["route_end_at"]),
-            start_at + timedelta(hours=7),
+            app_module.route_workday_end(start_at),
         )
         self.assertEqual(provider.call_shapes, [(17, 17)])
 
@@ -468,5 +468,5 @@ class AnchorAwareRouteTests(TestCase):
         self.assertEqual(scheduled[2]["scheduled_at"], "2026-08-10T14:00+02:00")
         self.assertLess(
             app_module.parse_planning_datetime(timeline["route_end_at"]),
-            start_at + timedelta(hours=7),
+            app_module.route_workday_end(start_at),
         )

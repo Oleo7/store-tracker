@@ -1,6 +1,8 @@
 from pathlib import Path
 import re
-from unittest import TestCase
+import shutil
+import subprocess
+from unittest import TestCase, skipUnless
 
 
 INDEX_PATH = Path(__file__).resolve().parents[1] / "index.html"
@@ -10,6 +12,57 @@ class PlanningFrontendContractTests(TestCase):
     @classmethod
     def setUpClass(cls):
         cls.html = INDEX_PATH.read_text(encoding="utf-8")
+
+    @skipUnless(shutil.which("node"), "Node.js required for real frontend helpers")
+    def test_legacy_route_normalizer_accounts_for_lunch_and_waiting(self):
+        script = r'''
+const fs = require('node:fs'), vm = require('node:vm'), assert = require('node:assert/strict');
+const html = fs.readFileSync(process.argv[1], 'utf8');
+const source = name => {
+  const start = html.indexOf(`  function ${name}(`);
+  assert.ok(start >= 0, name);
+  return html.slice(start, html.indexOf('\n  }', start) + 4);
+};
+const constants = ['ROUTE_MAX_TOTAL_MINUTES', 'ROUTE_MAX_STOPS', 'ROUTE_SERVICE_MINUTES_PER_STOP']
+  .map(name => html.match(new RegExp(`const ${name} = [^;]+;`))[0]).join('\n');
+const context = vm.createContext({assert});
+vm.runInContext(`${constants}
+const customers = [{row:2,customer:'Store A'},{row:3,customer:'Store B'}];
+${['parseRouteCoordinate','getRouteCoordinatePair','customerInsightKey','routeProposalError',
+   'normalizeRouteProposalResponse'].map(source).join('\n')}`, context);
+vm.runInContext(`
+const stop = (row, sequence, drive, cumulativeDrive, cumulativeTotal) => ({
+  row, sequence, customer: row === 2 ? 'Store A' : 'Store B', latitude:57.7, longitude:11.9,
+  priority_score:80, leg_drive_minutes:drive, cumulative_drive_minutes:cumulativeDrive,
+  cumulative_total_minutes:cumulativeTotal,
+});
+const payload = {
+  ok:true, start:{latitude:57.7,longitude:11.9},
+  stops:[stop(2,1,40,40,60),stop(3,2,20,60,300)],
+  summary:{candidate_count:2,stop_count:2,total_priority_score:160,drive_minutes:90,
+    return_drive_minutes:30,service_minutes:40,break_minutes:45,wait_minutes:155,
+    return_wait_minutes:0,total_minutes:330},
+  meta:{includes_return_to_start:true,max_route_stops:15},
+};
+assert.equal(normalizeRouteProposalResponse(payload, {}).summary.total_minutes,330);
+const earlyReturn = {...payload,stops:[stop(2,1,40,40,60)],
+  summary:{...payload.summary,stop_count:1,total_priority_score:80,drive_minutes:70,
+    service_minutes:20,total_minutes:285,wait_minutes:150,return_wait_minutes:195}};
+assert.equal(normalizeRouteProposalResponse(earlyReturn, {}).summary.break_minutes,45);
+const afterLunch = {...earlyReturn,summary:{...earlyReturn.summary,total_minutes:90,
+  break_minutes:0,wait_minutes:0,return_wait_minutes:0}};
+assert.equal(normalizeRouteProposalResponse(afterLunch, {}).summary.total_minutes,90);
+for (const changes of [{total_minutes:550},{break_minutes:-1},{wait_minutes:0},
+                       {return_wait_minutes:20}]) {
+  assert.throws(() => normalizeRouteProposalResponse({...payload,
+    summary:{...payload.summary,...changes}}, {}), error => error.code === 'invalid_route_response');
+}
+`, context);
+'''
+        result = subprocess.run(
+            ["node", "-e", script, str(INDEX_PATH)], capture_output=True, text=True, timeout=20,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_contact_log_uses_the_three_supported_channels(self):
         match = re.search(
@@ -622,7 +675,7 @@ class PlanningFrontendContractTests(TestCase):
     def test_route_traffic_infeasible_has_shared_post_and_recovery_message(self):
         expected = (
             "Trafiken gör att rutten inte ryms inom dagens fasta tider och "
-            "sjutimmarsgräns. Justera planeringen och försök igen."
+            "arbetsdagens slut 17:00. Justera planeringen och försök igen."
         )
         mapper = self.html.split(
             "function getRouteProposalFailureMessage", 1

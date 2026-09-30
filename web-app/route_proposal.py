@@ -8,9 +8,10 @@ import time
 from typing import Callable, Protocol, Sequence
 
 import requests
+from route_workday import WORKDAY_SECONDS
 
 
-MAX_TOTAL_SECONDS = 7 * 60 * 60
+MAX_TOTAL_SECONDS = WORKDAY_SECONDS
 SERVICE_SECONDS_PER_STOP = 20 * 60
 SHORTLIST_LIMIT = 24
 EXACT_SOLVER_LIMIT = 15
@@ -57,7 +58,7 @@ class TravelTimeUnavailable(RouteProposalError):
 
 class NoFeasibleRoute(RouteProposalError):
     code = "no_feasible_route"
-    message = "Ingen genomförbar rutt hittades under sju timmar inklusive retur till start."
+    message = "Ingen genomförbar rutt hittades före 17:00 inklusive retur till start."
     http_status = 422
 
 

@@ -28,9 +28,10 @@ from route_optimization import (  # noqa: E402
     load_service_account_credentials,
     parse_optimize_tours_response,
 )
+from route_workday import lunch_breaks  # noqa: E402
 
 
-SYNTHETIC_ROUTE_START = datetime(2026, 1, 15, 9, 0, tzinfo=ZoneInfo("Europe/Stockholm"))
+SYNTHETIC_ROUTE_START = datetime(2026, 1, 15, 8, 0, tzinfo=ZoneInfo("Europe/Stockholm"))
 PAID_RESPONSE_DIR = WEB_APP.parent / ".codex_tmp" / "route_optimization_smoke"
 
 
@@ -54,6 +55,7 @@ def synthetic_request(*, solving_mode):
         route_start=SYNTHETIC_ROUTE_START,
         start=start,
         shipments=synthetic_shipments(),
+        fixed_breaks=lunch_breaks(SYNTHETIC_ROUTE_START),
         timeout_seconds=90,
         solving_mode=solving_mode,
     )
@@ -108,6 +110,7 @@ def main():
                 shipments=synthetic_shipments(),
                 owner_user_name="synthetic-owner",
                 route_start=SYNTHETIC_ROUTE_START,
+                fixed_breaks=lunch_breaks(SYNTHETIC_ROUTE_START),
             )
             result["parser_accepted"] = True
             result["summary"] = parsed["summary"]

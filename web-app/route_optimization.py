@@ -22,14 +22,18 @@ from typing import Any, Iterable, Mapping
 import requests
 from google.auth.transport.requests import Request as GoogleAuthRequest
 from google.oauth2.service_account import Credentials
+from route_workday import (
+    LUNCH_SECONDS, WORKDAY_POLICY_VERSION, WORKDAY_SECONDS,
+    available_route_seconds, route_workday_end,
+)
 
 
-ROUTE_ENGINE_VERSION = "ro-v3"
+ROUTE_ENGINE_VERSION = "ro-v4"
 PRIMARY_MODEL_VERSION = "ro-v2"
 FALLBACK_POLICY_VERSION = "route-fallback-v1"
 ROUTE_COST_PER_HOUR = 1.0
 PRIORITY_PENALTY_MULTIPLIER = 10.0
-ROUTE_MAX_SECONDS = 25199
+ROUTE_MAX_SECONDS = WORKDAY_SECONDS
 SERVICE_SECONDS = 1200
 MAX_VISITS = 15
 QUADRATIC_SOFT_DURATION_BUFFER_SECONDS = 300
@@ -353,13 +357,13 @@ def build_optimize_tours_request(
         raise ValueError(
             "quadratic_soft_cost_per_square_hour must be nonnegative"
         )
-    available_seconds = ROUTE_MAX_SECONDS - max(0, int(pre_route_fixed_seconds))
+    available_seconds = available_route_seconds(route_start) - max(0, int(pre_route_fixed_seconds))
     if available_seconds <= 0:
         raise RouteOptimizationError(
             "route_day_capacity_exhausted",
             "Dagens fasta aktiviteter lämnar inte plats för en körbar rutt.",
         )
-    global_end = route_start + timedelta(seconds=available_seconds)
+    global_end = route_workday_end(route_start)
     breaks = sorted(fixed_breaks, key=lambda item: item["scheduled_at"])
     vehicle: dict[str, Any] = {
         "label": f"owner:{str(owner_user_name).strip().casefold()}",
@@ -370,6 +374,7 @@ def build_optimize_tours_request(
             "startTime": _utc_text(route_start),
             "endTime": _utc_text(route_start + timedelta(seconds=1)),
         }],
+        "endTimeWindows": [{"endTime": _utc_text(global_end)}],
         "loadLimits": {
             "visit_slots": {
                 "maxLoad": str(max_visits),
@@ -454,6 +459,7 @@ def _request_input_fingerprint_payload(
     start: TrustedCoordinate,
     shipments: Iterable[Mapping[str, Any]],
     fixed_activities: Iterable[Mapping[str, Any]],
+    blocked_contact_activities: Iterable[Mapping[str, str]] = (),
 ) -> dict[str, Any]:
     shipment_values = []
     for item in shipments:
@@ -487,6 +493,12 @@ def _request_input_fingerprint_payload(
         },
         "shipments": sorted(shipment_values, key=lambda item: item["customer_id"]),
         "fixed_activities": sorted(fixed_values, key=lambda item: item["activity_id"]),
+        "blocked_contact_activities": sorted(
+            ({"activity_id": item["activity_id"], "customer_id": item["customer_id"]}
+             for item in blocked_contact_activities),
+            key=lambda item: (item["activity_id"], item["customer_id"]),
+        ),
+        "workday_policy": WORKDAY_POLICY_VERSION,
     }
 
 
@@ -545,6 +557,8 @@ def build_request_fingerprint(**kwargs: Any) -> str:
 def build_legacy_ro_v1_request_fingerprint(**kwargs: Any) -> str:
     """Recreate the deployed ro-v1 fingerprint for exact recovery only."""
     input_payload = _request_input_fingerprint_payload(**kwargs)
+    input_payload.pop("workday_policy", None)
+    input_payload.pop("blocked_contact_activities", None)
     return request_fingerprint({
         "engine_version": "ro-v1",
         **input_payload,
@@ -603,6 +617,7 @@ def _traffic_infeasibility_diagnostics(
     shipments: list[Mapping[str, Any]],
     vehicle_start: datetime,
     vehicle_end: datetime,
+    route_start: datetime | None = None,
     pre_route_fixed_seconds: Any = 0,
     fixed_breaks: list[Mapping[str, Any]] | None = None,
     timeout_seconds: Any = None,
@@ -774,12 +789,7 @@ def _traffic_infeasibility_diagnostics(
                 normalized_pre_route_seconds = max(0, int(pre_route_fixed_seconds))
             except (TypeError, ValueError, OverflowError):
                 normalized_pre_route_seconds = None
-        model_route_max_seconds = (
-            ROUTE_MAX_SECONDS - normalized_pre_route_seconds
-            if normalized_pre_route_seconds is not None
-            and normalized_pre_route_seconds <= ROUTE_MAX_SECONDS
-            else None
-        )
+        model_route_max_seconds = available_route_seconds(route_start or vehicle_start) - (normalized_pre_route_seconds or 0)
         normalized_timeout = None
         if not isinstance(timeout_seconds, bool):
             try:
@@ -1238,7 +1248,7 @@ def parse_optimize_tours_response(
             "route_traffic_infeasible",
             (
                 "Trafiken gör att rutten inte ryms inom dagens fasta tider "
-                "och sjutimmarsgräns. Justera planeringen och försök igen."
+                "och arbetsdagens slut 17:00. Justera planeringen och försök igen."
             ),
             422,
             counted_attempt=True,
@@ -1250,6 +1260,7 @@ def parse_optimize_tours_response(
                 shipments=shipment_list,
                 vehicle_start=vehicle_start,
                 vehicle_end=vehicle_end,
+                route_start=route_start,
                 pre_route_fixed_seconds=pre_route_fixed_seconds,
                 fixed_breaks=fixed_break_list,
                 timeout_seconds=timeout_seconds,
@@ -1265,21 +1276,21 @@ def parse_optimize_tours_response(
             ),
         )
 
-    available_seconds = ROUTE_MAX_SECONDS - max(0, int(pre_route_fixed_seconds))
+    available_seconds = available_route_seconds(route_start) - max(0, int(pre_route_fixed_seconds))
     route_seconds = int((vehicle_end - vehicle_start).total_seconds())
     expected_start = route_start.astimezone(timezone.utc)
     if (
         vehicle_start < expected_start
         or vehicle_start > expected_start + timedelta(seconds=1)
-        or vehicle_end > expected_start + timedelta(seconds=available_seconds)
+        or vehicle_end > route_workday_end(route_start).astimezone(timezone.utc)
         or route_seconds < 0
         or route_seconds > available_seconds
-        or route_seconds + pre_route_fixed_seconds >= 25200
     ):
-        raise RouteOptimizationError("route_response_invalid", "Rutten överskrider sjutimmarsgränsen.", 502, counted_attempt=True)
+        raise RouteOptimizationError("route_response_invalid", "Rutten måste vara klar inklusive retur senast 17:00.", 502, counted_attempt=True)
     expected_breaks = sorted(fixed_break_list, key=lambda item: item["scheduled_at"])
     if len(returned_breaks) != len(expected_breaks):
         raise RouteOptimizationError("route_response_invalid", "En fast aktivitet saknas i rutten.", 502, counted_attempt=True)
+    break_intervals = []
     for expected, actual in zip(expected_breaks, returned_breaks):
         try:
             actual_start = _parse_time(actual["startTime"])
@@ -1288,6 +1299,35 @@ def parse_optimize_tours_response(
             raise RouteOptimizationError("route_response_invalid", "Google returnerade en ogiltig fast aktivitet.", 502, counted_attempt=True)
         if actual_start != expected["scheduled_at"].astimezone(timezone.utc) or actual_duration < int(expected["duration_seconds"]):
             raise RouteOptimizationError("route_response_invalid", "Google flyttade en fast aktivitet.", 502, counted_attempt=True)
+        actual_end = actual_start + timedelta(seconds=actual_duration)
+        if expected.get("contact_type") == "lunch" and (actual_end > vehicle_end or actual_duration != LUNCH_SECONDS):
+            raise RouteOptimizationError("route_response_invalid", "Google returnerade en ogiltig lunchrast.", 502, counted_attempt=True)
+        break_intervals.append((actual_start, actual_end))
+    visit_intervals = []
+    for visit in visits:
+        try:
+            visit_start = _parse_time(visit.get("startTime"))
+        except (TypeError, ValueError):
+            raise RouteOptimizationError("route_response_invalid", "Google returnerade en ogiltig besökstid.", 502, counted_attempt=True)
+        visit_end = visit_start + timedelta(seconds=SERVICE_SECONDS)
+        if visit_start < vehicle_start or visit_end > vehicle_end or any(
+            visit_start < end and start < visit_end for start, end in break_intervals
+        ):
+            raise RouteOptimizationError("route_response_invalid", "Ett besök överlappar en paus eller arbetsdagens slut.", 502, counted_attempt=True)
+        visit_intervals.append((visit_start, visit_end))
+    if break_intervals and transitions:
+        # Google permits interrupting travel for a break. The remaining transit
+        # interval must still contain all driving and delay outside that break.
+        for index, transition in enumerate(transitions):
+            if "travelDuration" not in transition:
+                continue
+            transit_start = vehicle_start if index == 0 else visit_intervals[index - 1][1]
+            transit_end = vehicle_end if index == len(visits) else visit_intervals[index][0]
+            blocked_seconds = sum(max(0, (min(transit_end, end) - max(transit_start, start)).total_seconds())
+                                  for start, end in break_intervals)
+            moving_seconds = _duration_seconds(transition.get("travelDuration")) + _duration_seconds(transition.get("delayDuration"))
+            if moving_seconds > (transit_end - transit_start).total_seconds() - blocked_seconds:
+                raise RouteOptimizationError("route_response_invalid", "Körtiden ryms inte utanför lunchrasten.", 502, counted_attempt=True)
     metrics = dict(metrics_value or {})
     travel_seconds = _duration_seconds(metrics.get("travelDuration"))
     wait_seconds = _duration_seconds(metrics.get("waitDuration"))
