@@ -14,6 +14,102 @@ class PlanningFrontendContractTests(TestCase):
         cls.html = INDEX_PATH.read_text(encoding="utf-8")
 
     @skipUnless(shutil.which("node"), "Node.js required for real frontend helpers")
+    def test_route_origin_gps_home_recovery_and_preview_use_real_frontend_functions(self):
+        script = r'''
+const fs = require('node:fs'), vm = require('node:vm'), assert = require('node:assert/strict');
+const html = fs.readFileSync(process.argv[1], 'utf8');
+const source = name => {
+  const match = new RegExp(`  (?:async )?function ${name}\\(`).exec(html);
+  assert.ok(match, name);
+  return html.slice(match.index, html.indexOf('\n  }', match.index) + 4);
+};
+const context = vm.createContext({assert});
+vm.runInContext(`
+let currentUser = null, planningSelectedUserName = '', planningData = null;
+let planningSelectedDate = '2026-10-02', planningRoutePreviewRequestId = '', planningRoutePreview = null;
+let planningRouteRecoveryPromise = null, planningRouteRecoveryTimer = 0;
+let gpsCalls = 0, posted = [], notices = [], errors = [], stored = null, switchOwnerOnGps = false;
+const button = {disabled:false,textContent:'',addEventListener:()=>{}};
+const document = {getElementById:()=>button};
+const sessionStorage = {
+  getItem:()=>stored, setItem:(_key,value)=>{stored=value;}, removeItem:()=>{stored=null;}
+};
+const PLANNING_ROUTE_RECOVERY_STORAGE_KEY = 'test', PLANNING_ROUTE_RECOVERY_TTL_MS = 86400000;
+const PLANNING_ROUTE_RECOVERY_WINDOW_MS = 180000;
+const planningTodayKey = () => '2026-10-01';
+const planningDateFromKey = value => value === planningSelectedDate ? new Date(value) : null;
+const normalizePlanningUser = value => value;
+const planningRouteRecoveryForCurrentContext = () => null;
+const resumePlanningRoutePreviewRecovery = () => {throw new Error('unexpected recovery');};
+const clearPlanningRouteRecoveryState = () => {stored=null;};
+const planningClientRequestId = () => 'request-1';
+const getCurrentPositionForRoute = async () => {
+  if (switchOwnerOnGps) planningSelectedUserName = 'johan';
+  gpsCalls++; return {latitude:57.7,longitude:11.9,accuracy:10};
+};
+const runPlanningRouteRecoverySingleFlight = async (_id, callback) => callback();
+const postPendingPlanningRoutePreview = async state => {posted.push(state.payload);};
+const planningRouteResetPreviewButton = () => {button.disabled=false;};
+const getRouteProposalFailureMessage = () => '';
+const showToast = message => errors.push(message);
+const esc = value => String(value), formatRouteMinutes = value => String(value);
+const planningFormatDate = () => '', openPlanningModal = (_title,_subtitle,body) => notices.push(body);
+const closePlanningModal = () => {}, applyPlanningRoutePreview = () => {};
+${['userIsAdmin','normalizeRouteIdentity','planningSelectedOwner','planningRouteUsesOwnerHome',
+   'planningRouteCurrentOwnerUserName','savePlanningRouteRecoveryState','readPlanningRouteRecoveryState',
+   'openPlanningRoutePreview','planningRouteGpsCopy','renderPlanningRoutePreview'].map(source).join('\n')}
+`, context);
+const run = async () => {
+  for (const [admin, actor, selected, home] of [
+    [false,'olle','',false], [true,'olle','olle',false], [true,'admin','johan',true],
+    [true,'admin','sofia',true],
+  ]) {
+    context.fixture = {admin,actor,selected,home};
+    await vm.runInContext(`(async () => {
+      currentUser = {user_name:fixture.actor,admin:fixture.admin};
+      planningSelectedUserName = fixture.selected;
+      stored=null; gpsCalls=0; posted=[]; errors=[];
+      await openPlanningRoutePreview();
+      assert.deepEqual(errors, []);
+      assert.equal(gpsCalls, fixture.home ? 0 : 1);
+      assert.equal(posted.length, 1);
+      assert.equal(posted[0].user_name || '', fixture.selected);
+      assert.equal(Boolean(posted[0].start), !fixture.home);
+      const recovered = readPlanningRouteRecoveryState();
+      assert.ok(recovered, 'saved request must survive reload without home GPS');
+      assert.equal(JSON.stringify(recovered.payload), JSON.stringify(posted[0]));
+      if (!fixture.home) assert.equal(posted[0].start.latitude,57.7);
+    })()`, context);
+  }
+  vm.runInContext(`
+    renderPlanningRoutePreview({origin_source:'selected_owner_home',gps_notice:'Rutten utgår från Johans hemadress',
+      stops:[],summary:{},preview_token:'signed'});
+    assert.ok(notices.at(-1).includes('Johans hemadress'));
+    assert.ok(!notices.at(-1).includes('din position nu'));
+    renderPlanningRoutePreview({origin_source:'current_position',stops:[],summary:{},preview_token:'signed'});
+    assert.ok(notices.at(-1).includes('Rutten beräknas från din position nu'));
+    currentUser = {user_name:'olle',admin:false};
+    const state = {version:1,actor_user_name:'olle',owner_user_name:'johan',route_date:planningSelectedDate,
+      created_at_ms:Date.now(),payload:{user_name:'johan',route_date:planningSelectedDate,
+        route_mode:'automatic',client_request_id:'forged-no-gps'}};
+    stored = JSON.stringify(state);
+    assert.equal(readPlanningRouteRecoveryState(),null);
+  `, context);
+  await vm.runInContext(`(async () => {
+    currentUser = {user_name:'olle',admin:true}; planningSelectedUserName='olle';
+    switchOwnerOnGps=true; stored=null; posted=[];
+    await openPlanningRoutePreview();
+    assert.equal(posted.length,0,'changing calendars during GPS must not save mismatched recovery');
+    assert.equal(stored,null);
+  })()`, context);
+};
+run().catch(error => { console.error(error); process.exitCode = 1; });
+'''
+        result = subprocess.run(["node", "-e", script, str(INDEX_PATH)],
+                                capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    @skipUnless(shutil.which("node"), "Node.js required for real frontend helpers")
     def test_legacy_route_normalizer_accounts_for_lunch_and_waiting(self):
         script = r'''
 const fs = require('node:fs'), vm = require('node:vm'), assert = require('node:assert/strict');
