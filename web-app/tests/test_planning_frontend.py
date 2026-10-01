@@ -250,6 +250,551 @@ for (const changes of [{total_minutes:550},{break_minutes:-1},{wait_minutes:0},
             drag_save.group(1),
         )
 
+    @skipUnless(shutil.which("node"), "Node.js required for real frontend helpers")
+    def test_workflow_refresh_orders_real_requests_and_preserves_serial_guards(self):
+        script = r'''
+const fs = require('node:fs'), vm = require('node:vm'), assert = require('node:assert/strict');
+const html = fs.readFileSync(process.argv[2], 'utf8');
+const source = name => {
+  const match = new RegExp(`  (?:async )?function ${name}\\(`).exec(html);
+  assert.ok(match, name);
+  const tail = html.slice(match.index);
+  const end = /\n  }\r?\n/.exec(tail);
+  assert.ok(end, name);
+  return tail.slice(0, end.index + 4);
+};
+const unhandled = [];
+process.on('unhandledRejection', error => unhandled.push(error));
+const context = vm.createContext({assert, URLSearchParams, setImmediate});
+vm.runInContext(`
+const API = '/api', sharedJsonRequests = new Map(), requests = [], toasts = [];
+let planningLoadSerial = 0, planningRecommendationRequestSerial = 0, insightsRequestSerial = 0;
+let insightsForegroundRequests = 0;
+let insightsBackgroundRequests = 0;
+let insightsBackgroundRefreshPending = false;
+let insightsListRenderPending = false;
+let customersLoadSerial = 0, planningLoading = false, planningData = null, planningActiveUsersCache = [];
+let planningWeekStart = '2026-10-05', planningSelectedDate = '2026-10-05', planningSelectedUserName = '';
+let planningRecommendationPreviewLimit = 10, planningRecommendationLoading = false;
+let planningRecommendation = null, planningRecommendationPreview = [], planningRecommendationPendingCount = 0;
+let insights = {}, insightsLoaded = false, insightsLoadFailed = false, insightsRevision = 0;
+let emailClickNoOrderActive = false, listRenders = 0;
+const filterState = {emailProposal:new Set()};
+const elements = new Map();
+const element = id => {
+  if (!elements.has(id)) {
+    const classes = new Set();
+    let html = '';
+    elements.set(id, {
+      id, classList:{add:value=>classes.add(value),remove:value=>classes.delete(value),contains:value=>classes.has(value)},
+      get innerHTML() {return html;},
+      set innerHTML(value) {
+        html=value;
+        if (id==='customer-list') {
+          listRenders++;
+          if (simulateListScrollJump) {window.scrollX=0;window.scrollY=0;}
+        }
+      },
+      querySelectorAll:()=>[], addEventListener:()=>{},
+    });
+  }
+  return elements.get(id);
+};
+const views = ['list','planning','detail','map'].map(name=>element('view-'+name));
+element('view-planning').classList.add('active');
+const document = {
+  getElementById:id=>id==='load-more-btn'?null:element(id),
+  querySelectorAll:()=>views,
+  querySelector:()=>views.find(view=>view.classList.contains('active')),
+};
+const googleMap = null;
+const customers = [{row:2,customer:'Test store',city:'Test city'}];
+let lastListSignature = '', visibleListCount = 10, filteredCustomers = [];
+const LIST_BATCH_SIZE = 10, getListSignature = () => 'test-list';
+const getBaseFilteredCustomers = () => customers, getRouteProposalStop = () => null;
+const isCancelledCustomer = () => false, currentUserCanPlan = () => true;
+let simulateListScrollJump = false;
+const scrollCalls = [], animationFrames = [];
+const window = {scrollX:0,scrollY:0,scrollTo:(x,y)=>{scrollCalls.push([x,y]);window.scrollX=x;window.scrollY=y;}};
+let deferAnimationFrames = false;
+const requestAnimationFrame = callback => {if (deferAnimationFrames) animationFrames.push(callback);else callback();};
+const tick = () => new Promise(resolve => setImmediate(resolve));
+function controlledRequest(path) {
+  let resolve, reject;
+  const promise = new Promise((yes,no) => {resolve=yes;reject=no;});
+  requests.push({path,resolve,reject});
+  return promise;
+}
+const fetch = path => controlledRequest(path).then(payload => ({ok:true,json:async()=>payload}));
+const planningFetchJson = controlledRequest;
+const planningCancelDrag = () => {}, planningTodayKey = () => planningSelectedDate;
+const planningStartOfWeek = value => value, planningAddDays = value => value;
+const planningOwnerQuery = value => value, userIsAdmin = () => false;
+const normalizePlanningUser = value => value, normalizePlanningActivity = value => value;
+const renderPlanningWeekStrip = () => {}, renderPlanning = () => {};
+const renderPlanningLoadError = () => {}, resumePlanningRoutePreviewRecovery = () => {};
+const renderPlanningRecommendation = () => {}, renderPlanningCandidates = () => {};
+const planningDragSavingIds = new Set();
+let planningDragRetry = null;
+const planningActivityId = activity => activity.id, planningActivityMinutes = () => 540;
+const planningMinutesLabel = () => '10:00', planningStockholmIso = () => '2026-10-05T10:00:00+02:00';
+const planningClientRequestId = () => 'drag-request', renderPlanningAgenda = () => {};
+const planningReplaceActivity = (id, activity) => {
+  planningData.activities = planningData.activities.map(row => row.id === id ? activity : row);
+};
+const buildInsightDropdowns = () => {}, updateEmailClickNoOrderChip = () => {}, updateChip = () => {};
+const showToast = text => toasts.push(text);
+${['fetchJsonShared','loadInsights','loadPlanningRecommendation','loadPlanningWeek','refreshWorkflowViews',
+   'planningCommitDraggedActivity','activeViewName','showView','renderList','esc','escAttr',
+   'customerInsightKey','getCustomerInsight','getCustomerGuidance','hasPriorityScore',
+   'getGuidanceStatusClass','getNextActionColorClass','guidanceContactLabel','getNextActionHtml',
+   'getPrioritySummaryHtml','getPotentialHtml','getCardDateHtml','getDeliveryVolumeText',
+   'getCardDatesHtml','getPriorityCardClass','getCustomerCardAriaLabel','getCardPlanningButtonHtml']
+   .map(source).join('\n')}
+`, context);
+vm.runInContext(`(async () => {
+  const week = version => ({owner:{user_name:'olle'},activities:[{id:version}],available_users:[]});
+  const suggestions = {suggestion:{id:'next'},queue_preview:[],pending_count:1};
+  const begin = () => requests.length;
+
+  // Week and its existing recommendation must finish before background insights start.
+  let first = begin(), done = false;
+  const critical = refreshWorkflowViews({planning:true,recommendation:true}).then(() => {done=true;});
+  assert.equal(requests.length-first,1);
+  assert.ok(requests[first].path.includes('/planning/activities'));
+  await tick(); assert.equal(requests.length-first,1); assert.equal(done,false);
+  requests[first].resolve(week('server'));
+  await tick(); assert.equal(requests.length-first,2);
+  assert.ok(requests[first+1].path.includes('/planning/suggestions'));
+  assert.equal(done,false); assert.deepEqual(planningData.activities,[{id:'server'}]);
+  requests[first+1].resolve(suggestions);
+  await critical;
+  assert.equal(done,true); assert.equal(requests.length-first,3);
+  assert.equal(requests[first+2].path,'/api/customer-insights');
+  assert.equal(planningRecommendation.id,'next');
+  assert.equal(listRenders,0);
+  requests[first+2].resolve({version:'background'});
+  await tick(); assert.equal(insights.version,'background'); assert.equal(listRenders,0);
+
+  // Ordinary refresh still waits for insights and renders the customer list.
+  first=begin(); done=false;
+  const ordinary = refreshWorkflowViews().then(() => {done=true;});
+  assert.equal(requests.length-first,1); assert.equal(requests[first].path,'/api/customer-insights');
+  await tick(); assert.equal(done,false);
+  requests[first].resolve({version:'ordinary'}); await ordinary;
+  assert.equal(done,true); assert.equal(listRenders,1);
+
+  // Recommendation-only refresh also finishes without waiting for secondary insights.
+  first=begin(); done=false;
+  const recommendation = refreshWorkflowViews({recommendation:true}).then(() => {done=true;});
+  assert.equal(requests.length-first,1); assert.ok(requests[first].path.includes('/planning/suggestions'));
+  requests[first].resolve(suggestions); await recommendation;
+  assert.equal(requests.length-first,2); assert.equal(requests[first+1].path,'/api/customer-insights');
+  assert.equal(done,true);
+  requests[first+1].resolve({version:'recommendation'}); await tick();
+  assert.equal(listRenders,1);
+
+  // A failed secondary request preserves valid insights and filters without a misleading save error.
+  const validInsights = insights, validRevision = insightsRevision, toastCount = toasts.length;
+  emailClickNoOrderActive = true;
+  filterState.emailProposal.add('selected');
+  first=begin();
+  const failedBackground = refreshWorkflowViews({planning:true});
+  requests[first].resolve(week('saved')); await tick();
+  requests[first+1].resolve(suggestions); await failedBackground;
+  requests[first+2].reject(new Error('insights unavailable')); await tick();
+  assert.deepEqual(planningData.activities,[{id:'saved'}]); assert.equal(planningLoading,false);
+  assert.equal(insights,validInsights); assert.equal(insightsRevision,validRevision);
+  assert.equal(insightsLoaded,true); assert.equal(insightsLoadFailed,false);
+  assert.equal(emailClickNoOrderActive,true); assert.ok(filterState.emailProposal.has('selected'));
+  assert.equal(toasts.length,toastCount); assert.equal(listRenders,1);
+
+  // An older week response must neither replace newer state nor trigger a competing insights request.
+  first=begin();
+  const older = refreshWorkflowViews({planning:true});
+  const newer = refreshWorkflowViews({planning:true});
+  assert.equal(requests.length-first,2);
+  requests[first].resolve(week('obsolete')); await older;
+  assert.equal(requests.length-first,2); assert.deepEqual(planningData.activities,[{id:'saved'}]);
+  requests[first+1].resolve(week('newer')); await tick();
+  assert.equal(requests.length-first,3); assert.ok(requests[first+2].path.includes('/planning/suggestions'));
+  requests[first+2].resolve(suggestions); await newer;
+  assert.equal(requests.length-first,4); assert.equal(requests[first+3].path,'/api/customer-insights');
+  requests[first+3].resolve({version:'newer'}); await tick();
+  assert.deepEqual(planningData.activities,[{id:'newer'}]);
+
+  // Existing insight request serials still discard an older response.
+  first=begin();
+  let oldResolve, newResolve;
+  const oldResponse = new Promise(resolve => {oldResolve=resolve;});
+  const newResponse = new Promise(resolve => {newResolve=resolve;});
+  const oldInsights = loadInsights({render:true,requestPromise:oldResponse});
+  const newInsights = loadInsights({render:true,requestPromise:newResponse});
+  newResolve({version:'latest'}); await newInsights;
+  oldResolve({version:'obsolete'}); await oldInsights;
+  assert.equal(insights.version,'latest'); assert.equal(requests.length,first);
+
+  // Even an unexpected loader rejection is handled without failing a saved planning action.
+  const originalLoader = loadInsights;
+  loadInsights = async () => {throw new Error('unexpected background failure');};
+  first=begin();
+  const unexpected = refreshWorkflowViews({planning:true});
+  requests[first].resolve(week('still-saved')); await tick();
+  requests[first+1].resolve(suggestions); await unexpected; await tick();
+  assert.deepEqual(planningData.activities,[{id:'still-saved'}]);
+  loadInsights = originalLoader;
+
+  // A planning background refresh waits for foreground and discards its known stale result.
+  first=begin();
+  const foreground = loadInsights({render:true});
+  const foregroundSerial = insightsRequestSerial, rendersBefore = listRenders;
+  const beforeForegroundRefresh = insights;
+  assert.equal(insightsForegroundRequests,1);
+  const refreshDuringForeground = refreshWorkflowViews({planning:true});
+  requests[first+1].resolve(week('foreground-inflight')); await tick();
+  requests[first+2].resolve(suggestions); await refreshDuringForeground;
+  assert.equal(requests.length-first,3);
+  assert.equal(requests[first].path,'/api/customer-insights');
+  assert.equal(insightsRequestSerial,foregroundSerial);
+  assert.equal(insightsForegroundRequests,1);
+  assert.equal(insightsBackgroundRefreshPending,true);
+  await loadInsights({render:false}); await loadInsights({render:false});
+  assert.equal(requests.length-first,3); assert.equal(insightsRequestSerial,foregroundSerial);
+  requests[first].resolve({version:'foreground'});
+  assert.equal(await foreground,false);
+  assert.equal(insights,beforeForegroundRefresh); assert.equal(listRenders,rendersBefore);
+  assert.equal(insightsForegroundRequests,0); assert.equal(toasts.length,toastCount);
+  assert.equal(insightsBackgroundRefreshPending,false);
+  assert.equal(requests.length-first,4); assert.equal(requests[first+3].path,'/api/customer-insights');
+  requests[first+3].resolve({version:'fresh-background'}); await tick();
+  assert.equal(insights.version,'fresh-background'); assert.equal(listRenders,rendersBefore);
+  assert.equal(requests.length-first,4);
+
+  // A failed week fetch prevents insights, but a handled suggestions failure still allows freshness.
+  first=begin();
+  const failedWeek = refreshWorkflowViews({planning:true});
+  requests[first].reject(new Error('activities unavailable')); await failedWeek;
+  assert.equal(requests.length-first,1);
+  first=begin();
+  const failedWeekRecommendation = refreshWorkflowViews({planning:true});
+  requests[first].resolve(week('saved-without-recommendation')); await tick();
+  requests[first+1].reject(new Error('suggestions unavailable')); await failedWeekRecommendation;
+  assert.equal(requests.length-first,3); assert.equal(requests[first+2].path,'/api/customer-insights');
+  requests[first+2].resolve({version:'fresh-background'}); await tick();
+  first=begin();
+  const failedRecommendation = refreshWorkflowViews({recommendation:true});
+  requests[first].reject(new Error('suggestions unavailable')); await failedRecommendation;
+  assert.equal(requests.length-first,2); assert.equal(requests[first+1].path,'/api/customer-insights');
+  requests[first+1].resolve({version:'fresh-background'}); await tick();
+  assert.equal(insights.version,'fresh-background'); assert.equal(toasts.length,toastCount);
+
+  // A week superseded while waiting for suggestions is still obsolete and must not trigger insights.
+  first=begin();
+  const supersededWeek = refreshWorkflowViews({planning:true});
+  requests[first].resolve(week('superseded-after-activities')); await tick();
+  const replacingWeek = refreshWorkflowViews({planning:true});
+  requests[first+1].resolve(suggestions); await supersededWeek;
+  assert.equal(requests.length-first,3);
+  requests[first+2].reject(new Error('new activities unavailable')); await replacingWeek;
+  assert.equal(requests.length-first,3);
+
+  // Obsolete recommendations and unexpected rejected loaders must not start insights.
+  first=begin();
+  const obsoleteRecommendation = refreshWorkflowViews({recommendation:true});
+  const currentRecommendation = refreshWorkflowViews({recommendation:true});
+  requests[first].reject(new Error('obsolete suggestions unavailable')); await obsoleteRecommendation;
+  assert.equal(requests.length-first,2);
+  requests[first+1].resolve(suggestions); await currentRecommendation;
+  assert.equal(requests.length-first,3);
+  requests[first+2].resolve({version:'fresh-background'}); await tick();
+  const originalRecommendationLoader = loadPlanningRecommendation;
+  loadPlanningRecommendation = async () => {throw new Error('unexpected loader rejection');};
+  first=begin(); await refreshWorkflowViews({recommendation:true});
+  assert.equal(requests.length,first);
+  loadPlanningRecommendation = originalRecommendationLoader;
+
+  // A newer foreground response still wins over a background request already in progress.
+  let backgroundResolve, foregroundResolve;
+  const backgroundResponse = new Promise(resolve => {backgroundResolve=resolve;});
+  const foregroundResponse = new Promise(resolve => {foregroundResolve=resolve;});
+  const backgroundFirst = loadInsights({render:false,requestPromise:backgroundResponse});
+  const foregroundSecond = loadInsights({render:true,requestPromise:foregroundResponse});
+  foregroundResolve({version:'foreground-wins'}); assert.equal(await foregroundSecond,true);
+  backgroundResolve({version:'stale-background'}); assert.equal(await backgroundFirst,false);
+  assert.equal(insights.version,'foreground-wins'); assert.equal(insightsForegroundRequests,0);
+
+  // Foreground failures retain their existing visible error handling and release priority.
+  first=begin();
+  const failedForeground = loadInsights({render:true});
+  requests[first].reject(new Error('insights unavailable')); assert.equal(await failedForeground,false);
+  assert.equal(insightsForegroundRequests,0); assert.equal(insightsLoaded,false);
+  assert.equal(insightsLoadFailed,true); assert.equal(emailClickNoOrderActive,false);
+  assert.equal(filterState.emailProposal.size,0);
+  assert.equal(toasts.at(-1),'Kunde inte ladda kundprioritering');
+
+  // Foreground starts before a real planning mutation; its old result is followed by one fresh request.
+  first=begin();
+  const preMutationForeground = loadInsights({render:true});
+  const preMutationSerial = insightsRequestSerial, preMutationRenders = listRenders;
+  const preMutationInsights = insights;
+  const activity = {id:'dragged',revision:1,scheduled_at:'2026-10-05T09:00:00+02:00'};
+  planningData = week('dragged');
+  const mutation = planningCommitDraggedActivity(activity,600);
+  assert.equal(requests[first+1].path,'/planning/activities/dragged');
+  requests[first+1].resolve({activity:{...activity,scheduled_at:'2026-10-05T10:00:00+02:00'}});
+  await tick(); assert.ok(requests[first+2].path.includes('/planning/activities?'));
+  requests[first+2].resolve(week('dragged')); await tick();
+  requests[first+3].resolve(suggestions); await mutation;
+  assert.equal(planningDragSavingIds.size,0);
+  await loadInsights({render:false}); await loadInsights({render:false});
+  assert.equal(requests.length-first,4); assert.equal(insightsRequestSerial,preMutationSerial);
+  assert.equal(insightsForegroundRequests,1); assert.equal(insightsBackgroundRefreshPending,true);
+  requests[first].resolve({version:'before-mutation'});
+  assert.equal(await preMutationForeground,false);
+  assert.equal(insights,preMutationInsights); assert.equal(listRenders,preMutationRenders);
+  assert.equal(requests.length-first,5); assert.equal(requests[first+4].path,'/api/customer-insights');
+  assert.equal(insightsForegroundRequests,0); assert.equal(insightsBackgroundRefreshPending,false);
+  requests[first+4].resolve({version:'after-mutation'}); await tick();
+  assert.equal(insights.version,'after-mutation'); assert.equal(requests.length-first,5);
+  assert.equal(listRenders,preMutationRenders);
+
+  // Only the last of multiple foreground requests drains the deferred refresh; failure remains silent.
+  first=begin();
+  let firstForegroundResolve, lastForegroundResolve;
+  const firstForeground = loadInsights({render:true,requestPromise:new Promise(resolve => {firstForegroundResolve=resolve;})});
+  const lastForeground = loadInsights({render:true,requestPromise:new Promise(resolve => {lastForegroundResolve=resolve;})});
+  await loadInsights({render:false}); await loadInsights({render:false});
+  assert.equal(insightsForegroundRequests,2); assert.equal(requests.length,first);
+  firstForegroundResolve({version:'superseded'}); assert.equal(await firstForeground,false);
+  assert.equal(insightsForegroundRequests,1); assert.equal(requests.length,first);
+  lastForegroundResolve({version:'valid-foreground'}); assert.equal(await lastForeground,false);
+  assert.equal(insightsForegroundRequests,0); assert.equal(requests.length-first,1);
+  const retainedInsights = insights, retainedRevision = insightsRevision, retainedToasts = toasts.length;
+  emailClickNoOrderActive = true; filterState.emailProposal.add('selected');
+  requests[first].reject(new Error('deferred insights unavailable')); await tick();
+  assert.equal(insights,retainedInsights); assert.equal(insightsRevision,retainedRevision);
+  assert.equal(insightsLoaded,true); assert.equal(insightsLoadFailed,false);
+  assert.equal(emailClickNoOrderActive,true); assert.ok(filterState.emailProposal.has('selected'));
+  assert.equal(toasts.length,retainedToasts); assert.equal(requests.length-first,1);
+  assert.equal(insightsBackgroundRefreshPending,false);
+
+  // Real planning mutations B and C during background A require one new fetch after A, never reuse A.
+  const commitMutation = async (id, failSuggestions = false) => {
+    const start = begin();
+    const row = {id,revision:1,scheduled_at:'2026-10-05T09:00:00+02:00'};
+    planningData = week(id);
+    const save = planningCommitDraggedActivity(row,600);
+    assert.equal(requests[start].path,'/planning/activities/'+id);
+    requests[start].resolve({activity:row}); await tick();
+    assert.ok(requests[start+1].path.includes('/planning/activities?'));
+    requests[start+1].resolve(week(id)); await tick();
+    assert.ok(requests[start+2].path.includes('/planning/suggestions'));
+    if (failSuggestions) requests[start+2].reject(new Error('suggestions unavailable after save'));
+    else requests[start+2].resolve(suggestions);
+    await save;
+    assert.equal(planningDragSavingIds.size,0); assert.equal(planningLoading,false);
+    return start;
+  };
+  first = await commitMutation('mutation-a');
+  assert.equal(requests.length-first,4); assert.equal(requests[first+3].path,'/api/customer-insights');
+  assert.equal(insightsBackgroundRequests,1); assert.equal(insightsBackgroundRefreshPending,false);
+  const backgroundASerial = insightsRequestSerial, mutationRenders = listRenders;
+  const beforeStaleA = insights, beforeStaleARevision = insightsRevision, beforeStaleADirty = insightsListRenderPending;
+  await commitMutation('mutation-b');
+  assert.equal(requests.length-first,7); assert.equal(insightsBackgroundRefreshPending,true);
+  assert.equal(insightsRequestSerial,backgroundASerial); assert.equal(insightsBackgroundRequests,1);
+  await commitMutation('mutation-c');
+  assert.equal(requests.length-first,10); assert.equal(insightsBackgroundRefreshPending,true);
+  assert.equal(insightsRequestSerial,backgroundASerial); assert.equal(insightsBackgroundRequests,1);
+  requests[first+3].resolve({version:'before-b-and-c'}); await tick();
+  assert.equal(insights,beforeStaleA); assert.equal(insightsRevision,beforeStaleARevision);
+  assert.equal(insightsListRenderPending,beforeStaleADirty); assert.equal(requests.length-first,11);
+  assert.equal(requests[first+10].path,'/api/customer-insights');
+  assert.equal(insightsBackgroundRequests,1); assert.equal(insightsBackgroundRefreshPending,false);
+  requests[first+10].resolve({version:'after-b-and-c'}); await tick();
+  assert.equal(insights.version,'after-b-and-c'); assert.equal(requests.length-first,11);
+  assert.equal(insightsBackgroundRequests,0); assert.equal(listRenders,mutationRenders);
+
+  // Failed background A still drains the pending refresh silently and preserves valid state/filters.
+  first = await commitMutation('failed-background-a');
+  await commitMutation('mutation-after-a');
+  const beforeFailure = insights, beforeFailureRevision = insightsRevision, beforeFailureToasts = toasts.length;
+  requests[first+3].reject(new Error('background A unavailable')); await tick();
+  assert.equal(requests.length-first,8); assert.equal(requests[first+7].path,'/api/customer-insights');
+  assert.equal(insights, beforeFailure); assert.equal(insightsRevision,beforeFailureRevision);
+  assert.equal(insightsLoaded,true); assert.equal(insightsLoadFailed,false);
+  assert.equal(emailClickNoOrderActive,true); assert.ok(filterState.emailProposal.has('selected'));
+  assert.equal(toasts.length,beforeFailureToasts);
+  requests[first+7].reject(new Error('deferred background unavailable')); await tick();
+  assert.equal(insights,beforeFailure); assert.equal(insightsRevision,beforeFailureRevision);
+  assert.equal(insightsLoaded,true); assert.equal(insightsLoadFailed,false);
+  assert.equal(emailClickNoOrderActive,true); assert.ok(filterState.emailProposal.has('selected'));
+  assert.equal(toasts.length,beforeFailureToasts); assert.equal(requests.length-first,8);
+  assert.equal(insightsBackgroundRequests,0); assert.equal(insightsBackgroundRefreshPending,false);
+
+  // A foreground completing first cannot drain pending work while background is still in flight.
+  first=begin();
+  const mixedBackground = loadInsights({render:false});
+  const beforeMixedInsights = insights;
+  let mixedForegroundResolve;
+  const mixedForeground = loadInsights({render:true,requestPromise:new Promise(resolve => {mixedForegroundResolve=resolve;})});
+  await loadInsights({render:false});
+  mixedForegroundResolve({version:'mixed-foreground'}); assert.equal(await mixedForeground,false);
+  assert.equal(insightsForegroundRequests,0); assert.equal(insightsBackgroundRequests,1);
+  assert.equal(insightsBackgroundRefreshPending,true); assert.equal(requests.length-first,1);
+  requests[first].resolve({version:'superseded-background'}); assert.equal(await mixedBackground,false);
+  assert.equal(insights,beforeMixedInsights); assert.equal(requests.length-first,2);
+  assert.equal(requests[first+1].path,'/api/customer-insights');
+  requests[first+1].resolve({version:'mixed-fresh'}); await tick();
+  assert.equal(insights.version,'mixed-fresh'); assert.equal(insightsBackgroundRequests,0);
+  assert.equal(insightsBackgroundRefreshPending,false); assert.equal(requests.length-first,2);
+
+  // A successful background refresh dirties a hidden list, then navigation renders new guidance once.
+  const guidancePayload = (id, date, status, label) => ({'test store':{customer_guidance:{
+    focus_key:'repeat_purchase', focus_label:'Repeat purchase', status_key:status, status_label:label,
+    action_label:label, planned_activity_id:id, next_contact_at:date, recommended_contact_type:'visit',
+  }}});
+  showView('list');
+  await loadInsights({requestPromise:Promise.resolve(guidancePayload('old-activity','2026-10-05','planned','Initial guidance'))});
+  const list = document.getElementById('customer-list');
+  assert.ok(list.innerHTML.includes('Initial guidance'));
+  assert.ok(list.innerHTML.includes('data-planned-activity-id="old-activity"'));
+  assert.ok(list.innerHTML.includes('data-plan-date="2026-10-05"'));
+  const initialRenders = listRenders, initialHtml = list.innerHTML;
+  showView('planning');
+  first = await commitMutation('hidden-list-mutation');
+  requests[first+3].resolve(guidancePayload('new-activity','2026-10-06','planned','New guidance')); await tick();
+  assert.equal(activeViewName(),'planning'); assert.equal(listRenders,initialRenders);
+  assert.equal(list.innerHTML,initialHtml); assert.equal(insightsListRenderPending,true);
+  showView('list');
+  assert.equal(listRenders,initialRenders+1); assert.equal(insightsListRenderPending,false);
+  assert.ok(list.innerHTML.includes('New guidance'));
+  assert.ok(list.innerHTML.includes('data-planned-activity-id="new-activity"'));
+  assert.ok(list.innerHTML.includes('data-plan-date="2026-10-06"'));
+  assert.ok(!list.innerHTML.includes('old-activity')); assert.ok(!list.innerHTML.includes('2026-10-05'));
+  assert.ok(!list.innerHTML.includes('Initial guidance'));
+  showView('list'); showView('planning'); showView('list');
+  assert.equal(listRenders,initialRenders+1);
+
+  // Returning before the background response arrives renders immediately upon its success.
+  showView('planning');
+  first = await commitMutation('early-return-mutation');
+  const beforeEarlyReturn = listRenders;
+  showView('list'); assert.equal(listRenders,beforeEarlyReturn);
+  requests[first+3].resolve(guidancePayload('','','act_now','Contact now')); await tick();
+  assert.equal(listRenders,beforeEarlyReturn+1); assert.equal(insightsListRenderPending,false);
+  assert.ok(list.innerHTML.includes('Contact now')); assert.ok(list.innerHTML.includes('next-action-red'));
+  assert.ok(list.innerHTML.includes('data-planned-activity-id=""'));
+  assert.ok(list.innerHTML.includes('data-plan-date=""'));
+  assert.ok(list.innerHTML.includes('Planera kontakt'));
+  assert.ok(!list.innerHTML.includes('new-activity')); assert.ok(!list.innerHTML.includes('2026-10-06'));
+  assert.ok(!list.innerHTML.includes('Öppna planering')); assert.ok(!list.innerHTML.includes('status-planned'));
+  showView('planning'); showView('list'); assert.equal(listRenders,beforeEarlyReturn+1);
+
+  // Failed background refreshes neither dirty a clean list nor consume a previous successful update.
+  showView('planning');
+  first=begin(); const failedHidden = loadInsights({render:false});
+  const beforeHiddenFailure = insights, beforeHiddenFailureRenders = listRenders, beforeHiddenFailureToasts = toasts.length;
+  requests[first].reject(new Error('hidden insights unavailable')); await failedHidden;
+  assert.equal(insights,beforeHiddenFailure); assert.equal(insightsListRenderPending,false);
+  assert.equal(listRenders,beforeHiddenFailureRenders); assert.equal(toasts.length,beforeHiddenFailureToasts);
+  showView('list'); assert.equal(listRenders,beforeHiddenFailureRenders);
+  showView('planning');
+  await loadInsights({render:false,requestPromise:Promise.resolve(guidancePayload('final-activity','2026-10-07','planned','Final guidance'))});
+  assert.equal(insightsListRenderPending,true);
+  first=begin(); const failedAfterSuccess = loadInsights({render:false});
+  requests[first].reject(new Error('later insights unavailable')); await failedAfterSuccess;
+  assert.equal(insightsListRenderPending,true); assert.equal(listRenders,beforeHiddenFailureRenders);
+  assert.equal(toasts.length,beforeHiddenFailureToasts);
+  showView('list'); assert.equal(listRenders,beforeHiddenFailureRenders+1);
+  assert.ok(list.innerHTML.includes('Final guidance')); assert.equal(insightsListRenderPending,false);
+
+  // A saved planning mutation still refreshes insights after its suggestions GET fails.
+  showView('planning');
+  const beforePartialSaveToasts = toasts.length, beforePartialSaveRenders = listRenders;
+  first = await commitMutation('partial-recommendation-failure',true);
+  assert.deepEqual(planningData.activities,[{id:'partial-recommendation-failure'}]);
+  assert.equal(planningRecommendation,null); assert.equal(planningRecommendationLoading,false);
+  assert.equal(toasts.length,beforePartialSaveToasts+1);
+  assert.equal(toasts.at(-1),'Aktiviteten flyttades till 10:00');
+  assert.equal(requests.length-first,4); assert.equal(requests[first+3].path,'/api/customer-insights');
+  requests[first+3].resolve(guidancePayload('partial-saved','2026-10-08','planned','Saved despite suggestions error'));
+  await tick(); assert.equal(listRenders,beforePartialSaveRenders); assert.equal(insightsListRenderPending,true);
+  showView('list'); assert.ok(list.innerHTML.includes('Saved despite suggestions error'));
+  assert.equal(toasts.length,beforePartialSaveToasts+1);
+
+  // Known stale background A publishes nothing after mutation B, then the fresh result preserves scroll.
+  first=begin();
+  const knownStaleBackground = loadInsights({render:false});
+  await commitMutation('known-stale-mutation-b');
+  assert.equal(requests.length-first,4); assert.equal(insightsBackgroundRefreshPending,true);
+  const beforeKnownStale = insights, beforeKnownStaleRevision = insightsRevision;
+  const beforeKnownStaleHtml = list.innerHTML, beforeKnownStaleRenders = listRenders;
+  requests[first].resolve(guidancePayload('stale-activity','2026-10-01','act_now','Known stale guidance'));
+  assert.equal(await knownStaleBackground,false);
+  assert.equal(insights,beforeKnownStale); assert.equal(insightsRevision,beforeKnownStaleRevision);
+  assert.equal(list.innerHTML,beforeKnownStaleHtml); assert.equal(listRenders,beforeKnownStaleRenders);
+  assert.equal(insightsListRenderPending,false); assert.equal(insightsBackgroundRefreshPending,false);
+  assert.equal(requests.length-first,5); assert.equal(requests[first+4].path,'/api/customer-insights');
+  window.scrollX=13; window.scrollY=487; scrollCalls.length=0;
+  simulateListScrollJump=true; deferAnimationFrames=true;
+  requests[first+4].resolve(guidancePayload('fresh-activity','2026-10-09','planned','Fresh after mutation B'));
+  await tick();
+  assert.equal(listRenders,beforeKnownStaleRenders+1); assert.ok(list.innerHTML.includes('Fresh after mutation B'));
+  assert.ok(!list.innerHTML.includes('Known stale guidance')); assert.ok(!list.innerHTML.includes('stale-activity'));
+  assert.equal(window.scrollX,13); assert.equal(window.scrollY,487);
+  assert.deepEqual(scrollCalls,[[13,487]]); assert.equal(animationFrames.length,1);
+  window.scrollX=0; window.scrollY=0; animationFrames.shift()();
+  assert.equal(window.scrollX,13); assert.equal(window.scrollY,487);
+  assert.deepEqual(scrollCalls,[[13,487],[13,487]]);
+  assert.equal(insightsListRenderPending,false); assert.equal(insightsBackgroundRequests,0);
+  assert.equal(requests.length-first,5);
+  simulateListScrollJump=false; deferAnimationFrames=false;
+
+  // Foreground reuses superseded network A via fetchJsonShared; neither success nor failure may publish it.
+  for (const rejectSharedRequest of [false,true]) {
+    first=begin();
+    const sharedBackground = loadInsights({render:false});
+    const sharedNetworkPromise = sharedJsonRequests.get('/api/customer-insights');
+    await commitMutation(rejectSharedRequest?'shared-failure-mutation-b':'shared-success-mutation-b');
+    assert.equal(insightsBackgroundRefreshPending,true); assert.equal(requests.length-first,4);
+    const sharedForeground = loadInsights(); // No custom requestPromise: this must use network A.
+    assert.equal(sharedJsonRequests.get('/api/customer-insights'),sharedNetworkPromise);
+    assert.equal(requests.length-first,4);
+    assert.equal(insightsForegroundRequests,1); assert.equal(insightsBackgroundRequests,1);
+    emailClickNoOrderActive=true; filterState.emailProposal.add('selected');
+    const retainedSharedInsights = insights, retainedSharedRevision = insightsRevision;
+    const retainedSharedHtml = list.innerHTML, retainedSharedRenders = listRenders;
+    const retainedSharedToasts = toasts.length, retainedSharedDirty = insightsListRenderPending;
+    const retainedSharedFilter = [...filterState.emailProposal];
+    if (rejectSharedRequest) requests[first].reject(new Error('superseded shared request unavailable'));
+    else requests[first].resolve(guidancePayload('shared-stale','2026-10-01','act_now','Shared stale guidance'));
+    assert.deepEqual(await Promise.all([sharedBackground,sharedForeground]),[false,false]);
+    assert.equal(insights,retainedSharedInsights); assert.equal(insightsRevision,retainedSharedRevision);
+    assert.equal(insightsLoaded,true); assert.equal(insightsLoadFailed,false);
+    assert.equal(list.innerHTML,retainedSharedHtml); assert.equal(listRenders,retainedSharedRenders);
+    assert.equal(insightsListRenderPending,retainedSharedDirty); assert.equal(toasts.length,retainedSharedToasts);
+    assert.equal(emailClickNoOrderActive,true); assert.deepEqual([...filterState.emailProposal],retainedSharedFilter);
+    assert.equal(insightsForegroundRequests,0); assert.equal(insightsBackgroundRequests,1);
+    assert.equal(insightsBackgroundRefreshPending,false);
+    assert.equal(requests.length-first,5); assert.equal(requests[first+4].path,'/api/customer-insights');
+    assert.notEqual(sharedJsonRequests.get('/api/customer-insights'),sharedNetworkPromise);
+    requests[first+4].resolve(guidancePayload('shared-fresh','2026-10-10','planned','Shared fresh guidance'));
+    await tick();
+    assert.equal(getCustomerGuidance(customers[0]).planned_activity_id,'shared-fresh');
+    assert.ok(list.innerHTML.includes('Shared fresh guidance')); assert.ok(!list.innerHTML.includes('Shared stale guidance'));
+    assert.equal(listRenders,retainedSharedRenders+1); assert.equal(insightsRevision,retainedSharedRevision+1);
+    assert.equal(requests.length-first,5); assert.equal(insightsForegroundRequests,0);
+    assert.equal(insightsBackgroundRequests,0); assert.equal(insightsBackgroundRefreshPending,false);
+    assert.equal(toasts.length,retainedSharedToasts); assert.equal(sharedJsonRequests.size,0);
+  }
+})()`, context).then(() => assert.deepEqual(unhandled,[]))
+  .catch(error => {console.error(error);process.exitCode=1;});
+'''
+        result = subprocess.run(["node", "-", str(INDEX_PATH)], input=script,
+                                capture_output=True, text=True, encoding="utf-8", timeout=20)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_planning_patch_flows_send_optimistic_version(self):
         self.assertIn(
             "payload.expected_updated_at = planningEditorActivity.updated_at",

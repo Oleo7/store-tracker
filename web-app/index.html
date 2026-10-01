@@ -4566,6 +4566,10 @@
   let insightsLoadFailed = false;
   let insightsRevision = 0;
   let insightsRequestSerial = 0;
+  let insightsForegroundRequests = 0;
+  let insightsBackgroundRequests = 0;
+  let insightsBackgroundRefreshPending = false;
+  let insightsListRenderPending = false;
   let customersLoadSerial = 0;
   let customersLoadPromise = null;
   let searchDebounceTimer = null;
@@ -4726,6 +4730,12 @@
     announceSort = false,
     performanceStartMark = null,
   } = {}) {
+    if (!render && (insightsForegroundRequests > 0 || insightsBackgroundRequests > 0)) {
+      insightsBackgroundRefreshPending = true;
+      return false;
+    }
+    if (render) insightsForegroundRequests += 1;
+    else insightsBackgroundRequests += 1;
     const requestSerial = ++insightsRequestSerial;
     try {
       const loadedInsights = await (
@@ -4734,6 +4744,7 @@
       if (
         requestSerial !== insightsRequestSerial
         || (parentLoadSerial !== null && parentLoadSerial !== customersLoadSerial)
+        || insightsBackgroundRefreshPending
       ) return false;
       insights = loadedInsights;
       insightsLoaded = true;
@@ -4742,29 +4753,33 @@
       buildInsightDropdowns();
       updateEmailClickNoOrderChip();
       updateChip("emailProposal");
-      if (render) {
+      if (render || activeViewName() === "list") {
         const scrollX = window.scrollX;
         const scrollY = window.scrollY;
-        if (announceSort) {
+        if (render && announceSort) {
           showToast("Prioriteringen är klar – uppdaterar sortering");
         }
         renderList();
         window.scrollTo(scrollX, scrollY);
         requestAnimationFrame(() => window.scrollTo(scrollX, scrollY));
-        if (performanceStartMark && parentLoadSerial !== null) {
+        if (render && performanceStartMark && parentLoadSerial !== null) {
           recordFrontendMilestone(
             "time-to-ready-insights",
             performanceStartMark,
             parentLoadSerial,
           );
         }
+      } else {
+        insightsListRenderPending = true;
       }
       return true;
     } catch {
       if (
         requestSerial !== insightsRequestSerial
         || (parentLoadSerial !== null && parentLoadSerial !== customersLoadSerial)
+        || insightsBackgroundRefreshPending
       ) return false;
+      if (!render) return false;
       insights = {};
       insightsLoaded = false;
       insightsLoadFailed = true;
@@ -4776,6 +4791,16 @@
       showToast("Kunde inte ladda kundprioritering");
       if (render) renderList();
       return false;
+    } finally {
+      if (render) {
+        insightsForegroundRequests -= 1;
+      } else {
+        insightsBackgroundRequests -= 1;
+      }
+      if (insightsForegroundRequests === 0 && insightsBackgroundRequests === 0 && insightsBackgroundRefreshPending) {
+        insightsBackgroundRefreshPending = false;
+        void loadInsights({ render: false }).catch(() => {});
+      }
     }
   }
 
@@ -5949,6 +5974,7 @@
 
   // ── Render list ──
   function renderList() {
+    insightsListRenderPending = false;
     const list = document.getElementById("customer-list");
     const signature = getListSignature();
     if (signature !== lastListSignature) {
@@ -7395,6 +7421,7 @@
     document.querySelectorAll(".view").forEach(v => v.classList.remove("active"));
     document.getElementById(`view-${name}`).classList.add("active");
     document.getElementById("detail-loader").classList.remove("show");
+    if (name === "list" && insightsListRenderPending) renderList();
     if (name === "map" && googleMap && window.google) {
       setTimeout(() => google.maps.event.trigger(googleMap, "resize"), 0);
     }
@@ -7789,20 +7816,23 @@
       const params = planningOwnerQuery(new URLSearchParams());
       params.set("preview_limit", String(previewLimit));
       const payload = await planningFetchJson(`/planning/suggestions?${params.toString()}`);
-      if (requestSerial !== planningRecommendationRequestSerial) return;
+      if (requestSerial !== planningRecommendationRequestSerial) return false;
       planningRecommendationPreviewLimit = Number(payload.preview_limit || previewLimit || 10);
       planningRecommendation = payload.suggestion || null;
       planningRecommendationPreview = Array.isArray(payload.queue_preview) ? payload.queue_preview : [];
       planningRecommendationPendingCount = Number(payload.pending_count || 0);
       renderPlanningRecommendation();
       renderPlanningCandidates();
+      return true;
     } catch (error) {
-      if (requestSerial !== planningRecommendationRequestSerial) return;
+      if (requestSerial !== planningRecommendationRequestSerial) return false;
       failed = true;
       planningRecommendation = null;
       planningRecommendationPreview = [];
       planningRecommendationPendingCount = 0;
       renderPlanningRecommendation({ error });
+      // A current, handled failure still completes the refresh attempt after a save.
+      return true;
     } finally {
       if (requestSerial === planningRecommendationRequestSerial) {
         planningRecommendationLoading = false;
@@ -7812,16 +7842,29 @@
   }
 
   async function refreshWorkflowViews({ planning = false, recommendation = false } = {}) {
-    const tasks = [loadInsights()];
     if (planning) {
       // loadPlanningWeek also refreshes Nästa åtgärd before it resolves.
-      tasks.push(loadPlanningWeek());
-    } else if (recommendation) {
-      tasks.push(loadPlanningRecommendation({
-        previewLimit: planningRecommendationPreviewLimit,
-      }));
+      const planningRefresh = loadPlanningWeek();
+      const requestSerial = planningLoadSerial;
+      const [result] = await Promise.allSettled([planningRefresh]);
+      if (result.status === "fulfilled" && result.value === true && requestSerial === planningLoadSerial) {
+        // Secondary state refresh must not delay or roll back a saved action.
+        void loadInsights({ render: false }).catch(() => {});
+      }
+      return;
     }
-    await Promise.allSettled(tasks);
+    if (recommendation) {
+      const recommendationRefresh = loadPlanningRecommendation({
+        previewLimit: planningRecommendationPreviewLimit,
+      });
+      const requestSerial = planningRecommendationRequestSerial;
+      const [result] = await Promise.allSettled([recommendationRefresh]);
+      if (result.status === "fulfilled" && result.value === true && requestSerial === planningRecommendationRequestSerial) {
+        void loadInsights({ render: false }).catch(() => {});
+      }
+      return;
+    }
+    await Promise.allSettled([loadInsights()]);
   }
 
   function replaceWithNextRecommendation(response) {
@@ -8027,7 +8070,7 @@
         include_followups: "0",
       }));
       const payload = await planningFetchJson(`/planning/activities?${params.toString()}`);
-      if (requestSerial !== planningLoadSerial) return;
+      if (requestSerial !== planningLoadSerial) return false;
       const source = payload?.data && typeof payload.data === "object" ? payload.data : payload;
       const responseOwner = normalizePlanningUser(source.owner || {});
       if (userIsAdmin() && responseOwner.user_name) {
@@ -8049,9 +8092,11 @@
       renderPlanning();
       await loadPlanningRecommendation();
       resumePlanningRoutePreviewRecovery();
+      return true;
     } catch (error) {
-      if (requestSerial !== planningLoadSerial) return;
+      if (requestSerial !== planningLoadSerial) return false;
       renderPlanningLoadError(error);
+      return false;
     } finally {
       if (requestSerial === planningLoadSerial) planningLoading = false;
     }
