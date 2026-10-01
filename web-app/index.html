@@ -4567,6 +4567,7 @@
   let insightsRevision = 0;
   let insightsRequestSerial = 0;
   let insightsForegroundRequests = 0;
+  let insightsBackgroundRefreshPending = false;
   let customersLoadSerial = 0;
   let customersLoadPromise = null;
   let searchDebounceTimer = null;
@@ -4727,7 +4728,10 @@
     announceSort = false,
     performanceStartMark = null,
   } = {}) {
-    if (!render && insightsForegroundRequests > 0) return false;
+    if (!render && insightsForegroundRequests > 0) {
+      insightsBackgroundRefreshPending = true;
+      return false;
+    }
     if (render) insightsForegroundRequests += 1;
     const requestSerial = ++insightsRequestSerial;
     try {
@@ -4781,7 +4785,13 @@
       if (render) renderList();
       return false;
     } finally {
-      if (render) insightsForegroundRequests -= 1;
+      if (render) {
+        insightsForegroundRequests -= 1;
+        if (insightsForegroundRequests === 0 && insightsBackgroundRefreshPending) {
+          insightsBackgroundRefreshPending = false;
+          void loadInsights({ render: false }).catch(() => {});
+        }
+      }
     }
   }
 
