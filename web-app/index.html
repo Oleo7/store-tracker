@@ -4567,6 +4567,7 @@
   let insightsRevision = 0;
   let insightsRequestSerial = 0;
   let insightsForegroundRequests = 0;
+  let insightsBackgroundRequests = 0;
   let insightsBackgroundRefreshPending = false;
   let customersLoadSerial = 0;
   let customersLoadPromise = null;
@@ -4728,11 +4729,12 @@
     announceSort = false,
     performanceStartMark = null,
   } = {}) {
-    if (!render && insightsForegroundRequests > 0) {
+    if (!render && (insightsForegroundRequests > 0 || insightsBackgroundRequests > 0)) {
       insightsBackgroundRefreshPending = true;
       return false;
     }
     if (render) insightsForegroundRequests += 1;
+    else insightsBackgroundRequests += 1;
     const requestSerial = ++insightsRequestSerial;
     try {
       const loadedInsights = await (
@@ -4787,10 +4789,12 @@
     } finally {
       if (render) {
         insightsForegroundRequests -= 1;
-        if (insightsForegroundRequests === 0 && insightsBackgroundRefreshPending) {
-          insightsBackgroundRefreshPending = false;
-          void loadInsights({ render: false }).catch(() => {});
-        }
+      } else {
+        insightsBackgroundRequests -= 1;
+      }
+      if (insightsForegroundRequests === 0 && insightsBackgroundRequests === 0 && insightsBackgroundRefreshPending) {
+        insightsBackgroundRefreshPending = false;
+        void loadInsights({ render: false }).catch(() => {});
       }
     }
   }

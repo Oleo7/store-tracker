@@ -270,6 +270,7 @@ vm.runInContext(`
 const API = '/api', sharedJsonRequests = new Map(), requests = [], toasts = [];
 let planningLoadSerial = 0, planningRecommendationRequestSerial = 0, insightsRequestSerial = 0;
 let insightsForegroundRequests = 0;
+let insightsBackgroundRequests = 0;
 let insightsBackgroundRefreshPending = false;
 let customersLoadSerial = 0, planningLoading = false, planningData = null, planningActiveUsersCache = [];
 let planningWeekStart = '2026-10-05', planningSelectedDate = '2026-10-05', planningSelectedUserName = '';
@@ -387,8 +388,8 @@ vm.runInContext(`(async () => {
   let oldResolve, newResolve;
   const oldResponse = new Promise(resolve => {oldResolve=resolve;});
   const newResponse = new Promise(resolve => {newResolve=resolve;});
-  const oldInsights = loadInsights({render:false,requestPromise:oldResponse});
-  const newInsights = loadInsights({render:false,requestPromise:newResponse});
+  const oldInsights = loadInsights({render:true,requestPromise:oldResponse});
+  const newInsights = loadInsights({render:true,requestPromise:newResponse});
   newResolve({version:'latest'}); await newInsights;
   oldResolve({version:'obsolete'}); await oldInsights;
   assert.equal(insights.version,'latest'); assert.equal(requests.length,first);
@@ -507,6 +508,72 @@ vm.runInContext(`(async () => {
   assert.equal(emailClickNoOrderActive,true); assert.ok(filterState.emailProposal.has('selected'));
   assert.equal(toasts.length,retainedToasts); assert.equal(requests.length-first,1);
   assert.equal(insightsBackgroundRefreshPending,false);
+
+  // Real planning mutations B and C during background A require one new fetch after A, never reuse A.
+  const commitMutation = async id => {
+    const start = begin();
+    const row = {id,revision:1,scheduled_at:'2026-10-05T09:00:00+02:00'};
+    planningData = week(id);
+    const save = planningCommitDraggedActivity(row,600);
+    assert.equal(requests[start].path,'/planning/activities/'+id);
+    requests[start].resolve({activity:row}); await tick();
+    assert.ok(requests[start+1].path.includes('/planning/activities?'));
+    requests[start+1].resolve(week(id)); await tick();
+    assert.ok(requests[start+2].path.includes('/planning/suggestions'));
+    requests[start+2].resolve(suggestions); await save;
+    assert.equal(planningDragSavingIds.size,0); assert.equal(planningLoading,false);
+    return start;
+  };
+  first = await commitMutation('mutation-a');
+  assert.equal(requests.length-first,4); assert.equal(requests[first+3].path,'/api/customer-insights');
+  assert.equal(insightsBackgroundRequests,1); assert.equal(insightsBackgroundRefreshPending,false);
+  const backgroundASerial = insightsRequestSerial, mutationRenders = listRenders;
+  await commitMutation('mutation-b');
+  assert.equal(requests.length-first,7); assert.equal(insightsBackgroundRefreshPending,true);
+  assert.equal(insightsRequestSerial,backgroundASerial); assert.equal(insightsBackgroundRequests,1);
+  await commitMutation('mutation-c');
+  assert.equal(requests.length-first,10); assert.equal(insightsBackgroundRefreshPending,true);
+  assert.equal(insightsRequestSerial,backgroundASerial); assert.equal(insightsBackgroundRequests,1);
+  requests[first+3].resolve({version:'before-b-and-c'}); await tick();
+  assert.equal(insights.version,'before-b-and-c'); assert.equal(requests.length-first,11);
+  assert.equal(requests[first+10].path,'/api/customer-insights');
+  assert.equal(insightsBackgroundRequests,1); assert.equal(insightsBackgroundRefreshPending,false);
+  requests[first+10].resolve({version:'after-b-and-c'}); await tick();
+  assert.equal(insights.version,'after-b-and-c'); assert.equal(requests.length-first,11);
+  assert.equal(insightsBackgroundRequests,0); assert.equal(listRenders,mutationRenders);
+
+  // Failed background A still drains the pending refresh silently and preserves valid state/filters.
+  first = await commitMutation('failed-background-a');
+  await commitMutation('mutation-after-a');
+  const beforeFailure = insights, beforeFailureRevision = insightsRevision, beforeFailureToasts = toasts.length;
+  requests[first+3].reject(new Error('background A unavailable')); await tick();
+  assert.equal(requests.length-first,8); assert.equal(requests[first+7].path,'/api/customer-insights');
+  assert.equal(insights, beforeFailure); assert.equal(insightsRevision,beforeFailureRevision);
+  assert.equal(insightsLoaded,true); assert.equal(insightsLoadFailed,false);
+  assert.equal(emailClickNoOrderActive,true); assert.ok(filterState.emailProposal.has('selected'));
+  assert.equal(toasts.length,beforeFailureToasts);
+  requests[first+7].reject(new Error('deferred background unavailable')); await tick();
+  assert.equal(insights,beforeFailure); assert.equal(insightsRevision,beforeFailureRevision);
+  assert.equal(insightsLoaded,true); assert.equal(insightsLoadFailed,false);
+  assert.equal(emailClickNoOrderActive,true); assert.ok(filterState.emailProposal.has('selected'));
+  assert.equal(toasts.length,beforeFailureToasts); assert.equal(requests.length-first,8);
+  assert.equal(insightsBackgroundRequests,0); assert.equal(insightsBackgroundRefreshPending,false);
+
+  // A foreground completing first cannot drain pending work while background is still in flight.
+  first=begin();
+  const mixedBackground = loadInsights({render:false});
+  let mixedForegroundResolve;
+  const mixedForeground = loadInsights({render:true,requestPromise:new Promise(resolve => {mixedForegroundResolve=resolve;})});
+  await loadInsights({render:false});
+  mixedForegroundResolve({version:'mixed-foreground'}); await mixedForeground;
+  assert.equal(insightsForegroundRequests,0); assert.equal(insightsBackgroundRequests,1);
+  assert.equal(insightsBackgroundRefreshPending,true); assert.equal(requests.length-first,1);
+  requests[first].resolve({version:'superseded-background'}); assert.equal(await mixedBackground,false);
+  assert.equal(insights.version,'mixed-foreground'); assert.equal(requests.length-first,2);
+  assert.equal(requests[first+1].path,'/api/customer-insights');
+  requests[first+1].resolve({version:'mixed-fresh'}); await tick();
+  assert.equal(insights.version,'mixed-fresh'); assert.equal(insightsBackgroundRequests,0);
+  assert.equal(insightsBackgroundRefreshPending,false); assert.equal(requests.length-first,2);
 })()`, context).then(() => assert.deepEqual(unhandled,[]))
   .catch(error => {console.error(error);process.exitCode=1;});
 '''
