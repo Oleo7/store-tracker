@@ -4566,6 +4566,7 @@
   let insightsLoadFailed = false;
   let insightsRevision = 0;
   let insightsRequestSerial = 0;
+  let insightsForegroundRequests = 0;
   let customersLoadSerial = 0;
   let customersLoadPromise = null;
   let searchDebounceTimer = null;
@@ -4726,6 +4727,8 @@
     announceSort = false,
     performanceStartMark = null,
   } = {}) {
+    if (!render && insightsForegroundRequests > 0) return false;
+    if (render) insightsForegroundRequests += 1;
     const requestSerial = ++insightsRequestSerial;
     try {
       const loadedInsights = await (
@@ -4765,6 +4768,7 @@
         requestSerial !== insightsRequestSerial
         || (parentLoadSerial !== null && parentLoadSerial !== customersLoadSerial)
       ) return false;
+      if (!render) return false;
       insights = {};
       insightsLoaded = false;
       insightsLoadFailed = true;
@@ -4776,6 +4780,8 @@
       showToast("Kunde inte ladda kundprioritering");
       if (render) renderList();
       return false;
+    } finally {
+      if (render) insightsForegroundRequests -= 1;
     }
   }
 
@@ -7789,20 +7795,22 @@
       const params = planningOwnerQuery(new URLSearchParams());
       params.set("preview_limit", String(previewLimit));
       const payload = await planningFetchJson(`/planning/suggestions?${params.toString()}`);
-      if (requestSerial !== planningRecommendationRequestSerial) return;
+      if (requestSerial !== planningRecommendationRequestSerial) return false;
       planningRecommendationPreviewLimit = Number(payload.preview_limit || previewLimit || 10);
       planningRecommendation = payload.suggestion || null;
       planningRecommendationPreview = Array.isArray(payload.queue_preview) ? payload.queue_preview : [];
       planningRecommendationPendingCount = Number(payload.pending_count || 0);
       renderPlanningRecommendation();
       renderPlanningCandidates();
+      return true;
     } catch (error) {
-      if (requestSerial !== planningRecommendationRequestSerial) return;
+      if (requestSerial !== planningRecommendationRequestSerial) return false;
       failed = true;
       planningRecommendation = null;
       planningRecommendationPreview = [];
       planningRecommendationPendingCount = 0;
       renderPlanningRecommendation({ error });
+      return false;
     } finally {
       if (requestSerial === planningRecommendationRequestSerial) {
         planningRecommendationLoading = false;
@@ -7816,8 +7824,8 @@
       // loadPlanningWeek also refreshes Nästa åtgärd before it resolves.
       const planningRefresh = loadPlanningWeek();
       const requestSerial = planningLoadSerial;
-      await Promise.allSettled([planningRefresh]);
-      if (requestSerial === planningLoadSerial) {
+      const [result] = await Promise.allSettled([planningRefresh]);
+      if (result.status === "fulfilled" && result.value === true && requestSerial === planningLoadSerial) {
         // Secondary state refresh must not delay or roll back a saved action.
         void loadInsights({ render: false }).catch(() => {});
       }
@@ -7828,8 +7836,8 @@
         previewLimit: planningRecommendationPreviewLimit,
       });
       const requestSerial = planningRecommendationRequestSerial;
-      await Promise.allSettled([recommendationRefresh]);
-      if (requestSerial === planningRecommendationRequestSerial) {
+      const [result] = await Promise.allSettled([recommendationRefresh]);
+      if (result.status === "fulfilled" && result.value === true && requestSerial === planningRecommendationRequestSerial) {
         void loadInsights({ render: false }).catch(() => {});
       }
       return;
@@ -8040,7 +8048,7 @@
         include_followups: "0",
       }));
       const payload = await planningFetchJson(`/planning/activities?${params.toString()}`);
-      if (requestSerial !== planningLoadSerial) return;
+      if (requestSerial !== planningLoadSerial) return false;
       const source = payload?.data && typeof payload.data === "object" ? payload.data : payload;
       const responseOwner = normalizePlanningUser(source.owner || {});
       if (userIsAdmin() && responseOwner.user_name) {
@@ -8060,11 +8068,13 @@
         .map(normalizePlanningUser)
         .filter(user => user.user_name);
       renderPlanning();
-      await loadPlanningRecommendation();
+      const recommendationLoaded = await loadPlanningRecommendation();
       resumePlanningRoutePreviewRecovery();
+      return recommendationLoaded;
     } catch (error) {
-      if (requestSerial !== planningLoadSerial) return;
+      if (requestSerial !== planningLoadSerial) return false;
       renderPlanningLoadError(error);
+      return false;
     } finally {
       if (requestSerial === planningLoadSerial) planningLoading = false;
     }

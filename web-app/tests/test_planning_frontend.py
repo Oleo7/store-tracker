@@ -269,6 +269,7 @@ const context = vm.createContext({assert, URLSearchParams, setImmediate});
 vm.runInContext(`
 const API = '/api', sharedJsonRequests = new Map(), requests = [], toasts = [];
 let planningLoadSerial = 0, planningRecommendationRequestSerial = 0, insightsRequestSerial = 0;
+let insightsForegroundRequests = 0;
 let customersLoadSerial = 0, planningLoading = false, planningData = null, planningActiveUsersCache = [];
 let planningWeekStart = '2026-10-05', planningSelectedDate = '2026-10-05', planningSelectedUserName = '';
 let planningRecommendationPreviewLimit = 10, planningRecommendationLoading = false;
@@ -342,15 +343,20 @@ vm.runInContext(`(async () => {
   requests[first+1].resolve({version:'recommendation'}); await tick();
   assert.equal(listRenders,1);
 
-  // A failed secondary request cannot undo the server's planning state or rerender the list.
+  // A failed secondary request preserves valid insights and filters without a misleading save error.
+  const validInsights = insights, validRevision = insightsRevision, toastCount = toasts.length;
+  emailClickNoOrderActive = true;
+  filterState.emailProposal.add('selected');
   first=begin();
   const failedBackground = refreshWorkflowViews({planning:true});
   requests[first].resolve(week('saved')); await tick();
   requests[first+1].resolve(suggestions); await failedBackground;
   requests[first+2].reject(new Error('insights unavailable')); await tick();
   assert.deepEqual(planningData.activities,[{id:'saved'}]); assert.equal(planningLoading,false);
-  assert.equal(insightsLoadFailed,true); assert.equal(listRenders,1);
-  assert.equal(toasts.at(-1),'Kunde inte ladda kundprioritering');
+  assert.equal(insights,validInsights); assert.equal(insightsRevision,validRevision);
+  assert.equal(insightsLoaded,true); assert.equal(insightsLoadFailed,false);
+  assert.equal(emailClickNoOrderActive,true); assert.ok(filterState.emailProposal.has('selected'));
+  assert.equal(toasts.length,toastCount); assert.equal(listRenders,1);
 
   // An older week response must neither replace newer state nor trigger a competing insights request.
   first=begin();
@@ -386,6 +392,58 @@ vm.runInContext(`(async () => {
   requests[first+1].resolve(suggestions); await unexpected; await tick();
   assert.deepEqual(planningData.activities,[{id:'still-saved'}]);
   loadInsights = originalLoader;
+
+  // A planning background refresh must not supersede an inflight foreground insights request.
+  first=begin();
+  const foreground = loadInsights({render:true});
+  const foregroundSerial = insightsRequestSerial, rendersBefore = listRenders;
+  assert.equal(insightsForegroundRequests,1);
+  const refreshDuringForeground = refreshWorkflowViews({planning:true});
+  requests[first+1].resolve(week('foreground-inflight')); await tick();
+  requests[first+2].resolve(suggestions); await refreshDuringForeground;
+  assert.equal(requests.length-first,3);
+  assert.equal(requests[first].path,'/api/customer-insights');
+  assert.equal(insightsRequestSerial,foregroundSerial);
+  assert.equal(insightsForegroundRequests,1);
+  requests[first].resolve({version:'foreground'});
+  assert.equal(await foreground,true);
+  assert.equal(insights.version,'foreground'); assert.equal(listRenders,rendersBefore+1);
+  assert.equal(insightsForegroundRequests,0); assert.equal(toasts.length,toastCount);
+
+  // Neither a failed week fetch nor a failed recommendation may start background insights.
+  first=begin();
+  const failedWeek = refreshWorkflowViews({planning:true});
+  requests[first].reject(new Error('activities unavailable')); await failedWeek;
+  assert.equal(requests.length-first,1);
+  first=begin();
+  const failedWeekRecommendation = refreshWorkflowViews({planning:true});
+  requests[first].resolve(week('saved-without-recommendation')); await tick();
+  requests[first+1].reject(new Error('suggestions unavailable')); await failedWeekRecommendation;
+  assert.equal(requests.length-first,2);
+  first=begin();
+  const failedRecommendation = refreshWorkflowViews({recommendation:true});
+  requests[first].reject(new Error('suggestions unavailable')); await failedRecommendation;
+  assert.equal(requests.length-first,1);
+  assert.equal(insights.version,'foreground'); assert.equal(toasts.length,toastCount);
+
+  // A newer foreground response still wins over a background request already in progress.
+  let backgroundResolve, foregroundResolve;
+  const backgroundResponse = new Promise(resolve => {backgroundResolve=resolve;});
+  const foregroundResponse = new Promise(resolve => {foregroundResolve=resolve;});
+  const backgroundFirst = loadInsights({render:false,requestPromise:backgroundResponse});
+  const foregroundSecond = loadInsights({render:true,requestPromise:foregroundResponse});
+  foregroundResolve({version:'foreground-wins'}); assert.equal(await foregroundSecond,true);
+  backgroundResolve({version:'stale-background'}); assert.equal(await backgroundFirst,false);
+  assert.equal(insights.version,'foreground-wins'); assert.equal(insightsForegroundRequests,0);
+
+  // Foreground failures retain their existing visible error handling and release priority.
+  first=begin();
+  const failedForeground = loadInsights({render:true});
+  requests[first].reject(new Error('insights unavailable')); assert.equal(await failedForeground,false);
+  assert.equal(insightsForegroundRequests,0); assert.equal(insightsLoaded,false);
+  assert.equal(insightsLoadFailed,true); assert.equal(emailClickNoOrderActive,false);
+  assert.equal(filterState.emailProposal.size,0);
+  assert.equal(toasts.at(-1),'Kunde inte ladda kundprioritering');
 })()`, context).then(() => assert.deepEqual(unhandled,[]))
   .catch(error => {console.error(error);process.exitCode=1;});
 '''
