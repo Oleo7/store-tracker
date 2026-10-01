@@ -4569,6 +4569,7 @@
   let insightsForegroundRequests = 0;
   let insightsBackgroundRequests = 0;
   let insightsBackgroundRefreshPending = false;
+  let insightsListRenderPending = false;
   let customersLoadSerial = 0;
   let customersLoadPromise = null;
   let searchDebounceTimer = null;
@@ -4767,6 +4768,10 @@
             parentLoadSerial,
           );
         }
+      } else if (activeViewName() === "list") {
+        renderList();
+      } else {
+        insightsListRenderPending = true;
       }
       return true;
     } catch {
@@ -5969,6 +5974,7 @@
 
   // ── Render list ──
   function renderList() {
+    insightsListRenderPending = false;
     const list = document.getElementById("customer-list");
     const signature = getListSignature();
     if (signature !== lastListSignature) {
@@ -7415,6 +7421,7 @@
     document.querySelectorAll(".view").forEach(v => v.classList.remove("active"));
     document.getElementById(`view-${name}`).classList.add("active");
     document.getElementById("detail-loader").classList.remove("show");
+    if (name === "list" && insightsListRenderPending) renderList();
     if (name === "map" && googleMap && window.google) {
       setTimeout(() => google.maps.event.trigger(googleMap, "resize"), 0);
     }

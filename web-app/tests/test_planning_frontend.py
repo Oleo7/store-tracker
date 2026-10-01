@@ -272,6 +272,7 @@ let planningLoadSerial = 0, planningRecommendationRequestSerial = 0, insightsReq
 let insightsForegroundRequests = 0;
 let insightsBackgroundRequests = 0;
 let insightsBackgroundRefreshPending = false;
+let insightsListRenderPending = false;
 let customersLoadSerial = 0, planningLoading = false, planningData = null, planningActiveUsersCache = [];
 let planningWeekStart = '2026-10-05', planningSelectedDate = '2026-10-05', planningSelectedUserName = '';
 let planningRecommendationPreviewLimit = 10, planningRecommendationLoading = false;
@@ -279,7 +280,33 @@ let planningRecommendation = null, planningRecommendationPreview = [], planningR
 let insights = {}, insightsLoaded = false, insightsLoadFailed = false, insightsRevision = 0;
 let emailClickNoOrderActive = false, listRenders = 0;
 const filterState = {emailProposal:new Set()};
-const document = {getElementById:()=>({innerHTML:''})};
+const elements = new Map();
+const element = id => {
+  if (!elements.has(id)) {
+    const classes = new Set();
+    let html = '';
+    elements.set(id, {
+      id, classList:{add:value=>classes.add(value),remove:value=>classes.delete(value),contains:value=>classes.has(value)},
+      get innerHTML() {return html;},
+      set innerHTML(value) {html=value;if (id==='customer-list') listRenders++;},
+      querySelectorAll:()=>[], addEventListener:()=>{},
+    });
+  }
+  return elements.get(id);
+};
+const views = ['list','planning','detail','map'].map(name=>element('view-'+name));
+element('view-planning').classList.add('active');
+const document = {
+  getElementById:id=>id==='load-more-btn'?null:element(id),
+  querySelectorAll:()=>views,
+  querySelector:()=>views.find(view=>view.classList.contains('active')),
+};
+const googleMap = null;
+const customers = [{row:2,customer:'Test store',city:'Test city'}];
+let lastListSignature = '', visibleListCount = 10, filteredCustomers = [];
+const LIST_BATCH_SIZE = 10, getListSignature = () => 'test-list';
+const getBaseFilteredCustomers = () => customers, getRouteProposalStop = () => null;
+const isCancelledCustomer = () => false, currentUserCanPlan = () => true;
 const window = {scrollX:0,scrollY:0,scrollTo:()=>{}};
 const requestAnimationFrame = callback => callback();
 const tick = () => new Promise(resolve => setImmediate(resolve));
@@ -307,9 +334,13 @@ const planningReplaceActivity = (id, activity) => {
   planningData.activities = planningData.activities.map(row => row.id === id ? activity : row);
 };
 const buildInsightDropdowns = () => {}, updateEmailClickNoOrderChip = () => {}, updateChip = () => {};
-const showToast = text => toasts.push(text), renderList = () => {listRenders++;};
+const showToast = text => toasts.push(text);
 ${['fetchJsonShared','loadInsights','loadPlanningRecommendation','loadPlanningWeek','refreshWorkflowViews',
-   'planningCommitDraggedActivity']
+   'planningCommitDraggedActivity','activeViewName','showView','renderList','esc','escAttr',
+   'customerInsightKey','getCustomerInsight','getCustomerGuidance','hasPriorityScore',
+   'getGuidanceStatusClass','getNextActionColorClass','guidanceContactLabel','getNextActionHtml',
+   'getPrioritySummaryHtml','getPotentialHtml','getCardDateHtml','getDeliveryVolumeText',
+   'getCardDatesHtml','getPriorityCardClass','getCustomerCardAriaLabel','getCardPlanningButtonHtml']
    .map(source).join('\n')}
 `, context);
 vm.runInContext(`(async () => {
@@ -574,6 +605,66 @@ vm.runInContext(`(async () => {
   requests[first+1].resolve({version:'mixed-fresh'}); await tick();
   assert.equal(insights.version,'mixed-fresh'); assert.equal(insightsBackgroundRequests,0);
   assert.equal(insightsBackgroundRefreshPending,false); assert.equal(requests.length-first,2);
+
+  // A successful background refresh dirties a hidden list, then navigation renders new guidance once.
+  const guidancePayload = (id, date, status, label) => ({'test store':{customer_guidance:{
+    focus_key:'repeat_purchase', focus_label:'Repeat purchase', status_key:status, status_label:label,
+    action_label:label, planned_activity_id:id, next_contact_at:date, recommended_contact_type:'visit',
+  }}});
+  showView('list');
+  await loadInsights({requestPromise:Promise.resolve(guidancePayload('old-activity','2026-10-05','planned','Initial guidance'))});
+  const list = document.getElementById('customer-list');
+  assert.ok(list.innerHTML.includes('Initial guidance'));
+  assert.ok(list.innerHTML.includes('data-planned-activity-id="old-activity"'));
+  assert.ok(list.innerHTML.includes('data-plan-date="2026-10-05"'));
+  const initialRenders = listRenders, initialHtml = list.innerHTML;
+  showView('planning');
+  first = await commitMutation('hidden-list-mutation');
+  requests[first+3].resolve(guidancePayload('new-activity','2026-10-06','planned','New guidance')); await tick();
+  assert.equal(activeViewName(),'planning'); assert.equal(listRenders,initialRenders);
+  assert.equal(list.innerHTML,initialHtml); assert.equal(insightsListRenderPending,true);
+  showView('list');
+  assert.equal(listRenders,initialRenders+1); assert.equal(insightsListRenderPending,false);
+  assert.ok(list.innerHTML.includes('New guidance'));
+  assert.ok(list.innerHTML.includes('data-planned-activity-id="new-activity"'));
+  assert.ok(list.innerHTML.includes('data-plan-date="2026-10-06"'));
+  assert.ok(!list.innerHTML.includes('old-activity')); assert.ok(!list.innerHTML.includes('2026-10-05'));
+  assert.ok(!list.innerHTML.includes('Initial guidance'));
+  showView('list'); showView('planning'); showView('list');
+  assert.equal(listRenders,initialRenders+1);
+
+  // Returning before the background response arrives renders immediately upon its success.
+  showView('planning');
+  first = await commitMutation('early-return-mutation');
+  const beforeEarlyReturn = listRenders;
+  showView('list'); assert.equal(listRenders,beforeEarlyReturn);
+  requests[first+3].resolve(guidancePayload('','','act_now','Contact now')); await tick();
+  assert.equal(listRenders,beforeEarlyReturn+1); assert.equal(insightsListRenderPending,false);
+  assert.ok(list.innerHTML.includes('Contact now')); assert.ok(list.innerHTML.includes('next-action-red'));
+  assert.ok(list.innerHTML.includes('data-planned-activity-id=""'));
+  assert.ok(list.innerHTML.includes('data-plan-date=""'));
+  assert.ok(list.innerHTML.includes('Planera kontakt'));
+  assert.ok(!list.innerHTML.includes('new-activity')); assert.ok(!list.innerHTML.includes('2026-10-06'));
+  assert.ok(!list.innerHTML.includes('Öppna planering')); assert.ok(!list.innerHTML.includes('status-planned'));
+  showView('planning'); showView('list'); assert.equal(listRenders,beforeEarlyReturn+1);
+
+  // Failed background refreshes neither dirty a clean list nor consume a previous successful update.
+  showView('planning');
+  first=begin(); const failedHidden = loadInsights({render:false});
+  const beforeHiddenFailure = insights, beforeHiddenFailureRenders = listRenders, beforeHiddenFailureToasts = toasts.length;
+  requests[first].reject(new Error('hidden insights unavailable')); await failedHidden;
+  assert.equal(insights,beforeHiddenFailure); assert.equal(insightsListRenderPending,false);
+  assert.equal(listRenders,beforeHiddenFailureRenders); assert.equal(toasts.length,beforeHiddenFailureToasts);
+  showView('list'); assert.equal(listRenders,beforeHiddenFailureRenders);
+  showView('planning');
+  await loadInsights({render:false,requestPromise:Promise.resolve(guidancePayload('final-activity','2026-10-07','planned','Final guidance'))});
+  assert.equal(insightsListRenderPending,true);
+  first=begin(); const failedAfterSuccess = loadInsights({render:false});
+  requests[first].reject(new Error('later insights unavailable')); await failedAfterSuccess;
+  assert.equal(insightsListRenderPending,true); assert.equal(listRenders,beforeHiddenFailureRenders);
+  assert.equal(toasts.length,beforeHiddenFailureToasts);
+  showView('list'); assert.equal(listRenders,beforeHiddenFailureRenders+1);
+  assert.ok(list.innerHTML.includes('Final guidance')); assert.equal(insightsListRenderPending,false);
 })()`, context).then(() => assert.deepEqual(unhandled,[]))
   .catch(error => {console.error(error);process.exitCode=1;});
 '''
