@@ -309,8 +309,8 @@ def _visit_request(
     fixed_at = shipment.get("fixed_at")
     if fixed_at:
         request["timeWindows"] = [{
-            "startTime": _utc_text(max(global_start, fixed_at - timedelta(minutes=15))),
-            "endTime": _utc_text(min(global_end, fixed_at + timedelta(minutes=15))),
+            "startTime": _utc_text(fixed_at),
+            "endTime": _utc_text(fixed_at),
         }]
     return request
 
@@ -1080,9 +1080,8 @@ def parse_optimize_tours_response(
                 actual_start = _parse_time(visit.get("startTime"))
             except (TypeError, ValueError):
                 raise RouteOptimizationError("route_response_invalid", "Google returnerade en ogiltig besökstid.", 502, counted_attempt=True)
-            delta = abs((actual_start - shipment["fixed_at"].astimezone(timezone.utc)).total_seconds())
-            if delta > 15 * 60:
-                raise RouteOptimizationError("route_required_visit_time_changed", "Google flyttade ett fast besök utanför dess tidsfönster.", 422, counted_attempt=True)
+            if actual_start != shipment["fixed_at"].astimezone(timezone.utc):
+                raise RouteOptimizationError("route_required_visit_time_changed", "Google flyttade ett fast besök från dess exakta bokade tid.", 422, counted_attempt=True)
         stops.append({
             "sequence": sequence,
             "customer_id": str(shipment["customer_id"]),

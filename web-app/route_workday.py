@@ -11,7 +11,7 @@ LUNCH_END = time(12, 45)
 WORKDAY_END = time(17)
 WORKDAY_SECONDS = 9 * 60 * 60
 LUNCH_SECONDS = 45 * 60
-WORKDAY_POLICY_VERSION = "stockholm-08-17-bookings-first-lunch-v2"
+WORKDAY_POLICY_VERSION = "stockholm-08-17-exact-bookings-lunch-v3"
 
 
 class RouteLunchNotFeasible(ValueError):
@@ -45,12 +45,11 @@ def available_route_seconds(start):
     return max(0, int((route_workday_end(start) - start).total_seconds()))
 
 
-def plan_route_lunch(start, confirmed_intervals=(), *, appointment_tolerance_seconds=0):
+def plan_route_lunch(start, confirmed_intervals=()):
     """Choose the closest free lunch slot; ties prefer the earlier slot.
 
-    Only a nominal booking collision changes normal lunch. When moving it,
-    protect the existing arrival tolerance as well as service, so the moved
-    lunch cannot narrow a confirmed booking's window. A passed lunch is never
+    Only a booking's actual service period can move normal lunch. Confirmed
+    visits start exactly at their booked time. A passed lunch is never
     scheduled again.
     """
     local = start.replace(tzinfo=STOCKHOLM) if start.tzinfo is None else start.astimezone(STOCKHOLM)
@@ -67,8 +66,6 @@ def plan_route_lunch(start, confirmed_intervals=(), *, appointment_tolerance_sec
         lunch_start = normal_start
     else:
         duration = timedelta(seconds=LUNCH_SECONDS)
-        tolerance = timedelta(seconds=appointment_tolerance_seconds)
-        bookings = [(begin - tolerance, end + tolerance) for begin, end in bookings]
         cursor = local
         candidates = []
         workday_end = route_workday_end(local)

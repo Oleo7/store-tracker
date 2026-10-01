@@ -693,7 +693,6 @@ PLANNING_STATUSES = {"planned", "completed", "skipped", "cancelled", "superseded
 PLANNING_SOURCES = {"manual", "follow_up", "route", "system_suggestion"}
 PLANNING_PREVIEW_MAX_AGE_SECONDS = 30 * 60
 PLANNING_ROUTE_START_HOUR = WORKDAY_START.hour
-PLANNING_ROUTE_CONFLICT_MINUTES = 15
 STOCKHOLM_ZONE = ZoneInfo("Europe/Stockholm")
 BREVO_SEND_URL = "https://api.brevo.com/v3/smtp/email"
 BREVO_EVENTS_URL = "https://api.brevo.com/v3/smtp/statistics/events"
@@ -9564,9 +9563,7 @@ def planning_route_lunch(route_start_at, confirmed_rows):
         if scheduled is not None:
             bookings.append((scheduled, scheduled + timedelta(seconds=SERVICE_SECONDS_PER_STOP)))
     try:
-        start, pauses = plan_route_lunch(
-            route_start_at, bookings, appointment_tolerance_seconds=PLANNING_ROUTE_CONFLICT_MINUTES * 60,
-        )
+        start, pauses = plan_route_lunch(route_start_at, bookings)
         return start, pauses, None
     except RouteLunchNotFeasible as exc:
         return None, None, planning_error("route_lunch_not_feasible", str(exc), 422)
@@ -9691,10 +9688,10 @@ def schedule_planning_route_timeline(
             delta_minutes = (
                 service_start - booked_at
             ).total_seconds() / 60
-            if abs(delta_minutes) > PLANNING_ROUTE_CONFLICT_MINUTES:
+            if service_start != booked_at:
                 return None, None, planning_error(
                     "required_stops_not_feasible",
-                    "Ett obligatoriskt besök kan inte nås inom 15 minuter från bokad tid.",
+                    "Ett obligatoriskt besök kan inte nås exakt på bokad tid.",
                     422,
                     planned_activity_id=stop.get(
                         "planned_activity_id",
@@ -9920,10 +9917,7 @@ def schedule_planning_route_with_anchors(
             if (
                 tail_booked is None
                 or timing is None
-                or timing["service_start"]
-                > tail_booked + timedelta(
-                    minutes=PLANNING_ROUTE_CONFLICT_MINUTES
-                )
+                or timing["service_start"] != tail_booked
             ):
                 return False
             tail_cursor = timing["service_end"]
@@ -10019,9 +10013,7 @@ def schedule_planning_route_with_anchors(
                 )
                 if (
                     anchor_timing is None
-                    or anchor_timing["service_start"]
-                    > anchor_booked
-                    + timedelta(minutes=PLANNING_ROUTE_CONFLICT_MINUTES)
+                    or anchor_timing["service_start"] != anchor_booked
                 ):
                     continue
                 if not required_tail_is_feasible(
@@ -10057,9 +10049,7 @@ def schedule_planning_route_with_anchors(
         anchor_timing = simulate(anchor, cursor, current_index)
         if (
             anchor_timing is None
-            or anchor_timing["service_start"]
-            > anchor_booked
-            + timedelta(minutes=PLANNING_ROUTE_CONFLICT_MINUTES)
+            or anchor_timing["service_start"] != anchor_booked
         ):
             estimated = (
                 anchor_timing["service_start"].isoformat(timespec="minutes")
@@ -10177,9 +10167,9 @@ def planning_route_conflicts(stops, fixed_non_route):
     for stop in stops:
         estimated = parse_planning_datetime(stop.get("estimated_at"))
         scheduled = parse_planning_datetime(stop.get("scheduled_at"))
-        if stop.get("required") and estimated and scheduled:
+        if stop.get("required") and stop.get("appointment_confirmed", True) and estimated and scheduled:
             delta_minutes = round((estimated - scheduled).total_seconds() / 60)
-            if abs(delta_minutes) > PLANNING_ROUTE_CONFLICT_MINUTES:
+            if estimated != scheduled:
                 conflicts.append({
                     "code": "scheduled_time_conflict",
                     "planned_activity_id": stop.get("planned_activity_id", ""),

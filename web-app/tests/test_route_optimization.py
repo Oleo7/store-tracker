@@ -206,7 +206,29 @@ class RouteOptimizationModelTests(TestCase):
         )
         start_window = at_start["model"]["shipments"][0]["pickups"][0]["timeWindows"][0]
         self.assertEqual(start_window["startTime"], at_start["model"]["globalStartTime"])
-        self.assertLess(start_window["startTime"], start_window["endTime"])
+        self.assertEqual(start_window["startTime"], start_window["endTime"])
+
+    def test_confirmed_visit_response_requires_exact_booked_start(self):
+        booked = NOW.replace(hour=12, minute=15)
+        items = [shipment(1, required=True, fixed_at=booked)]
+        for offset in (0, -60, 60, -1, 1):
+            with self.subTest(offset_seconds=offset):
+                response = successful_response(items, duration_minutes=420)
+                response["routes"][0]["visits"][0]["startTime"] = (
+                    booked + timedelta(seconds=offset)
+                ).astimezone(timezone.utc).isoformat()
+                if offset:
+                    with self.assertRaises(RouteOptimizationError) as exc:
+                        parse_optimize_tours_response(
+                            response, shipments=items, owner_user_name="Olle", route_start=NOW,
+                        )
+                    self.assertEqual(exc.exception.code, "route_required_visit_time_changed")
+                else:
+                    parsed = parse_optimize_tours_response(
+                        response, shipments=items, owner_user_name="Olle", route_start=NOW,
+                    )
+                    self.assertEqual(datetime.fromisoformat(parsed["stops"][0]["estimated_at"]), booked)
+                    self.assertEqual(datetime.fromisoformat(parsed["stops"][0]["scheduled_at"]), booked)
 
     def test_t2b_safer_policy_keeps_full_cap_and_changes_only_headroom(self):
         items = [shipment(1, score=74), shipment(2, required=True)]
@@ -964,9 +986,9 @@ class RouteOptimizationIntegrationTests(TestCase):
         for key in ("source", "note", "picking_help", "customer_id", "appointment_confirmed"):
             self.assertEqual(saved[key], original[key])
 
-    def test_apply_confirmed_required_visit_preserves_booking_despite_google_estimate(self):
-        original = self.append_required_visit(confirmed="Y", hour=11, source="manual")
-        preview, _body = self.optimized_required_preview(NOW.replace(hour=11, minute=5))
+    def test_apply_confirmed_required_visit_preserves_exact_booking(self):
+        original = self.append_required_visit(confirmed="Y", hour=12, minute=15, source="manual")
+        preview, _body = self.optimized_required_preview(NOW.replace(hour=12, minute=15))
         required = next(stop for stop in preview["stops"] if stop["required"])
         self.assertFalse(required["time_is_estimated"])
         self.assertTrue(required["appointment_confirmed"])
@@ -984,11 +1006,12 @@ class RouteOptimizationIntegrationTests(TestCase):
         preview, body = self.optimized_required_preview(NOW.replace(hour=12, minute=15))
         vehicle = body["model"]["vehicles"][0]
         lunch = vehicle["breakRule"]["breakRequests"][0]
-        self.assertEqual(lunch["earliestStartTime"], "2026-08-10T09:15:00Z")  # 11:15 local
+        self.assertEqual(lunch["earliestStartTime"], "2026-08-10T09:30:00Z")  # 11:30 local
+        self.assertEqual(lunch["latestStartTime"], lunch["earliestStartTime"])
         self.assertEqual(lunch["minDuration"], "2700s")
         required = next(item for item in body["model"]["shipments"] if "penaltyCost" not in item)
         self.assertEqual(required["pickups"][0]["timeWindows"], [{
-            "startTime": "2026-08-10T10:00:00Z", "endTime": "2026-08-10T10:30:00Z",
+            "startTime": "2026-08-10T10:15:00Z", "endTime": "2026-08-10T10:15:00Z",
         }])
         self.assertEqual(next(stop for stop in preview["stops"] if stop["required"])["estimated_at"],
                          "2026-08-10T10:15:00Z")
@@ -1006,14 +1029,15 @@ class RouteOptimizationIntegrationTests(TestCase):
         self.assertEqual(applied.get_json()["error"], "planning_changed")
         self.assertEqual(planned.values, before)
 
-    def test_moved_lunch_preserves_full_late_arrival_tolerance(self):
+    def test_moved_lunch_protects_only_actual_booked_service_period(self):
         self.append_required_visit(confirmed="Y", hour=12, minute=15)
         with patch.object(app_module, "stockholm_now", return_value=NOW.replace(hour=11, minute=40)):
-            preview, body = self.optimized_required_preview(NOW.replace(hour=12, minute=30))
+            preview, body = self.optimized_required_preview(NOW.replace(hour=12, minute=15))
         lunch = body["model"]["vehicles"][0]["breakRule"]["breakRequests"][0]
-        self.assertEqual(lunch["earliestStartTime"], "2026-08-10T10:50:00Z")
+        self.assertEqual(lunch["earliestStartTime"], "2026-08-10T10:35:00Z")
+        self.assertEqual(lunch["latestStartTime"], lunch["earliestStartTime"])
         self.assertEqual(next(stop for stop in preview["stops"] if stop["required"])["estimated_at"],
-                         "2026-08-10T10:30:00Z")
+                         "2026-08-10T10:15:00Z")
 
     def test_no_possible_lunch_is_local_before_google_and_quota_reservation(self):
         customers = [{"row": index + 2, "customer_id": f"40000000-0000-4000-8000-{index:012d}",
@@ -1183,7 +1207,7 @@ class RouteOptimizationIntegrationTests(TestCase):
         )
         self.assertEqual(
             rendered[shipments["confirmed"]["customer_id"]]["pickups"][0]["timeWindows"],
-            [{"startTime": "2026-10-02T08:45:00Z", "endTime": "2026-10-02T09:15:00Z"}],
+            [{"startTime": "2026-10-02T09:00:00Z", "endTime": "2026-10-02T09:00:00Z"}],
         )
         self.assertEqual(
             request["model"]["vehicles"][0]["startLocation"],
