@@ -1087,6 +1087,8 @@ def parse_optimize_tours_response(
             "sequence": sequence,
             "customer_id": str(shipment["customer_id"]),
             "required": bool(shipment.get("required")),
+            "appointment_confirmed": bool(shipment.get("fixed_at")),
+            "time_is_estimated": not bool(shipment.get("fixed_at")),
             "planned_activity_id": str(shipment.get("activity_id") or ""),
             "required_activity_ids": [str(shipment.get("activity_id"))] if shipment.get("activity_id") else [],
             "scheduled_at": _utc_text(shipment["fixed_at"]) if shipment.get("fixed_at") else str(visit.get("startTime") or ""),

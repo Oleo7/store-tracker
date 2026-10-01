@@ -879,6 +879,170 @@ class RouteOptimizationIntegrationTests(TestCase):
             fixed_activities=inputs["fixed_activities"],
         )
 
+    def append_required_visit(self, *, confirmed="N", hour=12, minute=0, source="follow_up"):
+        row = {
+            "planned_activity_id": "required-existing", "user_name": "olle", "sales_person": "Olle",
+            "customer_id": "11111111-1111-4111-8111-111111111111", "customer_row": 2,
+            "customer": "Butik A", "contact_type": "visit", "status": "planned",
+            "scheduled_at": NOW.replace(hour=hour, minute=minute).isoformat(timespec="minutes"),
+            "appointment_confirmed": confirmed, "time_is_estimated": "N", "source": source,
+            "note": "Keep this note", "picking_help": "Y", "duration_minutes": 20, "revision": 3,
+        }
+        sheet = self.spreadsheet.worksheet(app_module.PLANNED_ACTIVITIES_SHEET)
+        sheet.values.append([row.get(key, "") for key in app_module.PLANNED_ACTIVITY_COLUMNS])
+        return row
+
+    def optimized_required_preview(self, estimated):
+        captured = {}
+
+        class Provider:
+            def optimize(_self, *, project, body, timeout_seconds):
+                captured.update(body)
+                items = [{"customer_id": item["label"].split(":", 1)[1]}
+                         for item in body["model"]["shipments"]]
+                response = successful_response(items, selected=tuple(range(len(items))), start=NOW,
+                                               duration_minutes=420)
+                route = response["routes"][0]
+                route["vehicleStartTime"] = body["model"]["globalStartTime"]
+                for visit in route["visits"]:
+                    when = estimated if visit["shipmentLabel"].endswith("111111111111") else NOW.replace(hour=14)
+                    visit["startTime"] = when.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+                route["breaks"] = [{"startTime": item["earliestStartTime"], "duration": item["minDuration"]}
+                                   for item in body["model"]["vehicles"][0].get("breakRule", {}).get("breakRequests", [])]
+                return response, 200
+
+        with patch.object(app_module, "get_authoritative_priority_snapshot", return_value=self.priority_snapshot()), patch.object(
+            app_module, "route_optimization_provider", return_value=Provider(),
+        ):
+            response = self.client.post("/planning/route-preview", json={
+                "route_date": NOW.date().isoformat(), "client_request_id": "booked-preview",
+                "route_mode": "automatic", "start": {"latitude": START.latitude, "longitude": START.longitude},
+            })
+        self.assertEqual(response.status_code, 200, response.get_json())
+        return response.get_json(), captured
+
+    def apply_optimized_preview(self, preview):
+        return self.client.post("/planning/route-apply", json={
+            "client_request_id": "booked-apply", "preview_token": preview["preview_token"],
+        })
+
+    def test_apply_flexible_required_visit_saves_optimized_time_and_retry_without_mutation(self):
+        original = self.append_required_visit()
+        preview, body = self.optimized_required_preview(NOW.replace(hour=13, minute=15))
+        required = next(stop for stop in preview["stops"] if stop["required"])
+        self.assertTrue(required["time_is_estimated"])
+        self.assertFalse(required["appointment_confirmed"])
+        vehicle = body["model"]["vehicles"][0]
+        self.assertEqual(vehicle["startLocation"], vehicle["endLocation"])
+        self.assertEqual(vehicle["startLocation"], {"latitude": START.latitude, "longitude": START.longitude})
+        with patch.object(app_module, "get_authoritative_priority_snapshot", return_value=self.priority_snapshot()):
+            first = self.apply_optimized_preview(preview)
+        self.assertEqual(first.status_code, 200, first.get_json())
+        self.assertFalse(first.get_json()["duplicate"])
+        planned = self.spreadsheet.worksheet(app_module.PLANNED_ACTIVITIES_SHEET)
+        before_retry = [list(row) for row in planned.values]
+        writes = planned.batch_update_count
+        proposals = self.spreadsheet.worksheet(app_module.ROUTE_PROPOSALS_SHEET)
+        with patch.object(app_module, "build_route_optimization_inputs") as stale_check:
+            retry = self.apply_optimized_preview(preview)
+        self.assertEqual(retry.status_code, 200, retry.get_json())
+        self.assertTrue(retry.get_json()["duplicate"])
+        stale_check.assert_not_called()
+        self.assertEqual(first.get_json()["route_group_id"], retry.get_json()["route_group_id"])
+        self.assertEqual(first.get_json()["activities"], retry.get_json()["activities"])
+        self.assertEqual(planned.values, before_retry)
+        self.assertEqual(planned.batch_update_count, writes)
+        self.assertEqual(len(proposals.dict_rows()), 1)
+        rows = planned.dict_rows()
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(len({row["route_group_id"] for row in rows}), 1)
+        saved = next(row for row in rows if row["planned_activity_id"] == original["planned_activity_id"])
+        self.assertEqual(saved["scheduled_at"], "2026-08-10T13:15+02:00")
+        self.assertEqual(saved["time_is_estimated"], "Y")
+        self.assertEqual(saved["revision"], 4)
+        self.assertEqual(saved["route_sequence"], required["sequence"])
+        for key in ("source", "note", "picking_help", "customer_id", "appointment_confirmed"):
+            self.assertEqual(saved[key], original[key])
+
+    def test_apply_confirmed_required_visit_preserves_booking_despite_google_estimate(self):
+        original = self.append_required_visit(confirmed="Y", hour=11, source="manual")
+        preview, _body = self.optimized_required_preview(NOW.replace(hour=11, minute=5))
+        required = next(stop for stop in preview["stops"] if stop["required"])
+        self.assertFalse(required["time_is_estimated"])
+        self.assertTrue(required["appointment_confirmed"])
+        with patch.object(app_module, "get_authoritative_priority_snapshot", return_value=self.priority_snapshot()):
+            applied = self.apply_optimized_preview(preview)
+        self.assertEqual(applied.status_code, 200, applied.get_json())
+        saved = self.spreadsheet.worksheet(app_module.PLANNED_ACTIVITIES_SHEET).dict_rows()[0]
+        self.assertEqual(saved["scheduled_at"], original["scheduled_at"])
+        self.assertEqual(saved["appointment_confirmed"], "Y")
+        self.assertEqual(saved["route_sequence"], required["sequence"])
+        self.assertEqual(saved["route_group_id"], applied.get_json()["route_group_id"])
+
+    def test_confirmed_lunch_booking_survives_google_request_and_validation(self):
+        self.append_required_visit(confirmed="Y", hour=12, minute=15)
+        preview, body = self.optimized_required_preview(NOW.replace(hour=12, minute=15))
+        vehicle = body["model"]["vehicles"][0]
+        lunch = vehicle["breakRule"]["breakRequests"][0]
+        self.assertEqual(lunch["earliestStartTime"], "2026-08-10T09:15:00Z")  # 11:15 local
+        self.assertEqual(lunch["minDuration"], "2700s")
+        required = next(item for item in body["model"]["shipments"] if "penaltyCost" not in item)
+        self.assertEqual(required["pickups"][0]["timeWindows"], [{
+            "startTime": "2026-08-10T10:00:00Z", "endTime": "2026-08-10T10:30:00Z",
+        }])
+        self.assertEqual(next(stop for stop in preview["stops"] if stop["required"])["estimated_at"],
+                         "2026-08-10T10:15:00Z")
+
+    def test_first_apply_still_rejects_external_planning_change(self):
+        self.append_required_visit()
+        preview, _body = self.optimized_required_preview(NOW.replace(hour=13, minute=15))
+        planned = self.spreadsheet.worksheet(app_module.PLANNED_ACTIVITIES_SHEET)
+        planned.values[1][app_module.PLANNED_ACTIVITY_COLUMNS.index("revision")] = 4
+        planned.values[1][app_module.PLANNED_ACTIVITY_COLUMNS.index("scheduled_at")] = "2026-08-10T12:10+02:00"
+        before = [list(row) for row in planned.values]
+        with patch.object(app_module, "get_authoritative_priority_snapshot", return_value=self.priority_snapshot()):
+            applied = self.apply_optimized_preview(preview)
+        self.assertEqual(applied.status_code, 409, applied.get_json())
+        self.assertEqual(applied.get_json()["error"], "planning_changed")
+        self.assertEqual(planned.values, before)
+
+    def test_moved_lunch_preserves_full_late_arrival_tolerance(self):
+        self.append_required_visit(confirmed="Y", hour=12, minute=15)
+        with patch.object(app_module, "stockholm_now", return_value=NOW.replace(hour=11, minute=40)):
+            preview, body = self.optimized_required_preview(NOW.replace(hour=12, minute=30))
+        lunch = body["model"]["vehicles"][0]["breakRule"]["breakRequests"][0]
+        self.assertEqual(lunch["earliestStartTime"], "2026-08-10T10:50:00Z")
+        self.assertEqual(next(stop for stop in preview["stops"] if stop["required"])["estimated_at"],
+                         "2026-08-10T10:30:00Z")
+
+    def test_no_possible_lunch_is_local_before_google_and_quota_reservation(self):
+        customers = [{"row": index + 2, "customer_id": f"40000000-0000-4000-8000-{index:012d}",
+                      "customer": f"Booked {index}", "sales_person": "Olle", "cancelled_flag": "",
+                      "latitude_google": 56 + index / 10000, "longitude_google": 12 + index / 10000,
+                      "city_google": f"City {index}", "postal_code_google": str(40000 + index)}
+                     for index in range(15)]
+        planned = self.spreadsheet.worksheet(app_module.PLANNED_ACTIVITIES_SHEET)
+        for index, customer in enumerate(customers):
+            row = {**customer, "customer_row": customer["row"], "planned_activity_id": f"booked-{index}",
+                   "user_name": "olle", "sales_person": "Olle", "contact_type": "visit", "status": "planned",
+                   "source": "manual", "appointment_confirmed": "Y", "duration_minutes": 20, "revision": 1,
+                   "scheduled_at": (NOW + timedelta(minutes=index * 36)).isoformat()}
+            planned.values.append([row.get(key, "") for key in app_module.PLANNED_ACTIVITY_COLUMNS])
+        before = [list(row) for row in planned.values]
+        with patch.object(app_module, "get_authoritative_priority_snapshot", return_value=self.priority_snapshot(customers)), patch.object(
+            app_module, "route_optimization_provider",
+        ) as provider, patch.object(app_module, "execute_route_optimization") as execute:
+            response = self.client.post("/planning/route-preview", json={
+                "route_date": NOW.date().isoformat(), "client_request_id": "no-lunch",
+                "route_mode": "automatic", "start": {"latitude": START.latitude, "longitude": START.longitude},
+            })
+        self.assertEqual(response.status_code, 422, response.get_json())
+        self.assertEqual(response.get_json()["error"], "route_lunch_not_feasible")
+        provider.assert_not_called()
+        execute.assert_not_called()
+        self.assertNotIn(app_module.ROUTE_OPTIMIZATION_RUNS_SHEET, self.spreadsheet.added_sheets)
+        self.assertEqual(planned.values, before)
+
     def test_t12_input_builder_uses_all_577_owner_customers(self):
         customers = [{
             "row": index + 2,

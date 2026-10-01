@@ -3123,6 +3123,33 @@ class PlanningRouteApiTests(PlanningApiTestCase):
         saved = app_module.get_saved_route_proposal(self.spreadsheet, "olle", route_date)
         self.assertTrue(app_module.legacy_route_cache_current(saved, self.spreadsheet, owner, route_date))
 
+    def test_legacy_flexible_required_visit_keeps_source_and_saves_preview_time(self):
+        for source in ("manual", "follow_up", "system_suggestion"):
+            with self.subTest(source=source):
+                planned = self.spreadsheet.worksheet(app_module.PLANNED_ACTIVITIES_SHEET)
+                planned.values = planned.values[:1]
+                original = self.append_planning_row(
+                    planned_activity_id=f"flexible-{source}", source=source, appointment_confirmed="N",
+                    scheduled_at="2026-07-28T12:00+02:00", picking_help="Y", note="Preserve me",
+                )
+                response, _calculate = self.create_preview([self.route_stop(2, 1, 21), self.route_stop(4, 2, 42)])
+                self.assertEqual(response.status_code, 200, response.get_json())
+                preview = response.get_json()
+                required = next(stop for stop in preview["stops"] if stop["required"])
+                self.assertTrue(required["time_is_estimated"])
+                self.assertNotEqual(required["estimated_at"], original["scheduled_at"])
+                applied = self.client.post("/planning/route-apply", json={
+                    "client_request_id": f"apply-flexible-{source}", "preview_token": preview["preview_token"],
+                })
+                self.assertEqual(applied.status_code, 200, applied.get_json())
+                saved = next(row for row in self.planning_rows() if row["planned_activity_id"] == original["planned_activity_id"])
+                self.assertEqual(saved["scheduled_at"], required["estimated_at"])
+                self.assertEqual(saved["time_is_estimated"], "Y")
+                self.assertEqual(saved["route_group_id"], applied.get_json()["route_group_id"])
+                self.assertEqual(saved["route_sequence"], required["sequence"])
+                for key in ("source", "note", "picking_help", "customer_id", "appointment_confirmed"):
+                    self.assertEqual(saved[key], original[key])
+
     def test_apply_never_falls_back_when_customer_id_disappears(self):
         preview, _ = self.create_preview([
             self.route_stop(2, 1, 21),

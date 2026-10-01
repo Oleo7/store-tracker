@@ -11,7 +11,7 @@ from route_optimization import (
     RouteOptimizationError, TrustedCoordinate, build_optimize_tours_request,
     parse_optimize_tours_response,
 )
-from route_workday import available_route_seconds, lunch_breaks
+from route_workday import available_route_seconds, lunch_breaks, plan_route_lunch, RouteLunchNotFeasible
 from tests.test_planning import ConstantRoadProvider, default_spreadsheet
 
 
@@ -197,6 +197,7 @@ class RouteWorkdayTests(TestCase):
                 self.assertEqual(visit["fixed_at"], at(10, 30) if confirmed == "Y" else None)
                 legacy = next(item for item in self.legacy()["stops"] if item["customer_id"] == A)
                 self.assertIs(legacy["required"], True)
+                self.assertEqual(legacy["time_is_estimated"], confirmed == "N")
                 if confirmed == "N":
                     self.assertNotEqual(app_module.parse_planning_datetime(legacy["estimated_at"]), at(10, 30))
                 else:
@@ -266,6 +267,99 @@ class RouteWorkdayTests(TestCase):
                                              start=TrustedCoordinate(GPS.latitude, GPS.longitude), shipments=[])
         self.assertEqual(request["model"]["globalStartTime"], "2026-11-02T07:00:00Z")
         self.assertEqual(request["model"]["globalEndTime"], "2026-11-02T16:00:00Z")
+
+    def test_confirmed_booking_moves_lunch_in_both_engines(self):
+        self.activity(contact_type="visit", scheduled_at=at(12, 15).isoformat(), appointment_confirmed="Y")
+        inputs = self.inputs()
+        required = next(item for item in inputs["shipments"] if item["required"])
+        self.assertEqual(required["fixed_at"], at(12, 15))
+        self.assertEqual(inputs["fixed_breaks"][0]["scheduled_at"], at(11, 15))
+        preview = self.legacy()
+        booked = next(stop for stop in preview["stops"] if stop["required"])
+        self.assertEqual(app_module.parse_planning_datetime(booked["estimated_at"]), at(12, 15))
+        self.assertFalse(booked["time_is_estimated"])
+        lunch = next(segment for segment in preview["timeline"]["segments"] if segment["kind"] == "lunch")
+        self.assertEqual(app_module.parse_planning_datetime(lunch["start"]), at(11, 15))
+        self.assertEqual(app_module.parse_planning_datetime(lunch["end"]), at(12))
+
+    def test_booking_ending_at_noon_keeps_normal_lunch_in_both_engines(self):
+        self.activity(contact_type="visit", scheduled_at=at(11, 40).isoformat(), appointment_confirmed="Y")
+        self.assertEqual(self.inputs()["fixed_breaks"][0]["scheduled_at"], at(12))
+        lunch = next(segment for segment in self.legacy()["timeline"]["segments"] if segment["kind"] == "lunch")
+        self.assertEqual(app_module.parse_planning_datetime(lunch["start"]), at(12))
+
+    def test_multiple_bookings_move_lunch_deterministically_in_both_engines(self):
+        self.activity(contact_type="visit", scheduled_at=at(11, 45).isoformat(), appointment_confirmed="Y")
+        self.activity(planned_activity_id="visit-c", contact_type="visit", customer_id=C, customer_row=4,
+                      customer="Butik C", scheduled_at=at(12, 45).isoformat(), appointment_confirmed="Y")
+        first = self.inputs()
+        self.assertEqual(first["fixed_breaks"][0]["scheduled_at"], at(10, 45))
+        self.assertEqual({item["fixed_at"] for item in first["shipments"]}, {at(11, 45), at(12, 45)})
+        self.planned.values[1:] = reversed(self.planned.values[1:])
+        self.assertEqual(first["fixed_breaks"], self.inputs()["fixed_breaks"])
+        preview = self.legacy()
+        self.assertEqual({app_module.parse_planning_datetime(stop["estimated_at"]) for stop in preview["stops"]},
+                         {at(11, 45), at(12, 45)})
+        lunch = next(segment for segment in preview["timeline"]["segments"] if segment["kind"] == "lunch")
+        self.assertEqual(app_module.parse_planning_datetime(lunch["start"]), at(10, 45))
+
+    def test_booking_during_lunch_does_not_get_skipped_by_today_start_clamp(self):
+        self.activity(contact_type="visit", scheduled_at=at(12, 15).isoformat(), appointment_confirmed="Y")
+        with patch.object(app_module, "stockholm_now", return_value=at(12, 10)):
+            inputs = self.inputs()
+            self.assertEqual(inputs["route_start_at"], at(12, 10))
+            self.assertEqual(inputs["fixed_breaks"][0]["scheduled_at"], at(12, 50))
+            preview = self.legacy()
+            self.assertEqual(app_module.parse_planning_datetime(preview["route_start_at"]), at(12, 10))
+
+
+class LunchSelectionTests(TestCase):
+    def test_normal_lunch_is_unchanged_and_flexible_visits_do_not_move_it(self):
+        start, pauses = plan_route_lunch(at(8), [(at(11), at(11, 20))])
+        self.assertEqual(start, at(8))
+        self.assertEqual(pauses, lunch_breaks(at(8)))
+        self.assertEqual(pauses[0]["scheduled_at"], at(12))
+
+    def test_nearest_slot_respects_available_day_and_ties_choose_earlier(self):
+        booking = [(at(12, 15), at(12, 35))]
+        self.assertEqual(plan_route_lunch(at(8), booking)[1][0]["scheduled_at"], at(11, 30))
+        self.assertEqual(plan_route_lunch(at(11, 40), booking)[1][0]["scheduled_at"], at(12, 35))
+        tied_booking = [(at(12, 12) + timedelta(seconds=30), at(12, 32) + timedelta(seconds=30))]
+        self.assertEqual(plan_route_lunch(at(8), tied_booking)[1][0]["scheduled_at"],
+                         at(11, 27) + timedelta(seconds=30))
+
+    def test_no_uninterrupted_lunch_slot_has_specific_local_error(self):
+        bookings = [(at(8) + timedelta(minutes=index * 36),
+                     at(8) + timedelta(minutes=index * 36 + 20)) for index in range(15)]
+        with self.assertRaises(RouteLunchNotFeasible):
+            plan_route_lunch(at(8), bookings)
+        stops = [{"required": True, "appointment_confirmed": True, "contact_type": "visit",
+                  "scheduled_at": begin.isoformat(), "latitude": GPS.latitude, "longitude": GPS.longitude}
+                 for begin, _end in bookings]
+        with app_module.app.app_context(), patch.object(app_module, "get_route_travel_time_provider") as provider:
+            _stops, _timeline, error = app_module.schedule_planning_route_with_anchors(
+                stops=stops, fixed_non_route=[], route_start_at=at(8), start=GPS,
+            )
+        self.assertEqual(error[1], 422)
+        self.assertEqual(error[0].get_json()["error"], "route_lunch_not_feasible")
+        provider.assert_not_called()
+
+    def test_legacy_timeline_keeps_booking_and_moves_lunch_instead_of_visit(self):
+        with app_module.app.app_context():
+            scheduled, timeline, error = app_module.schedule_planning_route_timeline(
+                stops=[{"required": True, "appointment_confirmed": True, "contact_type": "visit",
+                        "scheduled_at": at(12, 15).isoformat(), "duration_minutes": 20, "leg_drive_minutes": 10},
+                       {"required": False, "duration_minutes": 20, "leg_drive_minutes": 10}],
+                fixed_non_route=[], route_start_at=at(11, 40), return_drive_minutes=10,
+            )
+        self.assertIsNone(error, error)
+        self.assertEqual(app_module.parse_planning_datetime(scheduled[0]["estimated_at"]), at(12, 15))
+        self.assertFalse(scheduled[0]["time_is_estimated"])
+        self.assertTrue(scheduled[1]["time_is_estimated"])
+        self.assertEqual(app_module.parse_planning_datetime(scheduled[1]["leg_departure_at"]), at(12, 35))
+        lunch = next(segment for segment in timeline["segments"] if segment["kind"] == "lunch")
+        self.assertEqual(app_module.parse_planning_datetime(lunch["start"]), at(12, 50))
+        self.assertEqual(app_module.parse_planning_datetime(lunch["end"]), at(13, 35))
 
 
 class LunchValidationTests(TestCase):
