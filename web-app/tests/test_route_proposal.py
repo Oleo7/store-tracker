@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from itertools import permutations
 from pathlib import Path
 import random
@@ -90,15 +92,15 @@ class SolverTests(TestCase):
         self.assertEqual(route.return_drive_seconds, 120)
         self.assertEqual(route.total_seconds, 1380)
 
-    def test_exact_solver_rejects_exactly_seven_hours(self):
+    def test_exact_solver_rejects_exactly_nine_hours(self):
         candidates = [candidate(2, 75)]
-        matrix = [[24000], [0]]
+        matrix = [[31200], [0]]
         solution = solve_route(candidates, matrix)
         self.assertEqual(solution.route_indices, ())
 
-    def test_exact_solver_accepts_one_second_under_seven_hours(self):
+    def test_exact_solver_accepts_one_second_under_nine_hours(self):
         candidates = [candidate(2, 75)]
-        matrix = [[23999], [0]]
+        matrix = [[31199], [0]]
         solution = solve_route(candidates, matrix)
         route = verify_route(
             candidates=candidates,
@@ -106,11 +108,11 @@ class SolverTests(TestCase):
             route_indices=solution.route_indices,
         )
 
-        self.assertEqual(route.total_seconds, 25199)
+        self.assertEqual(route.total_seconds, 32399)
 
     def test_exact_solver_rejects_route_one_second_over_budget(self):
         candidates = [candidate(2, 75)]
-        matrix = [[24001], [0]]
+        matrix = [[31201], [0]]
         solution = solve_route(candidates, matrix)
         self.assertEqual(solution.route_indices, ())
 
@@ -340,7 +342,7 @@ class SolverTests(TestCase):
         with self.assertRaises(RouteVerificationError):
             verify_route(
                 candidates=candidates,
-                drive_seconds=[[24000], [0]],
+                drive_seconds=[[31200], [0]],
                 route_indices=[0],
             )
 
@@ -723,6 +725,8 @@ class RouteEndpointTests(TestCase):
         ]
         self.provider = FormulaProvider()
         self.patchers = [
+            patch.object(app_module, "stockholm_now", return_value=datetime(2026, 7, 28, 8, tzinfo=ZoneInfo("Europe/Stockholm"))),
+            patch.object(app_module, "read_planned_activity_snapshot", return_value=(None, [], [])),
             patch.object(app_module, "get_spreadsheet_with_retry", return_value=object()),
             patch.object(app_module, "get_customer_rows", return_value=self.customers),
             patch.object(app_module, "get_contact_rows", return_value=[]),
@@ -789,12 +793,19 @@ class RouteEndpointTests(TestCase):
         self.assertEqual(payload["stops"][0]["priority_score"], 88)
         self.assertEqual(payload["stops"][0]["latitude"], 57.7)
         self.assertEqual(payload["stops"][0]["longitude"], 11.9)
-        self.assertEqual(payload["meta"]["max_total_minutes"], 420)
+        self.assertEqual(payload["meta"]["max_total_minutes"], 495)
         self.assertEqual(payload["meta"]["max_route_stops"], 15)
         self.assertEqual(payload["meta"]["service_minutes_per_stop"], 20)
         self.assertTrue(payload["meta"]["includes_return_to_start"])
         self.assertEqual(payload["route_owner"], "Route User")
         self.assertIn("route_date", payload)
+        summary = payload["summary"]
+        self.assertEqual(summary["break_minutes"], 45)
+        self.assertAlmostEqual(summary["total_minutes"], summary["drive_minutes"]
+                               + summary["service_minutes"] + summary["break_minutes"] + summary["wait_minutes"])
+        last_stop = payload["stops"][-1]
+        self.assertAlmostEqual(summary["total_minutes"], last_stop["cumulative_total_minutes"]
+                               + summary["return_drive_minutes"] + summary["return_wait_minutes"])
         self.save_route_mock.assert_called_once()
 
     def test_endpoint_caps_candidates_before_first_provider_call(self):
@@ -1089,7 +1100,7 @@ class FrontendRouteProposalFlowTests(TestCase):
         )
         self.assertIn("Retur till start", self.html)
         self.assertIn("const ROUTE_MAX_STOPS = 15;", self.html)
-        self.assertIn("const ROUTE_MAX_TOTAL_MINUTES = 420;", self.html)
+        self.assertIn("const ROUTE_MAX_TOTAL_MINUTES = 540;", self.html)
 
     def test_google_maps_export_returns_to_route_start(self):
         self.assertIn(

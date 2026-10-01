@@ -417,10 +417,11 @@ class AnchorAwareRouteTests(TestCase):
         self.assertNotIn("backtrack", {stop["customer_id"] for stop in scheduled})
         anchor_stop = next(stop for stop in scheduled if stop["required"])
         self.assertEqual(anchor_stop["scheduled_at"], "2026-08-10T13:00+02:00")
+        self.assertEqual(anchor_stop["estimated_at"], anchor_stop["scheduled_at"])
         self.assertLessEqual(len(scheduled), 15)
-        self.assertLess(
+        self.assertLessEqual(
             app_module.parse_planning_datetime(timeline["route_end_at"]),
-            start_at + timedelta(hours=7),
+            app_module.route_workday_end(start_at),
         )
         self.assertEqual(provider.call_shapes, [(17, 17)])
 
@@ -468,5 +469,5 @@ class AnchorAwareRouteTests(TestCase):
         self.assertEqual(scheduled[2]["scheduled_at"], "2026-08-10T14:00+02:00")
         self.assertLess(
             app_module.parse_planning_datetime(timeline["route_end_at"]),
-            start_at + timedelta(hours=7),
+            app_module.route_workday_end(start_at),
         )

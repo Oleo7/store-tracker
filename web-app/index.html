@@ -4529,7 +4529,7 @@
   const FREEZER_FIELD_SET = new Set(FREEZER_FIELDS);
   const FREEZER_LABELS = { Franui: "Franui", Schufrulade: "Schufrulade", Boujee: "Boujee", polarbar: "Polarbär", none: "Inget" };
   const LIST_BATCH_SIZE = 20;
-  const ROUTE_MAX_TOTAL_MINUTES = 420;
+  const ROUTE_MAX_TOTAL_MINUTES = 540;
   const ROUTE_MAX_STOPS = 15;
   const ROUTE_SERVICE_MINUTES_PER_STOP = 20;
   const MAP_ROUTE_DRAFT_KEY = "st_map_route_draft_v1";
@@ -5482,7 +5482,7 @@
             <div class="route-proposal-metric-value">${formatRouteMinutes(summary.return_drive_minutes)}</div>
           </div>
         </div>
-        <div class="route-proposal-map-hint">Total tid är under 7 timmar inklusive 20 minuters besök per butik och retur till start. Öppna kartan för att ta bort eller lägga tillbaka stopp.</div>
+        <div class="route-proposal-map-hint">Arbetsdag 08:00–17:00 med lunch 12:00–12:45, 20 minuters besök per butik och retur till start senast 17:00. Öppna kartan för att ta bort eller lägga tillbaka stopp.</div>
         ${mapSelectionChanged ? `
           <div class="planning-conflict" style="margin-bottom:10px">
             Kartans stopp har ändrats. Beräkna ett nytt verifierat ruttförslag eller återställ stoppordningen innan rutten sparas i Planering.
@@ -5679,6 +5679,9 @@
       drive_minutes: Number(payload.summary.drive_minutes),
       return_drive_minutes: Number(payload.summary.return_drive_minutes),
       service_minutes: Number(payload.summary.service_minutes),
+      break_minutes: Number(payload.summary.break_minutes ?? 0),
+      wait_minutes: Number(payload.summary.wait_minutes ?? 0),
+      return_wait_minutes: Number(payload.summary.return_wait_minutes ?? 0),
       total_minutes: Number(payload.summary.total_minutes),
     };
     if (
@@ -5689,13 +5692,17 @@
       || !Number.isFinite(summary.return_drive_minutes) || summary.return_drive_minutes < 0
       || summary.return_drive_minutes > summary.drive_minutes + 0.01
       || !Number.isFinite(summary.service_minutes) || summary.service_minutes < 0
+      || !Number.isFinite(summary.break_minutes) || summary.break_minutes < 0
+      || !Number.isFinite(summary.wait_minutes) || summary.wait_minutes < 0
+      || !Number.isFinite(summary.return_wait_minutes) || summary.return_wait_minutes < 0
       || !Number.isFinite(summary.total_minutes) || summary.total_minutes < 0
     ) {
       throw routeProposalError("invalid_route_response", "Ruttens summering är ogiltig.");
     }
 
     const expectedServiceMinutes = stops.length * ROUTE_SERVICE_MINUTES_PER_STOP;
-    const calculatedTotalMinutes = summary.drive_minutes + expectedServiceMinutes;
+    const calculatedTotalMinutes = summary.drive_minutes + expectedServiceMinutes
+      + summary.break_minutes + summary.wait_minutes;
     const calculatedPriorityScore = stops.reduce((sum, stop) => sum + stop.priority_score, 0);
     if (
       Math.abs(summary.service_minutes - expectedServiceMinutes) > 0.01
@@ -5720,6 +5727,7 @@
         || Math.abs(
           lastStop.cumulative_total_minutes
           + summary.return_drive_minutes
+          + summary.return_wait_minutes
           - summary.total_minutes
         ) > 1
       ) {
@@ -5798,10 +5806,10 @@
       return "Ruttoptimeringen hittade ingen verifierat genomförbar rutt inom de automatiska försöken. Justera planeringen och försök igen.";
     }
     if (normalizedCode.includes("no_feasible") || normalizedCode.includes("route_not_found")) {
-      return "Ingen genomförbar rutt hittades under sju timmar inklusive retur till start.";
+      return "Ingen genomförbar rutt hittades före 17:00 inklusive retur till start.";
     }
     if (normalizedCode === "route_traffic_infeasible") {
-      return "Trafiken gör att rutten inte ryms inom dagens fasta tider och sjutimmarsgräns. Justera planeringen och försök igen.";
+      return "Trafiken gör att rutten inte ryms inom dagens fasta tider och arbetsdagens slut 17:00. Justera planeringen och försök igen.";
     }
     if (
       normalizedCode.includes("travel")
@@ -5916,7 +5924,7 @@
         routeProposalLoading = false;
         routeProposalAbortController = null;
         routeProposalRequestSignature = "";
-        setRouteProposalMessage("Ingen genomförbar rutt hittades under sju timmar inklusive retur till start.");
+        setRouteProposalMessage("Ingen genomförbar rutt hittades före 17:00 inklusive retur till start.");
         return;
       }
 

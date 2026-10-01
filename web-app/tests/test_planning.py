@@ -2648,7 +2648,7 @@ class PlanningRouteApiTests(PlanningApiTestCase):
             [3],
         )
 
-    def test_preview_requires_fixed_visit_and_reserves_phone_email_capacity(self):
+    def test_preview_keeps_confirmed_visit_without_phone_email_capacity(self):
         self.append_planning_row(
             planned_activity_id="fixed-phone",
             contact_type="phone",
@@ -2661,6 +2661,7 @@ class PlanningRouteApiTests(PlanningApiTestCase):
         )
         required = self.append_planning_row(
             planned_activity_id="required-zero-score",
+            appointment_confirmed=True,
             customer_row=4,
             contact_type="visit",
             scheduled_at="2026-07-28T10:30:00+02:00",
@@ -2694,11 +2695,11 @@ class PlanningRouteApiTests(PlanningApiTestCase):
 
         self.assertEqual(response.status_code, 200, response.get_json())
         body = response.get_json()
-        self.assertEqual(body["route_start_at"], "2026-07-28T09:00+02:00")
-        self.assertEqual(body["summary"]["non_route_minutes"], 20)
+        self.assertEqual(body["route_start_at"], "2026-07-28T08:00+02:00")
+        self.assertEqual(body["summary"]["non_route_minutes"], 0)
         self.assertEqual(
             body["route_payload"]["meta"]["max_total_minutes"],
-            (app_module.MAX_TOTAL_SECONDS - 20 * 60) // 60,
+            (app_module.MAX_TOTAL_SECONDS - 45 * 60) // 60,
         )
         self.assertEqual(len(body["stops"]), 1)
         stop = body["stops"][0]
@@ -2718,13 +2719,13 @@ class PlanningRouteApiTests(PlanningApiTestCase):
             self.spreadsheet.sheets,
         )
 
-    def test_preview_schedules_long_drive_around_fixed_phone_interval(self):
+    def test_preview_long_drive_is_not_delayed_by_phone(self):
         self.append_planning_row(
             planned_activity_id="fixed-phone-during-drive",
             contact_type="phone",
             scheduled_at="2026-07-28T10:00:00+02:00",
         )
-        stop = self.route_stop(2, 1, 140)
+        stop = self.route_stop(4, 1, 140)
         stop["leg_drive_minutes"] = 120
 
         response, _ = self.create_preview([stop])
@@ -2734,11 +2735,11 @@ class PlanningRouteApiTests(PlanningApiTestCase):
         planned_stop = body["stops"][0]
         self.assertEqual(
             planned_stop["leg_departure_at"],
-            "2026-07-28T10:10+02:00",
+            "2026-07-28T08:00+02:00",
         )
         self.assertEqual(
             planned_stop["arrival_at"],
-            "2026-07-28T12:10+02:00",
+            "2026-07-28T10:00+02:00",
         )
         drive_segment = next(
             segment
@@ -2747,11 +2748,11 @@ class PlanningRouteApiTests(PlanningApiTestCase):
         )
         self.assertEqual(
             drive_segment["start"],
-            "2026-07-28T10:10+02:00",
+            "2026-07-28T08:00+02:00",
         )
         self.assertFalse(body["conflicts"])
 
-    def test_preview_rejects_required_visit_missed_by_blocked_long_drive(self):
+    def test_phone_does_not_delay_unconfirmed_required_visit(self):
         self.append_planning_row(
             planned_activity_id="fixed-phone-before-required",
             contact_type="phone",
@@ -2767,10 +2768,10 @@ class PlanningRouteApiTests(PlanningApiTestCase):
 
         response, _ = self.create_preview([stop])
 
-        self.assertEqual(response.status_code, 422, response.get_json())
+        self.assertEqual(response.status_code, 200, response.get_json())
         self.assertEqual(
-            response.get_json()["error"],
-            "required_schedule_not_feasible",
+            response.get_json()["stops"][0]["estimated_at"],
+            "2026-07-28T10:00+02:00",
         )
 
     def test_preview_rejects_duplicate_required_visits_for_same_customer(self):
@@ -2925,7 +2926,7 @@ class PlanningRouteApiTests(PlanningApiTestCase):
         self.assertEqual(rows[required["planned_activity_id"]]["status"], "planned")
         self.assertEqual(
             rows[required["planned_activity_id"]]["route_sequence"],
-            2,
+            1,
         )
         self.assertEqual(rows[old_open["planned_activity_id"]]["status"], "cancelled")
         self.assertEqual(
@@ -3085,6 +3086,69 @@ class PlanningRouteApiTests(PlanningApiTestCase):
         self.assertFalse(any(
             row["source"] == "route" for row in self.planning_rows()
         ))
+
+    def test_apply_rejects_preview_from_previous_workday_policy(self):
+        preview, _ = self.create_preview([self.route_stop(2, 1, 21)])
+        self.assertEqual(preview.status_code, 200, preview.get_json())
+        serializer = app_module.planning_preview_serializer()
+        token_payload = serializer.loads(preview.get_json()["preview_token"])
+        token_payload["route_payload"].pop("workday_policy", None)
+        response = self.client.post("/planning/route-apply", json={
+            "client_request_id": "previous-workday-preview",
+            "preview_token": serializer.dumps(token_payload),
+        })
+        self.assertEqual(response.status_code, 409, response.get_json())
+        self.assertEqual(response.get_json()["error"], "route_preview_expired_or_legacy")
+        self.assertFalse(any(row["source"] == "route" for row in self.planning_rows()))
+
+    def test_apply_preserves_phone_email_and_saves_current_cache_fingerprint(self):
+        for channel in ("phone", "email"):
+            self.append_planning_row(
+                planned_activity_id=f"unchanged-{channel}", contact_type=channel,
+                source="route", route_group_id="old-group", appointment_confirmed="Y",
+            )
+        before = self.planning_rows()
+        preview, _ = self.create_preview([self.route_stop(4, 1, 21)])
+        self.assertEqual(preview.status_code, 200, preview.get_json())
+        response = self.client.post("/planning/route-apply", json={
+            "client_request_id": "preserve-phone-email",
+            "preview_token": preview.get_json()["preview_token"],
+        })
+        self.assertEqual(response.status_code, 200, response.get_json())
+        after = self.planning_rows()
+        self.assertEqual([row for row in after if row["contact_type"] in {"phone", "email"}], before)
+        self.assertFalse(any(row["contact_type"] == "lunch" for row in after))
+        owner = {"user_name": "olle", "name": "Olle"}
+        route_date = datetime.fromisoformat(preview.get_json()["route_date"]).date()
+        saved = app_module.get_saved_route_proposal(self.spreadsheet, "olle", route_date)
+        self.assertTrue(app_module.legacy_route_cache_current(saved, self.spreadsheet, owner, route_date))
+
+    def test_legacy_flexible_required_visit_keeps_source_and_saves_preview_time(self):
+        for source in ("manual", "follow_up", "system_suggestion"):
+            with self.subTest(source=source):
+                planned = self.spreadsheet.worksheet(app_module.PLANNED_ACTIVITIES_SHEET)
+                planned.values = planned.values[:1]
+                original = self.append_planning_row(
+                    planned_activity_id=f"flexible-{source}", source=source, appointment_confirmed="N",
+                    scheduled_at="2026-07-28T12:00+02:00", picking_help="Y", note="Preserve me",
+                )
+                response, _calculate = self.create_preview([self.route_stop(2, 1, 21), self.route_stop(4, 2, 42)])
+                self.assertEqual(response.status_code, 200, response.get_json())
+                preview = response.get_json()
+                required = next(stop for stop in preview["stops"] if stop["required"])
+                self.assertTrue(required["time_is_estimated"])
+                self.assertNotEqual(required["estimated_at"], original["scheduled_at"])
+                applied = self.client.post("/planning/route-apply", json={
+                    "client_request_id": f"apply-flexible-{source}", "preview_token": preview["preview_token"],
+                })
+                self.assertEqual(applied.status_code, 200, applied.get_json())
+                saved = next(row for row in self.planning_rows() if row["planned_activity_id"] == original["planned_activity_id"])
+                self.assertEqual(saved["scheduled_at"], required["estimated_at"])
+                self.assertEqual(saved["time_is_estimated"], "Y")
+                self.assertEqual(saved["route_group_id"], applied.get_json()["route_group_id"])
+                self.assertEqual(saved["route_sequence"], required["sequence"])
+                for key in ("source", "note", "picking_help", "customer_id", "appointment_confirmed"):
+                    self.assertEqual(saved[key], original[key])
 
     def test_apply_never_falls_back_when_customer_id_disappears(self):
         preview, _ = self.create_preview([
@@ -3257,7 +3321,7 @@ class PlanningRouteApiTests(PlanningApiTestCase):
         )
         self.assertFalse(any(row["source"] == "route" for row in rows))
 
-    def test_legacy_daily_route_import_rejects_full_day_with_fixed_activity(self):
+    def test_legacy_daily_route_import_rejects_route_over_workday_capacity(self):
         fixed_phone = self.append_planning_row(
             planned_activity_id="fixed-phone-at-capacity",
             contact_type="phone",
@@ -3265,7 +3329,7 @@ class PlanningRouteApiTests(PlanningApiTestCase):
         )
         saved = self.route_payload([self.route_stop(2, 1, 410)])
         saved["route_date"] = NOW.date().isoformat()
-        saved["summary"]["total_minutes"] = 410
+        saved["summary"]["total_minutes"] = 541
         app_module.save_route_proposal(
             self.spreadsheet,
             user_name="olle",

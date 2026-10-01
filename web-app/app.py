@@ -70,6 +70,11 @@ from sales_coaching import (
 )
 from commercial_orders import order_volume, commercial_order
 from contact_channel import recommend_contact_channel
+from route_workday import (
+    WORKDAY_START, WORKDAY_POLICY_VERSION, available_route_seconds,
+    effective_route_start, route_workday_end, plan_route_lunch,
+    RouteLunchNotFeasible,
+)
 from route_proposal import (
     Coordinate,
     GoogleRoutesTravelTimeProvider,
@@ -687,8 +692,7 @@ PLANNING_CONTACT_DURATIONS = {
 PLANNING_STATUSES = {"planned", "completed", "skipped", "cancelled", "superseded"}
 PLANNING_SOURCES = {"manual", "follow_up", "route", "system_suggestion"}
 PLANNING_PREVIEW_MAX_AGE_SECONDS = 30 * 60
-PLANNING_ROUTE_START_HOUR = 9
-PLANNING_ROUTE_CONFLICT_MINUTES = 15
+PLANNING_ROUTE_START_HOUR = WORKDAY_START.hour
 STOCKHOLM_ZONE = ZoneInfo("Europe/Stockholm")
 BREVO_SEND_URL = "https://api.brevo.com/v3/smtp/email"
 BREVO_EVENTS_URL = "https://api.brevo.com/v3/smtp/statistics/events"
@@ -2464,27 +2468,8 @@ def next_planning_updated_at(previous_value):
     return candidate.isoformat(timespec="microseconds")
 
 
-def route_start_datetime(route_date, now=None):
-    now = now or stockholm_now()
-    if now.tzinfo is None:
-        now = now.replace(tzinfo=STOCKHOLM_ZONE)
-    now = now.astimezone(STOCKHOLM_ZONE)
-    if route_date == now.date():
-        minute_value = now.minute + (
-            1 if now.second or now.microsecond else 0
-        )
-        minute = ((minute_value + 4) // 5) * 5
-        rounded = now.replace(second=0, microsecond=0)
-        if minute >= 60:
-            rounded = rounded.replace(minute=0) + timedelta(hours=1)
-        else:
-            rounded = rounded.replace(minute=minute)
-        return rounded
-    return datetime.combine(
-        route_date,
-        datetime_time(hour=PLANNING_ROUTE_START_HOUR),
-        tzinfo=STOCKHOLM_ZONE,
-    )
+def route_start_datetime(route_date, now=None, *, include_lunch=True):
+    return effective_route_start(route_date, now or stockholm_now(), include_lunch=include_lunch)
 
 
 def resolve_planning_owner(
@@ -2717,6 +2702,66 @@ def active_planned_activity_queue_state(
         if str(item.get("customer_id") or "").strip()
     }
     return active_customer_ids, overdue_items
+
+
+def route_contact_candidate_blocks(activity_rows, owner, route_date, customers):
+    """Same-day phone/email contacts exclude only new optional visits."""
+    blocked = []
+    lookup = CustomerLookup(customers)
+    for row in activity_rows:
+        if not planning_owner_matches(row, owner):
+            continue
+        if str(row.get("status") or "planned").strip().casefold() != "planned":
+            continue
+        if normalize_planning_contact_type(row.get("contact_type")) not in {"phone", "email"}:
+            continue
+        scheduled = parse_planning_datetime(row.get("scheduled_at"))
+        if scheduled is None or scheduled.date() != route_date:
+            continue
+        customer_id = str(row.get("customer_id") or "").strip()
+        if not customer_id:
+            customer_id = str(related_row_customer(
+                row, customers, customer_lookup=lookup,
+            ).get("customer_id") or "").strip()
+        if customer_id:
+            blocked.append({"activity_id": str(row.get("planned_activity_id") or "").strip(),
+                            "customer_id": customer_id})
+    return blocked
+
+
+def route_contact_customer_ids(activity_rows, owner, route_date, customers):
+    return {item["customer_id"] for item in route_contact_candidate_blocks(
+        activity_rows, owner, route_date, customers,
+    )}
+
+
+def route_blocked_customer_ids(activity_rows, owner, route_date, customers, contact_rows=()):
+    # Preserve the existing queue restriction for visits. Phone/email use only
+    # their route date, even when the generic queue marks another date unresolved.
+    visits = [row for row in activity_rows if normalize_planning_contact_type(
+        row.get("contact_type")
+    ) not in {"phone", "email"}]
+    blocked, _overdue = active_planned_activity_queue_state(
+        visits, owner, contact_rows=contact_rows,
+    )
+    blocked.update(route_contact_customer_ids(activity_rows, owner, route_date, customers))
+    return blocked
+
+
+def route_priority_suppressed(priority, activity_rows):
+    reason = priority.get("recommendation_suppression_reason")
+    if reason == "future_planned_activity" and priority.get(
+        "recommendation_suppression_source_type"
+    ) == "planned_activity":
+        source_id = str(priority.get("recommendation_suppression_source_id") or "")
+        activity = next((row for row in activity_rows if str(
+            row.get("planned_activity_id") or ""
+        ) == source_id), None)
+        if activity and normalize_planning_contact_type(activity.get("contact_type")) in {"phone", "email"}:
+            # These contacts are filtered directly by date; keep all other
+            # explicit follow-up, delivery, cooldown and workflow restrictions.
+            return False
+    return bool(reason)
 
 
 def find_planned_activity(spreadsheet, activity_id):
@@ -9025,6 +9070,7 @@ def calculate_route_proposal_for_user(
     respect_requested_rows=False,
     owner=None,
 ):
+    route_start_at = route_start_datetime(route_date, include_lunch=False)
     try:
         snapshot = get_authoritative_priority_snapshot(
             spreadsheet, today=route_date
@@ -9044,8 +9090,17 @@ def calculate_route_proposal_for_user(
     priority_customers = apply_workflow_suppressions(
         priority_customers, priority_workflow_suppressions(spreadsheet, priority_customers)
     )
-    active_route_customer_ids, _overdue = active_planned_activity_queue_state(
-        snapshot.get("planned_activity_rows") or [], owner or user,
+    route_activity_rows = snapshot.get("planned_activity_rows") or []
+    booked_rows = planning_route_booked_rows(route_activity_rows, owner or user, route_date)
+    route_start_at, route_lunch, lunch_error = planning_route_lunch(route_start_at, booked_rows)
+    if lunch_error is not None:
+        return None, lunch_error
+    available_seconds = available_route_seconds(route_start_at)
+    max_total_seconds = min(max_total_seconds, available_seconds - sum(
+        pause["duration_seconds"] for pause in route_lunch
+    ))
+    active_route_customer_ids = route_blocked_customer_ids(
+        route_activity_rows, owner or user, route_date, customers,
         contact_rows=snapshot.get("contact_rows") or [],
     )
     coordinate_quality = route_coordinate_quality(customers)
@@ -9119,7 +9174,7 @@ def calculate_route_proposal_for_user(
             continue
         if row not in required_set and (
             not priority
-            or priority.get("recommendation_suppression_reason")
+            or route_priority_suppressed(priority, route_activity_rows)
             or str(customer.get("customer_id") or "") in active_route_customer_ids
             or not coordinate_quality.get(str(customer.get("customer_id") or ""), {}).get("trusted")
         ):
@@ -9172,6 +9227,10 @@ def calculate_route_proposal_for_user(
             "required_stops_not_feasible",
             "Ett eller flera obligatoriska besök kan inte ruttas.",
             422,
+        )
+    if available_seconds <= 0:
+        return None, route_proposal_error(
+            "route_workday_finished", "Arbetsdagen slutar 17:00. Välj en annan dag.", 422,
         )
     if not candidates:
         return None, route_proposal_error(
@@ -9313,6 +9372,11 @@ def calculate_route_proposal_for_user(
         route_date=route_date,
         max_total_seconds=max_total_seconds,
     )
+    payload["workday_policy"] = WORKDAY_POLICY_VERSION
+    payload["route_start_at"] = route_start_at.isoformat(timespec="minutes")
+    payload["plan_fingerprint"] = planning_state_fingerprint(planning_rows_for_date(
+        list(enumerate(route_activity_rows, start=2)), owner or user, route_date,
+    ))
     payload.setdefault("meta", {}).update({
         "candidate_count_before_preselection": (
             candidate_count_before_preselection
@@ -9436,6 +9500,8 @@ def planning_route_apply_fingerprint(preview):
 def planning_fixed_activity_intervals(fixed_non_route):
     intervals = []
     for activity in fixed_non_route:
+        if normalize_planning_contact_type(activity.get("contact_type")) in {"phone", "email"}:
+            continue
         start = parse_planning_datetime(activity.get("scheduled_at"))
         if start is None:
             return None, planning_error(
@@ -9476,6 +9542,49 @@ def planning_fixed_activity_intervals(fixed_non_route):
     return intervals, None
 
 
+def planning_route_booked_rows(rows, owner, route_date):
+    return [row for row in rows if planning_owner_matches(row, owner)
+            and str(row.get("status") or "").strip().casefold() == "planned"
+            and str(row.get("source") or "").strip().casefold() != "route"
+            and normalize_planning_contact_type(row.get("contact_type")) == "visit"
+            and (parse_planning_datetime(row.get("scheduled_at")) or datetime.min).date() == route_date]
+
+
+def planning_route_lunch(route_start_at, confirmed_rows):
+    bookings = []
+    for row in confirmed_rows:
+        if normalize_planning_contact_type(row.get("contact_type") or "visit") != "visit":
+            continue
+        if not row.get("required", True) or not normalize_planning_appointment_confirmed(
+            row.get("appointment_confirmed"), row.get("contact_type") or "visit",
+        ):
+            continue
+        scheduled = parse_planning_datetime(row.get("scheduled_at"))
+        if scheduled is not None:
+            bookings.append((scheduled, scheduled + timedelta(seconds=SERVICE_SECONDS_PER_STOP)))
+    try:
+        start, pauses = plan_route_lunch(route_start_at, bookings)
+        return start, pauses, None
+    except RouteLunchNotFeasible as exc:
+        return None, None, planning_error("route_lunch_not_feasible", str(exc), 422)
+
+
+def planning_route_fixed_intervals(route_start_at, fixed_non_route, confirmed_rows=()):
+    intervals, error = planning_fixed_activity_intervals(fixed_non_route)
+    if error is not None:
+        return None, None, error
+    route_start_at, pauses, error = planning_route_lunch(route_start_at, confirmed_rows)
+    if error is not None:
+        return None, None, error
+    for pause in pauses:
+        intervals.append({
+            "start": pause["scheduled_at"],
+            "end": pause["scheduled_at"] + timedelta(seconds=pause["duration_seconds"]),
+            "activity": {"contact_type": "lunch"},
+        })
+    return route_start_at, sorted(intervals, key=lambda interval: interval["start"]), None
+
+
 def planning_next_unblocked_start(
     earliest_start,
     duration_minutes,
@@ -9505,9 +9614,10 @@ def schedule_planning_route_timeline(
     fixed_non_route,
     route_start_at,
     return_drive_minutes,
+    confirmed_visits=(),
 ):
-    fixed_intervals, fixed_error = planning_fixed_activity_intervals(
-        fixed_non_route
+    route_start_at, fixed_intervals, fixed_error = planning_route_fixed_intervals(
+        route_start_at, fixed_non_route, [*stops, *confirmed_visits]
     )
     if fixed_error is not None:
         return None, None, fixed_error
@@ -9554,9 +9664,9 @@ def schedule_planning_route_timeline(
         required = bool(stop.get("required"))
         booked_at = (
             parse_planning_datetime(stop.get("scheduled_at"))
-            if required else None
+            if required and stop.get("appointment_confirmed", True) else None
         )
-        if required and booked_at is None:
+        if required and stop.get("appointment_confirmed", True) and booked_at is None:
             return None, None, planning_error(
                 "required_stops_not_feasible",
                 "Ett obligatoriskt besök saknar giltig bokad tid.",
@@ -9578,10 +9688,10 @@ def schedule_planning_route_timeline(
             delta_minutes = (
                 service_start - booked_at
             ).total_seconds() / 60
-            if abs(delta_minutes) > PLANNING_ROUTE_CONFLICT_MINUTES:
+            if service_start != booked_at:
                 return None, None, planning_error(
                     "required_stops_not_feasible",
-                    "Ett obligatoriskt besök kan inte nås inom 15 minuter från bokad tid.",
+                    "Ett obligatoriskt besök kan inte nås exakt på bokad tid.",
                     422,
                     planned_activity_id=stop.get(
                         "planned_activity_id",
@@ -9619,7 +9729,7 @@ def schedule_planning_route_timeline(
                     timespec="minutes"
                 )
             ),
-            "time_is_estimated": not required,
+            "time_is_estimated": booked_at is None,
         })
         scheduled_stops.append(stop)
         cursor = service_end
@@ -9647,13 +9757,21 @@ def schedule_planning_route_timeline(
             "start": return_departure.isoformat(timespec="minutes"),
             "end": route_end.isoformat(timespec="minutes"),
         })
+    for interval in fixed_intervals:
+        if interval["activity"].get("contact_type") == "lunch":
+            timeline_segments.append({
+                "kind": "lunch", "start": interval["start"].isoformat(timespec="minutes"),
+                "end": interval["end"].isoformat(timespec="minutes"),
+            })
+            route_end = max(route_end, interval["end"])
+    timeline_segments.sort(key=lambda segment: (segment["start"], segment["kind"]))
     elapsed_minutes = (
         route_end - route_start_at
     ).total_seconds() / 60
-    if elapsed_minutes >= (MAX_TOTAL_SECONDS / 60):
+    if route_start_at >= route_workday_end(route_start_at) or route_end > route_workday_end(route_start_at):
         return None, None, planning_error(
             "route_timeline_exceeds_capacity",
-            "Rutten, fasta aktiviteter och väntetider ryms inte inom sju timmar.",
+            "Rutten inklusive retur måste vara klar senast 17:00.",
             422,
             total_minutes=round(elapsed_minutes, 1),
         )
@@ -9677,8 +9795,8 @@ def schedule_planning_route_with_anchors(
     start,
 ):
     """Place optional route stops around immutable visit/time anchors."""
-    fixed_intervals, fixed_error = planning_fixed_activity_intervals(
-        fixed_non_route
+    route_start_at, fixed_intervals, fixed_error = planning_route_fixed_intervals(
+        route_start_at, fixed_non_route, stops
     )
     if fixed_error is not None:
         return None, None, fixed_error
@@ -9724,14 +9842,14 @@ def schedule_planning_route_with_anchors(
         for index, stop in enumerate(stops, start=1)
     ]
     anchors = sorted(
-        (stop for stop in indexed if stop.get("required")),
+        (stop for stop in indexed if stop.get("required") and stop.get("appointment_confirmed", True)),
         key=lambda stop: planning_datetime_text(stop.get("scheduled_at")),
     )
-    optional = [stop for stop in indexed if not stop.get("required")]
+    optional = [stop for stop in indexed if stop not in anchors]
     scheduled = []
     segments = [
         {
-            "kind": "fixed_activity",
+            "kind": "lunch" if interval["activity"].get("contact_type") == "lunch" else "fixed_activity",
             "planned_activity_id": interval["activity"].get(
                 "planned_activity_id", ""
             ),
@@ -9743,7 +9861,7 @@ def schedule_planning_route_with_anchors(
     ]
     cursor = route_start_at
     current_index = 0
-    route_limit = route_start_at + timedelta(seconds=MAX_TOTAL_SECONDS)
+    route_limit = route_workday_end(route_start_at)
 
     def drive_minutes(origin_index, destination_index):
         try:
@@ -9770,7 +9888,7 @@ def schedule_planning_route_with_anchors(
             service_minutes = 20
         booked_at = (
             parse_planning_datetime(stop.get("scheduled_at"))
-            if stop.get("required") else None
+            if stop.get("required") and stop.get("appointment_confirmed", True) else None
         )
         service_start = planning_next_unblocked_start(
             max(arrival, booked_at) if booked_at else arrival,
@@ -9799,10 +9917,7 @@ def schedule_planning_route_with_anchors(
             if (
                 tail_booked is None
                 or timing is None
-                or timing["service_start"]
-                > tail_booked + timedelta(
-                    minutes=PLANNING_ROUTE_CONFLICT_MINUTES
-                )
+                or timing["service_start"] != tail_booked
             ):
                 return False
             tail_cursor = timing["service_end"]
@@ -9815,7 +9930,7 @@ def schedule_planning_route_with_anchors(
         )
         return (
             return_departure + timedelta(minutes=return_minutes)
-            < route_limit
+            <= route_limit
         )
 
     def append_stop(stop, timing):
@@ -9843,7 +9958,7 @@ def schedule_planning_route_with_anchors(
                 if timing["booked_at"]
                 else timing["service_start"].isoformat(timespec="minutes")
             ),
-            "time_is_estimated": not bool(stop.get("required")),
+            "time_is_estimated": not bool(stop.get("required") and stop.get("appointment_confirmed", True)),
         })
         if timing["drive_minutes"]:
             segments.append({
@@ -9898,9 +10013,7 @@ def schedule_planning_route_with_anchors(
                 )
                 if (
                     anchor_timing is None
-                    or anchor_timing["service_start"]
-                    > anchor_booked
-                    + timedelta(minutes=PLANNING_ROUTE_CONFLICT_MINUTES)
+                    or anchor_timing["service_start"] != anchor_booked
                 ):
                     continue
                 if not required_tail_is_feasible(
@@ -9919,6 +10032,7 @@ def schedule_planning_route_with_anchors(
                     1, marginal_minutes
                 )
                 score = (
+                    bool(candidate.get("required")),
                     value_rate,
                     float(candidate.get("priority_score") or 0),
                     -marginal_minutes,
@@ -9935,9 +10049,7 @@ def schedule_planning_route_with_anchors(
         anchor_timing = simulate(anchor, cursor, current_index)
         if (
             anchor_timing is None
-            or anchor_timing["service_start"]
-            > anchor_booked
-            + timedelta(minutes=PLANNING_ROUTE_CONFLICT_MINUTES)
+            or anchor_timing["service_start"] != anchor_booked
         ):
             estimated = (
                 anchor_timing["service_start"].isoformat(timespec="minutes")
@@ -9966,7 +10078,7 @@ def schedule_planning_route_with_anchors(
                 timing["service_end"], return_minutes, fixed_intervals
             )
             route_end = return_departure + timedelta(minutes=return_minutes)
-            if route_end >= route_limit:
+            if route_end > route_limit:
                 continue
             if anchors:
                 direct_return = drive_minutes(current_index, 0)
@@ -9982,6 +10094,7 @@ def schedule_planning_route_with_anchors(
                     1, marginal_minutes
                 )
                 score = (
+                    bool(candidate.get("required")),
                     value_rate,
                     float(candidate.get("priority_score") or 0),
                     -marginal_minutes,
@@ -9994,7 +10107,7 @@ def schedule_planning_route_with_anchors(
                     + return_minutes
                 )
                 value_rate = float(candidate.get("priority_score") or 0) / max(1, extra)
-                score = (value_rate, float(candidate.get("priority_score") or 0))
+                score = (bool(candidate.get("required")), value_rate, float(candidate.get("priority_score") or 0))
             if best is None or score > best[0]:
                 best = (score, candidate, timing)
         if best is None:
@@ -10014,10 +10127,10 @@ def schedule_planning_route_with_anchors(
         cursor, return_minutes, fixed_intervals
     )
     route_end = return_departure + timedelta(minutes=return_minutes)
-    if route_end >= route_limit:
+    if route_start_at >= route_limit or route_end > route_limit or any(stop.get("required") for stop in remaining):
         return None, None, planning_error(
             "required_schedule_not_feasible",
-            "Dagens fasta schema och retur ryms inte inom mindre än sju timmar.",
+            "Dagens obligatoriska besök och retur måste rymmas före 17:00.",
             422,
             scheduled_at=route_start_at.isoformat(timespec="minutes"),
             estimated_at=route_end.isoformat(timespec="minutes"),
@@ -10028,6 +10141,8 @@ def schedule_planning_route_with_anchors(
             "start": return_departure.isoformat(timespec="minutes"),
             "end": route_end.isoformat(timespec="minutes"),
         })
+    route_end = max([route_end] + [interval["end"] for interval in fixed_intervals
+                                  if interval["activity"].get("contact_type") == "lunch"])
     segments.sort(key=lambda segment: (segment.get("start", ""), segment["kind"]))
     elapsed_minutes = int(math.ceil(
         (route_end - route_start_at).total_seconds() / 60
@@ -10052,9 +10167,9 @@ def planning_route_conflicts(stops, fixed_non_route):
     for stop in stops:
         estimated = parse_planning_datetime(stop.get("estimated_at"))
         scheduled = parse_planning_datetime(stop.get("scheduled_at"))
-        if stop.get("required") and estimated and scheduled:
+        if stop.get("required") and stop.get("appointment_confirmed", True) and estimated and scheduled:
             delta_minutes = round((estimated - scheduled).total_seconds() / 60)
-            if abs(delta_minutes) > PLANNING_ROUTE_CONFLICT_MINUTES:
+            if estimated != scheduled:
                 conflicts.append({
                     "code": "scheduled_time_conflict",
                     "planned_activity_id": stop.get("planned_activity_id", ""),
@@ -10185,7 +10300,11 @@ def build_route_optimization_inputs(
     *, spreadsheet, owner, route_date, start, route_start_at_override=None
 ):
     """Build one coherent, full-owner automatic optimization universe."""
-    route_start_at = route_start_at_override or route_start_datetime(route_date)
+    route_start_at = route_start_at_override or route_start_datetime(route_date, include_lunch=False)
+    if available_route_seconds(route_start_at) <= 0:
+        return None, planning_error(
+            "route_workday_finished", "Arbetsdagen slutar 17:00. Välj en annan dag.", 422,
+        )
     _sheet, _headers, indexed_rows = read_planned_activity_snapshot(spreadsheet)
     planned_rows = [row for _index, row in indexed_rows]
     snapshot = get_authoritative_priority_snapshot(
@@ -10249,7 +10368,6 @@ def build_route_optimization_inputs(
     ]
 
     mandatory_by_customer = defaultdict(list)
-    fixed_break_rows = []
     for row in active_date_rows:
         source = str(row.get("source") or "").strip().casefold()
         if source == "route":
@@ -10265,8 +10383,6 @@ def build_route_optimization_inputs(
                     planned_activity_ids=[str(row.get("planned_activity_id") or "").strip()],
                 )
             mandatory_by_customer[customer_id].append(row)
-        elif contact_type in {"phone", "email"}:
-            fixed_break_rows.append(row)
     duplicates = {
         customer_id: [str(row.get("planned_activity_id") or "").strip() for row in rows]
         for customer_id, rows in mandatory_by_customer.items()
@@ -10286,53 +10402,11 @@ def build_route_optimization_inputs(
             422,
         )
 
-    global_end = route_start_at + timedelta(seconds=ROUTE_OPTIMIZATION_MAX_SECONDS)
+    global_end = route_workday_end(route_start_at)
     fixed_intervals = []
     fixed_breaks = []
     fixed_activities_for_fingerprint = []
     pre_route_fixed_seconds = 0
-    for row in fixed_break_rows:
-        scheduled = parse_planning_datetime(row.get("scheduled_at"))
-        duration_seconds = _route_activity_duration_seconds(row, 10)
-        if scheduled is None:
-            return None, planning_error(
-                "route_fixed_activity_invalid",
-                "En fast telefon- eller mejlaktivitet saknar giltig tid.",
-                422,
-                planned_activity_id=row.get("planned_activity_id", ""),
-            )
-        end = scheduled + timedelta(seconds=duration_seconds)
-        if end <= route_start_at:
-            pre_route_fixed_seconds += duration_seconds
-        elif scheduled < route_start_at < end:
-            return None, planning_error(
-                "route_starts_during_fixed_activity",
-                "Ruttens starttid ligger mitt i en fast aktivitet.",
-                422,
-                planned_activity_id=row.get("planned_activity_id", ""),
-            )
-        elif end > global_end:
-            return None, planning_error(
-                "route_fixed_activity_outside_window",
-                "En fast aktivitet ligger utanför den tillåtna arbetsdagen.",
-                422,
-                planned_activity_id=row.get("planned_activity_id", ""),
-            )
-        else:
-            fixed_breaks.append({
-                "activity_id": str(row.get("planned_activity_id") or ""),
-                "scheduled_at": scheduled,
-                "duration_seconds": duration_seconds,
-            })
-        fixed_intervals.append((scheduled, end, row))
-        fixed_activities_for_fingerprint.append({
-            "activity_id": str(row.get("planned_activity_id") or ""),
-            "revision": planning_revision(row),
-            "contact_type": normalize_planning_contact_type(row.get("contact_type")),
-            "scheduled_at": scheduled,
-            "duration_seconds": duration_seconds,
-            "status": str(row.get("status") or "planned").strip().casefold(),
-        })
 
     shipments = []
     mandatory_ids = set(mandatory_by_customer)
@@ -10402,20 +10476,27 @@ def build_route_optimization_inputs(
                 ])),
             )
 
+    route_start_at, fixed_breaks, lunch_error = planning_route_lunch(
+        route_start_at, [row for rows in mandatory_by_customer.values() for row in rows],
+    )
+    if lunch_error is not None:
+        return None, lunch_error
+
     current = stockholm_now().astimezone(STOCKHOLM_ZONE)
     effective_planning = [
         row for row in planned_rows
         if str(row.get("source") or "").strip().casefold() != "route"
         or (parse_planning_datetime(row.get("scheduled_at")) or current) < current
     ]
-    blocked_customer_ids, _overdue = active_planned_activity_queue_state(
-        effective_planning, owner, contact_rows=snapshot.get("contact_rows") or [], now=current,
+    blocked_customer_ids = route_blocked_customer_ids(
+        effective_planning, owner, route_date, customers,
+        contact_rows=snapshot.get("contact_rows") or [],
     )
     # Eligibility here means a contact restriction, never an action-queue trigger
     # or a channel preference. Mandatory appointments retain their own validation.
     blocked_customer_ids.update(
         customer_id for customer_id, priority in priorities_by_id.items()
-        if priority.get("recommendation_suppression_reason")
+        if route_priority_suppressed(priority, planned_rows)
     )
 
     excluded_untrusted = 0
@@ -10466,14 +10547,16 @@ def build_route_optimization_inputs(
         "start": trusted_start,
         "shipments": shipments,
         "fixed_activities": fixed_activities_for_fingerprint,
+        "blocked_contact_activities": route_contact_candidate_blocks(
+            planned_rows, owner, route_date, customers,
+        ),
     }
     fingerprint = build_route_optimization_fingerprint(**fingerprint_kwargs)
     input_fingerprint = build_route_optimization_input_fingerprint(
         **fingerprint_kwargs
     )
-    legacy_request_fingerprints = {
-        "ro-v1": build_legacy_ro_v1_request_fingerprint(**fingerprint_kwargs),
-    }
+    # Old ro-v1 requests had neither the workday boundary nor mandatory lunch.
+    legacy_request_fingerprints = {}
     return {
         "route_start_at": route_start_at,
         "start": trusted_start,
@@ -11546,10 +11629,7 @@ def execute_route_optimization(*, spreadsheet, owner, inputs, client_request_id)
         parsed=parsed,
         full_shipment_count=len(inputs["shipments"]),
     )
-    model_route_max_seconds = (
-        ROUTE_OPTIMIZATION_MAX_SECONDS
-        - max(0, int(inputs["pre_route_fixed_seconds"]))
-    )
+    model_route_max_seconds = available_route_seconds(inputs["route_start_at"])
     model_diagnostics = {
         "route_engine_version": ROUTE_ENGINE_VERSION,
         "primary_model_version": PRIMARY_MODEL_VERSION,
@@ -11695,7 +11775,7 @@ def build_route_optimization_preview(
             )]["coordinate"].longitude,
             "contact_type": "visit",
             "contact_type_label": PLANNING_CONTACT_TYPE_LABELS["visit"],
-            "time_is_estimated": not bool(stop.get("required")),
+            "time_is_estimated": not bool(stop.get("required") and stop.get("appointment_confirmed")),
         })
     summary = dict(compact.get("summary") or {})
     pre_route_minutes = round(inputs["pre_route_fixed_seconds"] / 60, 1)
@@ -11765,6 +11845,12 @@ def build_planning_route_preview(
     start,
     candidate_rows,
 ):
+    route_start_at = route_start_datetime(route_date, include_lunch=False)
+    max_total_seconds = available_route_seconds(route_start_at)
+    if max_total_seconds <= 0:
+        return None, planning_error(
+            "route_workday_finished", "Arbetsdagen slutar 17:00. Välj en annan dag.", 422,
+        )
     _sheet, _headers, all_rows = read_planned_activity_snapshot(spreadsheet)
     customers = get_customer_rows(spreadsheet)
     customer_lookup = CustomerLookup(customers)
@@ -11784,15 +11870,7 @@ def build_planning_route_preview(
         for row_index, row in active_rows
         if (
             normalize_planning_contact_type(row.get("contact_type")) == "visit"
-            and str(row.get("source") or "").strip().casefold()
-            in {"manual", "follow_up"}
-            and (
-                normalize_planning_appointment_confirmed(
-                    row.get("appointment_confirmed"),
-                    row.get("contact_type"),
-                )
-                or not is_yes(row.get("time_is_estimated"))
-            )
+            and str(row.get("source") or "").strip().casefold() != "route"
         )
     ]
     changed_owner_activity_ids = sorted({
@@ -11839,22 +11917,20 @@ def build_planning_route_preview(
             owner,
         )
     ]
-    fixed_non_route = [
-        public_planned_activity(row)
-        for _row_index, row in active_rows
-        if normalize_planning_contact_type(row.get("contact_type"))
-        in {"phone", "email"}
-        and str(row.get("source") or "").strip().casefold()
-        in {"manual", "follow_up"}
-    ]
-    non_route_minutes = sum(
-        int(item.get("duration_minutes") or 0) for item in fixed_non_route
+    fixed_non_route = []
+    non_route_minutes = 0
+    route_start_at, route_lunch, lunch_error = planning_route_lunch(
+        route_start_at, [row for _index, row in fixed_visit_rows],
     )
-    max_total_seconds = MAX_TOTAL_SECONDS - (non_route_minutes * 60)
+    if lunch_error is not None:
+        return None, lunch_error
+    max_total_seconds = available_route_seconds(route_start_at) - sum(
+        pause["duration_seconds"] for pause in route_lunch
+    )
     if max_total_seconds <= SERVICE_SECONDS_PER_STOP:
         return None, planning_error(
             "day_capacity_exhausted",
-            "Telefon- och mejlaktiviteterna lämnar inte plats för en körbar rutt.",
+            "Arbetsdagen fram till 17:00 lämnar inte plats för en körbar rutt.",
             422,
         )
 
@@ -11946,11 +12022,7 @@ def build_planning_route_preview(
             activity.get("contact_type")
         )
         source = str(activity.get("source") or "").strip().casefold()
-        if (
-            scheduled.date() == route_date
-            and source != "route"
-            and activity_type in {"phone", "email"}
-        ) or scheduled.date() > route_date:
+        if activity_type not in {"phone", "email"} and scheduled.date() > route_date:
             blocked_candidate_identities.add(
                 activity_customer_identity(activity)
             )
@@ -11976,6 +12048,9 @@ def build_planning_route_preview(
             exc_info=True,
         )
     blocked_candidate_identities.discard("")
+    blocked_candidate_identities.update(route_contact_customer_ids(
+        [row for _index, row in all_rows], owner, route_date, customers,
+    ))
 
     candidate_warnings = []
     filtered_candidate_rows = []
@@ -11996,8 +12071,7 @@ def build_planning_route_preview(
                     "customer_row": row_number,
                     "message": "Kunden har redan en planerad kontakt.",
                 })
-            else:
-                continue
+            continue
         filtered_candidate_rows.append(row_number)
     candidate_rows = tuple(sorted(
         set(filtered_candidate_rows) | set(required_rows)
@@ -12017,7 +12091,6 @@ def build_planning_route_preview(
     if route_error is not None:
         return None, route_error
 
-    route_start_at = route_start_datetime(route_date)
     stops = []
     for stop in route_payload.get("stops", []):
         row_number = int(stop.get("row") or 0)
@@ -12065,6 +12138,7 @@ def build_planning_route_preview(
             "contact_type_label": PLANNING_CONTACT_TYPE_LABELS["visit"],
             "duration_minutes": SERVICE_SECONDS_PER_STOP // 60,
             "required": bool(required_activity),
+            "appointment_confirmed": bool(required_activity and required_activity.get("appointment_confirmed")),
             "planned_activity_id": (
                 required_activity.get("planned_activity_id", "")
                 if required_activity else ""
@@ -12077,7 +12151,7 @@ def build_planning_route_preview(
                 scheduled.isoformat(timespec="minutes") if scheduled else ""
             ),
             "estimated_at": "",
-            "time_is_estimated": not bool(required_activity),
+            "time_is_estimated": not bool(required_activity and required_activity.get("appointment_confirmed")),
         })
 
     route_summary = dict(route_payload.get("summary") or {})
@@ -12094,10 +12168,10 @@ def build_planning_route_preview(
         route_timeline.get("elapsed_minutes") or 0
     )
     route_total_minutes = max(0, active_total_minutes - non_route_minutes)
-    if float(active_total_minutes) >= (MAX_TOTAL_SECONDS / 60):
+    if parse_planning_datetime(route_timeline.get("route_end_at")) > route_workday_end(route_start_at):
         return None, planning_error(
             "day_capacity_exhausted",
-            "Rutten och dagens fasta aktiviteter måste rymmas inom mindre än sju timmar.",
+            "Rutten inklusive retur måste vara klar senast 17:00.",
             422,
             total_minutes=active_total_minutes,
         )
@@ -12138,6 +12212,8 @@ def build_planning_route_preview(
             "matrix_cache_hits", 0
         ),
     })
+    route_payload["workday_policy"] = WORKDAY_POLICY_VERSION
+    route_payload["plan_fingerprint"] = planning_state_fingerprint(date_rows)
     gps_notice = (
         "Start och retur: din position nu"
         if route_date == stockholm_today()
@@ -12186,7 +12262,7 @@ def build_planning_route_preview(
     return preview, None
 
 
-def saved_route_has_group(spreadsheet, route_group_id):
+def saved_route_group_payload(spreadsheet, route_group_id):
     sheet = get_or_create_worksheet(
         spreadsheet,
         ROUTE_PROPOSALS_SHEET,
@@ -12202,8 +12278,12 @@ def saved_route_has_group(spreadsheet, route_group_id):
         except (TypeError, ValueError):
             continue
         if str(payload.get("route_group_id") or "").strip() == route_group_id:
-            return True
-    return False
+            return payload
+    return None
+
+
+def saved_route_has_group(spreadsheet, route_group_id):
+    return saved_route_group_payload(spreadsheet, route_group_id) is not None
 
 
 def saved_route_request_conflicts(
@@ -12242,6 +12322,7 @@ def apply_planning_route(
     owner,
     preview,
     client_request_id,
+    preview_token=None,
 ):
     route_date = parse_planning_date(preview.get("route_date"))
     if route_date is None:
@@ -12310,6 +12391,34 @@ def apply_planning_route(
         resolved_customers_by_id[customer_id] = matches[0]
 
     with planning_write_lock():
+        saved_group = saved_route_group_payload(spreadsheet, route_group_id)
+        token_fingerprint = stable_planning_uuid("route-apply-token", preview_token) if preview_token else ""
+        if saved_group and saved_group.get("route_apply_result"):
+            if preview_token and saved_group.get("route_apply_token_fingerprint") != token_fingerprint:
+                return None, planning_error(
+                    "client_request_id_conflict", "Request-ID:t har redan använts för en annan förhandsgranskning.", 409,
+                )
+            return {**saved_group["route_apply_result"], "duplicate": True,
+                    "imported_count": 0, "cancelled_route_activity_count": 0}, None
+        if preview.get("route_engine_version") == ROUTE_ENGINE_VERSION:
+            start_data = preview.get("start") or {}
+            try:
+                preview_start = Coordinate(latitude=float(start_data.get("latitude")),
+                                           longitude=float(start_data.get("longitude")))
+            except (TypeError, ValueError):
+                return None, planning_error(
+                    "invalid_route_preview", "Ruttförhandsgranskningen saknar giltig startposition.", 400,
+                )
+            current_inputs, current_error = build_route_optimization_inputs(
+                spreadsheet=spreadsheet, owner=owner, route_date=route_date, start=preview_start,
+                route_start_at_override=parse_planning_datetime(preview.get("route_start_at")),
+            )
+            if current_error is not None:
+                return None, current_error
+            if str(preview.get("route_optimization_fingerprint") or "") != current_inputs["fingerprint"]:
+                return None, planning_error(
+                    "planning_changed", "Planeringen eller kundunderlaget ändrades efter förhandsgranskningen. Beräkna rutten igen.", 409,
+                )
         sheet, headers, all_rows = write_planned_activity_snapshot(spreadsheet)
         date_rows = planning_rows_for_date(all_rows, owner, route_date)
         conflicting_request_rows = [
@@ -12439,6 +12548,19 @@ def apply_planning_route(
                         current_sequence = 0
                     if current_sequence != sequence:
                         updates["route_sequence"] = sequence
+                    if not normalize_planning_appointment_confirmed(
+                        row.get("appointment_confirmed"), row.get("contact_type"),
+                    ):
+                        estimated = parse_planning_datetime(stop.get("estimated_at"))
+                        if estimated is None:
+                            return None, planning_error(
+                                "invalid_route_preview", "Ett flexibelt obligatoriskt besök saknar beräknad tid.", 400,
+                            )
+                        estimated_text = estimated.isoformat(timespec="minutes")
+                        if planning_datetime_text(row.get("scheduled_at")) != estimated_text:
+                            updates["scheduled_at"] = estimated_text
+                        if not is_yes(row.get("time_is_estimated")):
+                            updates["time_is_estimated"] = "Y"
                     if updates:
                         updates["updated_at"] = planning_timestamp()
                         updates["revision"] = planning_revision(row) + 1
@@ -12499,6 +12621,7 @@ def apply_planning_route(
         for row_index, row in date_rows:
             if (
                 str(row.get("source") or "").strip().casefold() != "route"
+                or normalize_planning_contact_type(row.get("contact_type")) != "visit"
                 or str(row.get("status") or "").strip().casefold() != "planned"
                 or str(row.get("route_group_id") or "").strip() == route_group_id
             ):
@@ -12520,8 +12643,27 @@ def apply_planning_route(
         )
 
         route_payload = dict(preview.get("route_payload") or {})
+        applied_changes = dict(row_changes)
+        unique_applied = {str(row.get("planned_activity_id") or ""): row for row in applied_rows}
+        activities = sorted(
+            (public_planned_activity(row) for row in unique_applied.values() if row),
+            key=lambda item: (item.get("route_sequence") or 999, item.get("scheduled_at") or ""),
+        )
+        result = {
+            "ok": True, "duplicate": bool(existing_group_rows and not new_rows),
+            "route_group_id": route_group_id, "route_date": route_date.isoformat(),
+            "activities": activities, "activity_count": len(activities),
+            "imported_count": len(new_rows), "cancelled_route_activity_count": cancelled_count,
+        }
         route_payload.update({
             "ok": True,
+            "route_apply_result": result,
+            "route_apply_token_fingerprint": token_fingerprint,
+            "workday_policy": WORKDAY_POLICY_VERSION,
+            "plan_fingerprint": planning_state_fingerprint(
+                [(index, {**row, **applied_changes.get(index, {})}) for index, row in date_rows]
+                + [(0, row) for row in new_rows]
+            ),
             "route_group_id": route_group_id,
             "route_request_key": route_request_key,
             "route_preview_fingerprint": preview_fingerprint,
@@ -12544,30 +12686,7 @@ def apply_planning_route(
                 payload=route_payload,
             )
 
-    unique_applied = {}
-    for row in applied_rows:
-        unique_applied[str(row.get("planned_activity_id") or "")] = row
-    activities = sorted(
-        (
-            public_planned_activity(row)
-            for row in unique_applied.values()
-            if row
-        ),
-        key=lambda item: (
-            item.get("route_sequence") or 999,
-            item.get("scheduled_at") or "",
-        ),
-    )
-    return {
-        "ok": True,
-        "duplicate": bool(existing_group_rows and not new_rows),
-        "route_group_id": route_group_id,
-        "route_date": route_date.isoformat(),
-        "activities": activities,
-        "activity_count": len(activities),
-        "imported_count": len(new_rows),
-        "cancelled_route_activity_count": cancelled_count,
-    }, None
+    return result, None
 
 
 def route_payload_accessible(
@@ -12607,6 +12726,13 @@ def route_payload_accessible(
     )
 
 
+def legacy_route_cache_current(payload, spreadsheet, owner, route_date):
+    if payload.get("workday_policy") != WORKDAY_POLICY_VERSION:
+        return False
+    rows = planning_rows_for_date(read_planned_activity_snapshot(spreadsheet)[2], owner, route_date)
+    return payload.get("plan_fingerprint") == planning_state_fingerprint(rows)
+
+
 # LEGACY/ROLLBACK COMPATIBILITY: no longer called by the active frontend.
 @app.route("/route-proposal", methods=["GET", "POST"])
 def create_route_proposal():
@@ -12632,6 +12758,10 @@ def create_route_proposal():
                     user_name,
                     route_date,
                 )
+                if saved and legacy_route_cache_current(saved, spreadsheet, user, route_date) and route_payload_accessible(
+                    saved, get_customer_rows(spreadsheet), user
+                ):
+                    return jsonify(saved)
         except Exception:
             app.logger.exception("Could not load saved route proposal")
             return route_proposal_error(
@@ -12639,10 +12769,6 @@ def create_route_proposal():
                 "Dagens ruttförslag kunde inte laddas. Försök igen.",
                 503,
             )
-        if saved and route_payload_accessible(
-            saved, get_customer_rows(spreadsheet), user
-        ):
-            return jsonify(saved)
         return route_proposal_error(
             "no_daily_route",
             "Inget ruttförslag har beräknats för dig idag.",
@@ -12705,7 +12831,7 @@ def create_route_proposal():
                 user_name,
                 route_date,
             )
-            if saved and route_payload_accessible(
+            if saved and legacy_route_cache_current(saved, spreadsheet, user, route_date) and route_payload_accessible(
                 saved, get_customer_rows(spreadsheet), user
             ):
                 return jsonify(saved)
@@ -12719,6 +12845,50 @@ def create_route_proposal():
             )
             if error_response is not None:
                 return error_response
+            route_start_at = parse_planning_datetime(payload.get("route_start_at"))
+            scheduled, timeline, timeline_error = schedule_planning_route_timeline(
+                stops=payload.get("stops") or [], fixed_non_route=[],
+                route_start_at=route_start_at,
+                return_drive_minutes=(payload.get("summary") or {}).get("return_drive_minutes"),
+                confirmed_visits=planning_route_booked_rows(
+                    [row for _index, row in read_planned_activity_snapshot(spreadsheet)[2]], user, route_date,
+                ),
+            )
+            if timeline_error is not None:
+                return timeline_error
+            cumulative_drive_minutes = 0
+            for stop in scheduled:
+                stop["leg_drive_minutes"] = (
+                    parse_planning_datetime(stop["arrival_at"])
+                    - parse_planning_datetime(stop["leg_departure_at"])
+                ).total_seconds() / 60
+                cumulative_drive_minutes += stop["leg_drive_minutes"]
+                stop["cumulative_drive_minutes"] = cumulative_drive_minutes
+                stop["cumulative_total_minutes"] = (
+                    parse_planning_datetime(stop["service_end_at"]) - route_start_at
+                ).total_seconds() / 60
+            return_drive_minutes = sum(
+                (parse_planning_datetime(segment["end"]) - parse_planning_datetime(segment["start"])).total_seconds() / 60
+                for segment in timeline["segments"] if segment["kind"] == "return_drive"
+            )
+            break_minutes = sum(
+                (parse_planning_datetime(segment["end"]) - parse_planning_datetime(segment["start"])).total_seconds() / 60
+                for segment in timeline["segments"] if segment["kind"] == "lunch"
+            )
+            drive_minutes = cumulative_drive_minutes + return_drive_minutes
+            payload.update({
+                "stops": scheduled, "route_start_at": route_start_at.isoformat(timespec="minutes"),
+                "timeline": timeline, "workday_policy": WORKDAY_POLICY_VERSION,
+            })
+            payload["summary"].update({
+                "route_end_at": timeline["route_end_at"], "total_minutes": timeline["elapsed_minutes"],
+                "drive_minutes": drive_minutes, "return_drive_minutes": return_drive_minutes,
+                "break_minutes": break_minutes,
+                "wait_minutes": max(0, timeline["elapsed_minutes"] - drive_minutes
+                                    - payload["summary"]["service_minutes"] - break_minutes),
+                "return_wait_minutes": max(0, timeline["elapsed_minutes"] - return_drive_minutes
+                                           - (scheduled[-1]["cumulative_total_minutes"] if scheduled else 0)),
+            })
             save_route_proposal(
                 spreadsheet,
                 user_name=user_name,
@@ -12803,15 +12973,7 @@ def planning_route_import():
         for _row_index, row in active_date_rows
         if (
             normalize_planning_contact_type(row.get("contact_type")) == "visit"
-            and str(row.get("source") or "").strip().casefold()
-            in {"manual", "follow_up"}
-            and (
-                normalize_planning_appointment_confirmed(
-                    row.get("appointment_confirmed"),
-                    row.get("contact_type"),
-                )
-                or not is_yes(row.get("time_is_estimated"))
-            )
+            and str(row.get("source") or "").strip().casefold() != "route"
             and not customer_owned_by_user(
                 related_row_customer(
                     row,
@@ -12863,11 +13025,7 @@ def planning_route_import():
         public_row = public_planned_activity(row)
         if (
             public_row.get("contact_type") == "visit"
-            and public_row.get("source") in {"manual", "follow_up"}
-            and (
-                public_row.get("appointment_confirmed")
-                or not public_row.get("time_is_estimated")
-            )
+            and public_row.get("source") != "route"
         ):
             if public_row.get("customer_row"):
                 required_by_customer_row[public_row["customer_row"]].append(
@@ -12877,11 +13035,6 @@ def planning_route_import():
                 invalid_required_activity_ids.append(
                     public_row.get("planned_activity_id", "")
                 )
-        elif (
-            public_row.get("contact_type") in {"phone", "email"}
-            and public_row.get("source") in {"manual", "follow_up"}
-        ):
-            fixed_non_route.append(public_row)
 
     if invalid_required_activity_ids:
         return planning_error(
@@ -12929,10 +13082,7 @@ def planning_route_import():
             customer_rows=missing_required_rows,
         )
 
-    non_route_minutes = sum(
-        int(item.get("duration_minutes") or 0)
-        for item in fixed_non_route
-    )
+    non_route_minutes = 0
     try:
         saved_route_minutes = float(
             (saved.get("summary") or {}).get("total_minutes")
@@ -12946,10 +13096,10 @@ def planning_route_import():
             422,
         )
     imported_total_minutes = saved_route_minutes + non_route_minutes
-    if imported_total_minutes >= (MAX_TOTAL_SECONDS / 60):
+    if imported_total_minutes > (MAX_TOTAL_SECONDS / 60):
         return planning_error(
             "day_capacity_exhausted",
-            "Rutten och dagens telefon- och mejlaktiviteter ryms inte inom sju timmar.",
+            "Rutten inklusive retur måste vara klar senast 17:00.",
             422,
             route_minutes=saved_route_minutes,
             non_route_minutes=non_route_minutes,
@@ -12967,6 +13117,7 @@ def planning_route_import():
         )
         start_at = route_start_datetime(
             route_date,
+            include_lunch=False,
             now=(
                 saved_generated_at
                 if saved_generated_at
@@ -12975,6 +13126,9 @@ def planning_route_import():
             ),
         )
     stops = []
+    blocked_contacts = route_contact_customer_ids(
+        [row for _index, row in all_rows], owner, route_date, route_customers,
+    )
     for raw_stop in saved.get("stops") or []:
         try:
             customer_row = int(
@@ -12984,6 +13138,9 @@ def planning_route_import():
         except (TypeError, ValueError):
             continue
         required_activities = required_by_customer_row.get(customer_row, [])
+        customer = next((item for item in route_customers if item.get("row") == customer_row), {})
+        if not required_activities and str(customer.get("customer_id") or "") in blocked_contacts:
+            continue
         scheduled = (
             parse_planning_datetime(required_activities[0].get("scheduled_at"))
             if required_activities else None
@@ -12997,6 +13154,7 @@ def planning_route_import():
             "contact_type_label": PLANNING_CONTACT_TYPE_LABELS["visit"],
             "duration_minutes": SERVICE_SECONDS_PER_STOP // 60,
             "required": bool(required_activities),
+            "appointment_confirmed": bool(required_activities and required_activities[0].get("appointment_confirmed")),
             "planned_activity_id": (
                 required_activities[0].get("planned_activity_id", "")
                 if required_activities else ""
@@ -13009,7 +13167,7 @@ def planning_route_import():
                 scheduled.isoformat(timespec="minutes") if scheduled else ""
             ),
             "estimated_at": "",
-            "time_is_estimated": not bool(required_activities),
+            "time_is_estimated": not bool(required_activities and required_activities[0].get("appointment_confirmed")),
         })
     if not stops:
         return planning_error(
@@ -13056,6 +13214,8 @@ def planning_route_import():
         "plan_fingerprint": planning_state_fingerprint(date_rows),
         "route_payload": {
             **saved,
+            "workday_policy": WORKDAY_POLICY_VERSION,
+            "plan_fingerprint": planning_state_fingerprint(date_rows),
             "stops": stops,
             "conflicts": conflicts,
             "timeline": route_timeline,
@@ -13165,42 +13325,23 @@ def planning_route_apply():
             "Ruttförhandsgranskningen tillhör en annan säljare.",
             409,
         )
-    if str(preview.get("route_engine_version") or "") == ROUTE_ENGINE_VERSION:
-        start_data = preview.get("start") or {}
-        try:
-            preview_start = Coordinate(
-                latitude=float(start_data.get("latitude")),
-                longitude=float(start_data.get("longitude")),
-            )
-        except (TypeError, ValueError):
-            return planning_error(
-                "invalid_route_preview",
-                "Ruttförhandsgranskningen saknar giltig startposition.",
-                400,
-            )
-        current_inputs, current_error = build_route_optimization_inputs(
-            spreadsheet=spreadsheet,
-            owner=owner,
-            route_date=route_date,
-            start=preview_start,
-            route_start_at_override=parse_planning_datetime(
-                preview.get("route_start_at")
-            ),
+    preview_engine = str(preview.get("route_engine_version") or "")
+    if (
+        preview_engine.startswith("ro-") and preview_engine != ROUTE_ENGINE_VERSION
+    ) or (
+        not preview_engine.startswith("ro-")
+        and (preview.get("route_payload") or {}).get("workday_policy") != WORKDAY_POLICY_VERSION
+    ):
+        return planning_error(
+            "route_preview_expired_or_legacy", "Ruttreglerna har uppdaterats. Beräkna rutten igen.", 409,
         )
-        if current_error is not None:
-            return current_error
-        if str(preview.get("route_optimization_fingerprint") or "") != current_inputs["fingerprint"]:
-            return planning_error(
-                "planning_changed",
-                "Planeringen eller kundunderlaget ändrades efter förhandsgranskningen. Beräkna rutten igen.",
-                409,
-            )
     try:
         result, apply_error = apply_planning_route(
             spreadsheet=spreadsheet,
             owner=owner,
             preview=preview,
             client_request_id=client_request_id,
+            preview_token=token,
         )
     except Exception:
         app.logger.exception("Could not apply planning route")

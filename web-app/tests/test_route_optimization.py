@@ -41,6 +41,7 @@ from route_optimization import (
 )
 import scripts.route_optimization_smoke as smoke_module
 from tests.test_planning import FakeWorksheet, default_spreadsheet
+from route_workday import lunch_breaks
 
 
 STOCKHOLM = ZoneInfo("Europe/Stockholm")
@@ -146,7 +147,7 @@ class RouteOptimizationModelTests(TestCase):
                 self.assertIsNone(_diagnostic_duration_seconds(value))
 
     def test_t1_penalty_proof_and_clamping(self):
-        self.assertEqual(ROUTE_ENGINE_VERSION, "ro-v3")
+        self.assertEqual(ROUTE_ENGINE_VERSION, "ro-v4")
         self.assertEqual(MAX_PROVIDER_ATTEMPTS_PER_OPERATION, 3)
         self.assertEqual(QUADRATIC_SOFT_DURATION_BUFFER_SECONDS, 300)
         self.assertEqual(FALLBACK_SAFER_SOFT_DURATION_BUFFER_SECONDS, 900)
@@ -185,8 +186,8 @@ class RouteOptimizationModelTests(TestCase):
         self.assertEqual(vehicle["startLocation"], vehicle["endLocation"])
         duration_limit = vehicle["routeDurationLimit"]
         self.assertEqual(duration_limit, {
-            "maxDuration": "25199s",
-            "quadraticSoftMaxDuration": "24899s",
+            "maxDuration": "32400s",
+            "quadraticSoftMaxDuration": "32100s",
             "costPerSquareHourAfterQuadraticSoftMax": 28800,
         })
         rendered = str(body)
@@ -205,7 +206,29 @@ class RouteOptimizationModelTests(TestCase):
         )
         start_window = at_start["model"]["shipments"][0]["pickups"][0]["timeWindows"][0]
         self.assertEqual(start_window["startTime"], at_start["model"]["globalStartTime"])
-        self.assertLess(start_window["startTime"], start_window["endTime"])
+        self.assertEqual(start_window["startTime"], start_window["endTime"])
+
+    def test_confirmed_visit_response_requires_exact_booked_start(self):
+        booked = NOW.replace(hour=12, minute=15)
+        items = [shipment(1, required=True, fixed_at=booked)]
+        for offset in (0, -60, 60, -1, 1):
+            with self.subTest(offset_seconds=offset):
+                response = successful_response(items, duration_minutes=420)
+                response["routes"][0]["visits"][0]["startTime"] = (
+                    booked + timedelta(seconds=offset)
+                ).astimezone(timezone.utc).isoformat()
+                if offset:
+                    with self.assertRaises(RouteOptimizationError) as exc:
+                        parse_optimize_tours_response(
+                            response, shipments=items, owner_user_name="Olle", route_start=NOW,
+                        )
+                    self.assertEqual(exc.exception.code, "route_required_visit_time_changed")
+                else:
+                    parsed = parse_optimize_tours_response(
+                        response, shipments=items, owner_user_name="Olle", route_start=NOW,
+                    )
+                    self.assertEqual(datetime.fromisoformat(parsed["stops"][0]["estimated_at"]), booked)
+                    self.assertEqual(datetime.fromisoformat(parsed["stops"][0]["scheduled_at"]), booked)
 
     def test_t2b_safer_policy_keeps_full_cap_and_changes_only_headroom(self):
         items = [shipment(1, score=74), shipment(2, required=True)]
@@ -226,8 +249,8 @@ class RouteOptimizationModelTests(TestCase):
             vehicle["loadLimits"]["visit_slots"]["maxLoad"], "15"
         )
         self.assertEqual(vehicle["routeDurationLimit"], {
-            "maxDuration": "25199s",
-            "quadraticSoftMaxDuration": "24299s",
+            "maxDuration": "32400s",
+            "quadraticSoftMaxDuration": "31500s",
             "costPerSquareHourAfterQuadraticSoftMax": 28800,
         })
         self.assertEqual(
@@ -378,8 +401,8 @@ class RouteOptimizationModelTests(TestCase):
             pre_route_fixed_seconds=600,
         )
         reduced_limit = reduced["model"]["vehicles"][0]["routeDurationLimit"]
-        self.assertEqual(reduced_limit["maxDuration"], "24599s")
-        self.assertEqual(reduced_limit["quadraticSoftMaxDuration"], "24299s")
+        self.assertEqual(reduced_limit["maxDuration"], "31800s")
+        self.assertEqual(reduced_limit["quadraticSoftMaxDuration"], "31500s")
         self.assertEqual(
             reduced_limit["costPerSquareHourAfterQuadraticSoftMax"], 28800
         )
@@ -399,20 +422,20 @@ class RouteOptimizationModelTests(TestCase):
 
     def test_t5b_quadratic_soft_duration_diagnostics_use_stable_decimal_cost(self):
         at_hard_max = quadratic_soft_duration_diagnostics(
-            model_route_max_seconds=25199,
-            route_duration_seconds=25199,
+            model_route_max_seconds=32400,
+            route_duration_seconds=32400,
         )
         self.assertEqual(at_hard_max, {
             "quadratic_soft_duration_enabled": True,
             "quadratic_soft_buffer_seconds": 300,
-            "quadratic_soft_max_seconds": 24899,
+            "quadratic_soft_max_seconds": 32100,
             "quadratic_soft_cost_per_square_hour": 28800,
             "quadratic_soft_exceedance_seconds": 300,
             "quadratic_soft_duration_cost": 200,
         })
         sofia_completed = quadratic_soft_duration_diagnostics(
-            model_route_max_seconds=25199,
-            route_duration_seconds=25050,
+            model_route_max_seconds=32400,
+            route_duration_seconds=32251,
         )
         self.assertEqual(
             sofia_completed["quadratic_soft_exceedance_seconds"], 151
@@ -602,7 +625,7 @@ class RouteOptimizationModelTests(TestCase):
             error.public_message,
             (
                 "Trafiken gör att rutten inte ryms inom dagens fasta tider "
-                "och sjutimmarsgräns. Justera planeringen och försök igen."
+                "och arbetsdagens slut 17:00. Justera planeringen och försök igen."
             ),
         )
         self.assertEqual(error.details["diagnostic_reason"], "traffic_infeasibility")
@@ -615,11 +638,11 @@ class RouteOptimizationModelTests(TestCase):
             "CANNOT_BE_PERFORMED_WITHIN_VEHICLE_DURATION_LIMIT": 1,
             "CANNOT_BE_PERFORMED_WITHIN_VEHICLE_TIME_WINDOWS": 1,
         })
-        self.assertEqual(error.details["absolute_route_max_seconds"], 25199)
-        self.assertEqual(error.details["model_route_max_seconds"], 24599)
+        self.assertEqual(error.details["absolute_route_max_seconds"], 32400)
+        self.assertEqual(error.details["model_route_max_seconds"], 31800)
         self.assertTrue(error.details["quadratic_soft_duration_enabled"])
         self.assertEqual(error.details["quadratic_soft_buffer_seconds"], 300)
-        self.assertEqual(error.details["quadratic_soft_max_seconds"], 24299)
+        self.assertEqual(error.details["quadratic_soft_max_seconds"], 31500)
         self.assertEqual(
             error.details["quadratic_soft_cost_per_square_hour"], 28800
         )
@@ -733,12 +756,12 @@ class RouteOptimizationModelTests(TestCase):
                     reason,
                 )
 
-    def test_t8_response_parser_rejects_missing_mandatory_duplicate_and_seven_hours(self):
+    def test_t8_response_parser_rejects_missing_mandatory_duplicate_and_after_workday_end(self):
         mandatory = [shipment(1, required=True)]
         cases = [
             successful_response(mandatory, selected=()),
             successful_response([shipment(1), shipment(2)], selected=(0, 0)),
-            successful_response([shipment(1)], selected=(0,), duration_minutes=420),
+            successful_response([shipment(1)], selected=(0,), duration_minutes=541),
             successful_response(
                 [shipment(index) for index in range(1, 17)],
                 selected=tuple(range(16)),
@@ -794,6 +817,37 @@ class RouteOptimizationModelTests(TestCase):
                 self.assertEqual(raised.exception.counted_attempt, status == 408 or status >= 500)
 
 
+def workday_successful_response(shipments, *, selected=(0,), start=NOW, duration_minutes=60, breaks=()):
+    response = successful_response(shipments, selected=selected, start=start,
+                                   duration_minutes=duration_minutes, breaks=breaks)
+    route = response["routes"][0]
+    pauses = lunch_breaks(start)
+    for pause in pauses:
+        route["breaks"].append({
+            "startTime": pause["scheduled_at"].astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "duration": f"{pause['duration_seconds']}s",
+        })
+    end = start + timedelta(minutes=duration_minutes)
+    if pauses:
+        end = max(end, pauses[-1]["scheduled_at"] + timedelta(seconds=pauses[-1]["duration_seconds"]))
+    cursor = start + timedelta(minutes=10)
+    for visit in route["visits"]:
+        if pauses and cursor < pauses[0]["scheduled_at"] + timedelta(seconds=2700) and cursor + timedelta(seconds=SERVICE_SECONDS) > pauses[0]["scheduled_at"]:
+            cursor = pauses[0]["scheduled_at"] + timedelta(seconds=2700)
+        visit["startTime"] = cursor.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+        cursor += timedelta(minutes=25)
+    end = max(end, cursor)
+    route["vehicleEndTime"] = end.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    route["metrics"]["breakDuration"] = f"{sum(pause['duration_seconds'] for pause in pauses)}s"
+    return response
+
+
+def workday_traffic_response(shipments, *, selected, start=NOW):
+    response = workday_successful_response(shipments, selected=selected, start=start, duration_minutes=400)
+    response["routes"][0]["hasTrafficInfeasibilities"] = True
+    return response
+
+
 class RouteOptimizationIntegrationTests(TestCase):
     def setUp(self):
         app_module.app.config.update(TESTING=True, SECRET_KEY="route-optimization-test")
@@ -846,6 +900,172 @@ class RouteOptimizationIntegrationTests(TestCase):
             shipments=inputs["shipments"],
             fixed_activities=inputs["fixed_activities"],
         )
+
+    def append_required_visit(self, *, confirmed="N", hour=12, minute=0, source="follow_up"):
+        row = {
+            "planned_activity_id": "required-existing", "user_name": "olle", "sales_person": "Olle",
+            "customer_id": "11111111-1111-4111-8111-111111111111", "customer_row": 2,
+            "customer": "Butik A", "contact_type": "visit", "status": "planned",
+            "scheduled_at": NOW.replace(hour=hour, minute=minute).isoformat(timespec="minutes"),
+            "appointment_confirmed": confirmed, "time_is_estimated": "N", "source": source,
+            "note": "Keep this note", "picking_help": "Y", "duration_minutes": 20, "revision": 3,
+        }
+        sheet = self.spreadsheet.worksheet(app_module.PLANNED_ACTIVITIES_SHEET)
+        sheet.values.append([row.get(key, "") for key in app_module.PLANNED_ACTIVITY_COLUMNS])
+        return row
+
+    def optimized_required_preview(self, estimated):
+        captured = {}
+
+        class Provider:
+            def optimize(_self, *, project, body, timeout_seconds):
+                captured.update(body)
+                items = [{"customer_id": item["label"].split(":", 1)[1]}
+                         for item in body["model"]["shipments"]]
+                response = successful_response(items, selected=tuple(range(len(items))), start=NOW,
+                                               duration_minutes=420)
+                route = response["routes"][0]
+                route["vehicleStartTime"] = body["model"]["globalStartTime"]
+                for visit in route["visits"]:
+                    when = estimated if visit["shipmentLabel"].endswith("111111111111") else NOW.replace(hour=14)
+                    visit["startTime"] = when.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+                route["breaks"] = [{"startTime": item["earliestStartTime"], "duration": item["minDuration"]}
+                                   for item in body["model"]["vehicles"][0].get("breakRule", {}).get("breakRequests", [])]
+                return response, 200
+
+        with patch.object(app_module, "get_authoritative_priority_snapshot", return_value=self.priority_snapshot()), patch.object(
+            app_module, "route_optimization_provider", return_value=Provider(),
+        ):
+            response = self.client.post("/planning/route-preview", json={
+                "route_date": NOW.date().isoformat(), "client_request_id": "booked-preview",
+                "route_mode": "automatic", "start": {"latitude": START.latitude, "longitude": START.longitude},
+            })
+        self.assertEqual(response.status_code, 200, response.get_json())
+        return response.get_json(), captured
+
+    def apply_optimized_preview(self, preview):
+        return self.client.post("/planning/route-apply", json={
+            "client_request_id": "booked-apply", "preview_token": preview["preview_token"],
+        })
+
+    def test_apply_flexible_required_visit_saves_optimized_time_and_retry_without_mutation(self):
+        original = self.append_required_visit()
+        preview, body = self.optimized_required_preview(NOW.replace(hour=13, minute=15))
+        required = next(stop for stop in preview["stops"] if stop["required"])
+        self.assertTrue(required["time_is_estimated"])
+        self.assertFalse(required["appointment_confirmed"])
+        vehicle = body["model"]["vehicles"][0]
+        self.assertEqual(vehicle["startLocation"], vehicle["endLocation"])
+        self.assertEqual(vehicle["startLocation"], {"latitude": START.latitude, "longitude": START.longitude})
+        with patch.object(app_module, "get_authoritative_priority_snapshot", return_value=self.priority_snapshot()):
+            first = self.apply_optimized_preview(preview)
+        self.assertEqual(first.status_code, 200, first.get_json())
+        self.assertFalse(first.get_json()["duplicate"])
+        planned = self.spreadsheet.worksheet(app_module.PLANNED_ACTIVITIES_SHEET)
+        before_retry = [list(row) for row in planned.values]
+        writes = planned.batch_update_count
+        proposals = self.spreadsheet.worksheet(app_module.ROUTE_PROPOSALS_SHEET)
+        with patch.object(app_module, "build_route_optimization_inputs") as stale_check:
+            retry = self.apply_optimized_preview(preview)
+        self.assertEqual(retry.status_code, 200, retry.get_json())
+        self.assertTrue(retry.get_json()["duplicate"])
+        stale_check.assert_not_called()
+        self.assertEqual(first.get_json()["route_group_id"], retry.get_json()["route_group_id"])
+        self.assertEqual(first.get_json()["activities"], retry.get_json()["activities"])
+        self.assertEqual(planned.values, before_retry)
+        self.assertEqual(planned.batch_update_count, writes)
+        self.assertEqual(len(proposals.dict_rows()), 1)
+        rows = planned.dict_rows()
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(len({row["route_group_id"] for row in rows}), 1)
+        saved = next(row for row in rows if row["planned_activity_id"] == original["planned_activity_id"])
+        self.assertEqual(saved["scheduled_at"], "2026-08-10T13:15+02:00")
+        self.assertEqual(saved["time_is_estimated"], "Y")
+        self.assertEqual(saved["revision"], 4)
+        self.assertEqual(saved["route_sequence"], required["sequence"])
+        for key in ("source", "note", "picking_help", "customer_id", "appointment_confirmed"):
+            self.assertEqual(saved[key], original[key])
+
+    def test_apply_confirmed_required_visit_preserves_exact_booking(self):
+        original = self.append_required_visit(confirmed="Y", hour=12, minute=15, source="manual")
+        preview, _body = self.optimized_required_preview(NOW.replace(hour=12, minute=15))
+        required = next(stop for stop in preview["stops"] if stop["required"])
+        self.assertFalse(required["time_is_estimated"])
+        self.assertTrue(required["appointment_confirmed"])
+        with patch.object(app_module, "get_authoritative_priority_snapshot", return_value=self.priority_snapshot()):
+            applied = self.apply_optimized_preview(preview)
+        self.assertEqual(applied.status_code, 200, applied.get_json())
+        saved = self.spreadsheet.worksheet(app_module.PLANNED_ACTIVITIES_SHEET).dict_rows()[0]
+        self.assertEqual(saved["scheduled_at"], original["scheduled_at"])
+        self.assertEqual(saved["appointment_confirmed"], "Y")
+        self.assertEqual(saved["route_sequence"], required["sequence"])
+        self.assertEqual(saved["route_group_id"], applied.get_json()["route_group_id"])
+
+    def test_confirmed_lunch_booking_survives_google_request_and_validation(self):
+        self.append_required_visit(confirmed="Y", hour=12, minute=15)
+        preview, body = self.optimized_required_preview(NOW.replace(hour=12, minute=15))
+        vehicle = body["model"]["vehicles"][0]
+        lunch = vehicle["breakRule"]["breakRequests"][0]
+        self.assertEqual(lunch["earliestStartTime"], "2026-08-10T09:30:00Z")  # 11:30 local
+        self.assertEqual(lunch["latestStartTime"], lunch["earliestStartTime"])
+        self.assertEqual(lunch["minDuration"], "2700s")
+        required = next(item for item in body["model"]["shipments"] if "penaltyCost" not in item)
+        self.assertEqual(required["pickups"][0]["timeWindows"], [{
+            "startTime": "2026-08-10T10:15:00Z", "endTime": "2026-08-10T10:15:00Z",
+        }])
+        self.assertEqual(next(stop for stop in preview["stops"] if stop["required"])["estimated_at"],
+                         "2026-08-10T10:15:00Z")
+
+    def test_first_apply_still_rejects_external_planning_change(self):
+        self.append_required_visit()
+        preview, _body = self.optimized_required_preview(NOW.replace(hour=13, minute=15))
+        planned = self.spreadsheet.worksheet(app_module.PLANNED_ACTIVITIES_SHEET)
+        planned.values[1][app_module.PLANNED_ACTIVITY_COLUMNS.index("revision")] = 4
+        planned.values[1][app_module.PLANNED_ACTIVITY_COLUMNS.index("scheduled_at")] = "2026-08-10T12:10+02:00"
+        before = [list(row) for row in planned.values]
+        with patch.object(app_module, "get_authoritative_priority_snapshot", return_value=self.priority_snapshot()):
+            applied = self.apply_optimized_preview(preview)
+        self.assertEqual(applied.status_code, 409, applied.get_json())
+        self.assertEqual(applied.get_json()["error"], "planning_changed")
+        self.assertEqual(planned.values, before)
+
+    def test_moved_lunch_protects_only_actual_booked_service_period(self):
+        self.append_required_visit(confirmed="Y", hour=12, minute=15)
+        with patch.object(app_module, "stockholm_now", return_value=NOW.replace(hour=11, minute=40)):
+            preview, body = self.optimized_required_preview(NOW.replace(hour=12, minute=15))
+        lunch = body["model"]["vehicles"][0]["breakRule"]["breakRequests"][0]
+        self.assertEqual(lunch["earliestStartTime"], "2026-08-10T10:35:00Z")
+        self.assertEqual(lunch["latestStartTime"], lunch["earliestStartTime"])
+        self.assertEqual(next(stop for stop in preview["stops"] if stop["required"])["estimated_at"],
+                         "2026-08-10T10:15:00Z")
+
+    def test_no_possible_lunch_is_local_before_google_and_quota_reservation(self):
+        customers = [{"row": index + 2, "customer_id": f"40000000-0000-4000-8000-{index:012d}",
+                      "customer": f"Booked {index}", "sales_person": "Olle", "cancelled_flag": "",
+                      "latitude_google": 56 + index / 10000, "longitude_google": 12 + index / 10000,
+                      "city_google": f"City {index}", "postal_code_google": str(40000 + index)}
+                     for index in range(15)]
+        planned = self.spreadsheet.worksheet(app_module.PLANNED_ACTIVITIES_SHEET)
+        for index, customer in enumerate(customers):
+            row = {**customer, "customer_row": customer["row"], "planned_activity_id": f"booked-{index}",
+                   "user_name": "olle", "sales_person": "Olle", "contact_type": "visit", "status": "planned",
+                   "source": "manual", "appointment_confirmed": "Y", "duration_minutes": 20, "revision": 1,
+                   "scheduled_at": (NOW + timedelta(minutes=index * 36)).isoformat()}
+            planned.values.append([row.get(key, "") for key in app_module.PLANNED_ACTIVITY_COLUMNS])
+        before = [list(row) for row in planned.values]
+        with patch.object(app_module, "get_authoritative_priority_snapshot", return_value=self.priority_snapshot(customers)), patch.object(
+            app_module, "route_optimization_provider",
+        ) as provider, patch.object(app_module, "execute_route_optimization") as execute:
+            response = self.client.post("/planning/route-preview", json={
+                "route_date": NOW.date().isoformat(), "client_request_id": "no-lunch",
+                "route_mode": "automatic", "start": {"latitude": START.latitude, "longitude": START.longitude},
+            })
+        self.assertEqual(response.status_code, 422, response.get_json())
+        self.assertEqual(response.get_json()["error"], "route_lunch_not_feasible")
+        provider.assert_not_called()
+        execute.assert_not_called()
+        self.assertNotIn(app_module.ROUTE_OPTIMIZATION_RUNS_SHEET, self.spreadsheet.added_sheets)
+        self.assertEqual(planned.values, before)
 
     def test_t12_input_builder_uses_all_577_owner_customers(self):
         customers = [{
@@ -903,7 +1123,7 @@ class RouteOptimizationIntegrationTests(TestCase):
         self.assertIsNone(error)
         required = [item for item in inputs["shipments"] if item["required"]]
         self.assertEqual([item["activity_id"] for item in required], ["mandatory"])
-        self.assertEqual(inputs["fixed_breaks"][0]["activity_id"], "break")
+        self.assertEqual(inputs["fixed_breaks"][0]["activity_id"], "system:lunch")
         bad_quality = {
             customer_id: {"trusted": False, "reason": "suspicious_shared"}
             for customer_id in ("11111111-1111-4111-8111-111111111111",)
@@ -987,7 +1207,7 @@ class RouteOptimizationIntegrationTests(TestCase):
         )
         self.assertEqual(
             rendered[shipments["confirmed"]["customer_id"]]["pickups"][0]["timeWindows"],
-            [{"startTime": "2026-10-02T08:45:00Z", "endTime": "2026-10-02T09:15:00Z"}],
+            [{"startTime": "2026-10-02T09:00:00Z", "endTime": "2026-10-02T09:00:00Z"}],
         )
         self.assertEqual(
             request["model"]["vehicles"][0]["startLocation"],
@@ -1019,7 +1239,7 @@ class RouteOptimizationIntegrationTests(TestCase):
                 # Labels/indices must match the real request; select its first shipment.
                 customer_ids = [item["label"].split(":", 1)[1] for item in body["model"]["shipments"]]
                 real = [{"customer_id": value} for value in customer_ids]
-                response = successful_response(real, selected=(0,), start=app_module.route_start_datetime(NOW.date()))
+                response = workday_successful_response(real, selected=(0,), start=app_module.route_start_datetime(NOW.date()))
                 return response, 200
 
         with patch.dict(os.environ, {"PERFORMANCE_LOGGING_ENABLED": "true"}, clear=False), patch.object(
@@ -1061,7 +1281,7 @@ class RouteOptimizationIntegrationTests(TestCase):
             def optimize(_self, *, project, body, timeout_seconds):
                 calls.append(body)
                 ids = [item["label"].split(":", 1)[1] for item in body["model"]["shipments"]]
-                return successful_response([{"customer_id": value} for value in ids], selected=(0,), start=app_module.route_start_datetime(NOW.date())), 200
+                return workday_successful_response([{"customer_id": value} for value in ids], selected=(0,), start=app_module.route_start_datetime(NOW.date())), 200
 
         with patch.object(app_module, "get_authoritative_priority_snapshot", return_value=snapshot), patch.object(app_module, "route_optimization_provider", return_value=Provider()):
             for request_id in ("cache-a", "cache-b"):
@@ -1079,15 +1299,15 @@ class RouteOptimizationIntegrationTests(TestCase):
         persisted = json.loads(str(rows[0]["result_payload_json"]))
         self.assertRegex(rows[0]["input_fingerprint"], r"^[0-9a-f]{64}$")
         self.assertEqual(persisted["model_diagnostics"], {
-            "route_engine_version": "ro-v3",
+            "route_engine_version": "ro-v4",
             "primary_model_version": "ro-v2",
             "fallback_policy_version": "route-fallback-v1",
             "attempt_number": 1,
             "fallback_strategy": "primary",
-            "model_route_max_seconds": 25199,
+            "model_route_max_seconds": 32400,
             "quadratic_soft_duration_enabled": True,
             "quadratic_soft_buffer_seconds": 300,
-            "quadratic_soft_max_seconds": 24899,
+            "quadratic_soft_max_seconds": 32100,
             "quadratic_soft_cost_per_square_hour": 28800,
             "quadratic_soft_exceedance_seconds": 0,
             "quadratic_soft_duration_cost": 0,
@@ -1102,7 +1322,7 @@ class RouteOptimizationIntegrationTests(TestCase):
         )
         self.assertEqual(persisted["summary"]["stop_count"], 1)
         self.assertEqual(persisted["summary"]["total_priority_score"], 80)
-        self.assertEqual(persisted["summary"]["route_seconds"], 3600)
+        self.assertEqual(persisted["summary"]["route_seconds"], 17100)
         self.assertGreaterEqual(persisted["solve_duration_ms"], 0)
 
     def test_completed_request_replay_reuses_exact_run_before_quota(self):
@@ -1116,7 +1336,7 @@ class RouteOptimizationIntegrationTests(TestCase):
                     item["label"].split(":", 1)[1]
                     for item in body["model"]["shipments"]
                 ]
-                return successful_response(
+                return workday_successful_response(
                     [{"customer_id": value} for value in ids],
                     selected=(0,),
                     start=app_module.route_start_datetime(NOW.date()),
@@ -1149,7 +1369,7 @@ class RouteOptimizationIntegrationTests(TestCase):
         self.assertEqual(rows[0]["client_request_id"], payload["client_request_id"])
         self.assertEqual(sum(app_module.is_yes(row["counted_attempt"]) for row in rows), 1)
 
-    def test_completed_ro_v1_request_replays_across_policy_deploy_only_for_same_input(self):
+    def test_completed_ro_v1_request_cannot_replay_without_new_workday_policy(self):
         snapshot = self.priority_snapshot()
         with patch.object(
             app_module,
@@ -1229,11 +1449,8 @@ class RouteOptimizationIntegrationTests(TestCase):
             )
 
         self.assertEqual(status.get_json(), {"ok": True, "state": "completed"})
-        self.assertEqual(recovered.status_code, 200, recovered.get_json())
-        self.assertEqual(
-            recovered.get_json()["route_optimization_run_id"],
-            "completed-before-ro-v2",
-        )
+        self.assertEqual(recovered.status_code, 409, recovered.get_json())
+        self.assertEqual(recovered.get_json()["code"], "route_request_id_conflict")
         self.assertEqual(changed.status_code, 409, changed.get_json())
         self.assertEqual(changed.get_json()["code"], "route_request_id_conflict")
         provider.assert_not_called()
@@ -1415,7 +1632,7 @@ class RouteOptimizationIntegrationTests(TestCase):
         class Provider:
             def optimize(_self, *, project, body, timeout_seconds):
                 ids = [item["label"].split(":", 1)[1] for item in body["model"]["shipments"]]
-                response, status = successful_response(
+                response, status = workday_successful_response(
                     [{"customer_id": value} for value in ids], selected=(0,), start=app_module.route_start_datetime(NOW.date())
                 ), 200
                 response["routes"][0]["vehicleLabel"] = "owner:someone_else"
@@ -1463,7 +1680,7 @@ class RouteOptimizationIntegrationTests(TestCase):
                     for item in body["model"]["shipments"]
                 ]
                 route_start = app_module.route_start_datetime(NOW.date())
-                response = successful_response(
+                response = workday_successful_response(
                     [{"customer_id": value} for value in ids],
                     selected=tuple(range(12)),
                     start=route_start,
@@ -1547,7 +1764,7 @@ class RouteOptimizationIntegrationTests(TestCase):
         self.assertEqual(payload["transition_count"], 13)
         self.assertEqual(payload["expected_transition_count"], 13)
         self.assertEqual(payload["skipped_count"], 0)
-        self.assertEqual(payload["break_count"], 0)
+        self.assertEqual(payload["break_count"], 1)
         self.assertTrue(payload["hasTrafficInfeasibilities"])
         self.assertTrue(payload["vehicle_label_matches"])
         self.assertEqual(payload["traffic_info_unavailable_count"], 0)
@@ -1559,16 +1776,16 @@ class RouteOptimizationIntegrationTests(TestCase):
         self.assertEqual(payload["route_delay_duration_seconds"], 0)
         self.assertEqual(payload["route_break_duration_seconds"], 0)
         self.assertEqual(payload["aggregate_timeline_residual_seconds"], -116)
-        self.assertEqual(payload["absolute_route_max_seconds"], 25199)
-        self.assertEqual(payload["model_route_max_seconds"], 25199)
+        self.assertEqual(payload["absolute_route_max_seconds"], 32400)
+        self.assertEqual(payload["model_route_max_seconds"], 32400)
         self.assertTrue(payload["quadratic_soft_duration_enabled"])
         self.assertEqual(payload["quadratic_soft_buffer_seconds"], 300)
-        self.assertEqual(payload["quadratic_soft_max_seconds"], 24899)
+        self.assertEqual(payload["quadratic_soft_max_seconds"], 32100)
         self.assertEqual(
             payload["quadratic_soft_cost_per_square_hour"], 28800
         )
-        self.assertEqual(payload["quadratic_soft_exceedance_seconds"], 300)
-        self.assertEqual(payload["quadratic_soft_duration_cost"], 200)
+        self.assertEqual(payload["quadratic_soft_exceedance_seconds"], 0)
+        self.assertEqual(payload["quadratic_soft_duration_cost"], 0)
         self.assertEqual(payload["route_elapsed_seconds"], 25199)
         self.assertTrue(payload["route_elapsed_matches_total_duration"])
         self.assertEqual(payload["negative_wait_transition_count"], 1)
@@ -1592,8 +1809,8 @@ class RouteOptimizationIntegrationTests(TestCase):
         self.assertFalse(payload["has_required_visits"])
         self.assertEqual(payload["fixed_visit_count"], 0)
         self.assertFalse(payload["has_fixed_visits"])
-        self.assertEqual(payload["fixed_break_count"], 0)
-        self.assertFalse(payload["has_fixed_breaks"])
+        self.assertEqual(payload["fixed_break_count"], 1)
+        self.assertTrue(payload["has_fixed_breaks"])
         self.assertEqual(payload["pre_route_fixed_seconds"], 0)
         self.assertTrue(payload["consider_road_traffic"])
         self.assertEqual(payload["search_mode"], "CONSUME_ALL_AVAILABLE_TIME")
@@ -1607,8 +1824,8 @@ class RouteOptimizationIntegrationTests(TestCase):
         request = calls[0]
         vehicle = request["model"]["vehicles"][0]
         self.assertEqual(vehicle["routeDurationLimit"], {
-            "maxDuration": "25199s",
-            "quadraticSoftMaxDuration": "24899s",
+            "maxDuration": "32400s",
+            "quadraticSoftMaxDuration": "32100s",
             "costPerSquareHourAfterQuadraticSoftMax": 28800,
         })
         self.assertEqual(request["searchMode"], "CONSUME_ALL_AVAILABLE_TIME")
@@ -1631,7 +1848,7 @@ class RouteOptimizationIntegrationTests(TestCase):
                     item["label"].split(":", 1)[1]
                     for item in body["model"]["shipments"]
                 ]
-                malformed = successful_response(
+                malformed = workday_successful_response(
                     [{"customer_id": value} for value in ids],
                     selected=(0,),
                     start=app_module.route_start_datetime(NOW.date()),
@@ -1742,12 +1959,12 @@ class RouteOptimizationIntegrationTests(TestCase):
                     {"customer_id": value} for value in ids
                 ]
                 if len(calls) == 1:
-                    return traffic_response(
+                    return workday_traffic_response(
                         provider_shipments,
                         selected=tuple(range(4)),
                         start=app_module.route_start_datetime(NOW.date()),
                     ), 200
-                return successful_response(
+                return workday_successful_response(
                     provider_shipments,
                     selected=(0, 1, 2),
                     start=app_module.route_start_datetime(NOW.date()),
@@ -1808,8 +2025,8 @@ class RouteOptimizationIntegrationTests(TestCase):
         self.assertEqual(
             safer_vehicle["routeDurationLimit"],
             {
-                "maxDuration": "25199s",
-                "quadraticSoftMaxDuration": "24299s",
+                "maxDuration": "32400s",
+                "quadraticSoftMaxDuration": "31500s",
                 "costPerSquareHourAfterQuadraticSoftMax": 28800,
             },
         )
@@ -1870,12 +2087,12 @@ class RouteOptimizationIntegrationTests(TestCase):
                     {"customer_id": value} for value in ids
                 ]
                 if len(calls) <= 2:
-                    return traffic_response(
+                    return workday_traffic_response(
                         provider_shipments,
                         selected=tuple(range(5)),
                         start=app_module.route_start_datetime(NOW.date()),
                     ), 200
-                return successful_response(
+                return workday_successful_response(
                     provider_shipments,
                     selected=(0, 1, 2, 3),
                     start=app_module.route_start_datetime(NOW.date()),
@@ -1946,7 +2163,7 @@ class RouteOptimizationIntegrationTests(TestCase):
         self.assertEqual(
             calls[2]["model"]["vehicles"][0]["routeDurationLimit"]
             ["quadraticSoftMaxDuration"],
-            "24299s",
+            "31500s",
         )
         row = self.spreadsheet.worksheet(
             app_module.ROUTE_OPTIMIZATION_RUNS_SHEET
@@ -1959,7 +2176,7 @@ class RouteOptimizationIntegrationTests(TestCase):
         self.assertEqual(history[1]["quadratic_soft_buffer_seconds"], 900)
         self.assertEqual(
             history[1]["traffic_diagnostics"]["quadratic_soft_max_seconds"],
-            24299,
+            31500,
         )
         self.assertEqual(history[2]["strategy"], "reduced_cap")
 
@@ -1975,7 +2192,7 @@ class RouteOptimizationIntegrationTests(TestCase):
                     for item in body["model"]["shipments"]
                 ]
                 selected_count = max(1, 4 - len(calls))
-                return traffic_response(
+                return workday_traffic_response(
                     [{"customer_id": value} for value in ids],
                     selected=tuple(range(min(selected_count, len(ids)))),
                     start=app_module.route_start_datetime(NOW.date()),
@@ -2074,7 +2291,7 @@ class RouteOptimizationIntegrationTests(TestCase):
                     item["label"].split(":", 1)[1]
                     for item in body["model"]["shipments"]
                 ]
-                return traffic_response(
+                return workday_traffic_response(
                     [{"customer_id": value} for value in ids],
                     selected=(0,),
                     start=app_module.route_start_datetime(NOW.date()),
@@ -2127,7 +2344,7 @@ class RouteOptimizationIntegrationTests(TestCase):
                     item["label"].split(":", 1)[1]
                     for item in body["model"]["shipments"]
                 ]
-                return traffic_response(
+                return workday_traffic_response(
                     [{"customer_id": value} for value in ids],
                     selected=(0,),
                     start=app_module.route_start_datetime(NOW.date()),
@@ -2260,7 +2477,7 @@ class RouteOptimizationIntegrationTests(TestCase):
 
         preview = {
             "route_date": NOW.date().isoformat(), "user_name": "olle",
-            "route_engine_version": "ro-v1", "route_optimization_fingerprint": "stale",
+            "route_engine_version": ROUTE_ENGINE_VERSION, "route_optimization_fingerprint": "stale",
             "start": {"latitude": 57.7, "longitude": 11.9},
             "stops": [{"customer_id": "11111111-1111-4111-8111-111111111111"}],
         }
