@@ -2401,6 +2401,16 @@ class PlanningContactCompletionTests(PlanningApiTestCase):
 
 
 class PlanningRouteApiTests(PlanningApiTestCase):
+    def configure_seller_home_origin(self):
+        users = self.spreadsheet.worksheet(app_module.USERS_SHEET)
+        users.values[0].extend(["home_adress", "home_town"])
+        for row in users.values[1:]:
+            row.extend(["Testvägen 1", "Testorten"])
+        app_module.invalidate_sheet_for_write(users)
+        geocode = patch.object(app_module, "geocode_address", return_value=app_module.Coordinate(57.7, 11.9))
+        geocode.start()
+        self.addCleanup(geocode.stop)
+
     def route_stop(
         self,
         customer_row,
@@ -2492,6 +2502,7 @@ class PlanningRouteApiTests(PlanningApiTestCase):
         return response, calculate
 
     def test_admin_preview_for_seller_filters_candidates_to_current_owner(self):
+        self.configure_seller_home_origin()
         self.login("admin")
         sofia_stop = self.route_stop(3, 1, 21)
 
@@ -2530,6 +2541,7 @@ class PlanningRouteApiTests(PlanningApiTestCase):
         )
 
     def test_admin_cannot_apply_signed_seller_preview_after_owner_change(self):
+        self.configure_seller_home_origin()
         self.login("admin")
         sofia_stop = self.route_stop(3, 1, 21)
         with (
@@ -2577,6 +2589,7 @@ class PlanningRouteApiTests(PlanningApiTestCase):
         ))
 
     def test_old_required_visit_reports_owner_change_without_becoming_stop(self):
+        self.configure_seller_home_origin()
         required = self.append_planning_row(
             planned_activity_id="sofia-required-before-reassignment",
             owner={"user_name": "sofia", "name": "Sofia"},

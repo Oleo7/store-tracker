@@ -70,6 +70,7 @@ from sales_coaching import (
 )
 from commercial_orders import order_volume, commercial_order
 from contact_channel import recommend_contact_channel
+from geocoding import geocode_address
 from route_workday import (
     WORKDAY_START, WORKDAY_POLICY_VERSION, available_route_seconds,
     effective_route_start, route_workday_end, plan_route_lunch,
@@ -1434,7 +1435,7 @@ def ensure_email_worksheets(spreadsheet, *, include_events=True):
 def get_user_rows(spreadsheet):
     return worksheet_to_dicts(
         get_worksheet(spreadsheet, USERS_SHEET),
-        expected_columns=USER_COLUMNS,
+        expected_columns=[*USER_COLUMNS, "home_adress", "home_town"],
         required_columns=USER_COLUMNS,
     )
 
@@ -8966,6 +8967,45 @@ def parse_route_start(data):
     return Coordinate(latitude=latitude, longitude=longitude)
 
 
+def resolve_planning_route_origin(spreadsheet, owner, data):
+    """Choose origin after resolving and authorizing the canonical owner."""
+    caller = current_user()
+    if normalize_key(owner.get("user_name")) == normalize_key(caller.get("user_name")):
+        start = parse_route_start(data)
+        if start is None:
+            return None, None, planning_error(
+                "invalid_start", "Din position är ogiltig. Försök hämta positionen igen.", 400, field="start",
+            )
+        return start, "current_position", None
+    if not user_is_admin(caller):
+        return None, None, planning_error(
+            "planning_owner_forbidden", "Du får bara hantera din egen planering.", 403,
+        )
+    private_owner = find_active_user(spreadsheet, owner.get("user_name")) or {}
+    address = str(private_owner.get("home_adress") or "").strip()
+    town = str(private_owner.get("home_town") or "").strip()
+    if not address or not town:
+        return None, None, planning_error(
+            "route_owner_home_address_missing",
+            "Den valda säljaren saknar komplett hemadress och hemort i users.", 422,
+        )
+    start = geocode_address(f"{address}, {town}, Sweden", cache=True)
+    if start is None:
+        return None, None, planning_error(
+            "route_owner_home_geocode_failed",
+            "Den valda säljarens hemadress kunde inte geokodas. Kontrollera adressen och att Google Geocoding är tillgängligt.",
+            422,
+        )
+    return start, "selected_owner_home", None
+
+
+def planning_route_origin_notice(owner, origin_source):
+    if origin_source == "selected_owner_home":
+        name = str(owner.get("name") or owner.get("user_name") or "Säljaren").strip()
+        return f"Rutten utgår från {name}s hemadress"
+    return "Start och retur: din position nu"
+
+
 def build_route_proposal_payload(
     *,
     proposal,
@@ -11714,7 +11754,7 @@ def execute_route_optimization(*, spreadsheet, owner, inputs, client_request_id)
 
 
 def build_route_optimization_preview(
-    *, spreadsheet, owner, route_date, start, client_request_id
+    *, spreadsheet, owner, route_date, start, client_request_id, origin_source="current_position"
 ):
     with performance_step("route_optimization.input_build") as measurement:
         inputs, input_error = build_route_optimization_inputs(
@@ -11738,6 +11778,7 @@ def build_route_optimization_preview(
     if solved.get("state") == "fallback_ready":
         return {
             **solved,
+            "origin_source": origin_source,
             "message": (
                 "Första ruttförslaget behöver större tidsmarginal. "
                 "Ett säkrare alternativ förbereds automatiskt."
@@ -11788,6 +11829,7 @@ def build_route_optimization_preview(
     route_payload = {
         "ok": True,
         "engine": "route_optimization",
+        "origin_source": origin_source,
         "engine_version": ROUTE_ENGINE_VERSION,
         "stops": stops,
         "summary": summary,
@@ -11823,7 +11865,8 @@ def build_route_optimization_preview(
             "message": "Butiker med osäkra koordinater utelämnades.",
         }] if inputs["excluded_untrusted_coordinates"] else []),
         "timeline": {"route_end_at": summary.get("route_end_at")},
-        "gps_notice": "Start och retur: din position nu",
+        "origin_source": origin_source,
+        "gps_notice": planning_route_origin_notice(owner, origin_source),
         "plan_fingerprint": planning_state_fingerprint(inputs["date_rows"]),
         "route_optimization_fingerprint": inputs["fingerprint"],
         "route_optimization_run_id": solved["run_id"],
@@ -11844,6 +11887,7 @@ def build_planning_route_preview(
     route_date,
     start,
     candidate_rows,
+    origin_source="current_position",
 ):
     route_start_at = route_start_datetime(route_date, include_lunch=False)
     max_total_seconds = available_route_seconds(route_start_at)
@@ -12219,6 +12263,8 @@ def build_planning_route_preview(
         if route_date == stockholm_today()
         else "Rutten beräknas från din position nu"
     )
+    if origin_source == "selected_owner_home":
+        gps_notice = planning_route_origin_notice(owner, origin_source)
     preview = {
         "ok": True,
         "owner": owner,
@@ -12239,6 +12285,7 @@ def build_planning_route_preview(
         "warnings": candidate_warnings,
         "timeline": route_timeline,
         "gps_notice": gps_notice,
+        "origin_source": origin_source,
         "plan_fingerprint": planning_state_fingerprint(date_rows),
         "route_payload": {
             **route_payload,
@@ -12246,6 +12293,7 @@ def build_planning_route_preview(
             "summary": route_summary,
             "route_start_at": route_start_at.isoformat(timespec="minutes"),
             "gps_notice": gps_notice,
+            "origin_source": origin_source,
             "conflicts": conflicts,
             "timeline": route_timeline,
         },
@@ -13409,14 +13457,6 @@ def planning_route_preview():
             409,
             field="route_date",
         )
-    start = parse_route_start(data)
-    if start is None:
-        return planning_error(
-            "invalid_start",
-            "Din position är ogiltig. Försök hämta positionen igen.",
-            400,
-            field="start",
-        )
     candidate_rows = data.get("candidate_rows", [])
     if candidate_rows is None:
         candidate_rows = []
@@ -13481,6 +13521,9 @@ def planning_route_preview():
     )
     if owner_error is not None:
         return owner_error
+    start, origin_source, origin_error = resolve_planning_route_origin(spreadsheet, owner, data)
+    if origin_error is not None:
+        return origin_error
     try:
         if engine == "route_optimization":
             preview, preview_error = build_route_optimization_preview(
@@ -13489,6 +13532,7 @@ def planning_route_preview():
                 route_date=route_date,
                 start=start,
                 client_request_id=client_request_id,
+                origin_source=origin_source,
             )
         else:
             preview, preview_error = build_planning_route_preview(
@@ -13497,6 +13541,7 @@ def planning_route_preview():
                 route_date=route_date,
                 start=start,
                 candidate_rows=tuple(sorted(set(candidate_rows))),
+                origin_source=origin_source,
             )
     except Exception:
         app.logger.exception("Unexpected planning route preview failure")
@@ -13935,25 +13980,16 @@ def update_customer_contact(row):
         address_str = f"{val('address_google')} {val('address_number_google')}, {val('postal_code_google')} {val('city_google')}, Sweden".strip(", ")
 
         new_lat = new_lng = None
-        api_key = os.environ.get("GOOGLE_MAPS_API_KEY", "")
-        if api_key and address_str:
+        coordinate = geocode_address(address_str)
+        if coordinate is not None:
             try:
-                resp = requests.get(
-                    "https://maps.googleapis.com/maps/api/geocode/json",
-                    params={"address": address_str, "key": api_key, "language": "sv"},
-                    timeout=10,
-                )
-                geo = resp.json()
-                if geo.get("results"):
-                    loc = geo["results"][0]["geometry"]["location"]
-                    new_lat = loc["lat"]
-                    new_lng = loc["lng"]
-                    lat_value = round(float(new_lat), 7)
-                    lng_value = round(float(new_lng), 7)
-                    if "latitude_google" in headers:
-                        sheet.update_cell(row, headers.index("latitude_google") + 1, lat_value)
-                    if "longitude_google" in headers:
-                        sheet.update_cell(row, headers.index("longitude_google") + 1, lng_value)
+                new_lat, new_lng = coordinate.latitude, coordinate.longitude
+                lat_value = round(new_lat, 7)
+                lng_value = round(new_lng, 7)
+                if "latitude_google" in headers:
+                    sheet.update_cell(row, headers.index("latitude_google") + 1, lat_value)
+                if "longitude_google" in headers:
+                    sheet.update_cell(row, headers.index("longitude_google") + 1, lng_value)
             except Exception:
                 pass
 

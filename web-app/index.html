@@ -9399,6 +9399,11 @@
       : "Rutten beräknas från din position nu";
   }
 
+  function planningRouteUsesOwnerHome(ownerUserName) {
+    return userIsAdmin() && Boolean(String(ownerUserName || "").trim()) &&
+      normalizeRouteIdentity(ownerUserName) !== normalizeRouteIdentity(currentUser?.user_name);
+  }
+
   function planningRouteCurrentOwnerUserName() {
     const selectedOwner = String(planningSelectedOwner() || "").trim();
     if (selectedOwner) return selectedOwner;
@@ -9448,8 +9453,9 @@
       payload && typeof payload === "object" && !Array.isArray(payload) &&
       String(payload.client_request_id || "").trim() &&
       payload.route_date === state.route_date && payload.route_mode === "automatic" &&
-      Number.isFinite(Number(payload.start?.latitude)) &&
-      Number.isFinite(Number(payload.start?.longitude));
+      ((planningRouteUsesOwnerHome(payload.user_name) && payload.user_name === state.owner_user_name) ||
+        (Number.isFinite(Number(payload.start?.latitude)) &&
+          Number.isFinite(Number(payload.start?.longitude))));
     if (!valid) {
       clearPlanningRouteRecoveryState();
       return null;
@@ -9791,20 +9797,23 @@
     button.disabled = true;
     button.textContent = "Optimerar rutten – det kan ta några minuter.";
     try {
-      const position = await getCurrentPositionForRoute();
+      const owner = planningSelectedOwner();
       planningRoutePreviewRequestId = planningClientRequestId("planning-route-preview");
       const payload = {
         route_date: planningSelectedDate,
         route_mode: "automatic",
         client_request_id: planningRoutePreviewRequestId,
-        start: {
+      };
+      if (owner) payload.user_name = owner;
+      if (!planningRouteUsesOwnerHome(owner)) {
+        const position = await getCurrentPositionForRoute();
+        payload.start = {
           latitude: position.latitude,
           longitude: position.longitude,
           accuracy: position.accuracy,
-        },
-      };
-      const owner = planningSelectedOwner();
-      if (owner) payload.user_name = owner;
+        };
+      }
+      if (payload.route_date !== planningSelectedDate || owner !== planningSelectedOwner()) return;
       const state = savePlanningRouteRecoveryState(payload);
       const deadlineMs = Number(state.created_at_ms) + PLANNING_ROUTE_RECOVERY_WINDOW_MS;
       await runPlanningRouteRecoverySingleFlight(payload.client_request_id, () =>
@@ -9838,7 +9847,9 @@
     const stopCount = Number(summary.stop_count ?? summary.activity_count ?? stops.length) || 0;
     const totalMinutes = Number(summary.total_minutes ?? summary.duration_minutes ?? 0);
     const driveMinutes = Number(summary.drive_minutes ?? summary.travel_minutes ?? 0);
-    const gpsCopy = planningRouteGpsCopy(planningSelectedDate);
+    const gpsCopy = source.origin_source === "selected_owner_home"
+      ? String(source.gps_notice || "Rutten utgår från den valda säljarens hemadress")
+      : planningRouteGpsCopy(planningSelectedDate);
     const gpsNotice = String(source.gps_notice || "").trim();
     const extraGpsNotice = gpsNotice && gpsNotice !== gpsCopy
       ? ` · ${esc(gpsNotice)}`
