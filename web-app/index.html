@@ -7812,16 +7812,29 @@
   }
 
   async function refreshWorkflowViews({ planning = false, recommendation = false } = {}) {
-    const tasks = [loadInsights()];
     if (planning) {
       // loadPlanningWeek also refreshes Nästa åtgärd before it resolves.
-      tasks.push(loadPlanningWeek());
-    } else if (recommendation) {
-      tasks.push(loadPlanningRecommendation({
-        previewLimit: planningRecommendationPreviewLimit,
-      }));
+      const planningRefresh = loadPlanningWeek();
+      const requestSerial = planningLoadSerial;
+      await Promise.allSettled([planningRefresh]);
+      if (requestSerial === planningLoadSerial) {
+        // Secondary state refresh must not delay or roll back a saved action.
+        void loadInsights({ render: false }).catch(() => {});
+      }
+      return;
     }
-    await Promise.allSettled(tasks);
+    if (recommendation) {
+      const recommendationRefresh = loadPlanningRecommendation({
+        previewLimit: planningRecommendationPreviewLimit,
+      });
+      const requestSerial = planningRecommendationRequestSerial;
+      await Promise.allSettled([recommendationRefresh]);
+      if (requestSerial === planningRecommendationRequestSerial) {
+        void loadInsights({ render: false }).catch(() => {});
+      }
+      return;
+    }
+    await Promise.allSettled([loadInsights()]);
   }
 
   function replaceWithNextRecommendation(response) {

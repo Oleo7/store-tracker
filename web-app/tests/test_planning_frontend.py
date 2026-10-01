@@ -250,6 +250,149 @@ for (const changes of [{total_minutes:550},{break_minutes:-1},{wait_minutes:0},
             drag_save.group(1),
         )
 
+    @skipUnless(shutil.which("node"), "Node.js required for real frontend helpers")
+    def test_workflow_refresh_orders_real_requests_and_preserves_serial_guards(self):
+        script = r'''
+const fs = require('node:fs'), vm = require('node:vm'), assert = require('node:assert/strict');
+const html = fs.readFileSync(process.argv[1], 'utf8');
+const source = name => {
+  const match = new RegExp(`  (?:async )?function ${name}\\(`).exec(html);
+  assert.ok(match, name);
+  const tail = html.slice(match.index);
+  const end = /\n  }\r?\n/.exec(tail);
+  assert.ok(end, name);
+  return tail.slice(0, end.index + 4);
+};
+const unhandled = [];
+process.on('unhandledRejection', error => unhandled.push(error));
+const context = vm.createContext({assert, URLSearchParams, setImmediate});
+vm.runInContext(`
+const API = '/api', sharedJsonRequests = new Map(), requests = [], toasts = [];
+let planningLoadSerial = 0, planningRecommendationRequestSerial = 0, insightsRequestSerial = 0;
+let customersLoadSerial = 0, planningLoading = false, planningData = null, planningActiveUsersCache = [];
+let planningWeekStart = '2026-10-05', planningSelectedDate = '2026-10-05', planningSelectedUserName = '';
+let planningRecommendationPreviewLimit = 10, planningRecommendationLoading = false;
+let planningRecommendation = null, planningRecommendationPreview = [], planningRecommendationPendingCount = 0;
+let insights = {}, insightsLoaded = false, insightsLoadFailed = false, insightsRevision = 0;
+let emailClickNoOrderActive = false, listRenders = 0;
+const filterState = {emailProposal:new Set()};
+const document = {getElementById:()=>({innerHTML:''})};
+const window = {scrollX:0,scrollY:0,scrollTo:()=>{}};
+const requestAnimationFrame = callback => callback();
+const tick = () => new Promise(resolve => setImmediate(resolve));
+function controlledRequest(path) {
+  let resolve, reject;
+  const promise = new Promise((yes,no) => {resolve=yes;reject=no;});
+  requests.push({path,resolve,reject});
+  return promise;
+}
+const fetch = path => controlledRequest(path).then(payload => ({ok:true,json:async()=>payload}));
+const planningFetchJson = controlledRequest;
+const planningCancelDrag = () => {}, planningTodayKey = () => planningSelectedDate;
+const planningStartOfWeek = value => value, planningAddDays = value => value;
+const planningOwnerQuery = value => value, userIsAdmin = () => false;
+const normalizePlanningUser = value => value, normalizePlanningActivity = value => value;
+const renderPlanningWeekStrip = () => {}, renderPlanning = () => {};
+const renderPlanningLoadError = () => {}, resumePlanningRoutePreviewRecovery = () => {};
+const renderPlanningRecommendation = () => {}, renderPlanningCandidates = () => {};
+const buildInsightDropdowns = () => {}, updateEmailClickNoOrderChip = () => {}, updateChip = () => {};
+const showToast = text => toasts.push(text), renderList = () => {listRenders++;};
+${['fetchJsonShared','loadInsights','loadPlanningRecommendation','loadPlanningWeek','refreshWorkflowViews']
+   .map(source).join('\n')}
+`, context);
+vm.runInContext(`(async () => {
+  const week = version => ({owner:{user_name:'olle'},activities:[{id:version}],available_users:[]});
+  const suggestions = {suggestion:{id:'next'},queue_preview:[],pending_count:1};
+  const begin = () => requests.length;
+
+  // Week and its existing recommendation must finish before background insights start.
+  let first = begin(), done = false;
+  const critical = refreshWorkflowViews({planning:true,recommendation:true}).then(() => {done=true;});
+  assert.equal(requests.length-first,1);
+  assert.ok(requests[first].path.includes('/planning/activities'));
+  await tick(); assert.equal(requests.length-first,1); assert.equal(done,false);
+  requests[first].resolve(week('server'));
+  await tick(); assert.equal(requests.length-first,2);
+  assert.ok(requests[first+1].path.includes('/planning/suggestions'));
+  assert.equal(done,false); assert.deepEqual(planningData.activities,[{id:'server'}]);
+  requests[first+1].resolve(suggestions);
+  await critical;
+  assert.equal(done,true); assert.equal(requests.length-first,3);
+  assert.equal(requests[first+2].path,'/api/customer-insights');
+  assert.equal(planningRecommendation.id,'next');
+  assert.equal(listRenders,0);
+  requests[first+2].resolve({version:'background'});
+  await tick(); assert.equal(insights.version,'background'); assert.equal(listRenders,0);
+
+  // Ordinary refresh still waits for insights and renders the customer list.
+  first=begin(); done=false;
+  const ordinary = refreshWorkflowViews().then(() => {done=true;});
+  assert.equal(requests.length-first,1); assert.equal(requests[first].path,'/api/customer-insights');
+  await tick(); assert.equal(done,false);
+  requests[first].resolve({version:'ordinary'}); await ordinary;
+  assert.equal(done,true); assert.equal(listRenders,1);
+
+  // Recommendation-only refresh also finishes without waiting for secondary insights.
+  first=begin(); done=false;
+  const recommendation = refreshWorkflowViews({recommendation:true}).then(() => {done=true;});
+  assert.equal(requests.length-first,1); assert.ok(requests[first].path.includes('/planning/suggestions'));
+  requests[first].resolve(suggestions); await recommendation;
+  assert.equal(requests.length-first,2); assert.equal(requests[first+1].path,'/api/customer-insights');
+  assert.equal(done,true);
+  requests[first+1].resolve({version:'recommendation'}); await tick();
+  assert.equal(listRenders,1);
+
+  // A failed secondary request cannot undo the server's planning state or rerender the list.
+  first=begin();
+  const failedBackground = refreshWorkflowViews({planning:true});
+  requests[first].resolve(week('saved')); await tick();
+  requests[first+1].resolve(suggestions); await failedBackground;
+  requests[first+2].reject(new Error('insights unavailable')); await tick();
+  assert.deepEqual(planningData.activities,[{id:'saved'}]); assert.equal(planningLoading,false);
+  assert.equal(insightsLoadFailed,true); assert.equal(listRenders,1);
+  assert.equal(toasts.at(-1),'Kunde inte ladda kundprioritering');
+
+  // An older week response must neither replace newer state nor trigger a competing insights request.
+  first=begin();
+  const older = refreshWorkflowViews({planning:true});
+  const newer = refreshWorkflowViews({planning:true});
+  assert.equal(requests.length-first,2);
+  requests[first].resolve(week('obsolete')); await older;
+  assert.equal(requests.length-first,2); assert.deepEqual(planningData.activities,[{id:'saved'}]);
+  requests[first+1].resolve(week('newer')); await tick();
+  assert.equal(requests.length-first,3); assert.ok(requests[first+2].path.includes('/planning/suggestions'));
+  requests[first+2].resolve(suggestions); await newer;
+  assert.equal(requests.length-first,4); assert.equal(requests[first+3].path,'/api/customer-insights');
+  requests[first+3].resolve({version:'newer'}); await tick();
+  assert.deepEqual(planningData.activities,[{id:'newer'}]);
+
+  // Existing insight request serials still discard an older response.
+  first=begin();
+  let oldResolve, newResolve;
+  const oldResponse = new Promise(resolve => {oldResolve=resolve;});
+  const newResponse = new Promise(resolve => {newResolve=resolve;});
+  const oldInsights = loadInsights({render:false,requestPromise:oldResponse});
+  const newInsights = loadInsights({render:false,requestPromise:newResponse});
+  newResolve({version:'latest'}); await newInsights;
+  oldResolve({version:'obsolete'}); await oldInsights;
+  assert.equal(insights.version,'latest'); assert.equal(requests.length,first);
+
+  // Even an unexpected loader rejection is handled without failing a saved planning action.
+  const originalLoader = loadInsights;
+  loadInsights = async () => {throw new Error('unexpected background failure');};
+  first=begin();
+  const unexpected = refreshWorkflowViews({planning:true});
+  requests[first].resolve(week('still-saved')); await tick();
+  requests[first+1].resolve(suggestions); await unexpected; await tick();
+  assert.deepEqual(planningData.activities,[{id:'still-saved'}]);
+  loadInsights = originalLoader;
+})()`, context).then(() => assert.deepEqual(unhandled,[]))
+  .catch(error => {console.error(error);process.exitCode=1;});
+'''
+        result = subprocess.run(["node", "-e", script, str(INDEX_PATH)],
+                                capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_planning_patch_flows_send_optimistic_version(self):
         self.assertIn(
             "payload.expected_updated_at = planningEditorActivity.updated_at",
