@@ -4744,7 +4744,7 @@
       if (
         requestSerial !== insightsRequestSerial
         || (parentLoadSerial !== null && parentLoadSerial !== customersLoadSerial)
-        || (!render && insightsBackgroundRefreshPending)
+        || insightsBackgroundRefreshPending
       ) return false;
       insights = loadedInsights;
       insightsLoaded = true;
@@ -4777,6 +4777,7 @@
       if (
         requestSerial !== insightsRequestSerial
         || (parentLoadSerial !== null && parentLoadSerial !== customersLoadSerial)
+        || insightsBackgroundRefreshPending
       ) return false;
       if (!render) return false;
       insights = {};

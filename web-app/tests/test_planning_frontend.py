@@ -254,7 +254,7 @@ for (const changes of [{total_minutes:550},{break_minutes:-1},{wait_minutes:0},
     def test_workflow_refresh_orders_real_requests_and_preserves_serial_guards(self):
         script = r'''
 const fs = require('node:fs'), vm = require('node:vm'), assert = require('node:assert/strict');
-const html = fs.readFileSync(process.argv[1], 'utf8');
+const html = fs.readFileSync(process.argv[2], 'utf8');
 const source = name => {
   const match = new RegExp(`  (?:async )?function ${name}\\(`).exec(html);
   assert.ok(match, name);
@@ -444,10 +444,11 @@ vm.runInContext(`(async () => {
   assert.deepEqual(planningData.activities,[{id:'still-saved'}]);
   loadInsights = originalLoader;
 
-  // A planning background refresh must not supersede an inflight foreground insights request.
+  // A planning background refresh waits for foreground and discards its known stale result.
   first=begin();
   const foreground = loadInsights({render:true});
   const foregroundSerial = insightsRequestSerial, rendersBefore = listRenders;
+  const beforeForegroundRefresh = insights;
   assert.equal(insightsForegroundRequests,1);
   const refreshDuringForeground = refreshWorkflowViews({planning:true});
   requests[first+1].resolve(week('foreground-inflight')); await tick();
@@ -460,13 +461,13 @@ vm.runInContext(`(async () => {
   await loadInsights({render:false}); await loadInsights({render:false});
   assert.equal(requests.length-first,3); assert.equal(insightsRequestSerial,foregroundSerial);
   requests[first].resolve({version:'foreground'});
-  assert.equal(await foreground,true);
-  assert.equal(insights.version,'foreground'); assert.equal(listRenders,rendersBefore+1);
+  assert.equal(await foreground,false);
+  assert.equal(insights,beforeForegroundRefresh); assert.equal(listRenders,rendersBefore);
   assert.equal(insightsForegroundRequests,0); assert.equal(toasts.length,toastCount);
   assert.equal(insightsBackgroundRefreshPending,false);
   assert.equal(requests.length-first,4); assert.equal(requests[first+3].path,'/api/customer-insights');
   requests[first+3].resolve({version:'fresh-background'}); await tick();
-  assert.equal(insights.version,'fresh-background'); assert.equal(listRenders,rendersBefore+1);
+  assert.equal(insights.version,'fresh-background'); assert.equal(listRenders,rendersBefore);
   assert.equal(requests.length-first,4);
 
   // A failed week fetch prevents insights, but a handled suggestions failure still allows freshness.
@@ -535,6 +536,7 @@ vm.runInContext(`(async () => {
   first=begin();
   const preMutationForeground = loadInsights({render:true});
   const preMutationSerial = insightsRequestSerial, preMutationRenders = listRenders;
+  const preMutationInsights = insights;
   const activity = {id:'dragged',revision:1,scheduled_at:'2026-10-05T09:00:00+02:00'};
   planningData = week('dragged');
   const mutation = planningCommitDraggedActivity(activity,600);
@@ -548,13 +550,13 @@ vm.runInContext(`(async () => {
   assert.equal(requests.length-first,4); assert.equal(insightsRequestSerial,preMutationSerial);
   assert.equal(insightsForegroundRequests,1); assert.equal(insightsBackgroundRefreshPending,true);
   requests[first].resolve({version:'before-mutation'});
-  assert.equal(await preMutationForeground,true);
-  assert.equal(insights.version,'before-mutation'); assert.equal(listRenders,preMutationRenders+1);
+  assert.equal(await preMutationForeground,false);
+  assert.equal(insights,preMutationInsights); assert.equal(listRenders,preMutationRenders);
   assert.equal(requests.length-first,5); assert.equal(requests[first+4].path,'/api/customer-insights');
   assert.equal(insightsForegroundRequests,0); assert.equal(insightsBackgroundRefreshPending,false);
   requests[first+4].resolve({version:'after-mutation'}); await tick();
   assert.equal(insights.version,'after-mutation'); assert.equal(requests.length-first,5);
-  assert.equal(listRenders,preMutationRenders+1);
+  assert.equal(listRenders,preMutationRenders);
 
   // Only the last of multiple foreground requests drains the deferred refresh; failure remains silent.
   first=begin();
@@ -565,7 +567,7 @@ vm.runInContext(`(async () => {
   assert.equal(insightsForegroundRequests,2); assert.equal(requests.length,first);
   firstForegroundResolve({version:'superseded'}); assert.equal(await firstForeground,false);
   assert.equal(insightsForegroundRequests,1); assert.equal(requests.length,first);
-  lastForegroundResolve({version:'valid-foreground'}); assert.equal(await lastForeground,true);
+  lastForegroundResolve({version:'valid-foreground'}); assert.equal(await lastForeground,false);
   assert.equal(insightsForegroundRequests,0); assert.equal(requests.length-first,1);
   const retainedInsights = insights, retainedRevision = insightsRevision, retainedToasts = toasts.length;
   emailClickNoOrderActive = true; filterState.emailProposal.add('selected');
@@ -633,14 +635,15 @@ vm.runInContext(`(async () => {
   // A foreground completing first cannot drain pending work while background is still in flight.
   first=begin();
   const mixedBackground = loadInsights({render:false});
+  const beforeMixedInsights = insights;
   let mixedForegroundResolve;
   const mixedForeground = loadInsights({render:true,requestPromise:new Promise(resolve => {mixedForegroundResolve=resolve;})});
   await loadInsights({render:false});
-  mixedForegroundResolve({version:'mixed-foreground'}); await mixedForeground;
+  mixedForegroundResolve({version:'mixed-foreground'}); assert.equal(await mixedForeground,false);
   assert.equal(insightsForegroundRequests,0); assert.equal(insightsBackgroundRequests,1);
   assert.equal(insightsBackgroundRefreshPending,true); assert.equal(requests.length-first,1);
   requests[first].resolve({version:'superseded-background'}); assert.equal(await mixedBackground,false);
-  assert.equal(insights.version,'mixed-foreground'); assert.equal(requests.length-first,2);
+  assert.equal(insights,beforeMixedInsights); assert.equal(requests.length-first,2);
   assert.equal(requests[first+1].path,'/api/customer-insights');
   requests[first+1].resolve({version:'mixed-fresh'}); await tick();
   assert.equal(insights.version,'mixed-fresh'); assert.equal(insightsBackgroundRequests,0);
@@ -747,11 +750,49 @@ vm.runInContext(`(async () => {
   assert.equal(insightsListRenderPending,false); assert.equal(insightsBackgroundRequests,0);
   assert.equal(requests.length-first,5);
   simulateListScrollJump=false; deferAnimationFrames=false;
+
+  // Foreground reuses superseded network A via fetchJsonShared; neither success nor failure may publish it.
+  for (const rejectSharedRequest of [false,true]) {
+    first=begin();
+    const sharedBackground = loadInsights({render:false});
+    const sharedNetworkPromise = sharedJsonRequests.get('/api/customer-insights');
+    await commitMutation(rejectSharedRequest?'shared-failure-mutation-b':'shared-success-mutation-b');
+    assert.equal(insightsBackgroundRefreshPending,true); assert.equal(requests.length-first,4);
+    const sharedForeground = loadInsights(); // No custom requestPromise: this must use network A.
+    assert.equal(sharedJsonRequests.get('/api/customer-insights'),sharedNetworkPromise);
+    assert.equal(requests.length-first,4);
+    assert.equal(insightsForegroundRequests,1); assert.equal(insightsBackgroundRequests,1);
+    emailClickNoOrderActive=true; filterState.emailProposal.add('selected');
+    const retainedSharedInsights = insights, retainedSharedRevision = insightsRevision;
+    const retainedSharedHtml = list.innerHTML, retainedSharedRenders = listRenders;
+    const retainedSharedToasts = toasts.length, retainedSharedDirty = insightsListRenderPending;
+    const retainedSharedFilter = [...filterState.emailProposal];
+    if (rejectSharedRequest) requests[first].reject(new Error('superseded shared request unavailable'));
+    else requests[first].resolve(guidancePayload('shared-stale','2026-10-01','act_now','Shared stale guidance'));
+    assert.deepEqual(await Promise.all([sharedBackground,sharedForeground]),[false,false]);
+    assert.equal(insights,retainedSharedInsights); assert.equal(insightsRevision,retainedSharedRevision);
+    assert.equal(insightsLoaded,true); assert.equal(insightsLoadFailed,false);
+    assert.equal(list.innerHTML,retainedSharedHtml); assert.equal(listRenders,retainedSharedRenders);
+    assert.equal(insightsListRenderPending,retainedSharedDirty); assert.equal(toasts.length,retainedSharedToasts);
+    assert.equal(emailClickNoOrderActive,true); assert.deepEqual([...filterState.emailProposal],retainedSharedFilter);
+    assert.equal(insightsForegroundRequests,0); assert.equal(insightsBackgroundRequests,1);
+    assert.equal(insightsBackgroundRefreshPending,false);
+    assert.equal(requests.length-first,5); assert.equal(requests[first+4].path,'/api/customer-insights');
+    assert.notEqual(sharedJsonRequests.get('/api/customer-insights'),sharedNetworkPromise);
+    requests[first+4].resolve(guidancePayload('shared-fresh','2026-10-10','planned','Shared fresh guidance'));
+    await tick();
+    assert.equal(getCustomerGuidance(customers[0]).planned_activity_id,'shared-fresh');
+    assert.ok(list.innerHTML.includes('Shared fresh guidance')); assert.ok(!list.innerHTML.includes('Shared stale guidance'));
+    assert.equal(listRenders,retainedSharedRenders+1); assert.equal(insightsRevision,retainedSharedRevision+1);
+    assert.equal(requests.length-first,5); assert.equal(insightsForegroundRequests,0);
+    assert.equal(insightsBackgroundRequests,0); assert.equal(insightsBackgroundRefreshPending,false);
+    assert.equal(toasts.length,retainedSharedToasts); assert.equal(sharedJsonRequests.size,0);
+  }
 })()`, context).then(() => assert.deepEqual(unhandled,[]))
   .catch(error => {console.error(error);process.exitCode=1;});
 '''
-        result = subprocess.run(["node", "-e", script, str(INDEX_PATH)],
-                                capture_output=True, text=True, timeout=20)
+        result = subprocess.run(["node", "-", str(INDEX_PATH)], input=script,
+                                capture_output=True, text=True, encoding="utf-8", timeout=20)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_planning_patch_flows_send_optimistic_version(self):
