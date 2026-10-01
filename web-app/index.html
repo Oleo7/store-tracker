@@ -4744,6 +4744,7 @@
       if (
         requestSerial !== insightsRequestSerial
         || (parentLoadSerial !== null && parentLoadSerial !== customersLoadSerial)
+        || (!render && insightsBackgroundRefreshPending)
       ) return false;
       insights = loadedInsights;
       insightsLoaded = true;
@@ -4752,24 +4753,22 @@
       buildInsightDropdowns();
       updateEmailClickNoOrderChip();
       updateChip("emailProposal");
-      if (render) {
+      if (render || activeViewName() === "list") {
         const scrollX = window.scrollX;
         const scrollY = window.scrollY;
-        if (announceSort) {
+        if (render && announceSort) {
           showToast("Prioriteringen är klar – uppdaterar sortering");
         }
         renderList();
         window.scrollTo(scrollX, scrollY);
         requestAnimationFrame(() => window.scrollTo(scrollX, scrollY));
-        if (performanceStartMark && parentLoadSerial !== null) {
+        if (render && performanceStartMark && parentLoadSerial !== null) {
           recordFrontendMilestone(
             "time-to-ready-insights",
             performanceStartMark,
             parentLoadSerial,
           );
         }
-      } else if (activeViewName() === "list") {
-        renderList();
       } else {
         insightsListRenderPending = true;
       }
@@ -7831,7 +7830,8 @@
       planningRecommendationPreview = [];
       planningRecommendationPendingCount = 0;
       renderPlanningRecommendation({ error });
-      return false;
+      // A current, handled failure still completes the refresh attempt after a save.
+      return true;
     } finally {
       if (requestSerial === planningRecommendationRequestSerial) {
         planningRecommendationLoading = false;
@@ -8089,9 +8089,9 @@
         .map(normalizePlanningUser)
         .filter(user => user.user_name);
       renderPlanning();
-      const recommendationLoaded = await loadPlanningRecommendation();
+      await loadPlanningRecommendation();
       resumePlanningRoutePreviewRecovery();
-      return recommendationLoaded;
+      return true;
     } catch (error) {
       if (requestSerial !== planningLoadSerial) return false;
       renderPlanningLoadError(error);

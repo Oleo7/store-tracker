@@ -288,7 +288,13 @@ const element = id => {
     elements.set(id, {
       id, classList:{add:value=>classes.add(value),remove:value=>classes.delete(value),contains:value=>classes.has(value)},
       get innerHTML() {return html;},
-      set innerHTML(value) {html=value;if (id==='customer-list') listRenders++;},
+      set innerHTML(value) {
+        html=value;
+        if (id==='customer-list') {
+          listRenders++;
+          if (simulateListScrollJump) {window.scrollX=0;window.scrollY=0;}
+        }
+      },
       querySelectorAll:()=>[], addEventListener:()=>{},
     });
   }
@@ -307,8 +313,11 @@ let lastListSignature = '', visibleListCount = 10, filteredCustomers = [];
 const LIST_BATCH_SIZE = 10, getListSignature = () => 'test-list';
 const getBaseFilteredCustomers = () => customers, getRouteProposalStop = () => null;
 const isCancelledCustomer = () => false, currentUserCanPlan = () => true;
-const window = {scrollX:0,scrollY:0,scrollTo:()=>{}};
-const requestAnimationFrame = callback => callback();
+let simulateListScrollJump = false;
+const scrollCalls = [], animationFrames = [];
+const window = {scrollX:0,scrollY:0,scrollTo:(x,y)=>{scrollCalls.push([x,y]);window.scrollX=x;window.scrollY=y;}};
+let deferAnimationFrames = false;
+const requestAnimationFrame = callback => {if (deferAnimationFrames) animationFrames.push(callback);else callback();};
 const tick = () => new Promise(resolve => setImmediate(resolve));
 function controlledRequest(path) {
   let resolve, reject;
@@ -460,7 +469,7 @@ vm.runInContext(`(async () => {
   assert.equal(insights.version,'fresh-background'); assert.equal(listRenders,rendersBefore+1);
   assert.equal(requests.length-first,4);
 
-  // Neither a failed week fetch nor a failed recommendation may start background insights.
+  // A failed week fetch prevents insights, but a handled suggestions failure still allows freshness.
   first=begin();
   const failedWeek = refreshWorkflowViews({planning:true});
   requests[first].reject(new Error('activities unavailable')); await failedWeek;
@@ -469,12 +478,39 @@ vm.runInContext(`(async () => {
   const failedWeekRecommendation = refreshWorkflowViews({planning:true});
   requests[first].resolve(week('saved-without-recommendation')); await tick();
   requests[first+1].reject(new Error('suggestions unavailable')); await failedWeekRecommendation;
-  assert.equal(requests.length-first,2);
+  assert.equal(requests.length-first,3); assert.equal(requests[first+2].path,'/api/customer-insights');
+  requests[first+2].resolve({version:'fresh-background'}); await tick();
   first=begin();
   const failedRecommendation = refreshWorkflowViews({recommendation:true});
   requests[first].reject(new Error('suggestions unavailable')); await failedRecommendation;
-  assert.equal(requests.length-first,1);
+  assert.equal(requests.length-first,2); assert.equal(requests[first+1].path,'/api/customer-insights');
+  requests[first+1].resolve({version:'fresh-background'}); await tick();
   assert.equal(insights.version,'fresh-background'); assert.equal(toasts.length,toastCount);
+
+  // A week superseded while waiting for suggestions is still obsolete and must not trigger insights.
+  first=begin();
+  const supersededWeek = refreshWorkflowViews({planning:true});
+  requests[first].resolve(week('superseded-after-activities')); await tick();
+  const replacingWeek = refreshWorkflowViews({planning:true});
+  requests[first+1].resolve(suggestions); await supersededWeek;
+  assert.equal(requests.length-first,3);
+  requests[first+2].reject(new Error('new activities unavailable')); await replacingWeek;
+  assert.equal(requests.length-first,3);
+
+  // Obsolete recommendations and unexpected rejected loaders must not start insights.
+  first=begin();
+  const obsoleteRecommendation = refreshWorkflowViews({recommendation:true});
+  const currentRecommendation = refreshWorkflowViews({recommendation:true});
+  requests[first].reject(new Error('obsolete suggestions unavailable')); await obsoleteRecommendation;
+  assert.equal(requests.length-first,2);
+  requests[first+1].resolve(suggestions); await currentRecommendation;
+  assert.equal(requests.length-first,3);
+  requests[first+2].resolve({version:'fresh-background'}); await tick();
+  const originalRecommendationLoader = loadPlanningRecommendation;
+  loadPlanningRecommendation = async () => {throw new Error('unexpected loader rejection');};
+  first=begin(); await refreshWorkflowViews({recommendation:true});
+  assert.equal(requests.length,first);
+  loadPlanningRecommendation = originalRecommendationLoader;
 
   // A newer foreground response still wins over a background request already in progress.
   let backgroundResolve, foregroundResolve;
@@ -541,7 +577,7 @@ vm.runInContext(`(async () => {
   assert.equal(insightsBackgroundRefreshPending,false);
 
   // Real planning mutations B and C during background A require one new fetch after A, never reuse A.
-  const commitMutation = async id => {
+  const commitMutation = async (id, failSuggestions = false) => {
     const start = begin();
     const row = {id,revision:1,scheduled_at:'2026-10-05T09:00:00+02:00'};
     planningData = week(id);
@@ -551,7 +587,9 @@ vm.runInContext(`(async () => {
     assert.ok(requests[start+1].path.includes('/planning/activities?'));
     requests[start+1].resolve(week(id)); await tick();
     assert.ok(requests[start+2].path.includes('/planning/suggestions'));
-    requests[start+2].resolve(suggestions); await save;
+    if (failSuggestions) requests[start+2].reject(new Error('suggestions unavailable after save'));
+    else requests[start+2].resolve(suggestions);
+    await save;
     assert.equal(planningDragSavingIds.size,0); assert.equal(planningLoading,false);
     return start;
   };
@@ -559,6 +597,7 @@ vm.runInContext(`(async () => {
   assert.equal(requests.length-first,4); assert.equal(requests[first+3].path,'/api/customer-insights');
   assert.equal(insightsBackgroundRequests,1); assert.equal(insightsBackgroundRefreshPending,false);
   const backgroundASerial = insightsRequestSerial, mutationRenders = listRenders;
+  const beforeStaleA = insights, beforeStaleARevision = insightsRevision, beforeStaleADirty = insightsListRenderPending;
   await commitMutation('mutation-b');
   assert.equal(requests.length-first,7); assert.equal(insightsBackgroundRefreshPending,true);
   assert.equal(insightsRequestSerial,backgroundASerial); assert.equal(insightsBackgroundRequests,1);
@@ -566,7 +605,8 @@ vm.runInContext(`(async () => {
   assert.equal(requests.length-first,10); assert.equal(insightsBackgroundRefreshPending,true);
   assert.equal(insightsRequestSerial,backgroundASerial); assert.equal(insightsBackgroundRequests,1);
   requests[first+3].resolve({version:'before-b-and-c'}); await tick();
-  assert.equal(insights.version,'before-b-and-c'); assert.equal(requests.length-first,11);
+  assert.equal(insights,beforeStaleA); assert.equal(insightsRevision,beforeStaleARevision);
+  assert.equal(insightsListRenderPending,beforeStaleADirty); assert.equal(requests.length-first,11);
   assert.equal(requests[first+10].path,'/api/customer-insights');
   assert.equal(insightsBackgroundRequests,1); assert.equal(insightsBackgroundRefreshPending,false);
   requests[first+10].resolve({version:'after-b-and-c'}); await tick();
@@ -665,6 +705,48 @@ vm.runInContext(`(async () => {
   assert.equal(toasts.length,beforeHiddenFailureToasts);
   showView('list'); assert.equal(listRenders,beforeHiddenFailureRenders+1);
   assert.ok(list.innerHTML.includes('Final guidance')); assert.equal(insightsListRenderPending,false);
+
+  // A saved planning mutation still refreshes insights after its suggestions GET fails.
+  showView('planning');
+  const beforePartialSaveToasts = toasts.length, beforePartialSaveRenders = listRenders;
+  first = await commitMutation('partial-recommendation-failure',true);
+  assert.deepEqual(planningData.activities,[{id:'partial-recommendation-failure'}]);
+  assert.equal(planningRecommendation,null); assert.equal(planningRecommendationLoading,false);
+  assert.equal(toasts.length,beforePartialSaveToasts+1);
+  assert.equal(toasts.at(-1),'Aktiviteten flyttades till 10:00');
+  assert.equal(requests.length-first,4); assert.equal(requests[first+3].path,'/api/customer-insights');
+  requests[first+3].resolve(guidancePayload('partial-saved','2026-10-08','planned','Saved despite suggestions error'));
+  await tick(); assert.equal(listRenders,beforePartialSaveRenders); assert.equal(insightsListRenderPending,true);
+  showView('list'); assert.ok(list.innerHTML.includes('Saved despite suggestions error'));
+  assert.equal(toasts.length,beforePartialSaveToasts+1);
+
+  // Known stale background A publishes nothing after mutation B, then the fresh result preserves scroll.
+  first=begin();
+  const knownStaleBackground = loadInsights({render:false});
+  await commitMutation('known-stale-mutation-b');
+  assert.equal(requests.length-first,4); assert.equal(insightsBackgroundRefreshPending,true);
+  const beforeKnownStale = insights, beforeKnownStaleRevision = insightsRevision;
+  const beforeKnownStaleHtml = list.innerHTML, beforeKnownStaleRenders = listRenders;
+  requests[first].resolve(guidancePayload('stale-activity','2026-10-01','act_now','Known stale guidance'));
+  assert.equal(await knownStaleBackground,false);
+  assert.equal(insights,beforeKnownStale); assert.equal(insightsRevision,beforeKnownStaleRevision);
+  assert.equal(list.innerHTML,beforeKnownStaleHtml); assert.equal(listRenders,beforeKnownStaleRenders);
+  assert.equal(insightsListRenderPending,false); assert.equal(insightsBackgroundRefreshPending,false);
+  assert.equal(requests.length-first,5); assert.equal(requests[first+4].path,'/api/customer-insights');
+  window.scrollX=13; window.scrollY=487; scrollCalls.length=0;
+  simulateListScrollJump=true; deferAnimationFrames=true;
+  requests[first+4].resolve(guidancePayload('fresh-activity','2026-10-09','planned','Fresh after mutation B'));
+  await tick();
+  assert.equal(listRenders,beforeKnownStaleRenders+1); assert.ok(list.innerHTML.includes('Fresh after mutation B'));
+  assert.ok(!list.innerHTML.includes('Known stale guidance')); assert.ok(!list.innerHTML.includes('stale-activity'));
+  assert.equal(window.scrollX,13); assert.equal(window.scrollY,487);
+  assert.deepEqual(scrollCalls,[[13,487]]); assert.equal(animationFrames.length,1);
+  window.scrollX=0; window.scrollY=0; animationFrames.shift()();
+  assert.equal(window.scrollX,13); assert.equal(window.scrollY,487);
+  assert.deepEqual(scrollCalls,[[13,487],[13,487]]);
+  assert.equal(insightsListRenderPending,false); assert.equal(insightsBackgroundRequests,0);
+  assert.equal(requests.length-first,5);
+  simulateListScrollJump=false; deferAnimationFrames=false;
 })()`, context).then(() => assert.deepEqual(unhandled,[]))
   .catch(error => {console.error(error);process.exitCode=1;});
 '''
