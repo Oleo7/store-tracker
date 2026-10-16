@@ -245,10 +245,8 @@ for (const changes of [{total_minutes:550},{break_minutes:-1},{wait_minutes:0},
             flags=re.DOTALL,
         )
         self.assertIsNotNone(drag_save)
-        self.assertIn(
-            "await refreshWorkflowViews({ planning: true })",
-            drag_save.group(1),
-        )
+        self.assertNotIn("refreshWorkflowViews({ planning: true })", drag_save.group(1))
+        self.assertNotIn("loadPlanningWeek()", drag_save.group(1))
 
     @skipUnless(shutil.which("node"), "Node.js required for real frontend helpers")
     def test_workflow_refresh_orders_real_requests_and_preserves_serial_guards(self):
@@ -269,6 +267,9 @@ const context = vm.createContext({assert, URLSearchParams, setImmediate});
 vm.runInContext(`
 const API = '/api', sharedJsonRequests = new Map(), requests = [], toasts = [];
 let planningLoadSerial = 0, planningRecommendationRequestSerial = 0, insightsRequestSerial = 0;
+let planningDragMutationSerial = 0;
+const planningDragOperations = new Map();
+const planningDragActivityVersions = new Map();
 let insightsForegroundRequests = 0;
 let insightsBackgroundRequests = 0;
 let insightsBackgroundRefreshPending = false;
@@ -295,7 +296,7 @@ const element = id => {
           if (simulateListScrollJump) {window.scrollX=0;window.scrollY=0;}
         }
       },
-      querySelectorAll:()=>[], addEventListener:()=>{},
+      querySelectorAll:()=>[], querySelector:()=>null, addEventListener:()=>{},
     });
   }
   return elements.get(id);
@@ -328,24 +329,24 @@ function controlledRequest(path) {
 const fetch = path => controlledRequest(path).then(payload => ({ok:true,json:async()=>payload}));
 const planningFetchJson = controlledRequest;
 const planningCancelDrag = () => {}, planningTodayKey = () => planningSelectedDate;
+const planningCalendarContextKey = () => 'test-calendar';
 const planningStartOfWeek = value => value, planningAddDays = value => value;
 const planningOwnerQuery = value => value, userIsAdmin = () => false;
 const normalizePlanningUser = value => value, normalizePlanningActivity = value => value;
 const renderPlanningWeekStrip = () => {}, renderPlanning = () => {};
 const renderPlanningLoadError = () => {}, resumePlanningRoutePreviewRecovery = () => {};
 const renderPlanningRecommendation = () => {}, renderPlanningCandidates = () => {};
+// This fixture triggers a critical refresh after a controlled server mutation. Actual
+// drag persistence has its own regression suite because it now preserves the calendar.
 const planningDragSavingIds = new Set();
-let planningDragRetry = null;
-const planningActivityId = activity => activity.id, planningActivityMinutes = () => 540;
-const planningMinutesLabel = () => '10:00', planningStockholmIso = () => '2026-10-05T10:00:00+02:00';
-const planningClientRequestId = () => 'drag-request', renderPlanningAgenda = () => {};
-const planningReplaceActivity = (id, activity) => {
-  planningData.activities = planningData.activities.map(row => row.id === id ? activity : row);
+const simulateCriticalWorkflowMutation = async activity => {
+  await planningFetchJson('/planning/activities/'+activity.id, {method:'PATCH'});
+  await refreshWorkflowViews({planning:true});
 };
 const buildInsightDropdowns = () => {}, updateEmailClickNoOrderChip = () => {}, updateChip = () => {};
 const showToast = text => toasts.push(text);
 ${['fetchJsonShared','loadInsights','loadPlanningRecommendation','loadPlanningWeek','refreshWorkflowViews',
-   'planningCommitDraggedActivity','activeViewName','showView','renderList','esc','escAttr',
+   'activeViewName','showView','renderList','esc','escAttr',
    'customerInsightKey','getCustomerInsight','getCustomerGuidance','hasPriorityScore',
    'getGuidanceStatusClass','getNextActionColorClass','guidanceContactLabel','getNextActionHtml',
    'getPrioritySummaryHtml','getPotentialHtml','getCardDateHtml','getDeliveryVolumeText',
@@ -532,14 +533,14 @@ vm.runInContext(`(async () => {
   assert.equal(filterState.emailProposal.size,0);
   assert.equal(toasts.at(-1),'Kunde inte ladda kundprioritering');
 
-  // Foreground starts before a real planning mutation; its old result is followed by one fresh request.
+  // Foreground starts before a critical workflow mutation; its old result is followed by one fresh request.
   first=begin();
   const preMutationForeground = loadInsights({render:true});
   const preMutationSerial = insightsRequestSerial, preMutationRenders = listRenders;
   const preMutationInsights = insights;
   const activity = {id:'dragged',revision:1,scheduled_at:'2026-10-05T09:00:00+02:00'};
   planningData = week('dragged');
-  const mutation = planningCommitDraggedActivity(activity,600);
+  const mutation = simulateCriticalWorkflowMutation(activity);
   assert.equal(requests[first+1].path,'/planning/activities/dragged');
   requests[first+1].resolve({activity:{...activity,scheduled_at:'2026-10-05T10:00:00+02:00'}});
   await tick(); assert.ok(requests[first+2].path.includes('/planning/activities?'));
@@ -578,12 +579,12 @@ vm.runInContext(`(async () => {
   assert.equal(toasts.length,retainedToasts); assert.equal(requests.length-first,1);
   assert.equal(insightsBackgroundRefreshPending,false);
 
-  // Real planning mutations B and C during background A require one new fetch after A, never reuse A.
+  // Critical workflow mutations B and C during background A require one new fetch after A, never reuse A.
   const commitMutation = async (id, failSuggestions = false) => {
     const start = begin();
     const row = {id,revision:1,scheduled_at:'2026-10-05T09:00:00+02:00'};
     planningData = week(id);
-    const save = planningCommitDraggedActivity(row,600);
+    const save = simulateCriticalWorkflowMutation(row);
     assert.equal(requests[start].path,'/planning/activities/'+id);
     requests[start].resolve({activity:row}); await tick();
     assert.ok(requests[start+1].path.includes('/planning/activities?'));
@@ -715,13 +716,12 @@ vm.runInContext(`(async () => {
   first = await commitMutation('partial-recommendation-failure',true);
   assert.deepEqual(planningData.activities,[{id:'partial-recommendation-failure'}]);
   assert.equal(planningRecommendation,null); assert.equal(planningRecommendationLoading,false);
-  assert.equal(toasts.length,beforePartialSaveToasts+1);
-  assert.equal(toasts.at(-1),'Aktiviteten flyttades till 10:00');
+  assert.equal(toasts.length,beforePartialSaveToasts);
   assert.equal(requests.length-first,4); assert.equal(requests[first+3].path,'/api/customer-insights');
   requests[first+3].resolve(guidancePayload('partial-saved','2026-10-08','planned','Saved despite suggestions error'));
   await tick(); assert.equal(listRenders,beforePartialSaveRenders); assert.equal(insightsListRenderPending,true);
   showView('list'); assert.ok(list.innerHTML.includes('Saved despite suggestions error'));
-  assert.equal(toasts.length,beforePartialSaveToasts+1);
+  assert.equal(toasts.length,beforePartialSaveToasts);
 
   // Known stale background A publishes nothing after mutation B, then the fresh result preserves scroll.
   first=begin();
@@ -1136,7 +1136,19 @@ vm.runInContext(`(async () => {
             flags=re.DOTALL,
         )
         self.assertIsNotNone(commit)
-        body = commit.group(1)
+        save = re.search(
+            r"async function planningSaveDraggedActivity\(operation\) \{(.*?)\n  \}",
+            self.html,
+            flags=re.DOTALL,
+        )
+        optimistic = re.search(
+            r"function planningDragOptimisticActivity\(activity, scheduledAt\) \{(.*?)\n  \}",
+            self.html,
+            flags=re.DOTALL,
+        )
+        self.assertIsNotNone(save)
+        self.assertIsNotNone(optimistic)
+        body = commit.group(1) + save.group(1) + optimistic.group(1)
         for field in (
             "scheduled_at",
             "client_request_id",
@@ -1149,7 +1161,8 @@ vm.runInContext(`(async () => {
         self.assertIn("retry?.requestBody || JSON.stringify(payload)", body)
         self.assertIn('method: "PATCH"', body)
         self.assertIn('["revision_conflict", "planning_changed"]', body)
-        self.assertIn("await loadPlanningWeek()", body)
+        self.assertNotIn("await loadPlanningWeek()", body)
+        self.assertNotIn("refreshWorkflowViews({ planning: true })", body)
         self.assertIn('activity.source === "route" ? "manual"', body)
 
     def test_drag_cleanup_covers_escape_reload_and_view_switch(self):

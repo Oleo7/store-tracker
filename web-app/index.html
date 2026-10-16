@@ -4628,7 +4628,10 @@
   let planningDragState = null;
   let planningDragFrame = 0;
   let planningDragAutoScrollFrame = 0;
-  let planningDragRetry = null;
+  let planningDragMutationSerial = 0;
+  const planningDragActivityVersions = new Map();
+  const planningDragRetries = new Map();
+  const planningDragOperations = new Map();
   const planningDragSavingIds = new Set();
   const planningDragSuppressedClicks = new Map();
   const planningStatusRequestIds = new Map();
@@ -8072,11 +8075,18 @@
       planningWeekStart = planningStartOfWeek(planningSelectedDate);
     }
     const requestSerial = ++planningLoadSerial;
+    const mutationSerial = planningDragMutationSerial;
+    const retainedData = planningData;
+    const agenda = document.getElementById("planning-agenda");
+    const retainCalendar = Boolean(retainedData &&
+      agenda.querySelector(".planning-calendar")?.dataset.calendarContext === planningCalendarContextKey());
     planningLoading = true;
-    document.getElementById("planning-agenda").innerHTML =
-      '<div class="planning-state"><strong>Laddar planering…</strong>Hämtar aktiviteter för veckan.</div>';
-    document.getElementById("planning-backlog").innerHTML =
-      '<div class="planning-state">Laddar att planera…</div>';
+    if (!retainCalendar) {
+      agenda.innerHTML =
+        '<div class="planning-state"><strong>Laddar planering…</strong>Hämtar aktiviteter för veckan.</div>';
+      document.getElementById("planning-backlog").innerHTML =
+        '<div class="planning-state">Laddar att planera…</div>';
+    }
     renderPlanningWeekStrip();
     try {
       const params = planningOwnerQuery(new URLSearchParams({
@@ -8086,12 +8096,13 @@
       }));
       const payload = await planningFetchJson(`/planning/activities?${params.toString()}`);
       if (requestSerial !== planningLoadSerial) return false;
+      if (retainCalendar && planningData !== retainedData) return false;
       const source = payload?.data && typeof payload.data === "object" ? payload.data : payload;
       const responseOwner = normalizePlanningUser(source.owner || {});
       if (userIsAdmin() && responseOwner.user_name) {
         planningSelectedUserName = responseOwner.user_name;
       }
-      planningData = {
+      const loadedData = {
         ...source,
         activities: (source.activities || source.items || []).map(normalizePlanningActivity),
         unplanned_contacts: source.unplanned_contacts || source.unplanned || [],
@@ -8101,16 +8112,31 @@
         day_summaries: source.day_summaries || source.days || [],
         available_users: source.available_users || source.users || [],
       };
+      if (retainCalendar) {
+        // Accept unrelated server changes without detaching pending drag operations
+        // from their data model or replacing their optimistic/newer revisions.
+        loadedData.activities = planningMergeLoadedActivities(loadedData.activities, mutationSerial);
+        Object.assign(planningData, loadedData);
+      } else {
+        planningData = loadedData;
+      }
       planningActiveUsersCache = planningData.available_users
         .map(normalizePlanningUser)
         .filter(user => user.user_name);
-      renderPlanning();
+      if (retainCalendar) {
+        renderPlanningOwnerSelect();
+        renderPlanningWeekStrip();
+        planningRenderDragUpdate();
+      } else {
+        renderPlanning();
+      }
       await loadPlanningRecommendation();
       resumePlanningRoutePreviewRecovery();
       return true;
     } catch (error) {
       if (requestSerial !== planningLoadSerial) return false;
-      renderPlanningLoadError(error);
+      if (retainCalendar) showToast("Planeringen kunde inte uppdateras. Den visade kalendern behålls.");
+      else renderPlanningLoadError(error);
       return false;
     } finally {
       if (requestSerial === planningLoadSerial) planningLoading = false;
@@ -8334,7 +8360,7 @@
       pickingHelp ? "Hjälp med plock" : "",
     ].filter(Boolean).join(", ");
     if (activity.unplanned) {
-      return `<div class="planning-activity-shell" style="${style}">
+      return `<div class="planning-activity-shell" data-planning-calendar-key="${escAttr(planningCalendarActivityKey(activity))}" style="${style}">
         <div class="planning-activity-card contact-${activity.contact_type} status-completed unplanned" aria-label="${escAttr(aria)}">${content}</div>
       </div>`;
     }
@@ -8342,14 +8368,19 @@
     const draggable = planningCanDragActivity(activity);
     const saving = planningDragSavingIds.has(activityId);
     return `<div class="planning-activity-shell${draggable ? " is-draggable" : ""}${saving ? " is-saving" : ""}" style="${style}"
-      data-planning-shell-id="${escAttr(activityId)}">
+      data-planning-shell-id="${escAttr(activityId)}" data-planning-calendar-key="${escAttr(planningCalendarActivityKey(activity))}">
       <button class="planning-activity-card contact-${activity.contact_type} status-${status}${pickingHelp ? " picking-help" : ""}${appointmentConfirmed ? " appointment-confirmed" : ""}" type="button"
         data-planning-open-id="${escAttr(activityId)}" aria-label="${escAttr(aria)}">${content}</button>
-      ${draggable && !saving ? `<button class="planning-drag-handle" type="button" data-planning-drag-handle="${escAttr(activityId)}" aria-label="Flytta ${escAttr(activity.customer || "aktivitet")}"></button>` : ""}
+      ${draggable ? `<button class="planning-drag-handle" type="button" data-planning-drag-handle="${escAttr(activityId)}" aria-label="Flytta ${escAttr(activity.customer || "aktivitet")}"></button>` : ""}
     </div>`;
   }
 
   function renderPlanningAgenda() {
+    ["planning-recommendation", "planning-day-summary"].forEach(id => {
+      const element = document.getElementById(id);
+      element.style.height = "";
+      element.style.overflowY = "";
+    });
     const activities = planningAgendaItemsForDate(planningSelectedDate);
     const dateLabel = planningFormatDate(planningSelectedDate, { year: true });
     document.getElementById("planning-day-title").textContent =
@@ -8399,14 +8430,28 @@
     agenda.innerHTML = `${routeNote}
       <div class="planning-calendar-header" aria-hidden="true"><span></span><span>Telefon/Email</span><span>Besök</span></div>
       <div class="planning-calendar" style="height:${calendarHeight}px" data-calendar-start-minutes="${startMinutes}"
-        data-calendar-end-minutes="${endHour * 60}" data-calendar-px-per-minute="${PLANNING_CALENDAR_PX_PER_MINUTE}">
+        data-calendar-end-minutes="${endHour * 60}" data-calendar-px-per-minute="${PLANNING_CALENDAR_PX_PER_MINUTE}"
+        data-calendar-context="${escAttr(planningCalendarContextKey())}">
         <div class="planning-calendar-hours">${hourLines}</div>
         <div class="planning-calendar-columns">
           <div class="planning-calendar-column" aria-label="Telefon och email">${layout.remote.map(renderPlanningCalendarActivity).join("")}</div>
           <div class="planning-calendar-column" aria-label="Besök">${layout.visit.map(renderPlanningCalendarActivity).join("")}</div>
         </div>
       </div>`;
-    agenda.querySelectorAll("[data-planning-open-id]").forEach(button => {
+    planningBindCalendarActivities(agenda);
+  }
+
+  function planningCalendarContextKey() {
+    const owner = planningSelectedOwner() || currentUser?.user_name || "";
+    return `${normalizeRouteIdentity(owner)}|${planningWeekStart}|${planningSelectedDate}`;
+  }
+
+  function planningCalendarActivityKey(activity) {
+    return activity.unplanned ? `contact:${activity.contact_id}` : `activity:${planningActivityId(activity)}`;
+  }
+
+  function planningBindCalendarActivities(root) {
+    root.querySelectorAll("[data-planning-open-id]").forEach(button => {
       button.addEventListener("click", event => {
         const activityId = button.dataset.planningOpenId;
         if ((planningDragSuppressedClicks.get(activityId) || 0) > Date.now()) {
@@ -8420,9 +8465,91 @@
         if (button.closest(".planning-activity-shell.is-draggable")) event.preventDefault();
       });
     });
-    agenda.querySelectorAll("[data-planning-drag-handle]").forEach(handle => {
+    root.querySelectorAll("[data-planning-drag-handle]").forEach(handle => {
       handle.addEventListener("pointerdown", planningDragPointerDown);
     });
+  }
+
+  function planningPatchCalendarActivity(shell, replacement) {
+    const dragging = shell.classList.contains("is-dragging");
+    shell.style.cssText = replacement.style.cssText;
+    shell.className = replacement.className;
+    if (dragging) shell.classList.add("is-dragging");
+    const card = shell.querySelector(".planning-activity-card");
+    const nextCard = replacement.querySelector(".planning-activity-card");
+    card.className = nextCard.className;
+    card.setAttribute("aria-label", nextCard.getAttribute("aria-label"));
+    card.querySelector(".planning-activity-customer").textContent =
+      nextCard.querySelector(".planning-activity-customer").textContent;
+    const handle = shell.querySelector("[data-planning-drag-handle]");
+    const nextHandle = replacement.querySelector("[data-planning-drag-handle]");
+    if (handle && !nextHandle) handle.remove();
+    else if (handle && nextHandle) handle.setAttribute("aria-label", nextHandle.getAttribute("aria-label"));
+    else if (nextHandle) {
+      nextHandle.addEventListener("pointerdown", planningDragPointerDown);
+      shell.append(nextHandle);
+    }
+  }
+
+  function planningPreserveDragLayout() {
+    // Reserve the space above the grid while secondary information is refreshed.
+    // Normal date/week navigation releases it in renderPlanningAgenda.
+    ["planning-recommendation", "planning-day-summary"].forEach(id => {
+      const element = document.getElementById(id);
+      if (!element.style.height && !element.hidden) {
+        element.style.height = `${element.getBoundingClientRect().height}px`;
+        element.style.overflowY = "auto";
+      }
+    });
+  }
+
+  function planningRenderDragUpdate() {
+    const agenda = document.getElementById("planning-agenda");
+    const calendar = agenda.querySelector(".planning-calendar");
+    if (!calendar || calendar.dataset.calendarContext !== planningCalendarContextKey()) return;
+    planningPreserveDragLayout();
+    const activities = planningAgendaItemsForDate(planningSelectedDate);
+    const previousStart = Number(calendar.dataset.calendarStartMinutes);
+    const previousEnd = Number(calendar.dataset.calendarEndMinutes);
+    // A drag stays within the existing grid. Unrelated edits/conflicts may need
+    // more hours; expand without collapsing hours the user is already viewing.
+    const start = Math.min(previousStart, ...activities.map(activity => Math.floor(planningActivityMinutes(activity) / 60) * 60));
+    const end = Math.min(1440, Math.max(previousEnd, ...activities.map(activity =>
+      Math.ceil((planningActivityMinutes(activity) + (PLANNING_CONTACT_TYPES[activity.contact_type]?.duration || 10)) / 60) * 60)));
+    const compensateStart = start < previousStart && calendar.getBoundingClientRect().top < window.innerHeight;
+    if (start !== previousStart || end !== previousEnd) {
+      calendar.dataset.calendarStartMinutes = String(start);
+      calendar.dataset.calendarEndMinutes = String(end);
+      calendar.style.height = `${(end - start) * PLANNING_CALENDAR_PX_PER_MINUTE}px`;
+      calendar.style.overflowAnchor = "none";
+      calendar.querySelector(".planning-calendar-hours").innerHTML = Array.from({ length: (end - start) / 60 + 1 }, (_, index) =>
+        `<div class="planning-calendar-hour" style="top:${index * 60 * PLANNING_CALENDAR_PX_PER_MINUTE}px"><span>${String(start / 60 + index).padStart(2, "0")}:00</span></div>`
+      ).join("");
+    }
+    const layout = planningCalendarLayout(activities, start);
+    const columns = calendar.querySelectorAll(".planning-calendar-column");
+    const existing = new Map([...calendar.querySelectorAll("[data-planning-calendar-key]")]
+      .map(shell => [shell.dataset.planningCalendarKey, shell]));
+    [layout.remote, layout.visit].forEach((items, index) => {
+      items.forEach(item => {
+        const key = planningCalendarActivityKey(item.activity);
+        const template = document.createElement("template");
+        template.innerHTML = renderPlanningCalendarActivity(item);
+        const replacement = template.content.firstElementChild;
+        const shell = existing.get(key);
+        if (shell) {
+          planningPatchCalendarActivity(shell, replacement);
+          if (shell.parentElement !== columns[index]) columns[index].append(shell);
+          existing.delete(key);
+        } else {
+          planningBindCalendarActivities(replacement);
+          columns[index].append(replacement);
+        }
+      });
+    });
+    existing.forEach(shell => shell.remove());
+    document.getElementById("planning-day-summary").textContent = planningStatusSummary(activities) || "Ingen aktivitet ännu";
+    if (compensateStart) window.scrollBy(0, (previousStart - start) * PLANNING_CALENDAR_PX_PER_MINUTE);
   }
 
   function planningCanDragActivity(activity) {
@@ -8458,7 +8585,7 @@
     const activity = getPlanningActivity(activityId);
     const calendar = shell?.closest(".planning-calendar");
     const column = shell?.closest(".planning-calendar-column");
-    if (!shell || !calendar || !column || !planningCanDragActivity(activity) || planningDragSavingIds.has(activityId)) return;
+    if (!shell || !calendar || !column || !planningCanDragActivity(activity)) return;
     if (handle) event.preventDefault();
     planningDragState = {
       pointerId: event.pointerId,
@@ -8647,61 +8774,153 @@
 
   function planningReplaceActivity(activityId, replacement) {
     if (!planningData) return;
+    planningDragMutationSerial += 1;
+    planningDragActivityVersions.set(activityId, planningDragMutationSerial);
     planningData.activities = (planningData.activities || []).map(activity =>
       planningActivityId(activity) === activityId ? replacement : activity
     );
   }
 
-  async function planningCommitDraggedActivity(activity, targetMinutes) {
-    const activityId = planningActivityId(activity);
-    if (!activityId || planningDragSavingIds.has(activityId) || targetMinutes === planningActivityMinutes(activity)) return;
-    const targetTime = planningMinutesLabel(targetMinutes);
-    const targetScheduledAt = planningStockholmIso(planningSelectedDate, targetTime);
-    const retry = planningDragRetry?.activityId === activityId &&
-      planningDragRetry.targetScheduledAt === targetScheduledAt
-      ? planningDragRetry : null;
-    const payload = retry?.payload || {
-      scheduled_at: targetScheduledAt,
-      client_request_id: planningClientRequestId("planning-drag"),
-      expected_revision: Number(activity.revision || 1),
-      expected_updated_at: String(activity.updated_at || ""),
+  function planningMergeLoadedActivities(incoming, mutationSerial) {
+    const local = new Map((planningData?.activities || []).map(activity => [planningActivityId(activity), activity]));
+    const keepLocal = activity => {
+      const id = planningActivityId(activity);
+      const operation = planningDragOperations.get(id);
+      return (operation?.data === planningData && operation.optimistic === activity) ||
+        (planningDragActivityVersions.get(id) || 0) > mutationSerial;
     };
-    const requestBody = retry?.requestBody || JSON.stringify(payload);
-    const original = { ...activity };
-    const optimistic = {
+    const merged = incoming.map(activity => {
+      const id = planningActivityId(activity);
+      const current = local.get(id);
+      local.delete(id);
+      const operation = planningDragOperations.get(id);
+      const pending = operation?.data === planningData && operation.optimistic === current;
+      return current && (pending || Number(current.revision || 1) > Number(activity.revision || 1) ||
+        (keepLocal(current) && Number(current.revision || 1) === Number(activity.revision || 1)))
+        ? current : activity;
+    });
+    local.forEach(activity => { if (keepLocal(activity)) merged.push(activity); });
+    return merged;
+  }
+
+  function planningDragOptimisticActivity(activity, scheduledAt) {
+    return {
       ...activity,
-      scheduled_at: targetScheduledAt,
+      scheduled_at: scheduledAt,
       source: activity.source === "route" ? "manual" : activity.source,
       time_is_estimated: false,
     };
-    planningDragSavingIds.add(activityId);
-    planningReplaceActivity(activityId, optimistic);
-    renderPlanningAgenda();
+  }
+
+  function planningDragContextIsCurrent(operation) {
+    const owner = normalizeRouteIdentity(planningSelectedOwner() || currentUser?.user_name || "");
+    return planningData === operation.data && owner === operation.owner &&
+      getPlanningActivity(operation.activityId) === operation.optimistic;
+  }
+
+  async function planningSaveDraggedActivity(operation) {
+    const { activityId } = operation;
+    let retry = planningDragRetries.get(activityId);
+    if (retry?.owner !== operation.owner) retry = null;
+    let request = null;
     try {
-      const result = await planningFetchJson(`/planning/activities/${encodeURIComponent(activityId)}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: requestBody,
-      });
-      const serverActivity = normalizePlanningActivity(result.activity || optimistic);
-      planningReplaceActivity(activityId, serverActivity);
-      if (planningDragRetry?.activityId === activityId) planningDragRetry = null;
-      showToast(`Aktiviteten flyttades till ${targetTime}`);
-      await refreshWorkflowViews({ planning: true });
+      while (retry || new Date(operation.desiredScheduledAt).getTime() !== new Date(operation.confirmed.scheduled_at).getTime()) {
+        const payload = retry?.payload || {
+          scheduled_at: operation.desiredScheduledAt,
+          client_request_id: planningClientRequestId("planning-drag"),
+          expected_revision: Number(operation.confirmed.revision || 1),
+          expected_updated_at: String(operation.confirmed.updated_at || ""),
+        };
+        const requestBody = retry?.requestBody || JSON.stringify(payload);
+        request = { owner: operation.owner, payload, requestBody };
+        const result = await planningFetchJson(`/planning/activities/${encodeURIComponent(activityId)}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: requestBody,
+        });
+        if (planningActivityId(result.activity) !== activityId || !Number(result.activity?.revision) ||
+          Number(result.activity.revision) < Number(operation.confirmed.revision || 1)) {
+          throw new Error("Missing saved activity revision");
+        }
+        const serverActivity = normalizePlanningActivity(result.activity);
+        const current = planningDragContextIsCurrent(operation);
+        operation.confirmed = serverActivity;
+        planningDragRetries.delete(activityId);
+        retry = null;
+        if (current) {
+          // A newer drop stays visible while the preceding save supplies its revision.
+          operation.optimistic = new Date(operation.desiredScheduledAt).getTime() === new Date(serverActivity.scheduled_at).getTime()
+            ? serverActivity : planningDragOptimisticActivity(serverActivity, operation.desiredScheduledAt);
+          planningReplaceActivity(activityId, operation.optimistic);
+          planningRenderDragUpdate();
+        }
+      }
+      if (planningDragContextIsCurrent(operation)) {
+        showToast(`Aktiviteten flyttades till ${planningTimeFromIso(operation.confirmed.scheduled_at)}`);
+        // Recommendation changes above the grid keep their reserved space.
+        void loadPlanningRecommendation().catch(() => {});
+        void loadInsights({ render: false }).catch(() => {});
+      }
     } catch (error) {
-      planningReplaceActivity(activityId, original);
-      if (["revision_conflict", "planning_changed"].includes(error.code)) {
-        if (planningDragRetry?.activityId === activityId) planningDragRetry = null;
-        showToast("Planeringen hade ändrats och laddas om");
-        await loadPlanningWeek();
+      const conflict = ["revision_conflict", "planning_changed"].includes(error.code);
+      const definitive = error.status >= 400 && error.status < 500 && ![408, 429].includes(error.status);
+      if (conflict || definitive) planningDragRetries.delete(activityId);
+      else if (request) planningDragRetries.set(activityId, request);
+      if (!planningDragContextIsCurrent(operation)) {
+        if (operation.actor === normalizeRouteIdentity(currentUser?.user_name || "")) {
+          showToast(`Flytten av ${operation.confirmed.customer || "aktiviteten"} kunde inte slutföras. Öppna den dagen igen och försök på nytt.`);
+        }
+        return;
+      }
+      const latest = error.payload?.activity;
+      const replacement = latest && planningActivityId(latest) === activityId
+        ? normalizePlanningActivity(latest) : operation.confirmed;
+      operation.optimistic = replacement;
+      planningReplaceActivity(activityId, replacement);
+      if (conflict) {
+        showToast("Aktiviteten hade ändrats. Kalendern visar den senaste versionen. Försök flytta igen.");
+      } else if (definitive) {
+        showToast(error.message || "Flytten kunde inte sparas. Aktiviteten har återställts.");
       } else {
-        planningDragRetry = { activityId, targetScheduledAt, payload, requestBody };
-        showToast("Flytten kunde inte sparas. Dra till samma tid för att försöka igen.");
+        showToast("Flytten kunde inte bekräftas. Aktiviteten har återställts. Dra igen för ett säkert återförsök.");
       }
     } finally {
       planningDragSavingIds.delete(activityId);
-      if (!planningLoading) renderPlanningAgenda();
+      planningDragOperations.delete(activityId);
+      if (planningDragContextIsCurrent(operation)) planningRenderDragUpdate();
     }
+  }
+
+  async function planningCommitDraggedActivity(activity, targetMinutes) {
+    const activityId = planningActivityId(activity);
+    const current = getPlanningActivity(activityId);
+    if (!activityId || !planningCanDragActivity(current)) return;
+    const targetScheduledAt = planningStockholmIso(planningSelectedDate, planningMinutesLabel(targetMinutes));
+    const pending = planningDragOperations.get(activityId);
+    if (pending) {
+      if (!planningDragContextIsCurrent(pending)) return;
+      pending.desiredScheduledAt = targetScheduledAt;
+      pending.optimistic = planningDragOptimisticActivity(pending.confirmed, targetScheduledAt);
+      planningReplaceActivity(activityId, pending.optimistic);
+      planningRenderDragUpdate();
+      return pending.promise;
+    }
+    const owner = normalizeRouteIdentity(planningSelectedOwner() || currentUser?.user_name || "");
+    const retry = planningDragRetries.get(activityId);
+    if (targetMinutes === planningActivityMinutes(current) && retry?.owner !== owner) return;
+    const operation = {
+      activityId, owner, data: planningData, confirmed: { ...current },
+      actor: normalizeRouteIdentity(currentUser?.user_name || ""),
+      desiredScheduledAt: targetScheduledAt,
+      optimistic: planningDragOptimisticActivity(current, targetScheduledAt),
+      promise: null,
+    };
+    planningDragSavingIds.add(activityId);
+    planningDragOperations.set(activityId, operation);
+    planningReplaceActivity(activityId, operation.optimistic);
+    planningRenderDragUpdate();
+    operation.promise = planningSaveDraggedActivity(operation);
+    return operation.promise;
   }
 
   function planningOwnerIdentityKeys() {
