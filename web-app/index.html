@@ -4401,7 +4401,8 @@
         <div class="planning-form-row">
           <div class="form-field">
             <label for="f-nextFollowUpTime">Tid</label>
-            <input type="time" id="f-nextFollowUpTime" />
+            <input type="time" id="f-nextFollowUpTime" aria-describedby="f-followup-time-suggestion" />
+            <div class="planning-field-help" id="f-followup-time-suggestion" role="status" aria-live="polite"></div>
           </div>
           <div class="form-field">
             <label for="f-followup-note">Anteckning</label>
@@ -4609,6 +4610,8 @@
   let planningEditorCustomer = null;
   let planningEditorSeed = null;
   let planningEditorRequestId = "";
+  let contactTimeSuggestion = null;
+  let planningEditorTimeSuggestion = null;
   let planningModalReturnFocus = null;
   let planningRoutePreview = null;
   let planningRoutePreviewRequestId = "";
@@ -7189,7 +7192,6 @@
     updateFollowupAppointmentField();
     if (enabled && !document.getElementById("f-nextFollowUp").value) {
       document.getElementById("f-nextFollowUp").value = planningAddDays(planningTodayKey(), 7);
-      document.getElementById("f-nextFollowUpTime").value = "09:00";
     }
     renderContactFollowupOwner();
     if (enabled && userIsAdmin()) {
@@ -7202,6 +7204,7 @@
         );
       }
     }
+    await contactTimeSuggestion?.refresh();
   }
 
   function updateFollowupAppointmentField() {
@@ -7258,6 +7261,7 @@
     document.getElementById("f-followup-type").value = "visit";
     document.getElementById("f-nextFollowUp").value = "";
     document.getElementById("f-nextFollowUpTime").value = "";
+    contactTimeSuggestion?.reset();
     document.getElementById("f-followup-note").value = "";
     document.getElementById("f-followup-appointment").checked = false;
     document.getElementById("f-followup-picking-help").checked = false;
@@ -7277,6 +7281,17 @@
   document.getElementById("f-channel").addEventListener("change", updateContactChannelFields);
   document.getElementById("f-followup-enabled").addEventListener("change", updateFollowupFields);
   document.getElementById("f-followup-type").addEventListener("change", updateFollowupAppointmentField);
+  contactTimeSuggestion = setupPlanningTimeSuggestion({
+    dateInput: document.getElementById("f-nextFollowUp"),
+    timeInput: document.getElementById("f-nextFollowUpTime"),
+    changeInputs: ["f-nextFollowUp", "f-followup-owner", "f-followup-type"].map(id => document.getElementById(id)),
+    getOwner: () => userIsAdmin()
+      ? document.getElementById("f-followup-owner").value
+      : currentUser?.user_name || "",
+    getType: () => document.getElementById("f-followup-type").value,
+    message: document.getElementById("f-followup-time-suggestion"),
+    enabled: () => document.getElementById("f-followup-enabled").checked,
+  });
 
   // ── Back (form → origin) ──
   document.getElementById("form-back-btn").addEventListener("click", () => showView(formReturnView));
@@ -8844,6 +8859,8 @@
   }
 
   function closePlanningModal() {
+    planningEditorTimeSuggestion?.cancel();
+    planningEditorTimeSuggestion = null;
     planningModalBackdrop.classList.remove("open");
     planningModalBackdrop.setAttribute("aria-hidden", "true");
     document.body.style.overflow = "";
@@ -8913,18 +8930,84 @@
       });
   }
 
-  function planningDefaultTime(dateKey) {
-    if (dateKey !== planningTodayKey()) return "09:00";
-    const now = new Date();
-    const stockholmTime = new Intl.DateTimeFormat("sv-SE", {
-      timeZone: PLANNING_TIME_ZONE,
-      hour: "2-digit",
-      minute: "2-digit",
-      hour12: false,
-    }).format(now);
-    const [hour, minute] = stockholmTime.split(":").map(Number);
-    const roundedMinutes = Math.min(23 * 60 + 30, Math.ceil((hour * 60 + minute + 15) / 30) * 30);
-    return `${String(Math.floor(roundedMinutes / 60)).padStart(2, "0")}:${String(roundedMinutes % 60).padStart(2, "0")}`;
+  function planningFirstAvailableTime({ dateKey, owner, contactType, activities, now = new Date() }) {
+    const ownerKey = normalizeRouteIdentity(owner);
+    const duration = PLANNING_CONTACT_TYPES[contactType]?.duration;
+    if (!planningDateFromKey(dateKey) || !ownerKey || !duration) return "";
+    const busy = activities
+      .filter(activity => normalizeRouteIdentity(activity.user_name) === ownerKey &&
+        !["cancelled", "superseded", "skipped"].includes(activity.status))
+      .map(activity => {
+        const start = new Date(activity.scheduled_at).getTime();
+        const minutes = PLANNING_CONTACT_TYPES[activity.contact_type]?.duration || 10;
+        return { start, end: start + minutes * 60000 };
+      });
+    // Keep manual time inputs unrestricted; only automatic proposals use this grid.
+    for (let minutes = 8 * 60; minutes + duration <= 24 * 60; minutes += 30) {
+      const time = `${String(Math.floor(minutes / 60)).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
+      const start = new Date(planningStockholmIso(dateKey, time)).getTime();
+      const end = start + duration * 60000;
+      if (start < now.getTime()) continue;
+      if (!busy.some(activity => start < activity.end && end > activity.start)) return time;
+    }
+    return "";
+  }
+
+  function setupPlanningTimeSuggestion({ dateInput, timeInput, changeInputs = [], getOwner, getType,
+    message, enabled = () => true, manual = false }) {
+    let manuallySet = manual;
+    let requestSerial = 0;
+    const context = () => ({ dateKey: dateInput.value, owner: String(getOwner() || "").trim(), contactType: getType() });
+    const contextKey = value => JSON.stringify(value);
+    const refresh = async () => {
+      const serial = ++requestSerial;
+      if (manuallySet) return;
+      message.textContent = "";
+      if (!enabled()) return;
+      const selection = context();
+      timeInput.value = "";
+      if (!planningDateFromKey(selection.dateKey)) return;
+      if (!selection.owner) {
+        message.textContent = "Välj säljare för att få ett tidsförslag.";
+        return;
+      }
+      const isCurrent = () => serial === requestSerial && !manuallySet && enabled() &&
+        document.getElementById(timeInput.id) === timeInput && contextKey(context()) === contextKey(selection);
+      message.textContent = "Söker ledig tid…";
+      try {
+        const params = new URLSearchParams({
+          start: planningAddDays(selection.dateKey, -1),
+          end: selection.dateKey,
+          availability: "1",
+          user_name: selection.owner,
+        });
+        const payload = await planningFetchJson(`/planning/activities?${params.toString()}`, { cache: "no-store" });
+        if (!isCurrent()) return;
+        const source = payload?.data && typeof payload.data === "object" ? payload.data : payload;
+        if (normalizeRouteIdentity(source?.owner?.user_name) !== normalizeRouteIdentity(selection.owner) ||
+          !Array.isArray(source.activities)) throw new Error("Invalid availability response");
+        const time = planningFirstAvailableTime({ ...selection, activities: source.activities });
+        timeInput.value = time;
+        message.textContent = time ? "" :
+          "Ingen ledig tid återstår på valt datum från 08:00 i 30-minuterssteg. Välj en tid manuellt eller ändra datum.";
+      } catch {
+        if (!isCurrent()) return;
+        message.textContent = "Kalendern kunde inte kontrolleras. Välj en tid manuellt eller ändra datum för att försöka igen.";
+      }
+    };
+    const markManual = () => {
+      manuallySet = true;
+      requestSerial += 1;
+      message.textContent = "";
+    };
+    timeInput.addEventListener("input", markManual);
+    timeInput.addEventListener("change", markManual);
+    changeInputs.forEach(input => input.addEventListener("change", refresh));
+    return {
+      refresh,
+      reset: () => { manuallySet = false; requestSerial += 1; timeInput.value = ""; message.textContent = ""; },
+      cancel: () => { requestSerial += 1; },
+    };
   }
 
   function planningSearchKey(value) {
@@ -9042,13 +9125,15 @@
   }
 
   function openPlanningEditor({ activity = null, customer = null, date = "", seed = null } = {}) {
+    planningEditorTimeSuggestion?.cancel();
+    planningEditorTimeSuggestion = null;
     planningEditorActivity = activity ? normalizePlanningActivity(activity) : null;
     planningEditorCustomer = customer || (activity ? planningCustomerForItem(activity) : null);
     planningEditorSeed = seed && typeof seed === "object" ? { ...seed } : null;
     planningEditorRequestId = planningClientRequestId(activity ? "planning-edit" : "planning-create");
     const scheduledDate = activity ? planningDateKeyFromIso(activity.scheduled_at) : "";
     const selectedDate = scheduledDate || (planningDateFromKey(date) ? date : planningSelectedDate || planningTodayKey());
-    const selectedTime = activity ? planningTimeFromIso(activity.scheduled_at) : planningDefaultTime(selectedDate);
+    const selectedTime = activity ? planningTimeFromIso(activity.scheduled_at) : "";
     const selectedType = activity?.contact_type || seed?.contact_type || "visit";
     const note = String(activity?.note ?? seed?.note ?? seed?.comment ?? "").slice(0, PLANNING_NOTE_MAX_LENGTH);
     const selectable = planningSelectableCustomers()
@@ -9119,9 +9204,10 @@
           </div>
           <div class="planning-field">
             <label for="planning-editor-time">Tid</label>
-            <input id="planning-editor-time" type="time" value="${escAttr(selectedTime)}" required />
+            <input id="planning-editor-time" type="time" value="${escAttr(selectedTime)}" aria-describedby="planning-editor-time-suggestion" required />
           </div>
         </div>
+        <div class="planning-field-help" id="planning-editor-time-suggestion" role="status" aria-live="polite"></div>
         <div class="planning-field-help" id="planning-editor-duration">Beräknad längd: ${PLANNING_CONTACT_TYPES[selectedType]?.duration || 20} minuter</div>
         <div class="planning-field">
           <label for="planning-editor-note">Anteckning</label>
@@ -9154,6 +9240,18 @@
         `${event.target.value.length}/${PLANNING_NOTE_MAX_LENGTH}`;
     });
     document.getElementById("planning-editor-form").addEventListener("submit", savePlanningEditor);
+    if (!editing) {
+      planningEditorTimeSuggestion = setupPlanningTimeSuggestion({
+        dateInput: document.getElementById("planning-editor-date"),
+        timeInput: document.getElementById("planning-editor-time"),
+        changeInputs: [document.getElementById("planning-editor-date"),
+          ...document.querySelectorAll("input[name='planning-editor-type']")],
+        getOwner: () => userIsAdmin() ? planningSelectedOwner() : currentUser?.user_name || "",
+        getType: () => document.querySelector("input[name='planning-editor-type']:checked")?.value || "visit",
+        message: document.getElementById("planning-editor-time-suggestion"),
+      });
+      planningEditorTimeSuggestion.refresh();
+    }
   }
 
   function syncPlanningEditorAppointment(contactType) {
@@ -10034,6 +10132,7 @@
   });
   document.getElementById("planning-owner-select").addEventListener("change", event => {
     planningSelectedUserName = event.target.value;
+    planningEditorTimeSuggestion?.refresh();
     planningRecommendationPreviewLimit = 10;
     planningRecommendationRequestSerial += 1;
     planningRecommendation = null;
