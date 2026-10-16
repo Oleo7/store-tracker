@@ -1232,8 +1232,8 @@ def ensure_planned_activities_worksheet(spreadsheet):
         )
 
 
-def read_planned_activity_snapshot(spreadsheet):
-    """Return the cached planning snapshot without locking or schema writes."""
+def read_planned_activity_snapshot(spreadsheet, *, use_cache=True):
+    """Read planning without locking or schema writes, optionally bypassing cache."""
     try:
         sheet = get_worksheet(spreadsheet, PLANNED_ACTIVITIES_SHEET)
     except WorksheetNotFound:
@@ -1241,6 +1241,7 @@ def read_planned_activity_snapshot(spreadsheet):
     headers, rows = worksheet_snapshot(
         sheet,
         expected_columns=PLANNED_ACTIVITY_COLUMNS,
+        use_cache=use_cache,
     )
     return sheet, headers, rows
 
@@ -1711,9 +1712,19 @@ def worksheet_snapshot(
     expected_columns=None,
     required_columns=None,
     merge_duplicate_checkbox_columns=None,
+    *,
+    use_cache=True,
 ):
     with performance_step(_performance_sheet_step(sheet)) as measurement:
-        values, cache_hit = cached_worksheet_values(sheet)
+        if use_cache:
+            values, cache_hit = cached_worksheet_values(sheet)
+        else:
+            values = read_with_retry(
+                sheet.get_all_values,
+                on_retry=_log_sheet_read_retry(f"values.{sheet.title}"),
+            )
+            cache_hit = False
+            record_google_sheet_read(True)
         measurement["row_count"] = max(0, len(values) - 1)
     record_performance_step(
         f"sheets.cache.{'hit' if cache_hit else 'miss'}",
@@ -8222,6 +8233,43 @@ def planning_activities():
             "Datumintervallet måste vara sammanhängande och högst 63 dagar.",
             400,
         )
+
+    if is_yes(request.args.get("availability")):
+        try:
+            _sheet, _headers, activity_rows = read_planned_activity_snapshot(
+                spreadsheet, use_cache=False
+            )
+        except Exception:
+            app.logger.exception("Could not read current planning availability")
+            return planning_error(
+                "planning_store_unavailable",
+                "Lediga tider kunde inte kontrolleras. Försök igen.",
+                503,
+            )
+        availability = []
+        now = stockholm_now()
+        for _row_index, row in activity_rows:
+            if not planning_owner_matches(row, owner):
+                continue
+            scheduled = parse_planning_datetime(row.get("scheduled_at"))
+            if not scheduled or not start_date <= scheduled.date() <= end_date:
+                continue
+            activity = public_planned_activity(row, now=now)
+            availability.append({
+                field: activity[field]
+                for field in (
+                    "user_name", "scheduled_at", "contact_type", "status",
+                    "duration_minutes",
+                )
+            })
+        availability.sort(key=lambda activity: activity["scheduled_at"])
+        return jsonify({
+            "ok": True,
+            "owner": owner,
+            "start": start_date.isoformat(),
+            "end": end_date.isoformat(),
+            "activities": availability,
+        })
 
     try:
         _sheet, _headers, activity_rows = read_planned_activity_snapshot(
