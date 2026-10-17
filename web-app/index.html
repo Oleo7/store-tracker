@@ -11227,7 +11227,10 @@
     mapContext = "list";
     mapReturnView = "list";
     const MAP_LIMIT = 150;
-    const customersWithCoordinates = filteredCustomers.filter(hasMapCoordinates);
+    // Stage 1 only changes the Butiker list. Preserve the pre-existing
+    // v2.2 route/map ordering regardless of its new sort selector.
+    const customersWithCoordinates = getFilteredCustomers().slice()
+      .sort(prioritySort).filter(hasMapCoordinates);
     mapStops = customersWithCoordinates.slice(0, MAP_LIMIT);
 
     if (mapStops.length < 1) {
