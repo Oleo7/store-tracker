@@ -8,8 +8,9 @@ from commercial_orders import order_volume, commercial_order
 from contact_channel import recommend_contact_channel
 from statistics import median
 from value_prioritization import (VERSION as VALUE_MODEL_VERSION, POLICY as VALUE_POLICY,
-    REACHED_RESULTS, complete_deliveries, segment_prior, business_opportunity,
-    contact_opportunity, business_days_elapsed)
+    REACHED_RESULTS, DO_NOT_CONTACT_RESULTS, complete_deliveries,
+    segment_prior, business_opportunity, contact_opportunity,
+    business_days_elapsed)
 import unicodedata
 import uuid
 
@@ -237,7 +238,8 @@ def build_order_features(order_rows: list[dict]) -> dict:
         dfp = _order_dfp(row)
         reference = str(row.get("Reference") or "").strip() or str(row.get("Order date") or row.get("Delivery date") or f"row-{idx}")
         order_date = parse_date(row.get("Order date"))
-        delivery_date = parse_date(row.get("Delivery date")) or order_date
+        confirmed_delivery_date = parse_date(row.get("Delivery date"))
+        delivery_date = confirmed_delivery_date or order_date
         total = _parse_number(row.get("Total"))
         raw_customer_id = str(row.get("customer_id") or "").strip()
         customer_number = str(row.get("Customer number") or "").strip()
@@ -265,6 +267,7 @@ def build_order_features(order_rows: list[dict]) -> dict:
                 "sales": 0.0,
                 "volume_known": False,
                 "delivery_volume_complete": True,
+                "confirmed_delivery": bool(confirmed_delivery_date),
                 "skus": set(),
             },
         )
@@ -272,6 +275,10 @@ def build_order_features(order_rows: list[dict]) -> dict:
             # Do not present a partial total, or attach several delivery dates
             # to the final date of an inconsistent logical order.
             order["delivery_volume_complete"] = False
+        if not confirmed_delivery_date:
+            # Preserve the historical order-date fallback for old consumers,
+            # but NEVER count this as a verified delivery in the v3.1 model.
+            order["confirmed_delivery"] = False
         if dfp is not None:
             order["dfp"] += dfp
             order["volume_known"] = True
@@ -320,6 +327,12 @@ def build_order_features(order_rows: list[dict]) -> dict:
                 else None
             )
             for day, rows in delivery_orders.items()
+        }
+        confirmed_delivery_dfp_by_date = {
+            day.isoformat(): amount
+            for day, rows in delivery_orders.items()
+            if all(o["confirmed_delivery"] for o in rows)
+            for amount in [delivery_dfp_by_date.get(day.isoformat())]
         }
         known_volumes = [o["dfp"] for o in customer_orders if o["dfp"] is not None]
         total_dfp = sum(known_volumes) if known_volumes else None
@@ -391,6 +404,7 @@ def build_order_features(order_rows: list[dict]) -> dict:
             "latest_order_reference": latest_order.get("reference", ""),
             "delivery_dates": delivery_dates,
             "delivery_dfp_by_date": delivery_dfp_by_date,
+            "confirmed_delivery_dfp_by_date": confirmed_delivery_dfp_by_date,
             "delivery_gaps": gaps,
             "latest_order_dfp": _clean_number(latest_dfp),
             "latest_order_value": _clean_number(latest_sales),
@@ -479,6 +493,10 @@ def build_contact_features(sales_activities: list[dict], order_features: dict) -
         reached = [a for a in human_activities if normalize_contact_result(a["row"].get("result")) in REACHED_RESULTS]
         last_reached = reached[-1] if reached else None
         unanswered_dates = [a["datetime"].date() for a in human_activities if normalize_contact_result(a["row"].get("result")) == "Ej anträffbar"]
+        opt_out = [
+            a for a in human_activities
+            if str(a["row"].get("result") or "").strip().casefold() in DO_NOT_CONTACT_RESULTS
+        ]
         planned_followups = [
             activity
             for activity in human_activities
@@ -492,7 +510,9 @@ def build_contact_features(sales_activities: list[dict], order_features: dict) -
             and any(
                 activity["sort_key"] > latest_plan["sort_key"]
                 and activity["datetime"].date() >= follow_up_date
-                for activity in activities
+                and not activity["is_email"]
+                and normalize_contact_result(activity["row"].get("result")) in REACHED_RESULTS
+                for activity in human_activities
             )
         )
         latest_identity = latest_activity
@@ -531,6 +551,9 @@ def build_contact_features(sales_activities: list[dict], order_features: dict) -
             ),
             "latest_reached_date": last_reached["datetime"].date() if last_reached else None,
             "unanswered_attempt_dates": unanswered_dates,
+            # Do not expire a request not to be contacted without a recorded
+            # explicit reversal; a later unanswered attempt is not consent.
+            "do_not_contact_date": opt_out[-1]["datetime"].date() if opt_out else None,
             "latest_human_contact_id": str(
                 latest_human_row.get("contact_id") or ""
             ).strip() or (
@@ -1365,6 +1388,12 @@ def build_customer_guidance(
         reason_text = "Kundidentitet eller ansvarig säljare saknas"
         action_key = "review_data"
         action_label = "Kontrollera kunddata"
+    elif suppression == "do_not_contact":
+        status_key = "wait"
+        action_key = "wait"
+        action_label = "Kontakta inte"
+        reason_code = "do_not_contact"
+        reason_text = status_text
     elif future_activity or future_follow_up:
         status_key = "planned"
         action_key = "open_planning"
@@ -1415,6 +1444,12 @@ def build_customer_guidance(
             reason_text = f"Väntar på leverans {waiting_until}"
         elif suppression == "recent_human_contact" and latest_human_contact:
             waiting_until = (latest_human_contact.date() + timedelta(days=3)).isoformat()
+        elif suppression == "unanswered_retry_wait" and latest_human_contact:
+            from_date = latest_human_contact.date()
+            while business_days_elapsed(latest_human_contact.date(), from_date) < int(VALUE_POLICY["retry_business_days"]):
+                from_date += timedelta(days=1)
+            waiting_until = from_date.isoformat()
+            reason_text = f"Ej anträffbar – försök igen från {waiting_until}"
         elif suppression == "negative_contact_cooldown" and latest_human_contact:
             waiting_until = (latest_human_contact.date() + timedelta(days=60)).isoformat()
         elif suppression == "dismissed":
@@ -1465,7 +1500,9 @@ def build_customer_guidance(
         email_available=email_available,
         visible=True,
     ) or {}
-    if status_key == "planned":
+    if suppression == "do_not_contact":
+        recommended_contact_type = ""
+    elif status_key == "planned":
         # A planned status should describe the actual booking, not invent a
         # fallback channel for legacy date-only follow-ups.
         recommended_contact_type = planned_contact_type
@@ -1499,7 +1536,7 @@ def build_customer_guidance(
             str(future_activity["row"].get("planned_activity_id") or "").strip()
             if future_activity else ""
         ),
-        "can_contact_now": status_key in {"act_now", "overdue_followup"},
+        "can_contact_now": status_key in {"act_now", "overdue_followup"} and suppression != "do_not_contact",
         "guidance_version": GUIDANCE_VERSION,
     }
 
@@ -1750,6 +1787,7 @@ def build_priority_customers(
             prior_dfp=value_priors.get(segment, value_priors.get("", 9)),
             delivery_count=delivery_count,
             cycle_days=expected_cycle or defaults.get("expected_cycle_days"),
+            days_since_delivery=days_since_delivery,
         )
 
         future_follow_up_days = _future_follow_up_days(
@@ -1792,9 +1830,9 @@ def build_priority_customers(
             status_text = (
                 f"Avvakta mejlutfall i {active_email_intent.get('wait_days')} dagar"
             )
-        elif days_since_contact is not None and 0 <= days_since_contact <= 2:
-            suppression = "recent_human_contact"
-            status_text = "Nyligen kontaktad"
+        elif contact.get("do_not_contact_date"):
+            suppression = "do_not_contact"
+            status_text = "Kunden har uttryckligen bett oss att inte återkomma"
         elif (
             latest_contact_class == "Negativ"
             and not has_order_after_latest_contact
@@ -1803,6 +1841,20 @@ def build_priority_customers(
         ):
             suppression = "negative_contact_cooldown"
             status_text = "Negativ kontakt – rekommendation pausad"
+        elif (
+            latest_contact_class == "Ej anträffbar"
+            and latest_human_date
+            and business_days_elapsed(latest_human_date, today)
+                < int(VALUE_POLICY["retry_business_days"])
+        ):
+            suppression = "unanswered_retry_wait"
+            status_text = "Kontaktförsök registrerat – avvakta nästa arbetsdag för nytt försök"
+        elif (
+            latest_contact_class != "Ej anträffbar"
+            and days_since_contact is not None and 0 <= days_since_contact <= 2
+        ):
+            suppression = "recent_human_contact"
+            status_text = "Nyligen kontaktad"
         workflow_reason = workflow_suppressions.get(customer_id)
         if workflow_reason:
             suppression = str(workflow_reason)
@@ -1952,6 +2004,7 @@ def build_priority_customers(
             **business_result, **contact_result,
             "latest_reached_date": _iso_date(latest_reached_date),
             "days_since_reached": days_since_reached,
+            "do_not_contact_date": _iso_date(contact.get("do_not_contact_date")),
             "row": customer.get("row"),
             "customer_id": customer_id,
             "customer": name,
