@@ -347,7 +347,7 @@ const buildInsightDropdowns = () => {}, updateEmailClickNoOrderChip = () => {}, 
 const showToast = text => toasts.push(text);
 ${['fetchJsonShared','loadInsights','loadPlanningRecommendation','loadPlanningWeek','refreshWorkflowViews',
    'activeViewName','showView','renderList','esc','escAttr',
-   'customerInsightKey','getCustomerInsight','getCustomerGuidance','hasPriorityScore',
+   'customerInsightKey','getCustomerInsight','getCustomerGuidance','getCustomerListGuidance','hasPriorityScore',
    'getGuidanceStatusClass','getNextActionColorClass','guidanceContactLabel','getNextActionHtml',
    'getPrioritySummaryHtml','getPotentialHtml','getCardDateHtml','getDeliveryVolumeText',
    'getCardDatesHtml','getPriorityCardClass','getCustomerCardAriaLabel','getCardPlanningButtonHtml']
