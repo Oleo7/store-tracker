@@ -4654,7 +4654,12 @@
     const existing = sharedJsonRequests.get(path);
     if (existing) return existing;
 
-    const requestPromise = fetch(path)
+    // An opt-in header adds the ID-keyed value read model without breaking
+    // older consumers of the name-keyed /customer-insights response.
+    const options = path.endsWith("/customer-insights")
+      ? { headers: { "X-PB-Value-Model": "v3.1" } }
+      : undefined;
+    const requestPromise = fetch(path, options)
       .then(async response => {
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         return response.json();
@@ -4756,9 +4761,8 @@
       const loadedInsights = await (
         requestPromise || fetchJsonShared(`${API}/customer-insights`)
       );
-      if (!loadedInsights || typeof loadedInsights !== "object" ||
-          !loadedInsights.__by_customer_id) {
-        throw new Error("Servern saknar affärsvärde och kontaktprioritet per kund-ID");
+      if (!loadedInsights || typeof loadedInsights !== "object") {
+        throw new Error("Kundinsikter kunde inte laddas");
       }
       if (
         requestSerial !== insightsRequestSerial
@@ -5186,7 +5190,7 @@
     const estimate = ins?.business_expected_dfp_per_delivery;
     const potential = estimate == null ? NaN : Number(estimate);
     if (!Number.isFinite(potential) || potential <= 0) {
-      return '<div class="potential-summary">Leveransstorlek: otillräckligt underlag</div>';
+      return '<div class="potential-summary">Potential ej beräknad · leveransstorlek saknas</div>';
     }
     const text = potential.toLocaleString("sv-SE", { maximumFractionDigits: 1 });
     return `<div class="potential-summary">Uppskattad leveransstorlek: ca ${esc(text)} DFP</div>`;
