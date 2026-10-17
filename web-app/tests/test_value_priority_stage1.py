@@ -8,7 +8,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from priority import (build_priority_customers, build_order_features,
                       build_contact_features, apply_workflow_suppressions)
 from value_prioritization import (contact_factor, business_days_elapsed, complete_deliveries,
-    business_opportunity, validate_policy, POLICY, next_business_day_retry)
+    business_opportunity, validate_policy, POLICY, next_business_day_retry,
+    store_format, empirical_format_prior)
 
 TODAY = date(2026, 10, 17)
 
@@ -195,7 +196,111 @@ class ValuePriorityStage1Tests(TestCase):
         self.assertIn("priority_score", row)
         self.assertIn("business_value_raw", row)
         self.assertIn("contact_priority_raw", row)
-        self.assertEqual(row["value_model_version"], "v3.1-preview")
+        self.assertEqual(row["value_model_version"], "v3.2-preview")
+
+
+    def test_contact_priority_follows_real_dialogue_age_not_value_score(self):
+        scores = []
+        value_scores = []
+        for age in (7, 20, 30, 40, 50, 60, 90):
+            from datetime import timedelta
+            reached = (TODAY - timedelta(days=age)).isoformat()
+            row = get([customer()], contacts=[
+                contact("a", "Butik", reached, "Neutral")
+            ])[0]
+            scores.append(row["contact_priority_score"])
+            value_scores.append(row["business_value_score"])
+        self.assertEqual(len(set(value_scores)), 1)
+        self.assertEqual(scores[0], 0)
+        self.assertEqual(scores, sorted(scores))
+        self.assertGreaterEqual(scores[-1], 75)
+        self.assertGreater(scores[5], scores[3])
+
+    def test_store_formats_personalize_a_prospects_without_fixed_bonus(self):
+        stores = [
+            customer("ICA Maxi Ny", "new-maxi", "A"),
+            customer("Stora Coop Ny", "new-coop", "A")
+        ]
+        deliveries = []
+        for idx in range(8):
+            mx = f"maxi-{idx}"
+            co = f"coop-{idx}"
+            stores.extend([
+                customer(f"ICA Maxi Kund {idx}", mx, "A"),
+                customer(f"Stora Coop Kund {idx}", co, "A"),
+            ])
+            deliveries.extend([
+                delivery(mx, f"ICA Maxi Kund {idx}", "2026-01-15", 30, mx),
+                delivery(co, f"Stora Coop Kund {idx}", "2026-01-15", 15, co),
+            ])
+        by_id = {r["customer_id"]: r for r in get(stores, deliveries)}
+        large = by_id["new-maxi"]
+        lower = by_id["new-coop"]
+        self.assertGreater(large["business_prior_dfp"], lower["business_prior_dfp"])
+        self.assertGreater(large["business_value_raw"], lower["business_value_raw"])
+        self.assertEqual(large["business_prior_basis"], "segment_and_format")
+        self.assertEqual(lower["business_prior_basis"], "segment_and_format")
+        self.assertEqual(store_format("ICA Nära Klippan"), "ica_nara")
+
+    def test_small_format_sample_falls_back_to_segment(self):
+        self.assertAlmostEqual(empirical_format_prior(21, [100] * 7), 21)
+        self.assertGreater(empirical_format_prior(21, [30] * 8), 21)
+
+    def test_low_value_uncontacted_c_prospect_is_visible_but_not_urgent(self):
+        by_id = {r["customer_id"]: r for r in get([
+            customer("ICA Maxi A", "a", "A"),
+            customer("ICA Nära C", "c", "C"),
+        ])}
+        self.assertEqual(by_id["c"]["list_guidance"]["status_key"], "idle")
+        self.assertEqual(by_id["c"]["contact_priority_score"], 0)
+        self.assertGreater(by_id["c"]["business_value_score"], 0)
+        self.assertEqual(by_id["a"]["list_guidance"]["status_key"], "act_now")
+
+    def test_stale_explicit_followup_is_flagged_for_review_not_cold_call(self):
+        old = contact("a", "Butik", "2026-01-02", "Positiv")
+        old["follow_up_date"] = "2026-03-10"
+        row = get([customer()], contacts=[old])[0]
+        guidance = row["list_guidance"]
+        self.assertEqual(guidance["reason_code"], "stale_follow_up_review")
+        self.assertEqual(guidance["status_key"], "overdue_followup")
+        self.assertFalse(guidance["can_contact_now"])
+        self.assertEqual(row["contact_priority_bucket"], 1)
+        self.assertEqual(row["contact_priority_score"], 0)
+        self.assertGreater(row["business_value_score"], 0)
+
+    def test_recent_unresolved_followup_keeps_real_outbound_priority(self):
+        plan = contact("a", "Butik", "2026-09-20", "Positiv")
+        plan["follow_up_date"] = "2026-10-08"
+        row = get([customer()], contacts=[plan])[0]
+        self.assertEqual(row["list_guidance"]["reason_code"],
+                         "overdue_explicit_follow_up")
+        self.assertTrue(row["list_guidance"]["can_contact_now"])
+        self.assertGreater(row["contact_priority_score"], 0)
+
+    def test_old_followup_with_later_order_requires_review_not_autoclose(self):
+        followup = contact("a", "Butik", "2026-06-01", "Positiv")
+        followup["follow_up_date"] = "2026-08-01"
+        row = get([customer()], orders=[
+            delivery("a", "Butik", "2026-09-01", 22),
+        ], contacts=[followup])[0]
+        self.assertEqual(row["list_guidance"]["reason_code"],
+                         "stale_follow_up_review")
+        self.assertEqual(row["list_guidance"]["status_key"],
+                         "overdue_followup")
+
+    def test_business_cycle_uses_verified_deliveries_not_order_date_fallback(self):
+        one = delivery("a", "Butik", "2026-04-01", 20, "one")
+        two = delivery("a", "Butik", "2026-05-01", 20, "two")
+        unconfirmed = delivery("a", "Butik", "2026-10-01", 50, "pending")
+        unconfirmed["Delivery date"] = ""
+        row = get([customer()], orders=[one, two, unconfirmed])[0]
+        self.assertEqual(row["business_verified_delivery_count"], 2)
+        self.assertEqual(row["business_days_since_delivery"],
+                         (TODAY - date(2026, 5, 1)).days)
+        self.assertGreater(row["business_overdue_days"], 100)
+        self.assertEqual(row["list_guidance"]["reason_code"],
+                         "established_reorder_due")
+
 
 
 class ValuePriorityFrontendStage1Tests(TestCase):

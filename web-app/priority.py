@@ -10,7 +10,8 @@ from statistics import median
 from value_prioritization import (VERSION as VALUE_MODEL_VERSION, POLICY as VALUE_POLICY,
     REACHED_RESULTS, DO_NOT_CONTACT_RESULTS, complete_deliveries,
     segment_prior, business_opportunity, contact_opportunity,
-    business_days_elapsed, store_contact_guidance)
+    business_days_elapsed, store_contact_guidance,
+    store_format, empirical_format_prior)
 import unicodedata
 import uuid
 
@@ -1791,16 +1792,52 @@ def build_priority_customers(
         # Order date is not proof of delivery. Keep legacy delivery_count
         # unchanged for existing consumers, but classify value by verified
         # completed deliveries only.
-        business_delivery_count = sum(
-            1 for day in order.get("confirmed_delivery_dates", ())
-            if day <= today
-        ) if "confirmed_delivery_dates" in order else delivery_count
+        verified_delivery_dates = sorted(
+            d for d in order.get("confirmed_delivery_dates", ())
+            if d <= today
+        ) if "confirmed_delivery_dates" in order else completed_dates
+        business_delivery_count = len(verified_delivery_dates)
+        business_last_delivery = (
+            verified_delivery_dates[-1] if verified_delivery_dates else None
+        )
+        business_days_since_delivery = (
+            (today - business_last_delivery).days
+            if business_last_delivery else None
+        )
+        business_expected_cycle = (
+            expected_reorder_cycle(
+                verified_delivery_dates,
+                defaults.get("expected_cycle_days") or 28,
+            )
+            if business_delivery_count >= 2 else
+            (defaults.get("expected_cycle_days") or 45)
+        )
+        business_overdue_days = (
+            (today - (business_last_delivery
+                      + timedelta(days=business_expected_cycle))).days
+            if business_last_delivery and business_delivery_count >= 2
+            else None
+        )
+        store_fmt = store_format(name)
+        has_store_format_prior = (
+            bool(store_fmt) and f"{segment}|{store_fmt}" in value_priors
+            and value_priors[f"{segment}|{store_fmt}"] !=
+                value_priors.get(segment, value_priors.get("", 9))
+        )
+        business_prior = value_priors.get(
+            f"{segment}|{store_fmt}",
+            value_priors.get(segment, value_priors.get("", 9)),
+        )
         business_result = business_opportunity(
             delivery_values=complete_deliveries(order, today),
-            prior_dfp=value_priors.get(segment, value_priors.get("", 9)),
+            prior_dfp=business_prior,
             delivery_count=business_delivery_count,
-            cycle_days=expected_cycle or defaults.get("expected_cycle_days"),
-            days_since_delivery=days_since_delivery,
+            cycle_days=business_expected_cycle,
+            days_since_delivery=business_days_since_delivery,
+        )
+        business_result["business_prior_dfp"] = round(business_prior, 2)
+        business_result["business_prior_basis"] = (
+            "segment_and_format" if has_store_format_prior else "segment"
         )
 
         future_follow_up_days = _future_follow_up_days(
@@ -2009,9 +2046,13 @@ def build_priority_customers(
             ),
             last_order_date=last_order,
             delivery_count=business_delivery_count,
-            days_since_delivery=days_since_delivery if business_delivery_count else None,
-            overdue_days=overdue_days if business_delivery_count else None,
-            expected_cycle_days=expected_cycle,
+            days_since_delivery=business_days_since_delivery,
+            overdue_days=business_overdue_days,
+            expected_cycle_days=business_expected_cycle,
+            follow_up_has_later_order=bool(
+                latest_follow_up_date and last_order
+                and last_order >= latest_follow_up_date
+            ),
             future_delivery=future_delivery,
             qualified_email_trigger=active_email_intent.get("trigger", "")
                 if active_email_intent.get("ready") else "",
@@ -2029,6 +2070,9 @@ def build_priority_customers(
             **business_result, **contact_result,
             "list_guidance": list_guidance,
             "business_verified_delivery_count": business_delivery_count,
+            "business_expected_cycle_days": business_expected_cycle,
+            "business_days_since_delivery": business_days_since_delivery,
+            "business_overdue_days": business_overdue_days,
             "latest_reached_date": _iso_date(latest_reached_date),
             "days_since_reached": days_since_reached,
             "row": customer.get("row"),
@@ -2987,6 +3031,7 @@ def _build_priority_benchmarks(
 
 def _value_v31_priors(customers, order_indices, ambiguous_names, today):
     grouped = defaultdict(list)
+    by_format = defaultdict(list)
     global_values = []
     for customer in customers:
         if _is_truthy(customer.get("cancelled_flag")):
@@ -2998,10 +3043,22 @@ def _value_v31_priors(customers, order_indices, ambiguous_names, today):
         volumes = complete_deliveries(feature, today)
         if volumes:
             average = sum(volumes) / len(volumes)
-            grouped[_segment_value(customer)].append(average)
+            segment = _segment_value(customer)
+            grouped[segment].append(average)
+            fmt = store_format(customer.get("customer"))
+            if fmt:
+                # One observation per BUYING STORE, never per order row.
+                by_format[(segment, fmt)].append(average)
             global_values.append(average)
-    return {segment: segment_prior(grouped[segment], segment, global_values)
-            for segment in ("A", "B", "C", "")}
+    priors = {segment: segment_prior(grouped[segment], segment, global_values)
+              for segment in ("A", "B", "C", "")}
+    # Small format groups shrink entirely to their segment prior; larger
+    # groups can add measured information without a second A/B/C bonus.
+    for (segment, fmt), values in by_format.items():
+        priors[f"{segment}|{fmt}"] = empirical_format_prior(
+            priors.get(segment, priors[""]), values
+        )
+    return priors
 
 
 def _segment_defaults(benchmarks: dict, segment: str) -> dict:

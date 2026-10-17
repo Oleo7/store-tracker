@@ -1,4 +1,4 @@
-"""V3.1 preview: independent business potential and contact urgency.
+"""V3.2 preview: independent business potential and contact urgency.
 
 DFP-based opportunity indices, NOT calibrated probabilities, SEK forecasts
 or causal sales uplift. Keep legacy priority_score for planning and routing.
@@ -9,8 +9,9 @@ from __future__ import annotations
 from datetime import date, timedelta
 from statistics import median
 import math
+import unicodedata
 
-VERSION = "v3.1-preview"
+VERSION = "v3.2-preview"
 POLICY = {
     "shrinkage_purchases": 3.0, "horizon_days": 90,
     "realization_prospect": 0.50, "realization_first_order": 0.70,
@@ -24,6 +25,11 @@ POLICY = {
     "stale_repeat_after_cycles": 3.0, "stale_repeat_factor": 0.75,
     "very_stale_repeat_after_cycles": 6.0, "very_stale_repeat_factor": 0.60,
     "stale_first_order_after_days": 180, "stale_first_order_factor": 0.70,
+    # Segment + store-format medians are shrunk toward the segment median.
+    "format_prior_min_buyers": 8, "format_prior_strength": 12.0,
+    "routine_prospect_min_raw_dfp": 6.0,
+    "stale_followup_review_days": 180,
+    "stale_followup_order_review_days": 60,
 }
 FALLBACK_DFP = {"A": 21.0, "B": 12.0, "C": 9.0}
 CONTACT_CURVE = ((0, 0.0), (7, 0.02), (20, 0.15), (30, 0.35),
@@ -33,6 +39,37 @@ CONTACT_CURVE = ((0, 0.0), (7, 0.02), (20, 0.15), (30, 0.35),
 # but also create a separate persistent no-contact safety guard.
 REACHED_RESULTS = frozenset({"Positiv", "Neutral", "Negativ"})
 DO_NOT_CONTACT_RESULTS = frozenset({"återkom ej", "kontakta ej", "ring ej"})
+
+
+def store_format(name: str) -> str:
+    """Recognized grocery-store formats; not a replacement for CRM segment."""
+    label = unicodedata.normalize("NFKD", str(name or "").casefold())
+    label = "".join(c for c in label if not unicodedata.combining(c))
+    for pattern, kind in (
+        ("ica maxi", "ica_maxi"),
+        ("ica kvantum", "ica_kvantum"),
+        ("ica supermarket", "ica_supermarket"),
+        ("ica nara", "ica_nara"),
+        ("stora coop", "stora_coop"),
+        ("coop", "coop"),
+        ("hemkop", "hemkop"),
+    ):
+        if pattern in label:
+            return kind
+    return ""
+
+
+def empirical_format_prior(segment_prior_dfp: float, values: list[float],
+                           policy: dict = POLICY) -> float:
+    """Shrunk within-segment empirical median; no arbitrary segment bonus."""
+    cleaned = [float(v) for v in values if v is not None
+               and math.isfinite(float(v)) and float(v) > 0]
+    if len(cleaned) < int(policy["format_prior_min_buyers"]):
+        return float(segment_prior_dfp)
+    strength = float(policy["format_prior_strength"])
+    share = len(cleaned) / (len(cleaned) + strength)
+    return ((1 - share) * float(segment_prior_dfp)
+            + share * float(median(cleaned)))
 
 
 def complete_deliveries(feature: dict, today: date) -> list[float]:
@@ -63,7 +100,10 @@ def segment_prior(values: list[float], segment: str, all_values: list[float]) ->
 def validate_policy(policy: dict) -> None:
     """Reject invalid policy, even while admin editing is intentionally disabled."""
     positives = ("shrinkage_purchases", "horizon_days", "score_scale_dfp",
-                 "retry_business_days", "maximum_repeat_frequency")
+                 "retry_business_days", "maximum_repeat_frequency",
+                 "format_prior_min_buyers", "format_prior_strength",
+                 "routine_prospect_min_raw_dfp", "stale_followup_review_days",
+                 "stale_followup_order_review_days")
     for key in positives:
         value = float(policy[key])
         if not math.isfinite(value) or value <= 0:
@@ -77,6 +117,8 @@ def validate_policy(policy: dict) -> None:
             raise ValueError(f"Invalid model factor {key}")
     if float(policy["very_stale_repeat_after_cycles"]) <= float(policy["stale_repeat_after_cycles"]):
         raise ValueError("Staleness bands must increase")
+    if int(policy["stale_followup_order_review_days"]) > int(policy["stale_followup_review_days"]):
+        raise ValueError("Stale follow-up review thresholds must increase")
 
 
 validate_policy(POLICY)
@@ -178,8 +220,10 @@ def contact_opportunity(*, business_value_raw: float,
         "idle": 1, "planned": 2, "wait": 3, "data_missing": 4,
     }.get(status, 4)
     relevance = contact_factor(days_since_reached, latest_result, policy)
-    if status == "overdue_followup":
+    if status == "overdue_followup" and trigger != "stale_follow_up_review":
         relevance = max(relevance, 0.75)
+    if trigger == "stale_follow_up_review":
+        bucket = 1  # needs review, not a fresh outbound call
     if trigger in {"stockfiller_click_followup", "product_sheet_click_followup"}:
         relevance = max(relevance, 0.75)
     # An unanswered attempt after a dialogue this week is not an urgent
@@ -193,7 +237,7 @@ def contact_opportunity(*, business_value_raw: float,
         and business_days_elapsed(latest_attempt_date, today)
             < int(policy["retry_business_days"])
     )
-    if status in {"planned", "wait", "data_missing", "idle"} or waiting_for_retry:
+    if status in {"planned", "wait", "data_missing", "idle"} or waiting_for_retry or trigger == "stale_follow_up_review":
         relevance = 0.0
         if waiting_for_retry:
             bucket = 3
@@ -226,6 +270,7 @@ def store_contact_guidance(
     delivery_count: int, days_since_delivery: int | None,
     overdue_days: int | None, future_delivery: date | None,
     expected_cycle_days: int | None = None,
+    follow_up_has_later_order: bool = False,
     qualified_email_trigger: str = "", policy: dict = POLICY,
 ) -> dict:
     """List-specific decision. Legacy calendar/suggestion contracts stay intact.
@@ -250,9 +295,10 @@ def store_contact_guidance(
             reason_code=code,
             reason_text=reason,
             waiting_until=until.isoformat() if until else None,
-            can_contact_now=status in {"act_now", "overdue_followup"},
+            can_contact_now=(status in {"act_now", "overdue_followup"}
+                             and code != "stale_follow_up_review"),
         )
-        if status not in {"act_now", "overdue_followup", "planned"}:
+        if status not in {"act_now", "overdue_followup", "planned"} or code == "stale_follow_up_review":
             result["recommended_contact_type"] = ""
         return result
 
@@ -275,6 +321,16 @@ def store_contact_guidance(
     # required to close it.
     if latest_follow_up_date and not follow_up_reached_resolved:
         if latest_follow_up_date < today:
+            overdue_age = (today - latest_follow_up_date).days
+            if (overdue_age >= int(policy["stale_followup_review_days"])
+                    or (follow_up_has_later_order and
+                        overdue_age >= int(policy["stale_followup_order_review_days"]))):
+                return choose(
+                    "overdue_followup", "Granska gammal uppföljning",
+                    "Äldre uttryckligt åtagande är fortfarande öppet. "
+                    "Kontrollera om det kvarstår innan en ny kontakt planeras.",
+                    code="stale_follow_up_review",
+                )
             return choose("overdue_followup", "Planera om uppföljningen",
                           f"Uttrycklig uppföljning från {latest_follow_up_date.isoformat()} är förfallen",
                           code="overdue_explicit_follow_up")
@@ -355,12 +411,18 @@ def store_contact_guidance(
             return choose("act_now", "Säkra andra köpet" if days_since_delivery <= 90 else "Återaktivera kunden",
                           f"En tidigare leverans, {days_since_delivery} dagar sedan",
                           code="second_purchase_due" if days_since_delivery <= 90 else "single_order_reactivation_due")
-    if delivery_count == 0 and business_value_raw > 0 and (age is None or age >= 20):
+    if (delivery_count == 0
+            and business_value_raw >= float(policy["routine_prospect_min_raw_dfp"])
+            and (age is None or age >= 20)):
         return choose("act_now", "Ta nästa steg mot första ordern",
                       ("Tidigare faktisk dialog saknas i historiken"
                        if age is None else f"{age} dagar sedan faktisk dialog"),
                       code="value_based_contact_due", key="contact_customer")
 
+    if delivery_count == 0 and business_value_raw > 0 and (age is None or age >= 20):
+        return choose("idle", "Bevaka prospekt",
+                      "Lägre beräknad potential – visas även vid sortering på Affärsvärde",
+                      code="routine_prospect_below_threshold")
     return choose("idle", "Ingen åtgärd nu",
                   "Ingen förfallen uppföljning eller aktuell kontaktmöjlighet",
                   code="no_current_trigger")
