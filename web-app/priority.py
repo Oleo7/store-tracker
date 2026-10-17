@@ -551,6 +551,10 @@ def build_contact_features(sales_activities: list[dict], order_features: dict) -
             ),
             "latest_reached_date": last_reached["datetime"].date() if last_reached else None,
             "unanswered_attempt_dates": unanswered_dates,
+            "latest_reached_result": (
+                normalize_contact_result(last_reached["row"].get("result"))
+                if last_reached else ""
+            ),
             # Do not expire a request not to be contacted without a recorded
             # explicit reversal; a later unanswered attempt is not consent.
             "do_not_contact_date": opt_out[-1]["datetime"].date() if opt_out else None,
@@ -1108,6 +1112,7 @@ def _phase3_trigger_snapshot(
     active_email_intent=None, legacy_missed_followup=False,
     expected_next=None, today=None,
     unanswered_retry_due=False, unanswered_count_30d=0,
+    days_since_reached=None, business_value_raw=0.0,
 ):
     triggers = []
     reasons = {}
@@ -1182,18 +1187,20 @@ def _phase3_trigger_snapshot(
         )
         reasons[trigger] = (trigger, f"{history_text} · {delivery_text}")
 
+    # Same value-based rule for B/C as for A: old v2.2 score and the
+    # last failed attempt must NOT be prerequisites for an actionable lead.
     strategic_due = (
         lifecycle in {"prospect", "reactivation"}
         and not a_prospect_due
-        and (segment == "A" or priority_score >= 70)
-        and (days_since_contact is None or days_since_contact > 45)
+        and business_value_raw > 0
+        and (days_since_reached is None or days_since_reached >= 30)
     )
     if strategic_due:
         triggers.append("strategic_contact_due")
         strategic_reason = (
-            "Strategisk kund – aldrig kontaktad"
-            if days_since_contact is None
-            else f"Strategisk kund – {days_since_contact} dagar sedan senaste kontakt"
+            "Senast nådd saknas i kontaktloggen – kontrollera kontaktläge"
+            if days_since_reached is None
+            else f"Affärspotential · {days_since_reached} dagar sedan faktisk dialog"
         )
         reasons["strategic_contact_due"] = (
             "strategic_contact_due", strategic_reason
@@ -1215,16 +1222,16 @@ def _phase3_trigger_snapshot(
     precedence = (
         "unanswered_verify_contact_due",
         "unanswered_retry_due",
-        "a_prospect_due",
         "stockfiller_click_followup",
         "product_sheet_click_followup",
         "email_open_followup",
+        "positive_dialogue_followup",
         "established_reorder_due",
         "first_order_onboarding",
         "first_order_reorder",
-        "positive_dialogue_followup",
         "repeat_reactivation_due",
         "single_order_reactivation_due",
+        "a_prospect_due",
         "strategic_contact_due",
         "legacy_missed_followup",
     )
@@ -1328,6 +1335,7 @@ def build_customer_guidance(
     latest_follow_up_date, follow_up_resolved, has_order_after_latest_contact,
     activity_state, primary_trigger, active_email_intent, business_email_intent,
     suppression, status_text, now, primary_reason_text="",
+    latest_reached_date=None,
 ):
     """Build the shared, presentation-ready decision without changing score."""
     has_future_delivery = bool(future_delivery and future_delivery > now.date())
@@ -1444,6 +1452,8 @@ def build_customer_guidance(
             reason_text = f"Väntar på leverans {waiting_until}"
         elif suppression == "recent_human_contact" and latest_human_contact:
             waiting_until = (latest_human_contact.date() + timedelta(days=3)).isoformat()
+        elif suppression == "recent_reached_routine_wait" and latest_reached_date:
+            waiting_until = (latest_reached_date + timedelta(days=20)).isoformat()
         elif suppression == "unanswered_retry_wait" and latest_human_contact:
             from_date = latest_human_contact.date()
             while business_days_elapsed(latest_human_contact.date(), from_date) < int(VALUE_POLICY["retry_business_days"]):
@@ -1467,7 +1477,7 @@ def build_customer_guidance(
         status_key = "act_now"
         reason_code = primary_trigger
         reason_text = primary_reason_text or "Aktuell signal behöver följas upp"
-        if primary_trigger in {"unanswered_retry_due", "unanswered_verify_contact_due"}:
+        if primary_trigger in TRIGGER_ACTIONS:
             action_key, action_label = TRIGGER_ACTIONS[primary_trigger]
         elif focus_key == "a_prospect":
             action_key, action_label = "advance_first_order", "Ta nästa steg mot första ordern"
@@ -1804,6 +1814,9 @@ def build_priority_customers(
         if not sales_person or not customer_id:
             suppression = "invalid_or_inactive_owner"
             status_text = "Saknar giltig ägare eller kundidentitet"
+        elif contact.get("do_not_contact_date"):
+            suppression = "do_not_contact"
+            status_text = "Kunden har uttryckligen bett oss att inte återkomma"
         elif future_delivery and future_delivery > today:
             suppression = "future_delivery"
             status_text = "Framtida leverans registrerad"
@@ -1830,14 +1843,11 @@ def build_priority_customers(
             status_text = (
                 f"Avvakta mejlutfall i {active_email_intent.get('wait_days')} dagar"
             )
-        elif contact.get("do_not_contact_date"):
-            suppression = "do_not_contact"
-            status_text = "Kunden har uttryckligen bett oss att inte återkomma"
         elif (
-            latest_contact_class == "Negativ"
+            contact.get("latest_reached_result") == "Negativ"
             and not has_order_after_latest_contact
-            and days_since_contact is not None
-            and 0 <= days_since_contact < 60
+            and latest_reached_date
+            and 0 <= (today - latest_reached_date).days < 60
         ):
             suppression = "negative_contact_cooldown"
             status_text = "Negativ kontakt – rekommendation pausad"
@@ -1855,8 +1865,22 @@ def build_priority_customers(
         ):
             suppression = "recent_human_contact"
             status_text = "Nyligen kontaktad"
+        elif (
+            days_since_reached is not None and 0 <= days_since_reached < 20
+            and not has_current_explicit_follow_up
+            and not active_email_intent.get("ready")
+            and not (
+                latest_contact_class == "Positiv"
+                and not has_order_after_latest_contact
+                and days_since_contact is not None
+                and days_since_contact >= (7 if delivery_count == 0 else 3)
+            )
+        ):
+            suppression = "recent_reached_routine_wait"
+            status_text = "Nyligen faktiskt nådd – rutinbearbetning avvaktar"
+
         workflow_reason = workflow_suppressions.get(customer_id)
-        if workflow_reason:
+        if workflow_reason and suppression != "do_not_contact":
             suppression = str(workflow_reason)
             status_text = {
                 "snoozed": "Rekommendation snoozad",
@@ -1899,6 +1923,8 @@ def build_priority_customers(
                 and not (future_delivery and future_delivery > today)
             ),
             unanswered_count_30d=unanswered_count_30d,
+            days_since_reached=days_since_reached,
+            business_value_raw=business_result["business_value_raw"],
         )
         reason_code = trigger_snapshot["primary_reason_code"]
         reason_text = trigger_snapshot["primary_reason_text"]
@@ -1985,6 +2011,7 @@ def build_priority_customers(
             activity_state=activity_state,
             primary_trigger=trigger_snapshot["primary_trigger_type"],
             primary_reason_text=trigger_snapshot["primary_reason_text"],
+            latest_reached_date=latest_reached_date,
             active_email_intent=active_email_intent,
             business_email_intent=business_email_intent,
             suppression=suppression,
@@ -2124,6 +2151,7 @@ def apply_workflow_suppressions(priority_customers, suppressions):
             # planned_activities / follow_up_date remain the source of truth.
             if (
                 reason == "suggestion_planned"
+                or guidance.get("reason_code") == "do_not_contact"
                 or guidance.get("status_key") in {
                     "data_missing", "planned", "overdue_followup"
                 }
