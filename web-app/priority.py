@@ -497,12 +497,11 @@ def build_contact_features(sales_activities: list[dict], order_features: dict) -
         # Additional v3.1 read fields; the existing planning-resolution field
         # is deliberately unchanged until the planned phase-2 migration.
         last_reached_sort_key = last_reached["sort_key"] if last_reached else None
-        unanswered_sequence_count = sum(
-            1 for a in human_activities
+        unanswered_sequence_dates = [
+            a["datetime"].date() for a in human_activities
             if normalize_contact_result(a["row"].get("result")) == "Ej anträffbar"
             and (last_reached_sort_key is None or a["sort_key"] > last_reached_sort_key)
-            and 0 <= (date.today() - a["datetime"].date()).days <= 30
-        )
+        ]
         planned_followups = [
             activity
             for activity in human_activities
@@ -563,7 +562,7 @@ def build_contact_features(sales_activities: list[dict], order_features: dict) -
             ),
             "latest_reached_date": last_reached["datetime"].date() if last_reached else None,
             "unanswered_attempt_dates": unanswered_dates,
-            "unanswered_sequence_count": unanswered_sequence_count,
+            "unanswered_sequence_dates": unanswered_sequence_dates,
             "last_opt_out_date": opt_out_rows[-1]["datetime"].date() if opt_out_rows else None,
             "latest_reached_result": (
                 normalize_contact_result(last_reached["row"].get("result"))
@@ -1992,11 +1991,15 @@ def build_priority_customers(
             last_opt_out_date=contact.get("last_opt_out_date"),
             latest_follow_up_date=latest_follow_up_date,
             follow_up_reached_resolved=bool(contact.get("follow_up_reached_resolved")),
-            unanswered_sequence_count=int(contact.get("unanswered_sequence_count") or 0),
+            unanswered_sequence_count=sum(
+                1 for attempt_date in contact.get("unanswered_sequence_dates", ())
+                if 0 <= (today - attempt_date).days <= 30
+            ),
             last_order_date=last_order,
             delivery_count=delivery_count,
             days_since_delivery=days_since_delivery,
             overdue_days=overdue_days,
+            expected_cycle_days=expected_cycle,
             future_delivery=future_delivery,
             qualified_email_trigger=active_email_intent.get("trigger", "")
                 if active_email_intent.get("ready") else "",
