@@ -5130,7 +5130,15 @@
     const insight = customerOrInsight?.customer_guidance
       ? customerOrInsight
       : getCustomerInsight(customerOrInsight);
+    // Legacy planning/suggestion read model remains untouched in stage 1.
     return insight?.customer_guidance || {};
+  }
+
+  function getCustomerListGuidance(customerOrInsight) {
+    const insight = customerOrInsight?.list_guidance || customerOrInsight?.customer_guidance
+      ? customerOrInsight
+      : getCustomerInsight(customerOrInsight);
+    return insight?.list_guidance || insight?.customer_guidance || {};
   }
 
   function getGuidanceStatusClass(statusKey) {
@@ -5151,7 +5159,7 @@
 
   function getNextActionHtml(c) {
     const insight = getCustomerInsight(c);
-    const guidance = getCustomerGuidance(insight);
+    const guidance = getCustomerListGuidance(insight);
     if (!guidance.focus_key || !guidance.status_key) {
       return `
         <div class="next-action next-action-neutral">
@@ -5219,7 +5227,7 @@
 
   function getCardDatesHtml(c) {
     const ins = getCustomerInsight(c);
-    const guidance = getCustomerGuidance(ins);
+    const guidance = getCustomerListGuidance(ins);
     const delivery = getCardDateHtml(ins.latest_delivery_date, true);
     const nextDelivery = getCardDateHtml(ins.next_delivery_date, true);
     const attempted = getCardDateHtml(ins.latest_human_contact_date);
@@ -5249,12 +5257,12 @@
   }
 
   function getPriorityCardClass(c) {
-    return getCustomerGuidance(c).status_key ? "guidance-card" : "priority-neutral";
+    return getCustomerListGuidance(c).status_key ? "guidance-card" : "priority-neutral";
   }
 
   function getCustomerCardAriaLabel(c, routeStop = null) {
     const ins = getCustomerInsight(c);
-    const guidance = getCustomerGuidance(ins);
+    const guidance = getCustomerListGuidance(ins);
     const score = ins?.contact_priority_score != null && ins?.business_value_score != null
       ? `Kontaktprioritet ${ins.contact_priority_score}. Affärsvärde ${ins.business_value_score}`
       : "poäng saknas";
@@ -5267,7 +5275,7 @@
 
   function getCardPlanningButtonHtml(c) {
     if (isCancelledCustomer(c) || !currentUserCanPlan()) return "";
-    const guidance = getCustomerGuidance(c);
+    const guidance = getCustomerListGuidance(c);
     if (!guidance.status_key || guidance.status_key === "data_missing") return "";
     let label = "";
     if (guidance.status_key === "planned") {
