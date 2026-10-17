@@ -1838,6 +1838,13 @@
       padding: 12px 12px 44px;
     }
 
+    .list-sort-control { display: flex; flex-wrap: wrap; align-items: center; gap: 9px; }
+    .list-sort-control label { font-size: .76rem; font-weight: 750; color: var(--pb-ink); }
+    .list-sort-control select { max-width: 100%; border: 1px solid var(--pb-border-strong); border-radius: 9px; padding: 8px; font: inherit; font-size: .8rem; background: #fff; color: var(--pb-ink); }
+    .score-pair { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0 5px; }
+    .score-pair-item { display: flex; align-items: baseline; gap: 5px; border-radius: 8px; padding: 6px 9px; font-size: .72rem; background: #f8f5f7; color: var(--pb-muted); }
+    .score-pair-item strong { font-size: .95rem; color: var(--pb-ink); }
+    .score-pair-item.contact strong { color: var(--pb-chocolate); }
     .list-guidance-help {
       margin: 8px 2px 0;
       color: var(--pb-muted);
@@ -3899,7 +3906,8 @@
     <div id="clear-filters-row" style="display:none">
       <button class="chip chip-clear" id="clear-filters-btn">✕ Rensa filter</button>
     </div>
-    <p class="list-guidance-help">Sorterat efter poäng. Fokus visar affärsspår, status visar läget. En viktig kund kan vara högt rankad men redan planerad.</p>
+    <div class="list-sort-control"><label for="list-sort-mode">Sortera</label><select id="list-sort-mode"><option value="contact">Kontaktprioritet</option><option value="value">Affärsvärde</option></select></div>
+    <p class="list-guidance-help">Kontaktprioritet visar vem som bör bearbetas nu. Affärsvärde visar uppskattad potential även för planerade kunder. Poäng är index, inte köpchans.</p>
   </div>
 
   <div class="list-body" id="customer-list">
@@ -4555,6 +4563,7 @@
   let customers = [];
   let currentUser = null;
   let searchQuery = "";
+  let listSortMode = "contact";
   let currentCustomer = null;
   let detailReturnView = "list";
   let formReturnView = "detail";
@@ -4645,7 +4654,12 @@
     const existing = sharedJsonRequests.get(path);
     if (existing) return existing;
 
-    const requestPromise = fetch(path)
+    // An opt-in header adds the ID-keyed value read model without breaking
+    // older consumers of the name-keyed /customer-insights response.
+    const options = path.endsWith("/customer-insights")
+      ? { headers: { "X-PB-Value-Model": "v3.1" } }
+      : undefined;
+    const requestPromise = fetch(path, options)
       .then(async response => {
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         return response.json();
@@ -4747,6 +4761,9 @@
       const loadedInsights = await (
         requestPromise || fetchJsonShared(`${API}/customer-insights`)
       );
+      if (!loadedInsights || typeof loadedInsights !== "object") {
+        throw new Error("Kundinsikter kunde inte laddas");
+      }
       if (
         requestSerial !== insightsRequestSerial
         || (parentLoadSerial !== null && parentLoadSerial !== customersLoadSerial)
@@ -5025,6 +5042,12 @@
   }
 
   function getCustomerInsight(c) {
+    const cid = String(c?.customer_id || "").trim();
+    const identityMap = insights?.__by_customer_id;
+    if (cid && identityMap) {
+      // Never borrow another store's order/contact history on name collisions.
+      return identityMap[cid] || {};
+    }
     const rawKey = String(c?.customer || "").toLowerCase();
     return insights[customerInsightKey(c?.customer)] || insights[rawKey] || {};
   }
@@ -5053,11 +5076,69 @@
     );
   }
 
+  function sortedModelValue(insight, key) {
+    const raw = insight?.[key];
+    if (raw === null || raw === undefined || raw === "") return null;
+    const value = Number(raw);
+    return Number.isFinite(value) ? value : null;
+  }
+
+  function stableCustomerTieBreak(a, b) {
+    const nameSort = String(a.customer || "").localeCompare(String(b.customer || ""), "sv");
+    return nameSort || String(a.customer_id || "").localeCompare(String(b.customer_id || ""), "sv")
+      || Number(a.row || 0) - Number(b.row || 0);
+  }
+
+  function compareDescendingMissingLast(a, b) {
+    if (a === null) return b === null ? 0 : 1;
+    if (b === null) return -1;
+    return b - a;
+  }
+
+  function contactPrioritySort(a, b) {
+    const ia = getCustomerInsight(a), ib = getCustomerInsight(b);
+    // Operational eligibility comes before the score: planned/snoozed stores
+    // keep their value but do not compete with an actionable call.
+    const bucketA = sortedModelValue(ia, "contact_priority_bucket") ?? 5;
+    const bucketB = sortedModelValue(ib, "contact_priority_bucket") ?? 5;
+    return bucketA - bucketB
+      || compareDescendingMissingLast(
+        sortedModelValue(ia, "contact_priority_raw"),
+        sortedModelValue(ib, "contact_priority_raw")
+      )
+      || compareDescendingMissingLast(
+        sortedModelValue(ia, "business_value_raw"),
+        sortedModelValue(ib, "business_value_raw")
+      )
+      || stableCustomerTieBreak(a, b);
+  }
+
+  function businessValueSort(a, b) {
+    return compareDescendingMissingLast(
+      sortedModelValue(getCustomerInsight(a), "business_value_raw"),
+      sortedModelValue(getCustomerInsight(b), "business_value_raw")
+    ) || stableCustomerTieBreak(a, b);
+  }
+
+  document.getElementById("list-sort-mode").addEventListener("change", event => {
+    if (!["contact", "value"].includes(event.target.value)) return;
+    listSortMode = event.target.value;
+    renderList();
+  });
+
   function getCustomerGuidance(customerOrInsight) {
     const insight = customerOrInsight?.customer_guidance
       ? customerOrInsight
       : getCustomerInsight(customerOrInsight);
+    // Legacy planning/suggestion read model remains untouched in stage 1.
     return insight?.customer_guidance || {};
+  }
+
+  function getCustomerListGuidance(customerOrInsight) {
+    const insight = customerOrInsight?.list_guidance || customerOrInsight?.customer_guidance
+      ? customerOrInsight
+      : getCustomerInsight(customerOrInsight);
+    return insight?.list_guidance || insight?.customer_guidance || {};
   }
 
   function getGuidanceStatusClass(statusKey) {
@@ -5078,7 +5159,7 @@
 
   function getNextActionHtml(c) {
     const insight = getCustomerInsight(c);
-    const guidance = getCustomerGuidance(insight);
+    const guidance = getCustomerListGuidance(insight);
     if (!guidance.focus_key || !guidance.status_key) {
       return `
         <div class="next-action next-action-neutral">
@@ -5105,20 +5186,22 @@
 
   function getPrioritySummaryHtml(c) {
     const ins = getCustomerInsight(c);
-    const score = hasPriorityScore(ins)
-      ? Number(ins.priority_score).toLocaleString("sv-SE", { maximumFractionDigits: 1 })
-      : "—";
-    return `<div class="priority-summary">${esc(score)} poäng</div>`;
+    const score = key => ins[key] == null ? "—" : Number(ins[key]).toLocaleString("sv-SE", { maximumFractionDigits: 0 });
+    return `<div class="score-pair" aria-label="Affärsvärde och kontaktprioritet">
+      <span class="score-pair-item contact" title="Aktuell kontaktprioritet">Kontaktprioritet <strong>${esc(score("contact_priority_score"))}</strong></span>
+      <span class="score-pair-item" title="Uppskattat affärsvärde oberoende av planering">Affärsvärde <strong>${esc(score("business_value_score"))}</strong></span>
+    </div>`;
   }
 
   function getPotentialHtml(c) {
     const ins = getCustomerInsight(c);
-    const potential = Number(ins.expected_order_dfp || 0);
+    const estimate = ins?.business_expected_dfp_per_delivery;
+    const potential = estimate == null ? NaN : Number(estimate);
     if (!Number.isFinite(potential) || potential <= 0) {
-      return '<div class="potential-summary">Potential ej beräknad</div>';
+      return '<div class="potential-summary">Potential ej beräknad · leveransstorlek saknas</div>';
     }
     const text = potential.toLocaleString("sv-SE", { maximumFractionDigits: 1 });
-    return `<div class="potential-summary">Potential: ca ${esc(text)} DFP</div>`;
+    return `<div class="potential-summary">Uppskattad leveransstorlek: ca ${esc(text)} DFP</div>`;
   }
 
   function getCardDateHtml(value, compact = false) {
@@ -5144,10 +5227,11 @@
 
   function getCardDatesHtml(c) {
     const ins = getCustomerInsight(c);
-    const guidance = getCustomerGuidance(ins);
+    const guidance = getCustomerListGuidance(ins);
     const delivery = getCardDateHtml(ins.latest_delivery_date, true);
     const nextDelivery = getCardDateHtml(ins.next_delivery_date, true);
-    const contact = getCardDateHtml(ins.latest_contact_date || c.latest_contact_date);
+    const attempted = getCardDateHtml(ins.latest_human_contact_date);
+    const reached = getCardDateHtml(ins.latest_reached_date);
     const followUpDate = String(guidance.next_contact_at || ins.latest_follow_up_date || "").trim().slice(0, 10);
     let followUp = "";
     if (guidance.status_key === "overdue_followup" && followUpDate) {
@@ -5163,7 +5247,8 @@
       <div class="card-dates">
         <span class="card-date-primary">${deliveryLabel} ${delivery}${volumeText}</span>
         <span class="card-date-secondary">
-          <span>Kontakt ${contact}</span>
+          <span>Senaste försök ${attempted}</span>
+          <span>Senast nådd ${reached}</span>
           ${ins.next_delivery_date ? `<span>Nästa leverans ${nextDelivery}${nextVolumeText}</span>` : ""}
           ${followUp}
         </span>
@@ -5172,13 +5257,15 @@
   }
 
   function getPriorityCardClass(c) {
-    return getCustomerGuidance(c).status_key ? "guidance-card" : "priority-neutral";
+    return getCustomerListGuidance(c).status_key ? "guidance-card" : "priority-neutral";
   }
 
   function getCustomerCardAriaLabel(c, routeStop = null) {
     const ins = getCustomerInsight(c);
-    const guidance = getCustomerGuidance(ins);
-    const score = hasPriorityScore(ins) ? `${ins.priority_score} poäng` : "poäng saknas";
+    const guidance = getCustomerListGuidance(ins);
+    const score = ins?.contact_priority_score != null && ins?.business_value_score != null
+      ? `Kontaktprioritet ${ins.contact_priority_score}. Affärsvärde ${ins.business_value_score}`
+      : "poäng saknas";
     const focus = guidance.focus_label || "fokus saknas";
     const status = guidance.status_label || "status saknas";
     const action = guidance.action_label || "ingen rekommendation";
@@ -5188,7 +5275,7 @@
 
   function getCardPlanningButtonHtml(c) {
     if (isCancelledCustomer(c) || !currentUserCanPlan()) return "";
-    const guidance = getCustomerGuidance(c);
+    const guidance = getCustomerListGuidance(c);
     if (!guidance.status_key || guidance.status_key === "data_missing") return "";
     let label = "";
     if (guidance.status_key === "planned") {
@@ -5207,6 +5294,7 @@
   function getListSignature() {
     return [
       searchQuery,
+      `list-sort:${listSortMode}`,
       emailClickNoOrderActive ? "email-click-no-order:1" : "email-click-no-order:0",
       ...Object.keys(filterState).sort().map(key => `${key}:${[...filterState[key]].sort().join("|")}`),
     ].join(";");
@@ -5301,7 +5389,9 @@
   }
 
   function getBaseFilteredCustomers() {
-    return getFilteredCustomers().slice().sort(prioritySort);
+    return getFilteredCustomers().slice().sort(
+      listSortMode === "value" ? businessValueSort : contactPrioritySort
+    );
   }
 
   function parseRouteCoordinate(value, min, max) {
@@ -5350,7 +5440,7 @@
   }
 
   function getRouteProposalBaseCustomers() {
-    if (!currentUserIsSeller()) return getBaseFilteredCustomers();
+    if (!currentUserIsSeller()) return getFilteredCustomers().slice().sort(prioritySort);
     const sellerName = normalizeRouteIdentity(currentUser?.name || currentUser?.user_name);
     return customers.filter(customer =>
       normalizeRouteIdentity(customer?.sales_person) === sellerName
@@ -11137,7 +11227,10 @@
     mapContext = "list";
     mapReturnView = "list";
     const MAP_LIMIT = 150;
-    const customersWithCoordinates = filteredCustomers.filter(hasMapCoordinates);
+    // Stage 1 only changes the Butiker list. Preserve the pre-existing
+    // v2.2 route/map ordering regardless of its new sort selector.
+    const customersWithCoordinates = getFilteredCustomers().slice()
+      .sort(prioritySort).filter(hasMapCoordinates);
     mapStops = customersWithCoordinates.slice(0, MAP_LIMIT);
 
     if (mapStops.length < 1) {

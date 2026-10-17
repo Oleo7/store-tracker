@@ -7,6 +7,11 @@ import os
 from commercial_orders import order_volume, commercial_order
 from contact_channel import recommend_contact_channel
 from statistics import median
+from value_prioritization import (VERSION as VALUE_MODEL_VERSION, POLICY as VALUE_POLICY,
+    REACHED_RESULTS, DO_NOT_CONTACT_RESULTS, complete_deliveries,
+    segment_prior, business_opportunity, contact_opportunity,
+    business_days_elapsed, store_contact_guidance,
+    store_format, empirical_format_prior)
 import unicodedata
 import uuid
 
@@ -234,7 +239,8 @@ def build_order_features(order_rows: list[dict]) -> dict:
         dfp = _order_dfp(row)
         reference = str(row.get("Reference") or "").strip() or str(row.get("Order date") or row.get("Delivery date") or f"row-{idx}")
         order_date = parse_date(row.get("Order date"))
-        delivery_date = parse_date(row.get("Delivery date")) or order_date
+        confirmed_delivery_date = parse_date(row.get("Delivery date"))
+        delivery_date = confirmed_delivery_date or order_date
         total = _parse_number(row.get("Total"))
         raw_customer_id = str(row.get("customer_id") or "").strip()
         customer_number = str(row.get("Customer number") or "").strip()
@@ -262,6 +268,7 @@ def build_order_features(order_rows: list[dict]) -> dict:
                 "sales": 0.0,
                 "volume_known": False,
                 "delivery_volume_complete": True,
+                "confirmed_delivery": bool(confirmed_delivery_date),
                 "skus": set(),
             },
         )
@@ -269,6 +276,8 @@ def build_order_features(order_rows: list[dict]) -> dict:
             # Do not present a partial total, or attach several delivery dates
             # to the final date of an inconsistent logical order.
             order["delivery_volume_complete"] = False
+        if not confirmed_delivery_date:
+            order["confirmed_delivery"] = False
         if dfp is not None:
             order["dfp"] += dfp
             order["volume_known"] = True
@@ -318,6 +327,15 @@ def build_order_features(order_rows: list[dict]) -> dict:
             )
             for day, rows in delivery_orders.items()
         }
+        confirmed_delivery_dfp_by_date = {
+            day.isoformat(): delivery_dfp_by_date.get(day.isoformat())
+            for day, rows in delivery_orders.items()
+            if all(o["confirmed_delivery"] for o in rows)
+        }
+        confirmed_delivery_dates = sorted(
+            day for day, rows in delivery_orders.items()
+            if all(o["confirmed_delivery"] for o in rows)
+        )
         known_volumes = [o["dfp"] for o in customer_orders if o["dfp"] is not None]
         total_dfp = sum(known_volumes) if known_volumes else None
         total_sales = sum(o["sales"] for o in customer_orders)
@@ -388,6 +406,8 @@ def build_order_features(order_rows: list[dict]) -> dict:
             "latest_order_reference": latest_order.get("reference", ""),
             "delivery_dates": delivery_dates,
             "delivery_dfp_by_date": delivery_dfp_by_date,
+            "confirmed_delivery_dfp_by_date": confirmed_delivery_dfp_by_date,
+            "confirmed_delivery_dates": confirmed_delivery_dates,
             "delivery_gaps": gaps,
             "latest_order_dfp": _clean_number(latest_dfp),
             "latest_order_value": _clean_number(latest_sales),
@@ -473,6 +493,21 @@ def build_contact_features(sales_activities: list[dict], order_features: dict) -
         latest_activity = activities[-1]
         human_activities = [activity for activity in activities if not activity["is_email"]]
         latest_human = human_activities[-1] if human_activities else None
+        reached = [a for a in human_activities if normalize_contact_result(a["row"].get("result")) in REACHED_RESULTS]
+        last_reached = reached[-1] if reached else None
+        unanswered_dates = [a["datetime"].date() for a in human_activities if normalize_contact_result(a["row"].get("result")) == "Ej anträffbar"]
+        opt_out_rows = [
+            a for a in human_activities
+            if str(a["row"].get("result") or "").strip().casefold() in DO_NOT_CONTACT_RESULTS
+        ]
+        # Additional v3.1 read fields; the existing planning-resolution field
+        # is deliberately unchanged until the planned phase-2 migration.
+        last_reached_sort_key = last_reached["sort_key"] if last_reached else None
+        unanswered_sequence_dates = [
+            a["datetime"].date() for a in human_activities
+            if normalize_contact_result(a["row"].get("result")) == "Ej anträffbar"
+            and (last_reached_sort_key is None or a["sort_key"] > last_reached_sort_key)
+        ]
         planned_followups = [
             activity
             for activity in human_activities
@@ -487,6 +522,14 @@ def build_contact_features(sales_activities: list[dict], order_features: dict) -
                 activity["sort_key"] > latest_plan["sort_key"]
                 and activity["datetime"].date() >= follow_up_date
                 for activity in activities
+            )
+        )
+        reached_resolved_followup = bool(
+            latest_plan and any(
+                a["sort_key"] > latest_plan["sort_key"]
+                and a["datetime"].date() >= follow_up_date
+                and normalize_contact_result(a["row"].get("result")) in REACHED_RESULTS
+                for a in human_activities
             )
         )
         latest_identity = latest_activity
@@ -522,6 +565,18 @@ def build_contact_features(sales_activities: list[dict], order_features: dict) -
             ),
             "latest_human_contact_date": (
                 latest_human["datetime"].date() if latest_human else None
+            ),
+            "latest_reached_date": last_reached["datetime"].date() if last_reached else None,
+            "unanswered_attempt_dates": unanswered_dates,
+            "unanswered_sequence_dates": unanswered_sequence_dates,
+            "last_opt_out_date": opt_out_rows[-1]["datetime"].date() if opt_out_rows else None,
+            "latest_reached_result": (
+                normalize_contact_result(last_reached["row"].get("result"))
+                if last_reached else ""
+            ),
+            "follow_up_reached_resolved": reached_resolved_followup,
+            "latest_follow_up_created_date": (
+                latest_plan["datetime"].date() if latest_plan else None
             ),
             "latest_human_contact_id": str(
                 latest_human_row.get("contact_id") or ""
@@ -1064,6 +1119,8 @@ TRIGGER_ACTIONS = {
     "single_order_reactivation_due": ("reactivate_customer", "Återaktivera kunden"),
     "strategic_contact_due": ("contact_customer", "Ta ny kontakt"),
     "legacy_missed_followup": ("reschedule_followup", "Planera om uppföljningen"),
+    "unanswered_retry_due": ("retry_unanswered", "Försök nå kunden igen"),
+    "unanswered_verify_contact_due": ("verify_contact_details", "Kontrollera kontaktväg"),
 }
 
 
@@ -1074,6 +1131,7 @@ def _phase3_trigger_snapshot(
     has_current_explicit_follow_up, priority_score,
     active_email_intent=None, legacy_missed_followup=False,
     expected_next=None, today=None,
+    unanswered_retry_due=False, unanswered_count_30d=0,
 ):
     triggers = []
     reasons = {}
@@ -1084,6 +1142,12 @@ def _phase3_trigger_snapshot(
         reasons["a_prospect_due"] = (
             "a_prospect_due", "Strategisk kund utan tidigare order"
         )
+
+    if unanswered_retry_due:
+        key = "unanswered_verify_contact_due" if unanswered_count_30d >= 3 else "unanswered_retry_due"
+        triggers.append(key)
+        reasons[key] = (key, "Tre obesvarade försök – kontrollera kontaktväg"
+                        if unanswered_count_30d >= 3 else "Ej anträffbar – försök nå kunden igen")
 
     if lifecycle == "established" and overdue_days is not None and overdue_days >= 0:
         triggers.append("established_reorder_due")
@@ -1173,6 +1237,8 @@ def _phase3_trigger_snapshot(
         )
 
     precedence = (
+        "unanswered_verify_contact_due",
+        "unanswered_retry_due",
         "a_prospect_due",
         "stockfiller_click_followup",
         "product_sheet_click_followup",
@@ -1413,7 +1479,9 @@ def build_customer_guidance(
         status_key = "act_now"
         reason_code = primary_trigger
         reason_text = primary_reason_text or "Aktuell signal behöver följas upp"
-        if focus_key == "a_prospect":
+        if primary_trigger in {"unanswered_retry_due", "unanswered_verify_contact_due"}:
+            action_key, action_label = TRIGGER_ACTIONS[primary_trigger]
+        elif focus_key == "a_prospect":
             action_key, action_label = "advance_first_order", "Ta nästa steg mot första ordern"
         elif focus_key == "warm_opportunity":
             action_key, action_label = "follow_up_opportunity", "Följ upp möjligheten"
@@ -1534,6 +1602,7 @@ def build_priority_customers(
         ambiguous_master_names=ambiguous_master_names,
     )
     activity_index = _planned_activity_index(planned_activities)
+    value_priors = _value_v31_priors(customers, order_indices, ambiguous_master_names, today)
     guidance_now = now or datetime.combine(today, time.min)
     represented_source_contact_ids = {
         str(row.get("source_contact_id") or "").strip()
@@ -1628,6 +1697,9 @@ def build_priority_customers(
             (today - latest_human_date).days if latest_human_date else None
         )
         latest_contact_class = contact.get("latest_contact_class") or ""
+        latest_reached_date = contact.get("latest_reached_date")
+        days_since_reached = (today - latest_reached_date).days if latest_reached_date else None
+        unanswered_count_30d = sum(1 for d in contact.get("unanswered_attempt_dates", []) if 0 <= (today - d).days <= 30)
         latest_follow_up_date = contact.get("latest_follow_up_date")
         follow_up_resolved = bool(contact.get("follow_up_resolved"))
         has_unresolved_follow_up = bool(
@@ -1719,6 +1791,57 @@ def build_priority_customers(
             intent_timing, value_index, strategic_index, history_index,
             policy=scoring_version,
         )
+        # Preserve legacy planning/routing score; new read model is only for Butiker.
+        # Order date is not proof of delivery. Keep legacy delivery_count
+        # unchanged for existing consumers, but classify value by verified
+        # completed deliveries only.
+        verified_delivery_dates = sorted(
+            d for d in order.get("confirmed_delivery_dates", ())
+            if d <= today
+        ) if "confirmed_delivery_dates" in order else completed_dates
+        business_delivery_count = len(verified_delivery_dates)
+        business_last_delivery = (
+            verified_delivery_dates[-1] if verified_delivery_dates else None
+        )
+        business_days_since_delivery = (
+            (today - business_last_delivery).days
+            if business_last_delivery else None
+        )
+        business_expected_cycle = (
+            expected_reorder_cycle(
+                verified_delivery_dates,
+                defaults.get("expected_cycle_days") or 28,
+            )
+            if business_delivery_count >= 2 else
+            (defaults.get("expected_cycle_days") or 45)
+        )
+        business_overdue_days = (
+            (today - (business_last_delivery
+                      + timedelta(days=business_expected_cycle))).days
+            if business_last_delivery and business_delivery_count >= 2
+            else None
+        )
+        store_fmt = store_format(name)
+        has_store_format_prior = (
+            bool(store_fmt) and f"{segment}|{store_fmt}" in value_priors
+            and value_priors[f"{segment}|{store_fmt}"] !=
+                value_priors.get(segment, value_priors.get("", 9))
+        )
+        business_prior = value_priors.get(
+            f"{segment}|{store_fmt}",
+            value_priors.get(segment, value_priors.get("", 9)),
+        )
+        business_result = business_opportunity(
+            delivery_values=complete_deliveries(order, today),
+            prior_dfp=business_prior,
+            delivery_count=business_delivery_count,
+            cycle_days=business_expected_cycle,
+            days_since_delivery=business_days_since_delivery,
+        )
+        business_result["business_prior_dfp"] = round(business_prior, 2)
+        business_result["business_prior_basis"] = (
+            "segment_and_format" if has_store_format_prior else "segment"
+        )
 
         future_follow_up_days = _future_follow_up_days(
             latest_contact_date=contact.get("latest_contact_date"),
@@ -1805,6 +1928,16 @@ def build_priority_customers(
             legacy_missed_followup=legacy_missed_followup,
             expected_next=expected_next,
             today=today,
+            unanswered_retry_due=bool(
+                latest_contact_class == "Ej anträffbar"
+                and latest_human_date
+                and business_days_elapsed(latest_human_date, today) >= int(VALUE_POLICY["retry_business_days"])
+                and not has_order_after_latest_contact
+                and not has_current_explicit_follow_up
+                and not activity
+                and not (future_delivery and future_delivery > today)
+            ),
+            unanswered_count_30d=unanswered_count_30d,
         )
         reason_code = trigger_snapshot["primary_reason_code"]
         reason_text = trigger_snapshot["primary_reason_text"]
@@ -1897,7 +2030,58 @@ def build_priority_customers(
             status_text=status_text,
             now=guidance_now,
         )
+        # Do not change the legacy guidance/trigger consumed by Planering.
+        # Stage 1 has its own canonical store-list action paired with its score.
+        list_guidance = store_contact_guidance(
+            legacy=customer_guidance,
+            today=today,
+            business_value_raw=business_result["business_value_raw"],
+            latest_attempt_date=latest_human_date,
+            latest_attempt_result=latest_contact_class,
+            latest_reached_date=latest_reached_date,
+            latest_reached_result=contact.get("latest_reached_result") or "",
+            last_opt_out_date=contact.get("last_opt_out_date"),
+            latest_follow_up_date=latest_follow_up_date,
+            follow_up_reached_resolved=bool(contact.get("follow_up_reached_resolved")),
+            unanswered_sequence_count=sum(
+                1 for attempt_date in contact.get("unanswered_sequence_dates", ())
+                if 0 <= (today - attempt_date).days <= 30
+            ),
+            last_order_date=last_order,
+            delivery_count=business_delivery_count,
+            days_since_delivery=business_days_since_delivery,
+            overdue_days=business_overdue_days,
+            expected_cycle_days=business_expected_cycle,
+            follow_up_has_later_order=bool(
+                latest_follow_up_date and last_order
+                and last_order >= latest_follow_up_date
+            ),
+            follow_up_created_date=contact.get("latest_follow_up_created_date"),
+            unverified_order_without_delivery=bool(
+                order_count > 0 and business_delivery_count == 0
+            ),
+            future_delivery=future_delivery,
+            qualified_email_trigger=active_email_intent.get("trigger", "")
+                if active_email_intent.get("ready") else "",
+        )
+        contact_result = contact_opportunity(
+            business_value_raw=business_result["business_value_raw"],
+            days_since_reached=days_since_reached,
+            latest_attempt_date=latest_human_date,
+            today=today, latest_result=latest_contact_class,
+            status=list_guidance["status_key"],
+            trigger=list_guidance.get("reason_code", ""),
+        )
         result.append({
+            "value_model_version": VALUE_MODEL_VERSION,
+            **business_result, **contact_result,
+            "list_guidance": list_guidance,
+            "business_verified_delivery_count": business_delivery_count,
+            "business_expected_cycle_days": business_expected_cycle,
+            "business_days_since_delivery": business_days_since_delivery,
+            "business_overdue_days": business_overdue_days,
+            "latest_reached_date": _iso_date(latest_reached_date),
+            "days_since_reached": days_since_reached,
             "row": customer.get("row"),
             "customer_id": customer_id,
             "customer": name,
@@ -2025,6 +2209,19 @@ def apply_workflow_suppressions(priority_customers, suppressions):
                 continue
             updated["recommendation_eligible"] = False
             updated["recommendation_suppression_reason"] = reason
+            updated["contact_priority_score"] = 0
+            updated["contact_priority_raw"] = 0.0
+            updated["contact_relevance_factor"] = 0.0
+            updated["contact_priority_bucket"] = 3
+            list_guidance = dict(updated.get("list_guidance") or {})
+            if list_guidance.get("status_key") not in {"planned", "overdue_followup", "data_missing"}:
+                list_guidance.update({
+                    "status_key": "wait", "status_label": "Avvakta",
+                    "action_label": "Avvakta" if reason == "snoozed" else "Återuppta förslag",
+                    "reason_code": reason, "reason_text": "Rekommendationen är pausad eller dold",
+                    "can_contact_now": False, "recommended_contact_type": "",
+                })
+                updated["list_guidance"] = list_guidance
             updated["planning_status_text"] = {
                 "snoozed": "Rekommendation snoozad",
                 "dismissed": "Samma beslutsunderlag markerat Ej relevant",
@@ -2837,6 +3034,38 @@ def _build_priority_benchmarks(
         "expected_order_value_p90": _percentile(global_value, 0.9) or global_default["expected_order_value"] or 1,
         "segment_defaults": segment_defaults,
     }
+
+
+def _value_v31_priors(customers, order_indices, ambiguous_names, today):
+    grouped = defaultdict(list)
+    by_format = defaultdict(list)
+    global_values = []
+    for customer in customers:
+        if _is_truthy(customer.get("cancelled_flag")):
+            continue
+        feature = _identity_feature(
+            customer, order_indices, name_field="customer", number_field="customer_number",
+            ambiguous_master_names=ambiguous_names,
+        )
+        volumes = complete_deliveries(feature, today)
+        if volumes:
+            average = sum(volumes) / len(volumes)
+            segment = _segment_value(customer)
+            grouped[segment].append(average)
+            fmt = store_format(customer.get("customer"))
+            if fmt:
+                # One observation per BUYING STORE, never per order row.
+                by_format[(segment, fmt)].append(average)
+            global_values.append(average)
+    priors = {segment: segment_prior(grouped[segment], segment, global_values)
+              for segment in ("A", "B", "C", "")}
+    # Small format groups shrink entirely to their segment prior; larger
+    # groups can add measured information without a second A/B/C bonus.
+    for (segment, fmt), values in by_format.items():
+        priors[f"{segment}|{fmt}"] = empirical_format_prior(
+            priors.get(segment, priors[""]), values
+        )
+    return priors
 
 
 def _segment_defaults(benchmarks: dict, segment: str) -> dict:

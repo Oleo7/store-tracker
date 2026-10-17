@@ -11,7 +11,7 @@ function source(name) {
   assert.ok(end > start, name);
   return html.slice(start, end);
 }
-const functions = ['getFilterOptionValue', 'getCardDateHtml', 'getDeliveryVolumeText',
+const functions = ['getCustomerListGuidance', 'getFilterOptionValue', 'getCardDateHtml', 'getDeliveryVolumeText',
   'getCardDatesHtml', 'getPlainDeliveryText', 'planningRecommendationContactContext',
   'getFilteredCustomers', 'renderFilterOptions'];
 const constants = html.slice(html.indexOf('  const FOCUS_KEYS_BY_LABEL ='),

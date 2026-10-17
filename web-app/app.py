@@ -7155,13 +7155,25 @@ def get_customer_insights():
         priority_started,
         len(priority_customers),
     )
+    # Keep the legacy name-based response for older clients, but do not
+    # cross-associate distinct stores with the same display name.
+    priority_by_id = {
+        str(priority.get("customer_id") or "").strip(): priority
+        for priority in priority_customers if priority.get("customer_id")
+    }
+    named_priorities = defaultdict(list)
+    named_customers = defaultdict(list)
+    for priority in priority_customers:
+        named_priorities[normalize_key(priority["customer"])].append(priority)
+    for customer in customers:
+        named_customers[normalize_key(customer["customer"])].append(customer)
     priority_by_name = {
-        normalize_key(customer["customer"]): customer
-        for customer in priority_customers
+        name: matches[0] for name, matches in named_priorities.items()
+        if len(matches) == 1 and len(named_customers.get(name, ())) == 1
     }
     customers_by_name = {
-        normalize_key(customer["customer"]): customer
-        for customer in customers
+        name: matches[0] for name, matches in named_customers.items()
+        if len(matches) == 1
     }
 
     # Compute insights for all customers
@@ -7221,6 +7233,24 @@ def get_customer_insights():
             "priority_level": priority.get("priority_level", ""),
             "priority_score": priority.get("priority_score"),
             "score_version": priority.get("score_version", SCORE_VERSION),
+            # Stage 1: model read fields. Preserve legacy score for existing
+            # route/planning consumers and older clients.
+            "value_model_version": priority.get("value_model_version", ""),
+            "business_value_score": priority.get("business_value_score"),
+            "business_value_raw": priority.get("business_value_raw"),
+            "business_expected_dfp_per_delivery": priority.get("business_expected_dfp_per_delivery"),
+            "business_deliveries_used": priority.get("business_deliveries_used"),
+            "business_value_confidence": priority.get("business_value_confidence", ""),
+            "business_frequency_estimate": priority.get("business_frequency_estimate"),
+            "business_realization_factor": priority.get("business_realization_factor"),
+            "list_guidance": priority.get("list_guidance", {}),
+            "contact_priority_score": priority.get("contact_priority_score"),
+            "contact_priority_raw": priority.get("contact_priority_raw"),
+            "contact_priority_bucket": priority.get("contact_priority_bucket"),
+            "contact_relevance_factor": priority.get("contact_relevance_factor"),
+            "latest_reached_date": priority.get("latest_reached_date"),
+            "days_since_reached": priority.get("days_since_reached"),
+            "latest_human_contact_date": priority.get("latest_human_contact_date"),
             "lifecycle": priority.get("lifecycle", ""),
             "intent_timing": priority.get("intent_timing"),
             "value_index": priority.get("value_index"),
@@ -7289,6 +7319,50 @@ def get_customer_insights():
             "reminder_email_recipient_count": email_proposal["eligible_recipient_count"],
             "reminder_email_latest_sent_at": email_proposal["latest_sent_at"],
         }
+
+    if request.headers.get("X-PB-Value-Model") == "v3.1":
+        # Identity-safe read model for the new store list. Name-only legacy data
+        # are copied only when the master-name mapping is unambiguous.
+        by_customer_id = {}
+        model_fields = (
+            "value_model_version", "business_value_score", "business_value_raw",
+            "business_expected_dfp_per_delivery", "business_deliveries_used",
+            "business_value_confidence", "business_frequency_estimate",
+        "business_realization_factor", "list_guidance", "contact_priority_score",
+            "contact_priority_raw", "contact_priority_bucket",
+            "contact_relevance_factor", "latest_reached_date",
+            "days_since_reached", "latest_human_contact_date",
+        )
+        action_fields = (
+            "priority_score", "customer_guidance", "recommendation_eligible",
+            "recommendation_suppression_reason", "primary_trigger_type",
+            "primary_reason_text", "lifecycle", "delivery_count",
+            "expected_order_dfp", "latest_delivery_date", "latest_delivery_dfp",
+            "next_delivery_date", "next_delivery_dfp", "days_since_delivery",
+            "latest_contact_date", "latest_contact_class",
+            "latest_contact_result", "latest_follow_up_date",
+            "email_click_without_order", "email_clicked_without_order",
+        )
+        for customer in customers:
+            cid = str(customer.get("customer_id") or "").strip()
+            if not cid:
+                continue
+            name_key = normalize_key(customer.get("customer"))
+            unique_name = len(named_customers.get(name_key, ())) == 1
+            record = dict(insights.get(name_key, {})) if unique_name else {}
+            priority = priority_by_id.get(cid, {})
+            if not priority:
+                # Missing priority inputs must remain missing, not be transformed
+                # into a misleading zero or a different store's score.
+                record.update({field: None for field in model_fields})
+            else:
+                record.update({field: priority.get(field) for field in model_fields})
+                record.update({
+                    field: priority.get(field)
+                    for field in action_fields if field in priority
+                })
+            by_customer_id[cid] = record
+        insights["__by_customer_id"] = by_customer_id
 
     record_performance_step(
         "calculation.customer_insights",
