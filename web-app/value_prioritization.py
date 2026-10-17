@@ -47,6 +47,7 @@ def store_format(name: str) -> str:
     label = "".join(c for c in label if not unicodedata.combining(c))
     for pattern, kind in (
         ("ica maxi", "ica_maxi"),
+        ("maxi ica", "ica_maxi"),
         ("ica kvantum", "ica_kvantum"),
         ("ica supermarket", "ica_supermarket"),
         ("ica nara", "ica_nara"),

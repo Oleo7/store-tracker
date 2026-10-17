@@ -242,6 +242,7 @@ class ValuePriorityStage1Tests(TestCase):
         self.assertEqual(large["business_prior_basis"], "segment_and_format")
         self.assertEqual(lower["business_prior_basis"], "segment_and_format")
         self.assertEqual(store_format("ICA Nära Klippan"), "ica_nara")
+        self.assertEqual(store_format("Maxi ICA Högsbo"), "ica_maxi")
 
     def test_small_format_sample_falls_back_to_segment(self):
         self.assertAlmostEqual(empirical_format_prior(21, [100] * 7), 21)
