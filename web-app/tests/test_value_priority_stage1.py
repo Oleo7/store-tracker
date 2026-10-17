@@ -421,6 +421,186 @@ class ValuePriorityStage1Tests(TestCase):
         self.assertAlmostEqual(positive["contact_relevance_factor"], 0.75)
 
 
+    def test_buyer_positive_dialogue_is_warmer_than_neutral_before_reorder_due(self):
+        orders = [
+            delivery("a", "Butik", "2026-09-01", 30, "a-1"),
+            delivery("a", "Butik", "2026-10-01", 30, "a-2"),
+        ]
+        positive = get([customer()], orders=orders, contacts=[
+            contact("a", "Butik", "2026-10-03", "Positiv")
+        ])[0]
+        neutral = get([customer()], orders=orders, contacts=[
+            contact("a", "Butik", "2026-10-03", "Neutral")
+        ])[0]
+        self.assertEqual(positive["business_value_raw"], neutral["business_value_raw"])
+        self.assertEqual(neutral["list_guidance"]["status_key"], "wait")
+        self.assertEqual(neutral["contact_priority_score"], 0)
+        self.assertEqual(positive["list_guidance"]["reason_code"], "positive_buyer_followup")
+        self.assertEqual(positive["list_guidance"]["action_label"], "Följ upp positiv dialog")
+        self.assertGreater(positive["contact_priority_raw"], neutral["contact_priority_raw"])
+
+    def test_positive_buyer_boosts_materially_overdue_ranking_without_changing_value(self):
+        orders = [
+            delivery("a", "Butik", "2026-05-01", 40, "a-1"),
+            delivery("a", "Butik", "2026-06-01", 40, "a-2"),
+        ]
+        positive = get([customer()], orders=orders, contacts=[
+            contact("a", "Butik", "2026-09-17", "Positiv")
+        ])[0]
+        neutral = get([customer()], orders=orders, contacts=[
+            contact("a", "Butik", "2026-09-17", "Neutral")
+        ])[0]
+        self.assertEqual(positive["business_value_raw"], neutral["business_value_raw"])
+        self.assertEqual(positive["list_guidance"]["reason_code"], "established_reorder_due")
+        self.assertEqual(neutral["list_guidance"]["reason_code"], "established_reorder_due")
+        self.assertGreater(positive["contact_priority_raw"], neutral["contact_priority_raw"])
+
+    def test_materially_late_reorder_breaks_routine_wait_only_after_minimum_gap(self):
+        orders = [
+            delivery("a", "Butik", "2026-07-01", 40, "a-1"),
+            delivery("a", "Butik", "2026-08-01", 40, "a-2"),
+        ]
+        recent = get([customer()], orders=orders, contacts=[
+            contact("a", "Butik", "2026-10-12", "Neutral")
+        ])[0]
+        due = get([customer()], orders=orders, contacts=[
+            contact("a", "Butik", "2026-10-07", "Neutral")
+        ])[0]
+        self.assertEqual(recent["list_guidance"]["status_key"], "wait")
+        self.assertEqual(recent["contact_priority_score"], 0)
+        self.assertGreaterEqual(due["business_overdue_days"], 14)
+        self.assertEqual(due["list_guidance"]["reason_code"], "established_reorder_due")
+        self.assertTrue(due["list_guidance"]["can_contact_now"])
+        self.assertGreaterEqual(due["contact_relevance_factor"], 0.75)
+
+    def test_fresh_pending_order_pauses_reorder_without_changing_business_value(self):
+        orders = [
+            delivery("a", "Butik", "2026-07-01", 40, "a-1"),
+            delivery("a", "Butik", "2026-08-01", 40, "a-2"),
+        ]
+        baseline = get([customer()], orders=orders, contacts=[
+            contact("a", "Butik", "2026-10-07", "Neutral")
+        ])[0]
+        pending = delivery("a", "Butik", "2026-10-12", 60, "a-pending")
+        pending["Delivery date"] = ""
+        with_order = get([customer()], orders=[*orders, pending], contacts=[
+            contact("a", "Butik", "2026-10-07", "Neutral")
+        ])[0]
+        self.assertEqual(with_order["business_value_raw"], baseline["business_value_raw"])
+        self.assertEqual(with_order["business_verified_delivery_count"], 2)
+        self.assertEqual(with_order["latest_unconfirmed_order_date"], "2026-10-12")
+        self.assertEqual(with_order["list_guidance"]["reason_code"],
+                         "recent_order_pending_confirmation")
+        self.assertEqual(with_order["list_guidance"]["status_key"], "wait")
+        self.assertEqual(with_order["contact_priority_score"], 0)
+
+    def test_unconfirmed_order_older_than_wait_window_requests_status_check(self):
+        orders = [
+            delivery("a", "Butik", "2026-07-01", 40, "a-1"),
+            delivery("a", "Butik", "2026-08-01", 40, "a-2"),
+        ]
+        pending = delivery("a", "Butik", "2026-09-25", 50, "a-pending")
+        pending["Delivery date"] = ""
+        row = get([customer()], orders=[*orders, pending])[0]
+        self.assertEqual(row["list_guidance"]["reason_code"], "unconfirmed_order_status_due")
+        self.assertEqual(row["list_guidance"]["action_label"], "Kontrollera orderstatus")
+        self.assertNotEqual(row["list_guidance"]["reason_code"], "established_reorder_due")
+
+    def test_confirmed_new_delivery_resets_reorder_alarm(self):
+        orders = [
+            delivery("a", "Butik", "2026-07-01", 40, "a-1"),
+            delivery("a", "Butik", "2026-08-01", 40, "a-2"),
+            delivery("a", "Butik", "2026-10-11", 40, "a-3"),
+        ]
+        row = get([customer()], orders=orders, contacts=[
+            contact("a", "Butik", "2026-10-07", "Neutral")
+        ])[0]
+        self.assertLess(row["business_overdue_days"], 0)
+        self.assertNotEqual(row["list_guidance"]["reason_code"], "established_reorder_due")
+
+    def test_negative_dialogue_remains_lower_priority_after_sixty_days(self):
+        from datetime import timedelta
+        for days in (70, 110, 200):
+            with self.subTest(days=days):
+                day = (TODAY - timedelta(days=days)).isoformat()
+                neg = get([customer()], contacts=[
+                    contact("a", "Butik", day, "Negativ")
+                ])[0]
+                neutral = get([customer()], contacts=[
+                    contact("a", "Butik", day, "Neutral")
+                ])[0]
+                self.assertEqual(neg["business_value_raw"], neutral["business_value_raw"])
+                self.assertLess(neg["contact_priority_raw"], neutral["contact_priority_raw"])
+                self.assertLess(neg["contact_priority_score"], neutral["contact_priority_score"])
+        recent = get([customer()], contacts=[
+            contact("a", "Butik", "2026-09-20", "Negativ")
+        ])[0]
+        self.assertEqual(recent["list_guidance"]["reason_code"], "negative_contact_cooldown")
+        self.assertEqual(recent["contact_priority_score"], 0)
+
+    def test_failed_attempt_after_negative_dialogue_does_not_restore_priority(self):
+        from datetime import timedelta
+        negative_date = (TODAY - timedelta(days=70)).isoformat()
+        missed = contact("a", "Butik", "2026-10-12", "Ej anträffbar")
+        negative = get([customer()], contacts=[
+            contact("a", "Butik", negative_date, "Negativ"), missed
+        ])[0]
+        neutral = get([customer()], contacts=[
+            contact("a", "Butik", negative_date, "Neutral"), missed
+        ])[0]
+        self.assertEqual(negative["list_guidance"]["reason_code"], "unanswered_retry_due")
+        self.assertLess(negative["contact_priority_raw"], neutral["contact_priority_raw"])
+
+    def test_explicit_followup_from_negative_dialogue_keeps_agreed_date_priority(self):
+        negative = contact("a", "Butik", "2026-10-01", "Negativ")
+        negative["follow_up_date"] = "2026-10-10"
+        result = get([customer()], contacts=[negative])[0]
+        self.assertEqual(result["list_guidance"]["reason_code"], "overdue_explicit_follow_up")
+        self.assertGreater(result["contact_priority_score"], 0)
+
+    def test_reached_positive_after_negative_is_not_penalized_as_negative(self):
+        neg = contact("a", "Butik", "2026-06-01", "Negativ")
+        pos = contact("a", "Butik", "2026-09-17", "Positiv")
+        renewed = get([customer()], contacts=[neg, pos])[0]
+        positive_only = get([customer()], contacts=[pos])[0]
+        self.assertEqual(renewed["contact_priority_raw"], positive_only["contact_priority_raw"])
+        self.assertEqual(renewed["business_value_raw"], positive_only["business_value_raw"])
+
+    def test_new_order_does_not_autoclose_explicit_callback(self):
+        orders = [
+            delivery("a", "Butik", "2026-07-01", 40, "a-1"),
+            delivery("a", "Butik", "2026-08-01", 40, "a-2"),
+        ]
+        promise = contact("a", "Butik", "2026-09-01", "Positiv")
+        promise["follow_up_date"] = "2026-10-12"
+        pending = delivery("a", "Butik", "2026-10-12", 50, "a-pending")
+        pending["Delivery date"] = ""
+        row = get([customer()], orders=[*orders, pending], contacts=[promise])[0]
+        self.assertEqual(row["list_guidance"]["reason_code"], "overdue_explicit_follow_up")
+        self.assertGreater(row["contact_priority_score"], 0)
+
+    def test_same_day_order_does_not_override_negative_human_reply(self):
+        # Day-level Order date cannot prove the purchase happened AFTER
+        # the negative reply; do not invent a same-day change of mind.
+        ordered = delivery("a", "Butik", "2026-10-10", 30, "a-order")
+        negative = contact("a", "Butik", "2026-10-10", "Negativ")
+        row = get([customer()], orders=[ordered], contacts=[negative])[0]
+        self.assertEqual(row["list_guidance"]["reason_code"], "negative_contact_cooldown")
+        self.assertEqual(row["contact_priority_score"], 0)
+        self.assertGreater(row["business_value_score"], 0)
+
+    def test_contact_negative_policy_parameters_must_be_valid(self):
+        for changes in (
+            {"negative_60_to_90_factor": 1.2},
+            {"negative_90_to_180_factor": 0.1},
+            {"material_reorder_overdue_days": 0},
+        ):
+            with self.subTest(changes=changes):
+                with self.assertRaises(ValueError):
+                    validate_policy({**POLICY, **changes})
+
+
+
 class ValuePriorityFrontendStage1Tests(TestCase):
     def test_frontend_sort_and_stage2_remains(self):
         html = (Path(__file__).resolve().parents[1] / "index.html").read_text(encoding="utf-8")

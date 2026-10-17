@@ -402,6 +402,13 @@ def build_order_features(order_rows: list[dict]) -> dict:
             "avg_dfp_per_order": _clean_number(avg_dfp),
             "avg_sales_per_order": _clean_number(avg_sales),
             "last_order_date": max(order_dates) if order_dates else None,
+            # Expose an order with no confirmed delivery separately from the
+            # legacy date-fallback delivery history. Additive v3.x input only.
+            "latest_unconfirmed_order_date": max(
+                (item["order_date"] for item in customer_orders
+                 if not item.get("confirmed_delivery") and item.get("order_date")),
+                default=None,
+            ),
             "last_delivery_date": latest_order.get("delivery_date") if customer_orders else None,
             "latest_order_reference": latest_order.get("reference", ""),
             "delivery_dates": delivery_dates,
@@ -1821,6 +1828,15 @@ def build_priority_customers(
             if business_last_delivery and business_delivery_count >= 2
             else None
         )
+        # An unconfirmed order AFTER the last verified delivery is not a
+        # missed reorder, even if our older delivery-date fallback says so.
+        pending_unconfirmed_order_date = order.get("latest_unconfirmed_order_date")
+        if pending_unconfirmed_order_date and (
+            pending_unconfirmed_order_date > today
+            or (business_last_delivery
+                and pending_unconfirmed_order_date <= business_last_delivery)
+        ):
+            pending_unconfirmed_order_date = None
         store_fmt = store_format(name)
         has_store_format_prior = (
             bool(store_fmt) and f"{segment}|{store_fmt}" in value_priors
@@ -2032,12 +2048,33 @@ def build_priority_customers(
         )
         # Do not change the legacy guidance/trigger consumed by Planering.
         # Stage 1 has its own canonical store-list action paired with its score.
-        positive_prospect_signal = bool(
-            order_count == 0
-            and business_delivery_count == 0
-            and contact.get("latest_reached_result") == "Positiv"
+        latest_reached_result = contact.get("latest_reached_result") or ""
+        positive_dialogue_without_order = bool(
+            latest_reached_result == "Positiv"
             and latest_reached_date is not None
             and (not last_order or last_order < latest_reached_date)
+        )
+        positive_prospect_signal = bool(
+            business_delivery_count == 0
+            and order_count == 0
+            and positive_dialogue_without_order
+        )
+        positive_buyer_signal = bool(
+            business_delivery_count >= 1 and positive_dialogue_without_order
+        )
+        # A later missed call is not a fresh neutral reply. A later order
+        # or genuine reached reply supersedes the negative dialogue.
+        negative_dialogue_signal = bool(
+            latest_reached_result == "Negativ"
+            and latest_reached_date is not None
+            and (not last_order or last_order <= latest_reached_date)
+        )
+        materially_overdue = bool(
+            business_delivery_count >= 2
+            and business_overdue_days is not None
+            and business_overdue_days >= int(VALUE_POLICY["material_reorder_overdue_days"])
+            and (days_since_reached is None
+                 or days_since_reached >= int(VALUE_POLICY["material_reorder_min_dialogue_days"]))
         )
         list_guidance = store_contact_guidance(
             legacy=customer_guidance,
@@ -2068,6 +2105,8 @@ def build_priority_customers(
                 order_count > 0 and business_delivery_count == 0
             ),
             positive_prospect_signal=positive_prospect_signal,
+            positive_buyer_signal=positive_buyer_signal,
+            pending_unconfirmed_order_date=pending_unconfirmed_order_date,
             future_delivery=future_delivery,
             qualified_email_trigger=active_email_intent.get("trigger", "")
                 if active_email_intent.get("ready") else "",
@@ -2080,6 +2119,9 @@ def build_priority_customers(
             status=list_guidance["status_key"],
             trigger=list_guidance.get("reason_code", ""),
             positive_prospect_signal=positive_prospect_signal,
+            positive_buyer_signal=positive_buyer_signal,
+            negative_dialogue_signal=negative_dialogue_signal,
+            materially_overdue=materially_overdue,
         )
         result.append({
             "value_model_version": VALUE_MODEL_VERSION,
@@ -2089,6 +2131,7 @@ def build_priority_customers(
             "business_expected_cycle_days": business_expected_cycle,
             "business_days_since_delivery": business_days_since_delivery,
             "business_overdue_days": business_overdue_days,
+            "latest_unconfirmed_order_date": _iso_date(pending_unconfirmed_order_date),
             "latest_reached_date": _iso_date(latest_reached_date),
             "days_since_reached": days_since_reached,
             "row": customer.get("row"),

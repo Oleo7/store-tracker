@@ -1,4 +1,4 @@
-# Store Tracker – steg 1: Affärsvärde och Kontaktprioritet (v3.1-preview)
+# Store Tracker – steg 1: Affärsvärde och Kontaktprioritet (v3.2-preview)
 
 **Status:** PR #48 för granskning, ännu inte mergad eller deployad. Beräkningsmodellen är en policy/pilot, inte en validerad prognos för köpchans, omsättning eller täckningsbidrag.
 
@@ -61,3 +61,12 @@ CI kör Python-regressioner, API-test med faktisk Flask-endpoint, desktop/mobil 
 **Kvar innan produktionsbeslut:** full portföljreplay med aktuellt CRM_DATABASE, kalibrering mot historiska utfall och användbar poängfördelning, kontroll av topp 20 per säljare och avvikande A/B/C-kunder. Parametrarna är versionsstyrda i Python; adminpanelen och styrd livekonfiguration byggs inte i etapp 1.
 
 Rekommenderat införande: granska PR:s diff och testresultat, jämför simulerad ranking i skrivskyddat underlag, testa manuellt i staging innan merge. Vid akut regressionsbehov efter senare driftsättning ska senaste bevisat fungerande Render-commit deployas tillbaka (och datamigreringar ska undvikas i etapp 1). Det finns **ingen datamigrering** eller ändring i CRM-databasen i denna PR.
+
+## Förfinade kommersiella signaler (PR48)
+
+- **Positiv dialog med tidigare köpande kund:** när senaste verkliga dialog var `Positiv` och ingen senare order registrerats ges kontaktbehovet en särskild, tidstyrd förstärkning. Ett informellt positivt besked ger normalt ingen omedelbar uppmaning; 10–45 dagar utan order kan ge ”Följ upp positiv dialog”. En avtalad uppföljning har företräde. Effekten berör **Kontaktprioritet, inte Affärsvärde**, och upphör efter ny order eller annan verklig dialog.
+- **Betydligt försenat återköp:** när en återkommande kund ligger minst 14 dagar efter beräknad återköpstid kan ”Säkra försenat återköp” aktiveras redan sju dagar efter senaste neutrala/positiva dialog. En nylig dialog kortare än sju dagar, kontaktförbud, negativ kontaktpaus, bokning och senare ny order får inte kringgås.
+- **Registrerad order utan bekräftad leverans:** en ny, ännu obekräftad order efter senaste verifierade leverans stoppar rekommendationen om försenat återköp. Under 14 dagar visas ”Avvakta registrerad order”. Om leverans fortfarande inte är verifierad därefter blir åtgärden ”Kontrollera orderstatus” i stället för ytterligare återorderpåtryckning. **Det betyder inte att leveransen säkert är utebliven** – saknat leveransdatum är osäkert underlag. Uttryckliga kontaktlöften avslutas inte automatiskt av en order.
+- **Negativ dialog:** ett verifierat `Negativ` medför fortsatt 60 dagars kontaktpaus om ingen senare order eller ny verklig dialog ger ändrad information. Även därefter sänks Kontaktprioriteten: faktor 0,35 dag 60–89; 0,55 dag 90–179; 0,75 från dag 180. Faktorn multipliceras **efter** övriga signalhöjningar och gäller tills en senare nådd dialog eller order ändrar läget. En uppföljning som kunden uttryckligen avtalade vid ett negativt besked behåller sin förfallna åtgärd. `Återkom ej` är separat och blockerar helt.
+
+Dessa tider och faktorer är **pilotregler**, inte uppmätta sannolikheter; de måste utvärderas mot verklig återköpsutveckling och förändringar i topplistorna innan en produktionsmerge. V2.2:s gamla poäng och Planerings nuvarande rekommendationsgränssnitt lämnas intakta under etapp 1.

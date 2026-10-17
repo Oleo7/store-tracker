@@ -30,6 +30,16 @@ POLICY = {
     "routine_prospect_min_raw_dfp": 6.0,
     "stale_followup_review_days": 90,
     "stale_followup_order_review_days": 60,
+    # Explicit operating assumptions, not empirically calibrated chances.
+    "positive_buyer_followup_min_days": 10,
+    "positive_buyer_followup_max_days": 45,
+    "material_reorder_overdue_days": 14,
+    "material_reorder_min_dialogue_days": 7,
+    "recent_order_hold_days": 14,
+    "negative_cooldown_days": 60,
+    "negative_60_to_90_factor": 0.35,
+    "negative_90_to_180_factor": 0.55,
+    "negative_after_180_factor": 0.75,
 }
 FALLBACK_DFP = {"A": 21.0, "B": 12.0, "C": 9.0}
 CONTACT_CURVE = ((0, 0.0), (7, 0.02), (20, 0.15), (30, 0.35),
@@ -41,6 +51,12 @@ CONTACT_CURVE = ((0, 0.0), (7, 0.02), (20, 0.15), (30, 0.35),
 POSITIVE_PROSPECT_CURVE = (
     (0, 0.0), (7, 0.02), (14, 0.15), (20, 0.45), (30, 0.75),
     (40, 0.85), (50, 0.92), (60, 0.95), (90, 1.0),
+)
+# A buying customer's positive dialogue without a subsequent order is a
+# warmer lead, not proof that an immediate extra call is justified.
+POSITIVE_BUYER_CURVE = (
+    (0, 0.0), (7, 0.02), (10, 0.18), (14, 0.40),
+    (20, 0.65), (30, 0.85), (45, 0.95), (60, 0.98), (90, 1.0),
 )
 # 'Order lagd' can represent an order logged without speaking to the buyer.
 # It does not prove a human dialogue. Explicit refusals count as dialogue
@@ -112,7 +128,10 @@ def validate_policy(policy: dict) -> None:
                  "retry_business_days", "maximum_repeat_frequency",
                  "format_prior_min_buyers", "format_prior_strength",
                  "routine_prospect_min_raw_dfp", "stale_followup_review_days",
-                 "stale_followup_order_review_days")
+                 "stale_followup_order_review_days",
+                 "positive_buyer_followup_min_days", "positive_buyer_followup_max_days",
+                 "material_reorder_overdue_days", "material_reorder_min_dialogue_days",
+                 "recent_order_hold_days", "negative_cooldown_days")
     for key in positives:
         value = float(policy[key])
         if not math.isfinite(value) or value <= 0:
@@ -120,7 +139,8 @@ def validate_policy(policy: dict) -> None:
     for key in ("realization_prospect", "realization_first_order",
                 "realization_repeat", "unknown_dialogue_factor",
                 "stale_repeat_factor", "very_stale_repeat_factor",
-                "stale_first_order_factor"):
+                "stale_first_order_factor", "negative_60_to_90_factor",
+                "negative_90_to_180_factor", "negative_after_180_factor"):
         value = float(policy[key])
         if not math.isfinite(value) or not 0 <= value <= 1:
             raise ValueError(f"Invalid model factor {key}")
@@ -128,6 +148,10 @@ def validate_policy(policy: dict) -> None:
         raise ValueError("Staleness bands must increase")
     if int(policy["stale_followup_order_review_days"]) > int(policy["stale_followup_review_days"]):
         raise ValueError("Stale follow-up review thresholds must increase")
+    if int(policy["positive_buyer_followup_min_days"]) > int(policy["positive_buyer_followup_max_days"]):
+        raise ValueError("Positive buyer follow-up window must increase")
+    if not (policy["negative_60_to_90_factor"] <= policy["negative_90_to_180_factor"] <= policy["negative_after_180_factor"]):
+        raise ValueError("Negative-contact penalty must decrease with age")
 
 
 validate_policy(POLICY)
@@ -211,6 +235,22 @@ def contact_factor(days_since_reached: int | None,
     return _interpolated_contact_factor(days_since_reached, CONTACT_CURVE)
 
 
+def negative_dialogue_factor(age_days: int, policy: dict = POLICY) -> float:
+    """Persistent lower priority after a genuine negative reply.
+
+    The first 60 days are handled by a contact cooldown. Afterwards, the
+    reduction weakens gradually but never implies a fresh positive dialogue.
+    A later order or reached neutral/positive reply clears this signal.
+    """
+    if age_days < int(policy["negative_cooldown_days"]):
+        return 0.0
+    if age_days < 90:
+        return float(policy["negative_60_to_90_factor"])
+    if age_days < 180:
+        return float(policy["negative_90_to_180_factor"])
+    return float(policy["negative_after_180_factor"])
+
+
 def business_days_elapsed(start: date | None, end: date) -> int:
     if not start or start >= end:
         return 0
@@ -228,6 +268,9 @@ def contact_opportunity(*, business_value_raw: float,
                         today: date, latest_result: str,
                         status: str, trigger: str,
                         positive_prospect_signal: bool = False,
+                        positive_buyer_signal: bool = False,
+                        negative_dialogue_signal: bool = False,
+                        materially_overdue: bool = False,
                         policy: dict = POLICY) -> dict:
     """Effective sortable contact priority; suppress unavailable customers."""
     bucket = {
@@ -240,6 +283,15 @@ def contact_opportunity(*, business_value_raw: float,
             relevance,
             _interpolated_contact_factor(days_since_reached, POSITIVE_PROSPECT_CURVE),
         )
+    if positive_buyer_signal and days_since_reached is not None:
+        relevance = max(
+            relevance,
+            _interpolated_contact_factor(days_since_reached, POSITIVE_BUYER_CURVE),
+        )
+    if status == "act_now" and trigger == "established_reorder_due" and materially_overdue:
+        # Strongly overdue despite a recent neutral dialogue: prioritise
+        # after a minimum gap; never override negative-contact safety rules.
+        relevance = max(relevance, 0.75)
     if status == "overdue_followup" and trigger != "stale_follow_up_review":
         relevance = max(relevance, 0.75)
     if trigger == "stale_follow_up_review":
@@ -252,6 +304,14 @@ def contact_opportunity(*, business_value_raw: float,
         days_since_reached is None or days_since_reached >= 30
     ):
         relevance = max(relevance, 0.75)
+    if negative_dialogue_signal and trigger not in {
+        "overdue_explicit_follow_up", "follow_up_due_today",
+    }:
+        # Apply AFTER the other signal boosts, including missed attempts.
+        # A later failed attempt must not erase a negative human response.
+        relevance *= negative_dialogue_factor(
+            days_since_reached if days_since_reached is not None else 0, policy
+        )
     waiting_for_retry = (
         latest_result == "Ej anträffbar" and latest_attempt_date is not None
         and business_days_elapsed(latest_attempt_date, today)
@@ -294,6 +354,8 @@ def store_contact_guidance(
     follow_up_created_date: date | None = None,
     unverified_order_without_delivery: bool = False,
     positive_prospect_signal: bool = False,
+    positive_buyer_signal: bool = False,
+    pending_unconfirmed_order_date: date | None = None,
     qualified_email_trigger: str = "", policy: dict = POLICY,
 ) -> dict:
     """List-specific decision. Legacy calendar/suggestion contracts stay intact.
@@ -343,14 +405,14 @@ def store_contact_guidance(
     # older due date. A negative dialogue that itself contains a new follow-up
     # promise must still honour that explicit commitment.
     if (latest_reached_result == "Negativ" and latest_reached_date
-        and (not last_order_date or last_order_date < latest_reached_date)
-        and 0 <= (today - latest_reached_date).days < 60
+        and (not last_order_date or last_order_date <= latest_reached_date)
+        and 0 <= (today - latest_reached_date).days < int(policy["negative_cooldown_days"])
         and (follow_up_created_date is None
              or latest_reached_date > follow_up_created_date)):
         return choose("wait", "Avvakta",
                       "Senare negativ dialog ersätter äldre uppföljningslöfte",
                       code="negative_contact_cooldown",
-                      until=latest_reached_date + timedelta(days=60))
+                      until=latest_reached_date + timedelta(days=int(policy["negative_cooldown_days"])))
     # An explicit promise is not resolved merely by an outbound email or by
     # a failed call. Reached dialogue (or explicit recorded cancellation) is
     # required to close it.
@@ -377,11 +439,37 @@ def store_contact_guidance(
         return guidance
 
     if latest_reached_result == "Negativ" and latest_reached_date and (
-        not last_order_date or last_order_date < latest_reached_date
-    ) and 0 <= (today - latest_reached_date).days < 60:
+        not last_order_date or last_order_date <= latest_reached_date
+    ) and 0 <= (today - latest_reached_date).days < int(policy["negative_cooldown_days"]):
         return choose("wait", "Avvakta", "Negativ dialog – kontaktpaus gäller",
                       code="negative_contact_cooldown",
-                      until=latest_reached_date + timedelta(days=60))
+                      until=latest_reached_date + timedelta(days=int(policy["negative_cooldown_days"])))
+
+    # A manual snooze/dismissal and an outbound-email wait must not be
+    # overridden by a sales signal or an unanswered retry.
+    old_reason = str(guidance.get("reason_code") or "")
+    if guidance.get("status_key") == "wait" and old_reason not in {"recent_human_contact"}:
+        return guidance
+
+    # Only orders with an UNCONFIRMED delivery after the latest verified
+    # delivery are pending. A new order resolves the generic reorder alarm,
+    # not an unrelated explicit promise to contact the buyer.
+    if pending_unconfirmed_order_date and pending_unconfirmed_order_date <= today:
+        order_age = (today - pending_unconfirmed_order_date).days
+        if order_age <= int(policy["recent_order_hold_days"]):
+            until = pending_unconfirmed_order_date + timedelta(
+                days=int(policy["recent_order_hold_days"]) + 1
+            )
+            return choose(
+                "wait", "Avvakta registrerad order",
+                f"Ny order {pending_unconfirmed_order_date.isoformat()} utan bekräftat leveransdatum",
+                code="recent_order_pending_confirmation", until=until,
+            )
+        return choose(
+            "act_now", "Kontrollera orderstatus",
+            f"Order {pending_unconfirmed_order_date.isoformat()} saknar bekräftad leverans",
+            code="unconfirmed_order_status_due", key="check_order_status",
+        )
 
     if latest_attempt_result == "Ej anträffbar" and latest_attempt_date:
         retry = next_business_day_retry(
@@ -399,14 +487,17 @@ def store_contact_guidance(
                       f"Senaste kontaktförsöket {latest_attempt_date.isoformat()} var Ej anträffbar",
                       code="unanswered_retry_due", key="retry_unanswered")
 
-    # Preserve intentional snoozes/dismissals and outbound-email waits. The
-    # earlier v2 'recent contact' block is superseded by reached/attempt rules.
-    old_reason = str(guidance.get("reason_code") or "")
-    if guidance.get("status_key") == "wait" and old_reason not in {"recent_human_contact"}:
-        return guidance
-
     age = (today - latest_reached_date).days if latest_reached_date else None
-    if age is not None and age < 20 and not qualified_email_trigger:
+    material_reorder = (
+        delivery_count >= 2
+        and overdue_days is not None
+        and overdue_days >= int(policy["material_reorder_overdue_days"])
+        and (age is None or age >= int(policy["material_reorder_min_dialogue_days"]))
+    )
+    if age is not None and age < 20 and not qualified_email_trigger and not (
+        material_reorder or
+        (positive_buyer_signal and age >= int(policy["positive_buyer_followup_min_days"]))
+    ):
         return choose("wait", "Avvakta rutinuppföljning",
                       f"Faktisk dialog för {max(0,age)} dagar sedan",
                       code="recent_reached_routine_wait",
@@ -420,6 +511,26 @@ def store_contact_guidance(
                           "Aktuell kvalificerad mejlsignal, ingen senare order",
                           code=qualified_email_trigger, key="follow_up_order_interest")
 
+    if material_reorder:
+        return choose(
+            "act_now", "Säkra försenat återköp",
+            f"Beräknat återköp är {overdue_days} dagar försenat trots senaste dialog",
+            code="established_reorder_due", key="secure_next_order",
+        )
+    if delivery_count == 1 and days_since_delivery is not None and days_since_delivery < 7:
+        return choose(
+            "idle", "Ingen åtgärd nu",
+            "Första leveransen är nyligen genomförd",
+            code="first_order_new",
+        )
+    if (positive_buyer_signal and delivery_count > 0 and age is not None
+            and int(policy["positive_buyer_followup_min_days"]) <= age <=
+                int(policy["positive_buyer_followup_max_days"])):
+        return choose(
+            "act_now", "Följ upp positiv dialog",
+            f"Positiv dialog för {age} dagar sedan utan efterföljande order",
+            code="positive_buyer_followup", key="follow_up_dialogue",
+        )
     if delivery_count == 0 and unverified_order_without_delivery:
         return choose(
             "idle", "Granska order-/leveransstatus",
