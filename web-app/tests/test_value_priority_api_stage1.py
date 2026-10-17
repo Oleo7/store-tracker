@@ -30,8 +30,11 @@ class ValueContactApiStage1Tests(PlanningApiTestCase):
         self.assertIn("11111111-1111-4111-8111-111111111111", by_id)
         self.assertIn("33333333-3333-4333-8333-333333333333", by_id)
         self.assertNotIn("22222222-2222-4222-8222-222222222222", by_id)
-        self.assertNotIn("44444444-4444-4444-8444-444444444444", by_id)
-        for item in by_id.values():
+        # Archived stores can remain visible but must not be recommended.
+        archived = by_id["44444444-4444-4444-8444-444444444444"]
+        self.assertIsNone(archived["contact_priority_raw"])
+        for item in (item for item in by_id.values()
+                     if item.get("value_model_version") == "v3.1-preview"):
             self.assertIsNotNone(item["business_value_raw"])
             self.assertIsNotNone(item["contact_priority_raw"])
             self.assertIn(item["list_guidance"]["status_key"],
