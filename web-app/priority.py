@@ -2032,6 +2032,13 @@ def build_priority_customers(
         )
         # Do not change the legacy guidance/trigger consumed by Planering.
         # Stage 1 has its own canonical store-list action paired with its score.
+        positive_prospect_signal = bool(
+            order_count == 0
+            and business_delivery_count == 0
+            and contact.get("latest_reached_result") == "Positiv"
+            and latest_reached_date is not None
+            and (not last_order or last_order < latest_reached_date)
+        )
         list_guidance = store_contact_guidance(
             legacy=customer_guidance,
             today=today,
@@ -2060,6 +2067,7 @@ def build_priority_customers(
             unverified_order_without_delivery=bool(
                 order_count > 0 and business_delivery_count == 0
             ),
+            positive_prospect_signal=positive_prospect_signal,
             future_delivery=future_delivery,
             qualified_email_trigger=active_email_intent.get("trigger", "")
                 if active_email_intent.get("ready") else "",
@@ -2071,6 +2079,7 @@ def build_priority_customers(
             today=today, latest_result=latest_contact_class,
             status=list_guidance["status_key"],
             trigger=list_guidance.get("reason_code", ""),
+            positive_prospect_signal=positive_prospect_signal,
         )
         result.append({
             "value_model_version": VALUE_MODEL_VERSION,

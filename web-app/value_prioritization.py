@@ -34,6 +34,14 @@ POLICY = {
 FALLBACK_DFP = {"A": 21.0, "B": 12.0, "C": 9.0}
 CONTACT_CURVE = ((0, 0.0), (7, 0.02), (20, 0.15), (30, 0.35),
                  (40, 0.55), (50, 0.75), (60, 0.90), (90, 1.0))
+# A genuine positive dialogue with no later order is a stronger reason to
+# follow up, but it does not make a call appropriate immediately afterwards.
+# Both curves converge after 90 days. Provisional operating rule (not an
+# empirically estimated conversion probability).
+POSITIVE_PROSPECT_CURVE = (
+    (0, 0.0), (7, 0.02), (14, 0.15), (20, 0.45), (30, 0.75),
+    (40, 0.85), (50, 0.92), (60, 0.95), (90, 1.0),
+)
 # 'Order lagd' can represent an order logged without speaking to the buyer.
 # It does not prove a human dialogue. Explicit refusals count as dialogue
 # but also create a separate persistent no-contact safety guard.
@@ -183,20 +191,24 @@ def business_opportunity(*, delivery_values: list[float], prior_dfp: float,
     }
 
 
+def _interpolated_contact_factor(days_since_reached: int, curve: tuple) -> float:
+    day = max(0, int(days_since_reached))
+    for idx in range(1, len(curve)):
+        right_day, right_value = curve[idx]
+        if day <= right_day:
+            left_day, left_value = curve[idx - 1]
+            fraction = (day - left_day) / (right_day - left_day)
+            return left_value + fraction * (right_value - left_value)
+    return curve[-1][1]
+
+
 def contact_factor(days_since_reached: int | None,
                    latest_result: str = "", policy: dict = POLICY) -> float:
     if days_since_reached is None:
         # Unknown history is not the same as proven "never reached".
         # Failed attempts never imply successful dialogue or conversion.
         return float(policy["unknown_dialogue_factor"])
-    day = max(0, int(days_since_reached))
-    for idx in range(1, len(CONTACT_CURVE)):
-        right_day, right_value = CONTACT_CURVE[idx]
-        if day <= right_day:
-            left_day, left_value = CONTACT_CURVE[idx - 1]
-            fraction = (day - left_day) / (right_day - left_day)
-            return left_value + fraction * (right_value - left_value)
-    return 1.0
+    return _interpolated_contact_factor(days_since_reached, CONTACT_CURVE)
 
 
 def business_days_elapsed(start: date | None, end: date) -> int:
@@ -214,13 +226,20 @@ def contact_opportunity(*, business_value_raw: float,
                         days_since_reached: int | None,
                         latest_attempt_date: date | None,
                         today: date, latest_result: str,
-                        status: str, trigger: str, policy: dict = POLICY) -> dict:
+                        status: str, trigger: str,
+                        positive_prospect_signal: bool = False,
+                        policy: dict = POLICY) -> dict:
     """Effective sortable contact priority; suppress unavailable customers."""
     bucket = {
         "overdue_followup": 0, "act_now": 0,
         "idle": 1, "planned": 2, "wait": 3, "data_missing": 4,
     }.get(status, 4)
     relevance = contact_factor(days_since_reached, latest_result, policy)
+    if positive_prospect_signal and days_since_reached is not None:
+        relevance = max(
+            relevance,
+            _interpolated_contact_factor(days_since_reached, POSITIVE_PROSPECT_CURVE),
+        )
     if status == "overdue_followup" and trigger != "stale_follow_up_review":
         relevance = max(relevance, 0.75)
     if trigger == "stale_follow_up_review":
@@ -274,6 +293,7 @@ def store_contact_guidance(
     follow_up_has_later_order: bool = False,
     follow_up_created_date: date | None = None,
     unverified_order_without_delivery: bool = False,
+    positive_prospect_signal: bool = False,
     qualified_email_trigger: str = "", policy: dict = POLICY,
 ) -> dict:
     """List-specific decision. Legacy calendar/suggestion contracts stay intact.
@@ -432,6 +452,12 @@ def store_contact_guidance(
             return choose("act_now", "Säkra andra köpet" if days_since_delivery <= 90 else "Återaktivera kunden",
                           f"En tidigare leverans, {days_since_delivery} dagar sedan",
                           code="second_purchase_due" if days_since_delivery <= 90 else "single_order_reactivation_due")
+    if positive_prospect_signal and delivery_count == 0 and age is not None and 20 <= age <= 45:
+        return choose(
+            "act_now", "Följ upp positiv dialog",
+            f"Positiv dialog för {age} dagar sedan – ingen senare order",
+            code="positive_dialogue_followup", key="follow_up_dialogue",
+        )
     if (delivery_count == 0
             and business_value_raw >= float(policy["routine_prospect_min_raw_dfp"])
             and (age is None or age >= 20)):

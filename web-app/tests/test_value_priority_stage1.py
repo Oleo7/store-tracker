@@ -9,7 +9,7 @@ from priority import (build_priority_customers, build_order_features,
                       build_contact_features, apply_workflow_suppressions)
 from value_prioritization import (contact_factor, business_days_elapsed, complete_deliveries,
     business_opportunity, validate_policy, POLICY, next_business_day_retry,
-    store_format, empirical_format_prior)
+    store_format, empirical_format_prior, contact_opportunity)
 
 TODAY = date(2026, 10, 17)
 
@@ -330,6 +330,95 @@ class ValuePriorityStage1Tests(TestCase):
         self.assertEqual(row["contact_priority_bucket"], 1)
         self.assertEqual(row["contact_priority_score"], 0)
 
+
+
+    def test_positive_dialogue_without_order_boosts_30_day_a_prospect(self):
+        # Same A-store value, same contact date; only result differs.
+        from datetime import timedelta
+        day = (TODAY - timedelta(days=30)).isoformat()
+        neutral = get([customer()], contacts=[contact("a", "Butik", day, "Neutral")])[0]
+        positive = get([customer()], contacts=[contact("a", "Butik", day, "Positiv")])[0]
+        self.assertEqual(positive["business_value_raw"], neutral["business_value_raw"])
+        self.assertEqual(positive["business_value_score"], neutral["business_value_score"])
+        self.assertGreaterEqual(positive["contact_priority_score"], 73)
+        self.assertGreaterEqual(
+            positive["contact_priority_score"] - neutral["contact_priority_score"], 15
+        )
+        self.assertEqual(positive["list_guidance"]["action_label"], "Följ upp positiv dialog")
+        self.assertEqual(positive["list_guidance"]["reason_code"], "positive_dialogue_followup")
+        self.assertEqual(neutral["list_guidance"]["reason_code"], "value_based_contact_due")
+
+    def test_positive_prospect_score_still_respects_recent_contact_age(self):
+        from datetime import timedelta
+        scores = []
+        for days in (7, 20, 30, 40, 50, 60, 90):
+            day = (TODAY - timedelta(days=days)).isoformat()
+            item = get([customer()], contacts=[contact("a", "Butik", day, "Positiv")])[0]
+            scores.append(item["contact_priority_score"])
+            if days == 7:
+                self.assertEqual(item["list_guidance"]["status_key"], "wait")
+                self.assertEqual(item["contact_priority_score"], 0)
+        self.assertEqual(scores, sorted(scores))
+        self.assertGreater(scores[2], scores[1])
+
+    def test_positive_signal_applies_to_c_prospect_despite_low_routine_value(self):
+        day = "2026-09-17"  # exactly 30 days old
+        neutral = get([customer(segment="C")], contacts=[contact("a", "Butik", day, "Neutral")])[0]
+        positive = get([customer(segment="C")], contacts=[contact("a", "Butik", day, "Positiv")])[0]
+        self.assertEqual(neutral["list_guidance"]["status_key"], "idle")
+        self.assertEqual(positive["list_guidance"]["status_key"], "act_now")
+        self.assertGreater(positive["contact_priority_score"], 0)
+        self.assertEqual(positive["business_value_raw"], neutral["business_value_raw"])
+
+    def test_failed_attempt_does_not_erase_earlier_positive_signal(self):
+        contacts = [contact("a", "Butik", "2026-09-17", "Positiv"),
+                    contact("a", "Butik", "2026-10-12", "Ej anträffbar")]
+        item = get([customer()], contacts=contacts)[0]
+        self.assertIn(item["list_guidance"]["reason_code"],
+                      {"unanswered_retry_due", "unanswered_verify_contact_due"})
+        self.assertGreaterEqual(item["contact_priority_score"], 73)
+
+    def test_new_order_or_new_neutral_dialogue_clears_positive_boost(self):
+        pos = contact("a", "Butik", "2026-09-17", "Positiv")
+        neutral_after = contact("a", "Butik", "2026-10-10", "Neutral")
+        after_neutral = get([customer()], contacts=[pos, neutral_after])[0]
+        self.assertEqual(after_neutral["list_guidance"]["status_key"], "wait")
+        self.assertEqual(after_neutral["contact_priority_score"], 0)
+        ordered = get([customer()],
+                      orders=[delivery("a", "Butik", "2026-10-12", 30)],
+                      contacts=[pos])[0]
+        self.assertNotEqual(ordered["list_guidance"]["reason_code"],
+                            "positive_dialogue_followup")
+
+    def test_booking_or_opt_out_blocks_positive_follow_up(self):
+        pos = contact("a", "Butik", "2026-09-17", "Positiv")
+        planned = [{"customer_id": "a", "customer": "Butik",
+                    "status": "planned", "scheduled_at": "2026-10-20T10:00:00",
+                    "sales_person": "Olle", "contact_type": "phone"}]
+        booked = get([customer()], contacts=[pos], planned=planned)[0]
+        self.assertEqual(booked["list_guidance"]["status_key"], "planned")
+        self.assertEqual(booked["contact_priority_score"], 0)
+        refused = get([customer()], contacts=[
+            contact("a", "Butik", "2026-06-01", "Återkom ej"), pos
+        ])[0]
+        self.assertEqual(refused["list_guidance"]["reason_code"], "do_not_contact")
+        self.assertEqual(refused["contact_priority_score"], 0)
+
+    def test_positive_factor_example_matches_58_to_75_target(self):
+        neutral = contact_opportunity(
+            business_value_raw=10.5, days_since_reached=30,
+            latest_attempt_date=TODAY, today=TODAY, latest_result="Neutral",
+            status="act_now", trigger="value_based_contact_due",
+        )
+        positive = contact_opportunity(
+            business_value_raw=10.5, days_since_reached=30,
+            latest_attempt_date=TODAY, today=TODAY, latest_result="Positiv",
+            status="act_now", trigger="positive_dialogue_followup",
+            positive_prospect_signal=True,
+        )
+        self.assertEqual(neutral["contact_priority_score"], 58)
+        self.assertEqual(positive["contact_priority_score"], 75)
+        self.assertAlmostEqual(positive["contact_relevance_factor"], 0.75)
 
 
 class ValuePriorityFrontendStage1Tests(TestCase):
