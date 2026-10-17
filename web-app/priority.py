@@ -331,6 +331,10 @@ def build_order_features(order_rows: list[dict]) -> dict:
             for day, rows in delivery_orders.items()
             if all(o["confirmed_delivery"] for o in rows)
         }
+        confirmed_delivery_dates = sorted(
+            day for day, rows in delivery_orders.items()
+            if all(o["confirmed_delivery"] for o in rows)
+        )
         known_volumes = [o["dfp"] for o in customer_orders if o["dfp"] is not None]
         total_dfp = sum(known_volumes) if known_volumes else None
         total_sales = sum(o["sales"] for o in customer_orders)
@@ -402,6 +406,7 @@ def build_order_features(order_rows: list[dict]) -> dict:
             "delivery_dates": delivery_dates,
             "delivery_dfp_by_date": delivery_dfp_by_date,
             "confirmed_delivery_dfp_by_date": confirmed_delivery_dfp_by_date,
+            "confirmed_delivery_dates": confirmed_delivery_dates,
             "delivery_gaps": gaps,
             "latest_order_dfp": _clean_number(latest_dfp),
             "latest_order_value": _clean_number(latest_sales),
@@ -1783,10 +1788,17 @@ def build_priority_customers(
             policy=scoring_version,
         )
         # Preserve legacy planning/routing score; new read model is only for Butiker.
+        # Order date is not proof of delivery. Keep legacy delivery_count
+        # unchanged for existing consumers, but classify value by verified
+        # completed deliveries only.
+        business_delivery_count = sum(
+            1 for day in order.get("confirmed_delivery_dates", ())
+            if day <= today
+        ) if "confirmed_delivery_dates" in order else delivery_count
         business_result = business_opportunity(
             delivery_values=complete_deliveries(order, today),
             prior_dfp=value_priors.get(segment, value_priors.get("", 9)),
-            delivery_count=delivery_count,
+            delivery_count=business_delivery_count,
             cycle_days=expected_cycle or defaults.get("expected_cycle_days"),
             days_since_delivery=days_since_delivery,
         )
@@ -1996,9 +2008,9 @@ def build_priority_customers(
                 if 0 <= (today - attempt_date).days <= 30
             ),
             last_order_date=last_order,
-            delivery_count=delivery_count,
-            days_since_delivery=days_since_delivery,
-            overdue_days=overdue_days,
+            delivery_count=business_delivery_count,
+            days_since_delivery=days_since_delivery if business_delivery_count else None,
+            overdue_days=overdue_days if business_delivery_count else None,
             expected_cycle_days=expected_cycle,
             future_delivery=future_delivery,
             qualified_email_trigger=active_email_intent.get("trigger", "")
@@ -2016,6 +2028,7 @@ def build_priority_customers(
             "value_model_version": VALUE_MODEL_VERSION,
             **business_result, **contact_result,
             "list_guidance": list_guidance,
+            "business_verified_delivery_count": business_delivery_count,
             "latest_reached_date": _iso_date(latest_reached_date),
             "days_since_reached": days_since_reached,
             "row": customer.get("row"),
