@@ -28,7 +28,7 @@ POLICY = {
     # Segment + store-format medians are shrunk toward the segment median.
     "format_prior_min_buyers": 8, "format_prior_strength": 12.0,
     "routine_prospect_min_raw_dfp": 6.0,
-    "stale_followup_review_days": 180,
+    "stale_followup_review_days": 90,
     "stale_followup_order_review_days": 60,
 }
 FALLBACK_DFP = {"A": 21.0, "B": 12.0, "C": 9.0}
@@ -271,6 +271,8 @@ def store_contact_guidance(
     overdue_days: int | None, future_delivery: date | None,
     expected_cycle_days: int | None = None,
     follow_up_has_later_order: bool = False,
+    follow_up_created_date: date | None = None,
+    unverified_order_without_delivery: bool = False,
     qualified_email_trigger: str = "", policy: dict = POLICY,
 ) -> dict:
     """List-specific decision. Legacy calendar/suggestion contracts stay intact.
@@ -316,6 +318,18 @@ def store_contact_guidance(
         return choose("wait", "Avvakta",
                       f"Invänta registrerad leverans {future_delivery.isoformat()}",
                       code="future_delivery", until=future_delivery)
+    # A negative dialogue occurring AFTER the original promise wins over the
+    # older due date. A negative dialogue that itself contains a new follow-up
+    # promise must still honour that explicit commitment.
+    if (latest_reached_result == "Negativ" and latest_reached_date
+        and (not last_order_date or last_order_date < latest_reached_date)
+        and 0 <= (today - latest_reached_date).days < 60
+        and (follow_up_created_date is None
+             or latest_reached_date > follow_up_created_date)):
+        return choose("wait", "Avvakta",
+                      "Senare negativ dialog ersätter äldre uppföljningslöfte",
+                      code="negative_contact_cooldown",
+                      until=latest_reached_date + timedelta(days=60))
     # An explicit promise is not resolved merely by an outbound email or by
     # a failed call. Reached dialogue (or explicit recorded cancellation) is
     # required to close it.
@@ -385,6 +399,12 @@ def store_contact_guidance(
                           "Aktuell kvalificerad mejlsignal, ingen senare order",
                           code=qualified_email_trigger, key="follow_up_order_interest")
 
+    if delivery_count == 0 and unverified_order_without_delivery:
+        return choose(
+            "idle", "Granska order-/leveransstatus",
+            "Kunden har en registrerad order men ingen verifierad leverans. "
+            "Behandla inte kunden som ett obearbetat prospekt.",
+            code="order_without_verified_delivery")
     if delivery_count >= 2:
         if overdue_days is not None and overdue_days >= 0:
             return choose("act_now", "Säkra återköpet",

@@ -575,6 +575,9 @@ def build_contact_features(sales_activities: list[dict], order_features: dict) -
                 if last_reached else ""
             ),
             "follow_up_reached_resolved": reached_resolved_followup,
+            "latest_follow_up_created_date": (
+                latest_plan["datetime"].date() if latest_plan else None
+            ),
             "latest_human_contact_id": str(
                 latest_human_row.get("contact_id") or ""
             ).strip() or (
@@ -2052,6 +2055,10 @@ def build_priority_customers(
             follow_up_has_later_order=bool(
                 latest_follow_up_date and last_order
                 and last_order >= latest_follow_up_date
+            ),
+            follow_up_created_date=contact.get("latest_follow_up_created_date"),
+            unverified_order_without_delivery=bool(
+                order_count > 0 and business_delivery_count == 0
             ),
             future_delivery=future_delivery,
             qualified_email_trigger=active_email_intent.get("trigger", "")

@@ -171,8 +171,9 @@ class ValuePriorityStage1Tests(TestCase):
         self.assertEqual(out["business_verified_delivery_count"],0)
         self.assertEqual(out["business_deliveries_used"],0)
         self.assertEqual(out["business_value_confidence"],"segmentbaserad")
-        self.assertEqual(out["list_guidance"]["status_key"],"act_now")
-        self.assertEqual(out["list_guidance"]["action_label"],"Ta nästa steg mot första ordern")
+        self.assertEqual(out["list_guidance"]["status_key"],"idle")
+        self.assertEqual(out["list_guidance"]["action_label"],"Granska order-/leveransstatus")
+        self.assertEqual(out["contact_priority_score"],0)
 
     def test_stale_repeat_keeps_value_but_reduces_realization_assumption(self):
         active = business_opportunity(delivery_values=[30,30,30],
@@ -300,6 +301,33 @@ class ValuePriorityStage1Tests(TestCase):
         self.assertGreater(row["business_overdue_days"], 100)
         self.assertEqual(row["list_guidance"]["reason_code"],
                          "established_reorder_due")
+
+
+
+    def test_negative_response_after_older_promise_prevents_recontact(self):
+        original = contact("a", "Butik", "2026-09-01", "Positiv")
+        original["follow_up_date"] = "2026-10-02"
+        later_negative = contact("a", "Butik", "2026-10-12", "Negativ")
+        row = get([customer()], contacts=[original, later_negative])[0]
+        self.assertEqual(row["list_guidance"]["status_key"], "wait")
+        self.assertEqual(row["list_guidance"]["reason_code"], "negative_contact_cooldown")
+        self.assertEqual(row["contact_priority_score"], 0)
+
+    def test_negative_dialogue_with_new_promised_followup_keeps_commitment(self):
+        negative = contact("a", "Butik", "2026-10-01", "Negativ")
+        negative["follow_up_date"] = "2026-10-06"
+        row = get([customer()], contacts=[negative])[0]
+        self.assertEqual(row["list_guidance"]["status_key"], "overdue_followup")
+        self.assertEqual(row["list_guidance"]["reason_code"], "overdue_explicit_follow_up")
+
+    def test_ninety_day_explicit_followup_stays_visible_for_review(self):
+        followup = contact("a", "Butik", "2026-06-01", "Positiv")
+        followup["follow_up_date"] = "2026-07-09"
+        row = get([customer()], contacts=[followup])[0]
+        self.assertEqual(row["list_guidance"]["status_key"], "overdue_followup")
+        self.assertEqual(row["list_guidance"]["reason_code"], "stale_follow_up_review")
+        self.assertEqual(row["contact_priority_bucket"], 1)
+        self.assertEqual(row["contact_priority_score"], 0)
 
 
 
