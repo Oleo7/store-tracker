@@ -300,8 +300,13 @@ class ValuePriorityStage1Tests(TestCase):
         self.assertEqual(row["business_days_since_delivery"],
                          (TODAY - date(2026, 5, 1)).days)
         self.assertGreater(row["business_overdue_days"], 100)
+        # A registered but undelivered order replaces a false reorder prompt.
         self.assertEqual(row["list_guidance"]["reason_code"],
-                         "established_reorder_due")
+                         "unconfirmed_order_status_due")
+        baseline = get([customer()], [one, two])[0]
+        self.assertEqual(row["business_expected_cycle_days"],
+                         baseline["business_expected_cycle_days"])
+        self.assertEqual(row["business_value_raw"], baseline["business_value_raw"])
 
 
 
@@ -505,6 +510,21 @@ class ValuePriorityStage1Tests(TestCase):
         self.assertEqual(row["list_guidance"]["reason_code"], "unconfirmed_order_status_due")
         self.assertEqual(row["list_guidance"]["action_label"], "Kontrollera orderstatus")
         self.assertNotEqual(row["list_guidance"]["reason_code"], "established_reorder_due")
+
+
+    def test_very_old_missing_delivery_is_a_data_review_not_an_endless_urgent_call(self):
+        orders = [
+            delivery("a", "Butik", "2026-01-01", 30, "a-1"),
+            delivery("a", "Butik", "2026-02-01", 30, "a-2"),
+        ]
+        uncertain = delivery("a", "Butik", "2026-03-01", 30, "missing")
+        uncertain["Delivery date"] = ""
+        result = get([customer()], orders=[*orders, uncertain])[0]
+        self.assertEqual(result["list_guidance"]["status_key"], "idle")
+        self.assertEqual(result["list_guidance"]["reason_code"],
+                         "stale_unconfirmed_order_review")
+        self.assertEqual(result["contact_priority_score"], 0)
+        self.assertGreater(result["business_value_score"], 0)
 
     def test_confirmed_new_delivery_resets_reorder_alarm(self):
         orders = [

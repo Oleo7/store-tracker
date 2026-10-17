@@ -1814,13 +1814,15 @@ def build_priority_customers(
             (today - business_last_delivery).days
             if business_last_delivery else None
         )
+        # This v3.x cycle prior must come ONLY from other buyers' confirmed
+        # deliveries. Reusing the legacy benchmark inadvertently lets an
+        # undelivered order change a customer's estimated 90-day business value.
+        business_cycle_prior = value_priors.get(
+            f"cycle:{segment}", value_priors.get("cycle:", 45)
+        )
         business_expected_cycle = (
-            expected_reorder_cycle(
-                verified_delivery_dates,
-                defaults.get("expected_cycle_days") or 28,
-            )
-            if business_delivery_count >= 2 else
-            (defaults.get("expected_cycle_days") or 45)
+            expected_reorder_cycle(verified_delivery_dates, business_cycle_prior)
+            if business_delivery_count >= 2 else business_cycle_prior
         )
         business_overdue_days = (
             (today - (business_last_delivery
@@ -2129,6 +2131,7 @@ def build_priority_customers(
             "list_guidance": list_guidance,
             "business_verified_delivery_count": business_delivery_count,
             "business_expected_cycle_days": business_expected_cycle,
+            "business_cycle_prior_days": business_cycle_prior,
             "business_days_since_delivery": business_days_since_delivery,
             "business_overdue_days": business_overdue_days,
             "latest_unconfirmed_order_date": _iso_date(pending_unconfirmed_order_date),
@@ -3091,7 +3094,9 @@ def _build_priority_benchmarks(
 def _value_v31_priors(customers, order_indices, ambiguous_names, today):
     grouped = defaultdict(list)
     by_format = defaultdict(list)
+    by_segment_cycle = defaultdict(list)
     global_values = []
+    global_cycles = []
     for customer in customers:
         if _is_truthy(customer.get("cancelled_flag")):
             continue
@@ -3099,18 +3104,42 @@ def _value_v31_priors(customers, order_indices, ambiguous_names, today):
             customer, order_indices, name_field="customer", number_field="customer_number",
             ambiguous_master_names=ambiguous_names,
         )
+        segment = _segment_value(customer)
         volumes = complete_deliveries(feature, today)
         if volumes:
             average = sum(volumes) / len(volumes)
-            segment = _segment_value(customer)
             grouped[segment].append(average)
             fmt = store_format(customer.get("customer"))
             if fmt:
                 # One observation per BUYING STORE, never per order row.
                 by_format[(segment, fmt)].append(average)
             global_values.append(average)
+        # Keep cycle priors completely separate from the legacy model's
+        # order-date fallback. Count each buying store only once.
+        confirmed_dates = sorted({
+            d for d in feature.get("confirmed_delivery_dates", ())
+            if d <= today
+        })
+        if len(confirmed_dates) >= 2:
+            gaps = [
+                (confirmed_dates[i] - confirmed_dates[i - 1]).days
+                for i in range(1, len(confirmed_dates))
+                if confirmed_dates[i] > confirmed_dates[i - 1]
+            ]
+            if gaps:
+                typical_gap = _clamp(median(gaps[-4:]), 14, 75)
+                by_segment_cycle[segment].append(typical_gap)
+                global_cycles.append(typical_gap)
     priors = {segment: segment_prior(grouped[segment], segment, global_values)
               for segment in ("A", "B", "C", "")}
+    default_cycle = int(round(_clamp(median(global_cycles), 14, 75))) if global_cycles else 45
+    priors["cycle:"] = default_cycle
+    for segment in ("A", "B", "C"):
+        segment_cycles = by_segment_cycle.get(segment, ())
+        priors[f"cycle:{segment}"] = (
+            int(round(_clamp(median(segment_cycles), 14, 75)))
+            if segment_cycles else default_cycle
+        )
     # Small format groups shrink entirely to their segment prior; larger
     # groups can add measured information without a second A/B/C bonus.
     for (segment, fmt), values in by_format.items():

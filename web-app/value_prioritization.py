@@ -36,6 +36,7 @@ POLICY = {
     "material_reorder_overdue_days": 14,
     "material_reorder_min_dialogue_days": 7,
     "recent_order_hold_days": 14,
+    "unconfirmed_order_review_days": 60,
     "negative_cooldown_days": 60,
     "negative_60_to_90_factor": 0.35,
     "negative_90_to_180_factor": 0.55,
@@ -131,7 +132,8 @@ def validate_policy(policy: dict) -> None:
                  "stale_followup_order_review_days",
                  "positive_buyer_followup_min_days", "positive_buyer_followup_max_days",
                  "material_reorder_overdue_days", "material_reorder_min_dialogue_days",
-                 "recent_order_hold_days", "negative_cooldown_days")
+                 "recent_order_hold_days", "unconfirmed_order_review_days",
+                 "negative_cooldown_days")
     for key in positives:
         value = float(policy[key])
         if not math.isfinite(value) or value <= 0:
@@ -150,6 +152,8 @@ def validate_policy(policy: dict) -> None:
         raise ValueError("Stale follow-up review thresholds must increase")
     if int(policy["positive_buyer_followup_min_days"]) > int(policy["positive_buyer_followup_max_days"]):
         raise ValueError("Positive buyer follow-up window must increase")
+    if int(policy["unconfirmed_order_review_days"]) <= int(policy["recent_order_hold_days"]):
+        raise ValueError("Unconfirmed order review must follow recent order hold")
     if not (policy["negative_60_to_90_factor"] <= policy["negative_90_to_180_factor"] <= policy["negative_after_180_factor"]):
         raise ValueError("Negative-contact penalty must decrease with age")
 
@@ -465,10 +469,24 @@ def store_contact_guidance(
                 f"Ny order {pending_unconfirmed_order_date.isoformat()} utan bekräftat leveransdatum",
                 code="recent_order_pending_confirmation", until=until,
             )
+        if order_age <= int(policy["unconfirmed_order_review_days"]):
+            return choose(
+                "act_now", "Kontrollera orderstatus",
+                f"Order {pending_unconfirmed_order_date.isoformat()} saknar bekräftad leverans",
+                code="unconfirmed_order_status_due", key="check_order_status",
+            )
+        # Old missing delivery dates are data quality questions, not a
+        # perpetual urgent reorder or a promise that stock was delivered.
+        if delivery_count <= 0:
+            return choose(
+                "idle", "Granska order-/leveransstatus",
+                "Historisk order saknar verifierad leverans",
+                code="order_without_verified_delivery",
+            )
         return choose(
-            "act_now", "Kontrollera orderstatus",
-            f"Order {pending_unconfirmed_order_date.isoformat()} saknar bekräftad leverans",
-            code="unconfirmed_order_status_due", key="check_order_status",
+            "idle", "Granska historisk orderstatus",
+            "En äldre order saknar verifierad leverans – kontrollera historiken",
+            code="stale_unconfirmed_order_review",
         )
 
     if latest_attempt_result == "Ej anträffbar" and latest_attempt_date:
