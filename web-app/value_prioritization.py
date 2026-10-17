@@ -190,7 +190,7 @@ def contact_opportunity(*, business_value_raw: float,
         and business_days_elapsed(latest_attempt_date, today)
             < int(policy["retry_business_days"])
     )
-    if status in {"planned", "wait", "data_missing"} or waiting_for_retry:
+    if status in {"planned", "wait", "data_missing", "idle"} or waiting_for_retry:
         relevance = 0.0
         if waiting_for_retry:
             bucket = 3
@@ -222,6 +222,7 @@ def store_contact_guidance(
     unanswered_sequence_count: int, last_order_date: date | None,
     delivery_count: int, days_since_delivery: int | None,
     overdue_days: int | None, future_delivery: date | None,
+    expected_cycle_days: int | None = None,
     qualified_email_trigger: str = "", policy: dict = POLICY,
 ) -> dict:
     """List-specific decision. Legacy calendar/suggestion contracts stay intact.
@@ -325,16 +326,34 @@ def store_contact_guidance(
                           "Aktuell kvalificerad mejlsignal, ingen senare order",
                           code=qualified_email_trigger, key="follow_up_order_interest")
 
-    if delivery_count >= 2 and overdue_days is not None and overdue_days >= 0:
-        return choose("act_now", "Säkra återköpet",
-                      f"Beräknat återköp är {overdue_days} dagar försenat",
-                      code="established_reorder_due", key="secure_next_order")
-    if delivery_count == 1 and days_since_delivery is not None and days_since_delivery >= 11:
-        return choose("act_now", "Säkra andra köpet" if days_since_delivery <= 90 else "Återaktivera kunden",
-                      f"En tidigare leverans, {days_since_delivery} dagar sedan",
-                      code="second_purchase_due" if days_since_delivery <= 90 else "single_order_reactivation_due")
-    if business_value_raw > 0 and (age is None or age >= 20):
-        return choose("act_now", "Ta nästa steg mot första ordern" if delivery_count == 0 else "Ta ny kontakt",
+    if delivery_count >= 2:
+        if overdue_days is not None and overdue_days >= 0:
+            return choose("act_now", "Säkra återköpet",
+                          f"Beräknat återköp är {overdue_days} dagar försenat",
+                          code="established_reorder_due", key="secure_next_order")
+        # A recent delivery should not trigger a fabricated reorder problem.
+        if (days_since_delivery is not None and days_since_delivery >= 45
+                and (age is None or age >= 60)):
+            return choose("act_now", "Vårda kundrelationen",
+                          "Länge sedan faktisk dialog – återköp är inte förfallet",
+                          code="relationship_care_due", key="contact_customer")
+        return choose("idle", "Ingen åtgärd nu",
+                      "Återköp ännu inte förfallet", code="reorder_not_due")
+    if delivery_count == 1:
+        if days_since_delivery is not None and days_since_delivery < 7:
+            return choose("idle", "Ingen åtgärd nu",
+                          "Första leveransen är nyligen genomförd",
+                          code="first_order_new")
+        if days_since_delivery is not None and days_since_delivery <= 10:
+            return choose("act_now", "Kontrollera placering och start",
+                          f"Första leverans för {days_since_delivery} dagar sedan",
+                          code="first_order_onboarding")
+        if days_since_delivery is not None and days_since_delivery >= 11:
+            return choose("act_now", "Säkra andra köpet" if days_since_delivery <= 90 else "Återaktivera kunden",
+                          f"En tidigare leverans, {days_since_delivery} dagar sedan",
+                          code="second_purchase_due" if days_since_delivery <= 90 else "single_order_reactivation_due")
+    if delivery_count == 0 and business_value_raw > 0 and (age is None or age >= 20):
+        return choose("act_now", "Ta nästa steg mot första ordern",
                       ("Tidigare faktisk dialog saknas i historiken"
                        if age is None else f"{age} dagar sedan faktisk dialog"),
                       code="value_based_contact_due", key="contact_customer")
