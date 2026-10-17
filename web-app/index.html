@@ -4756,6 +4756,10 @@
       const loadedInsights = await (
         requestPromise || fetchJsonShared(`${API}/customer-insights`)
       );
+      if (!loadedInsights || typeof loadedInsights !== "object" ||
+          !loadedInsights.__by_customer_id) {
+        throw new Error("Servern saknar affärsvärde och kontaktprioritet per kund-ID");
+      }
       if (
         requestSerial !== insightsRequestSerial
         || (parentLoadSerial !== null && parentLoadSerial !== customersLoadSerial)
@@ -5034,6 +5038,12 @@
   }
 
   function getCustomerInsight(c) {
+    const cid = String(c?.customer_id || "").trim();
+    const identityMap = insights?.__by_customer_id;
+    if (cid && identityMap) {
+      // Never borrow another store's order/contact history on name collisions.
+      return identityMap[cid] || {};
+    }
     const rawKey = String(c?.customer || "").toLowerCase();
     return insights[customerInsightKey(c?.customer)] || insights[rawKey] || {};
   }
@@ -5062,21 +5072,48 @@
     );
   }
 
+  function sortedModelValue(insight, key) {
+    const raw = insight?.[key];
+    if (raw === null || raw === undefined || raw === "") return null;
+    const value = Number(raw);
+    return Number.isFinite(value) ? value : null;
+  }
+
+  function stableCustomerTieBreak(a, b) {
+    const nameSort = String(a.customer || "").localeCompare(String(b.customer || ""), "sv");
+    return nameSort || String(a.customer_id || "").localeCompare(String(b.customer_id || ""), "sv")
+      || Number(a.row || 0) - Number(b.row || 0);
+  }
+
+  function compareDescendingMissingLast(a, b) {
+    if (a === null) return b === null ? 0 : 1;
+    if (b === null) return -1;
+    return b - a;
+  }
+
   function contactPrioritySort(a, b) {
     const ia = getCustomerInsight(a), ib = getCustomerInsight(b);
-    if (ia?.contact_priority_raw == null || ib?.contact_priority_raw == null) return prioritySort(a, b);
-    return (
-      Number(ia.contact_priority_bucket ?? 4) - Number(ib.contact_priority_bucket ?? 4) ||
-      Number(ib.contact_priority_raw || 0) - Number(ia.contact_priority_raw || 0) ||
-      Number(ib.business_value_raw || 0) - Number(ia.business_value_raw || 0) ||
-      prioritySort(a, b)
-    );
+    // Operational eligibility comes before the score: planned/snoozed stores
+    // keep their value but do not compete with an actionable call.
+    const bucketA = sortedModelValue(ia, "contact_priority_bucket") ?? 5;
+    const bucketB = sortedModelValue(ib, "contact_priority_bucket") ?? 5;
+    return bucketA - bucketB
+      || compareDescendingMissingLast(
+        sortedModelValue(ia, "contact_priority_raw"),
+        sortedModelValue(ib, "contact_priority_raw")
+      )
+      || compareDescendingMissingLast(
+        sortedModelValue(ia, "business_value_raw"),
+        sortedModelValue(ib, "business_value_raw")
+      )
+      || stableCustomerTieBreak(a, b);
   }
 
   function businessValueSort(a, b) {
-    const ia = getCustomerInsight(a), ib = getCustomerInsight(b);
-    if (ia?.business_value_raw == null || ib?.business_value_raw == null) return prioritySort(a, b);
-    return Number(ib.business_value_raw || 0) - Number(ia.business_value_raw || 0) || prioritySort(a, b);
+    return compareDescendingMissingLast(
+      sortedModelValue(getCustomerInsight(a), "business_value_raw"),
+      sortedModelValue(getCustomerInsight(b), "business_value_raw")
+    ) || stableCustomerTieBreak(a, b);
   }
 
   document.getElementById("list-sort-mode").addEventListener("change", event => {
@@ -5146,12 +5183,13 @@
 
   function getPotentialHtml(c) {
     const ins = getCustomerInsight(c);
-    const potential = Number(ins.expected_order_dfp || 0);
+    const estimate = ins?.business_expected_dfp_per_delivery;
+    const potential = estimate == null ? NaN : Number(estimate);
     if (!Number.isFinite(potential) || potential <= 0) {
-      return '<div class="potential-summary">Potential ej beräknad</div>';
+      return '<div class="potential-summary">Leveransstorlek: otillräckligt underlag</div>';
     }
     const text = potential.toLocaleString("sv-SE", { maximumFractionDigits: 1 });
-    return `<div class="potential-summary">Potential: ca ${esc(text)} DFP</div>`;
+    return `<div class="potential-summary">Uppskattad leveransstorlek: ca ${esc(text)} DFP</div>`;
   }
 
   function getCardDateHtml(value, compact = false) {
@@ -5180,7 +5218,8 @@
     const guidance = getCustomerGuidance(ins);
     const delivery = getCardDateHtml(ins.latest_delivery_date, true);
     const nextDelivery = getCardDateHtml(ins.next_delivery_date, true);
-    const contact = getCardDateHtml(ins.latest_contact_date || c.latest_contact_date);
+    const attempted = getCardDateHtml(ins.latest_human_contact_date);
+    const reached = getCardDateHtml(ins.latest_reached_date);
     const followUpDate = String(guidance.next_contact_at || ins.latest_follow_up_date || "").trim().slice(0, 10);
     let followUp = "";
     if (guidance.status_key === "overdue_followup" && followUpDate) {
@@ -5196,7 +5235,8 @@
       <div class="card-dates">
         <span class="card-date-primary">${deliveryLabel} ${delivery}${volumeText}</span>
         <span class="card-date-secondary">
-          <span>Kontakt ${contact}</span>
+          <span>Senaste försök ${attempted}</span>
+          <span>Senast nådd ${reached}</span>
           ${ins.next_delivery_date ? `<span>Nästa leverans ${nextDelivery}${nextVolumeText}</span>` : ""}
           ${followUp}
         </span>
