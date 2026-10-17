@@ -35,7 +35,10 @@ DO_NOT_CONTACT_RESULTS = frozenset({"återkom ej", "kontakta ej", "ring ej"})
 def complete_deliveries(feature: dict, today: date) -> list[float]:
     """Only known positive DFP on completed commercial delivery dates."""
     result = []
-    for day, amount in (feature.get("delivery_dfp_by_date") or {}).items():
+    source = (feature.get("confirmed_delivery_dfp_by_date", {})
+              if "confirmed_delivery_dfp_by_date" in feature
+              else feature.get("delivery_dfp_by_date", {}))
+    for day, amount in (source or {}).items():
         try:
             delivery_date = date.fromisoformat(str(day)[:10])
             value = float(amount)
@@ -174,11 +177,13 @@ def contact_opportunity(*, business_value_raw: float,
     relevance = contact_factor(days_since_reached, latest_result, policy)
     if status == "overdue_followup":
         relevance = max(relevance, 0.75)
-    if trigger in {
-        "positive_dialogue_followup", "stockfiller_click_followup",
-        "product_sheet_click_followup", "unanswered_retry_due",
-        "unanswered_verify_contact_due",
-    }:
+    if trigger in {"stockfiller_click_followup", "product_sheet_click_followup"}:
+        relevance = max(relevance, 0.75)
+    # An unanswered attempt after a dialogue this week is not an urgent
+    # new business opportunity. Older cases can have an overdue retry need.
+    if trigger in {"unanswered_retry_due", "unanswered_verify_contact_due"} and (
+        days_since_reached is None or days_since_reached >= 30
+    ):
         relevance = max(relevance, 0.75)
     waiting_for_retry = (
         latest_result == "Ej anträffbar" and latest_attempt_date is not None
