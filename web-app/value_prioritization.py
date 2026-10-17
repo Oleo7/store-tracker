@@ -201,3 +201,144 @@ def contact_opportunity(*, business_value_raw: float,
         "contact_priority_bucket": bucket,
         "contact_relevance_factor": round(relevance, 4),
     }
+
+
+def next_business_day_retry(start: date, business_days: int) -> date:
+    current = start
+    elapsed = 0
+    while elapsed < business_days:
+        current += timedelta(days=1)
+        if current.weekday() < 5:
+            elapsed += 1
+    return current
+
+
+def store_contact_guidance(
+    *, legacy: dict, today: date, business_value_raw: float,
+    latest_attempt_date: date | None, latest_attempt_result: str,
+    latest_reached_date: date | None, latest_reached_result: str,
+    last_opt_out_date: date | None,
+    latest_follow_up_date: date | None, follow_up_reached_resolved: bool,
+    unanswered_sequence_count: int, last_order_date: date | None,
+    delivery_count: int, days_since_delivery: int | None,
+    overdue_days: int | None, future_delivery: date | None,
+    qualified_email_trigger: str = "", policy: dict = POLICY,
+) -> dict:
+    """List-specific decision. Legacy calendar/suggestion contracts stay intact.
+
+    Returns a single source of truth for the two-score Butiker experience.
+    Explicit commitments and contact restrictions take priority over routine
+    value ranking. This never mutates the underlying planned activities.
+    """
+    guidance = dict(legacy or {})
+    def choose(status: str, action: str, reason: str, *,
+               code: str = "", key: str = "", until: date | None = None) -> dict:
+        result = dict(guidance)
+        result.update(
+            status_key=status,
+            status_label={
+                "act_now": "Agera nu", "overdue_followup": "Missad uppföljning",
+                "planned": "Planerad", "wait": "Avvakta",
+                "idle": "Ingen åtgärd nu", "data_missing": "Data saknas",
+            }[status],
+            action_label=action,
+            action_key=key or code or "none",
+            reason_code=code,
+            reason_text=reason,
+            waiting_until=until.isoformat() if until else None,
+            can_contact_now=status in {"act_now", "overdue_followup"},
+        )
+        if status not in {"act_now", "overdue_followup", "planned"}:
+            result["recommended_contact_type"] = ""
+        return result
+
+    if guidance.get("status_key") == "data_missing":
+        return guidance
+    if last_opt_out_date:
+        return choose("wait", "Kontakta inte",
+                      "Återkom ej är registrerat – ändra endast efter uttrycklig ny tillåtelse",
+                      code="do_not_contact")
+    # Actual future booking or date-specific follow-up cannot be replaced by
+    # a generic value-based suggestion.
+    if guidance.get("status_key") == "planned":
+        return guidance
+    if future_delivery and future_delivery > today:
+        return choose("wait", "Avvakta",
+                      f"Invänta registrerad leverans {future_delivery.isoformat()}",
+                      code="future_delivery", until=future_delivery)
+    # An explicit promise is not resolved merely by an outbound email or by
+    # a failed call. Reached dialogue (or explicit recorded cancellation) is
+    # required to close it.
+    if latest_follow_up_date and not follow_up_reached_resolved:
+        if latest_follow_up_date < today:
+            return choose("overdue_followup", "Planera om uppföljningen",
+                          f"Uttrycklig uppföljning från {latest_follow_up_date.isoformat()} är förfallen",
+                          code="overdue_explicit_follow_up")
+        if latest_follow_up_date == today:
+            return choose("act_now", "Följ upp idag",
+                          "Uttrycklig uppföljning förfaller i dag",
+                          code="follow_up_due_today")
+    if guidance.get("status_key") == "overdue_followup":
+        return guidance
+
+    if latest_reached_result == "Negativ" and latest_reached_date and (
+        not last_order_date or last_order_date < latest_reached_date
+    ) and 0 <= (today - latest_reached_date).days < 60:
+        return choose("wait", "Avvakta", "Negativ dialog – kontaktpaus gäller",
+                      code="negative_contact_cooldown",
+                      until=latest_reached_date + timedelta(days=60))
+
+    if latest_attempt_result == "Ej anträffbar" and latest_attempt_date:
+        retry = next_business_day_retry(
+            latest_attempt_date, int(policy["retry_business_days"])
+        )
+        if today < retry:
+            return choose("wait", "Avvakta till nästa försök",
+                          f"Ej anträffbar – nytt försök tidigast {retry.isoformat()}",
+                          code="unanswered_retry_wait", until=retry)
+        if unanswered_sequence_count >= 3:
+            return choose("act_now", "Kontrollera kontaktväg",
+                          "Tre obesvarade försök – kontrollera kontaktuppgifter eller inköpare",
+                          code="unanswered_verify_contact_due", key="verify_contact_details")
+        return choose("act_now", "Försök nå kunden igen",
+                      f"Senaste kontaktförsöket {latest_attempt_date.isoformat()} var Ej anträffbar",
+                      code="unanswered_retry_due", key="retry_unanswered")
+
+    # Preserve intentional snoozes/dismissals and outbound-email waits. The
+    # earlier v2 'recent contact' block is superseded by reached/attempt rules.
+    old_reason = str(guidance.get("reason_code") or "")
+    if guidance.get("status_key") == "wait" and old_reason not in {"recent_human_contact"}:
+        return guidance
+
+    age = (today - latest_reached_date).days if latest_reached_date else None
+    if age is not None and age < 20 and not qualified_email_trigger:
+        return choose("wait", "Avvakta rutinuppföljning",
+                      f"Faktisk dialog för {max(0,age)} dagar sedan",
+                      code="recent_reached_routine_wait",
+                      until=latest_reached_date + timedelta(days=20))
+
+    if qualified_email_trigger:
+        # A genuine inbound click can justify an early contact; it is not
+        # the same as a sent email or a stale email-open pixel.
+        if qualified_email_trigger in {"stockfiller_click_followup", "product_sheet_click_followup"}:
+            return choose("act_now", "Följ upp intresset",
+                          "Aktuell kvalificerad mejlsignal, ingen senare order",
+                          code=qualified_email_trigger, key="follow_up_order_interest")
+
+    if delivery_count >= 2 and overdue_days is not None and overdue_days >= 0:
+        return choose("act_now", "Säkra återköpet",
+                      f"Beräknat återköp är {overdue_days} dagar försenat",
+                      code="established_reorder_due", key="secure_next_order")
+    if delivery_count == 1 and days_since_delivery is not None and days_since_delivery >= 11:
+        return choose("act_now", "Säkra andra köpet" if days_since_delivery <= 90 else "Återaktivera kunden",
+                      f"En tidigare leverans, {days_since_delivery} dagar sedan",
+                      code="second_purchase_due" if days_since_delivery <= 90 else "single_order_reactivation_due")
+    if business_value_raw > 0 and (age is None or age >= 20):
+        return choose("act_now", "Ta nästa steg mot första ordern" if delivery_count == 0 else "Ta ny kontakt",
+                      ("Tidigare faktisk dialog saknas i historiken"
+                       if age is None else f"{age} dagar sedan faktisk dialog"),
+                      code="value_based_contact_due", key="contact_customer")
+
+    return choose("idle", "Ingen åtgärd nu",
+                  "Ingen förfallen uppföljning eller aktuell kontaktmöjlighet",
+                  code="no_current_trigger")
