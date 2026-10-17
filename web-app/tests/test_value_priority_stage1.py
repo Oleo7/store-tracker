@@ -7,7 +7,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from priority import (build_priority_customers, build_order_features,
                       build_contact_features, apply_workflow_suppressions)
-from value_prioritization import contact_factor, business_days_elapsed, complete_deliveries
+from value_prioritization import (contact_factor, business_days_elapsed, complete_deliveries,
+    business_opportunity, validate_policy, POLICY, next_business_day_retry)
 
 TODAY = date(2026, 10, 17)
 
@@ -106,6 +107,88 @@ class ValuePriorityStage1Tests(TestCase):
     def test_missing_or_future_volumes_excluded(self):
         self.assertEqual(complete_deliveries({"delivery_dfp_by_date": {
             "2026-01-01": None, "2026-02-01": 5, "2026-11-01": 999}}, TODAY), [5.0])
+
+
+    def test_formula_uses_n_k_and_segment_mean_without_fixed_bonus(self):
+        value = business_opportunity(
+            delivery_values=[20.0, 40.0], prior_dfp=21.0,
+            delivery_count=2, cycle_days=45,
+        )
+        self.assertAlmostEqual(value["business_expected_dfp_per_delivery"], 24.6)
+        self.assertEqual(value["business_deliveries_used"], 2)
+
+    def test_recent_reached_a_prospect_waits_but_old_one_is_actionable(self):
+        latest = get([customer()], contacts=[contact("a","Butik","2026-10-10","Neutral")])[0]
+        old = get([customer()], contacts=[contact("a","Butik","2026-08-18","Neutral")])[0]
+        self.assertEqual(latest["list_guidance"]["status_key"], "wait")
+        self.assertEqual(latest["contact_priority_score"], 0)
+        self.assertEqual(old["list_guidance"]["status_key"], "act_now")
+        self.assertGreater(old["contact_priority_score"], latest["contact_priority_score"])
+        self.assertEqual(old["business_value_raw"], latest["business_value_raw"])
+
+    def test_customer_did_not_opt_in_after_earlier_do_not_contact(self):
+        value = get([customer()], contacts=[
+            contact("a","Butik","2026-06-01","Återkom ej"),
+            contact("a","Butik","2026-10-12","Ej anträffbar"),
+        ])[0]
+        self.assertEqual(value["list_guidance"]["reason_code"], "do_not_contact")
+        self.assertEqual(value["list_guidance"]["action_label"], "Kontakta inte")
+        self.assertEqual(value["contact_priority_score"], 0)
+        self.assertGreater(value["business_value_score"], 0)
+
+    def test_failed_call_does_not_complete_explicit_followup_in_list(self):
+        followup = contact("a","Butik","2026-09-01","Positiv")
+        followup["follow_up_date"] = "2026-09-20"
+        fail = contact("a","Butik","2026-10-02","Ej anträffbar")
+        value = get([customer()], contacts=[followup,fail])[0]
+        self.assertEqual(value["list_guidance"]["status_key"], "overdue_followup")
+        self.assertEqual(value["list_guidance"]["reason_code"], "overdue_explicit_follow_up")
+        self.assertGreater(value["contact_priority_score"], 0)
+
+    def test_retry_two_business_days_and_three_calls_since_reached(self):
+        self.assertEqual(next_business_day_retry(date(2026,10,12),2),date(2026,10,14))
+        self.assertEqual(next_business_day_retry(date(2026,10,16),2),date(2026,10,20))
+        wait = get([customer()], contacts=[contact("a","Butik","2026-10-16","Ej anträffbar")])[0]
+        self.assertEqual(wait["list_guidance"]["status_key"], "wait")
+        self.assertEqual(wait["list_guidance"]["waiting_until"], "2026-10-20")
+        retry = get([customer()], contacts=[contact("a","Butik","2026-10-14","Ej anträffbar")])[0]
+        self.assertEqual(retry["list_guidance"]["action_key"], "retry_unanswered")
+        self.assertEqual(retry["list_guidance"]["status_key"], "act_now")
+        check = get([customer()], contacts=[
+            contact("a","Butik","2026-09-01","Ej anträffbar"),
+            contact("a","Butik","2026-09-10","Neutral"),
+            contact("a","Butik","2026-10-02","Ej anträffbar"),
+            contact("a","Butik","2026-10-08","Ej anträffbar"),
+            contact("a","Butik","2026-10-12","Ej anträffbar"),
+        ])[0]
+        self.assertEqual(check["list_guidance"]["action_key"], "verify_contact_details")
+
+    def test_order_date_only_is_not_confirmed_delivery_in_stage_one(self):
+        order = delivery("a","Butik","2026-01-01",40)
+        order["Delivery date"] = ""
+        out = get([customer()], orders=[order])[0]
+        self.assertEqual(out["business_verified_delivery_count"],0)
+        self.assertEqual(out["business_deliveries_used"],0)
+        self.assertEqual(out["business_value_confidence"],"segmentbaserad")
+        self.assertEqual(out["list_guidance"]["status_key"],"act_now")
+        self.assertEqual(out["list_guidance"]["action_label"],"Ta nästa steg mot första ordern")
+
+    def test_stale_repeat_keeps_value_but_reduces_realization_assumption(self):
+        active = business_opportunity(delivery_values=[30,30,30],
+            prior_dfp=21,delivery_count=3,cycle_days=30,days_since_delivery=30)
+        inactive = business_opportunity(delivery_values=[30,30,30],
+            prior_dfp=21,delivery_count=3,cycle_days=30,days_since_delivery=250)
+        self.assertLess(inactive["business_value_raw"],active["business_value_raw"])
+        self.assertEqual(inactive["business_expected_dfp_per_delivery"],
+                         active["business_expected_dfp_per_delivery"])
+
+    def test_model_policy_rejects_invalid_parameters(self):
+        for changes in ({"score_scale_dfp":0},
+                        {"realization_prospect":1.1},
+                        {"shrinkage_purchases":-1}):
+            with self.subTest(changes=changes):
+                with self.assertRaises(ValueError):
+                    validate_policy({**POLICY,**changes})
 
     def test_separate_fields_and_legacy_score_preserved(self):
         row = get([customer()])[0]
