@@ -71,9 +71,12 @@ print(json.dumps([dict(name=k,item=scored(**v)) for k,v in cases.items()]))
           };
         },{item});
         const g=item.customer_guidance;
-        assert.equal(result.reason,g.reason_text,`${width}/${name}: reason`);
-        assert.ok(result.action.startsWith(g.action_label),`${width}/${name}: action`);
-        assert.equal(result.focus,g.focus_label,`${width}/${name}: focus`);
+        const storeGuidance=item.list_guidance || g;
+        // Butiker uses stage-one guidance, but Planning must retain its
+        // independently validated legacy action until stage two.
+        assert.equal(result.reason,storeGuidance.reason_text,`${width}/${name}: store reason`);
+        assert.ok(result.action.startsWith(storeGuidance.action_label),`${width}/${name}: store action`);
+        assert.equal(result.focus,storeGuidance.focus_label,`${width}/${name}: focus`);
         assert.equal(result.fits,true,`${width}/${name}: overflow`);
         if (g.status_key==='act_now') assert.equal(result.planningReason,g.reason_text,`${width}/${name}: planning`);
         if (name==='past-and-future') {
