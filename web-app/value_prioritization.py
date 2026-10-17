@@ -16,7 +16,10 @@ POLICY = {
     "realization_prospect": 0.50, "realization_first_order": 0.70,
     "realization_repeat": 0.80, "first_order_frequency": 1.20,
     # All parameters are provisional until portfolio replay and backtesting.
-    "maximum_repeat_frequency": 6.0, "score_scale_dfp": 6.0,
+    # Provisional anchor: A-group median 21 DFP x prospect factor 0.50
+    # maps to 80/100 after 90d (10.5/(10.5+2.625)=0.8).
+    # Does NOT imply an 80% purchase chance; must be portfolio-calibrated.
+    "maximum_repeat_frequency": 6.0, "score_scale_dfp": 2.625,
     "unknown_dialogue_factor": 0.70, "retry_business_days": 2,
     "stale_repeat_after_cycles": 3.0, "stale_repeat_factor": 0.75,
     "very_stale_repeat_after_cycles": 6.0, "very_stale_repeat_factor": 0.60,
