@@ -106,7 +106,7 @@ class ScoringV2Tests(TestCase):
         self.assertFalse(result["recommendation_eligible"])
         self.assertEqual(
             result["recommendation_suppression_reason"],
-            "recent_human_contact",
+            "recent_reached_routine_wait",
         )
 
     def test_established_timing_boundaries(self):

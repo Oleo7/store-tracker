@@ -61,7 +61,9 @@ def scored(*, store=None, orders=(), contacts=(), mail=None, planned=(), today=T
 class GuidanceIntegrityTests(TestCase):
     def assert_canonical(self, item):
         guidance = item['customer_guidance']
-        self.assertEqual(guidance['reason_code'], item['primary_trigger_type'])
+        self.assertEqual(guidance, item['list_guidance'])
+        self.assertEqual(guidance['reason_code'], item['primary_reason_code'])
+        self.assertEqual(item['primary_trigger_type'], guidance['reason_code'] if item['recommendation_eligible'] else '')
         self.assertEqual(guidance['reason_text'], item['primary_reason_text'])
         self.assertNotIn('Uttrycklig', guidance['reason_text'])
         self.assertNotEqual(guidance['action_key'], 'follow_up_today')
@@ -77,7 +79,7 @@ class GuidanceIntegrityTests(TestCase):
                     self.assertEqual(g['reason_text'], f'F\u00f6rsta leverans f\u00f6r {days} dagar sedan \u2013 planera uppf\u00f6ljning')
                     self.assert_canonical(item)
                 elif 11 <= days <= 90:
-                    self.assertEqual(g['action_label'], 'S\u00e4kra \u00e5terk\u00f6pet')
+                    self.assertEqual(g['action_label'], 'Säkra andra köpet')
                     self.assertEqual(g['reason_text'], f'{days} dagar sedan f\u00f6rsta leveransen \u00b7 dags att s\u00e4kra andra k\u00f6pet')
                     self.assertEqual(g['focus_label'], 'En leverans, 11\u201390 dagar sedan')
                     self.assertEqual(g['focus_key'], 'second_purchase')
@@ -110,37 +112,36 @@ class GuidanceIntegrityTests(TestCase):
                     self.assertEqual(g['focus_key'],focus)
                     self.assertIn('Stockfiller-klick' if kind=='stockfiller' else 'Produktbladsklick',g['reason_text'])
                     self.assertIn('ingen senare order',g['reason_text'])
-                    if focus=='a_prospect':
-                        self.assertEqual(item['primary_trigger_type'],'a_prospect_due')
-                        self.assertEqual(g['action_label'],'Ta n\u00e4sta steg mot f\u00f6rsta ordern')
-                    elif focus=='warm_opportunity':
-                        self.assertEqual(g['action_label'],'F\u00f6lj upp m\u00f6jligheten')
-                    else:
-                        self.assertEqual(g['action_label'],'F\u00f6lj upp best\u00e4llningsintresset' if kind=='stockfiller' else 'F\u00f6lj upp produktintresset')
+                    self.assertEqual(item['primary_trigger_type'],kind+'_click_followup')
+                    self.assertEqual(g['action_label'],'Följ upp beställningsintresset' if kind=='stockfiller' else 'Följ upp produktintresset')
+                    self.assertEqual(item['next_action']['action_type'], kind+'_click_followup')
+                    self.assertEqual(item['next_action']['contact_type'], 'phone')
 
-    def test_dialogue_matrix_is_specific_but_does_not_replace_a_primary_reorder(self):
+    def test_dialogue_matrix_uses_buyer_window_and_preserves_first_order_phase(self):
         for rows, segment, focus in [([], 'B','warm_opportunity'),([], 'A','a_prospect'),
-            ([order('one',5)],'C','second_purchase'),
-            ([order('one',10),order('two',30)],'C','repeat_purchase'),
+            ([order('one',30)],'C','second_purchase'),
+            ([order('one',20),order('two',40)],'C','repeat_purchase'),
             ([order('one',200)],'C','reactivation')]:
             with self.subTest(focus=focus):
-                age = 7 if not rows else 3
+                age = 7 if not rows else 10
                 item=scored(store=customer(segment),orders=rows,contacts=[contact(age,'Positiv')])
                 g=self.assert_canonical(item)
                 self.assertEqual(g['focus_key'],focus)
                 self.assertIn(f'Positiv dialog f\u00f6r {age} dagar sedan \u00b7 ingen senare order',g['reason_text'])
-                if rows: self.assertEqual(g['action_label'],'F\u00f6lj upp dialogen')
+                self.assertEqual(g['action_label'],'Följ upp positiv dialog')
+                self.assertEqual(g['reason_code'], 'positive_buyer_followup' if rows else 'positive_dialogue_followup')
         reorder=scored(orders=[order('first',19)],contacts=[contact(3,'Positiv')])
-        self.assertEqual(reorder['primary_trigger_type'],'first_order_reorder')
-        self.assertIn('positive_dialogue_followup',reorder['covered_trigger_keys'])
-        self.assertEqual(self.assert_canonical(reorder)['action_label'],'S\u00e4kra \u00e5terk\u00f6pet')
+        self.assertEqual(reorder['primary_trigger_type'],'second_purchase_due')
+        self.assertEqual(reorder['covered_trigger_keys'], ['second_purchase_due'])
+        self.assertEqual(self.assert_canonical(reorder)['action_label'],'Säkra andra köpet')
 
     def test_a_prospect_explanation_never_changes_context_identity(self):
         baseline=scored(store=customer('A'))
         for kwargs in ({'contacts':[contact(10,'Positiv')]},{'mail':email()},
                        {'contacts':[contact(10,'Positiv')],'mail':email()}):
             item=scored(store=customer('A'),**kwargs)
-            self.assertEqual(item['primary_trigger_type'],'a_prospect_due')
+            self.assertEqual(item['customer_guidance']['focus_key'], 'a_prospect')
+            self.assertEqual(item['primary_trigger_type'], 'stockfiller_click_followup' if kwargs.get('mail') else 'positive_dialogue_followup')
             self.assertEqual(app_module.priority_decision_context_hash(item,'olle'),
                              app_module.priority_decision_context_hash(baseline,'olle'))
             self.assert_canonical(item)
@@ -157,9 +158,9 @@ class GuidanceIntegrityTests(TestCase):
                 ('En tidigare leverans' if count==1 else 'Tidigare \u00e5terkommande kund')+
                 ' \u00b7 200 dagar sedan senaste leveransen')
 
-    def test_strategic_trigger_uses_its_real_reason_not_reactivation_fallback(self):
-        # This trigger currently overlaps other stronger triggers in many cases.
-        # Test its presentation directly without changing live eligibility rules.
+    def test_legacy_strategic_trigger_cannot_replace_verified_reactivation(self):
+        # The old scoring snapshot is reference data; the current decision
+        # must use actual delivery/contact evidence even if a legacy trigger differs.
         for text in ('Strategisk kund \u2013 aldrig kontaktad',
                      'Strategisk kund \u2013 46 dagar sedan senaste kontakt'):
             snapshot={'primary_trigger_type':'strategic_contact_due',
@@ -169,8 +170,8 @@ class GuidanceIntegrityTests(TestCase):
             with patch.object(p,'_phase3_trigger_snapshot',return_value=snapshot):
                 item=scored(orders=[order('old',200)])
             g=self.assert_canonical(item)
-            self.assertEqual(g['action_label'],'Ta ny kontakt')
-            self.assertEqual(g['reason_text'],text)
+            self.assertEqual(g['action_label'],'Återaktivera kunden')
+            self.assertEqual(g['reason_text'],'En tidigare leverans · 200 dagar sedan senaste leveransen')
 
     def test_true_followup_today_overrides_commercial_copy_only_when_date_exists(self):
         for segment in ('A','C'):
@@ -182,8 +183,11 @@ class GuidanceIntegrityTests(TestCase):
                 self.assertEqual(g['action_key'],'follow_up_today')
                 self.assertEqual(g['reason_code'],'follow_up_due_today')
                 self.assertEqual(g['reason_text'],'Uttrycklig uppf\u00f6ljning f\u00f6rfaller i dag')
-        resolved=scored(contacts=[contact(10,'Positiv',TODAY.isoformat())],orders=[order('today',0)])
-        self.assertNotEqual(resolved['customer_guidance']['action_key'],'follow_up_today')
+        # An order resolves order-acquisition signals, not an independently
+        # promised service contact. It needs explicit linked completion.
+        still_due=scored(contacts=[contact(10,'Positiv',TODAY.isoformat())],orders=[order('today',0)])
+        self.assertEqual(still_due['customer_guidance']['action_key'],'follow_up_today')
+        self.assertTrue(still_due['can_start_unscheduled_contact'])
 
     def test_real_plans_overdue_and_suppressions_stay_authoritative(self):
         for planned,status in [([activity(1)],'planned'),([activity(-1)],'overdue_followup'),
@@ -196,7 +200,7 @@ class GuidanceIntegrityTests(TestCase):
                      (TODAY+timedelta(days=days)).isoformat())])['customer_guidance']
             self.assertEqual(g['status_key'],status)
         for kwargs,reason in [({'orders':[order('future',-4)]},'future_delivery'),
-                             ({'contacts':[contact(1)]},'recent_human_contact'),
+                             ({'contacts':[contact(1)]},'recent_reached_routine_wait'),
                              ({'contacts':[contact(3,'Negativ')]},'negative_contact_cooldown'),
                              ({'mail':email(age=2)},'recent_email_engagement_wait'),
                              ({'suppressions':{'c':'snoozed'}},'snoozed')]:
@@ -208,21 +212,24 @@ class GuidanceIntegrityTests(TestCase):
     def test_inactive_or_handled_signals_are_not_described_as_live(self):
         for kwargs in ({'mail':email(age=15)},
                        {'mail':email(),'contacts':[contact(4)]},
-                       {'contacts':[contact(31,'Positiv')]}):
+                       {'contacts':[contact(46,'Positiv')]}):
             item=scored(store=customer('A'),**kwargs)
-            self.assertEqual(item['primary_reason_text'],'Strategisk kund utan tidigare order')
+            self.assertNotIn('Stockfiller', item['primary_reason_text'])
+            self.assertNotIn('Positiv dialog', item['primary_reason_text'])
+            self.assertEqual(item['customer_guidance']['focus_key'], 'a_prospect')
         later=scored(store=customer('A'),mail=email(),orders=[order('later',4)])
         self.assertNotIn('Stockfiller',later['customer_guidance']['reason_text'])
 
-    def test_unknown_trigger_has_neutral_fallback_not_fabricated_followup(self):
+    def test_unknown_legacy_trigger_cannot_fabricate_a_current_signal_or_followup(self):
         snapshot={'primary_trigger_type':'new_signal','primary_trigger_key':'new_signal',
                   'covered_trigger_keys':['new_signal'],'primary_reason_code':'new_signal',
                   'primary_reason_text':'Verifierad ny signal'}
         for reason in ('Verifierad ny signal',''):
             with patch.object(p,'_phase3_trigger_snapshot',return_value={**snapshot,'primary_reason_text':reason}):
                 g=scored()['customer_guidance']
-            self.assertEqual(g['action_label'],'F\u00f6lj upp kunden')
-            self.assertEqual(g['reason_text'],reason or 'Aktuell signal beh\u00f6ver f\u00f6ljas upp')
+            self.assertEqual(g['action_label'],'Ta nästa steg mot första ordern')
+            self.assertEqual(g['reason_code'], 'value_based_contact_due')
+            self.assertEqual(g['reason_text'],'Tidigare faktisk dialog saknas i historiken')
             self.assertNotIn('Uttrycklig',g['reason_text'])
 
 
@@ -254,7 +261,12 @@ class DeliveryVolumeIntegrityTests(TestCase):
         self.assertEqual(item['customer_guidance']['status_key'],'wait')
 
     def test_delivery_date_boundary_reuses_same_date_independent_features(self):
-        features=p.build_order_features([order('old',10,13),order('today',0,15),order('next',-4,17)])
+        # Both future deliveries were already ordered before the first replay.
+        # A genuinely future Order date must instead be excluded at as_of.
+        rows = [order('old',10,13),order('today',0,15),order('next',-4,17)]
+        for row in rows:
+            row['Order date'] = min(row['Order date'], (TODAY-timedelta(days=2)).isoformat())
+        features=p.build_order_features(rows)
         before=scored(features=features,today=TODAY-timedelta(days=1))
         after=scored(features=features,today=TODAY)
         self.assertEqual((before['latest_delivery_dfp'],before['next_delivery_dfp']),(13,15))
@@ -290,7 +302,9 @@ class DeliveryVolumeIntegrityTests(TestCase):
         self.assertIsNone(scored(orders=[order('past',10)])['next_delivery_dfp'])
 
     def test_legacy_precomputed_features_do_not_fabricate_a_date_volume_pair(self):
-        features=p.build_order_features([order('old',10,13),order('new',-4,15)])
+        # A real legacy precomputed map has no recoverable source provenance.
+        # A FeatureSnapshot can correctly rebuild its actual paired facts.
+        features=dict(p.build_order_features([order('old',10,13),order('new',-4,15)]))
         for row in features.values(): row.pop('delivery_dfp_by_date')
         item=scored(features=features)
         self.assertIsNone(item['latest_delivery_dfp'])
@@ -363,18 +377,21 @@ class GuidanceIntegrityApiTests(PlanningApiTestCase):
         self.assertEqual(candidate['customer_guidance'],ins['customer_guidance'])
         self.assertTrue(candidate['externally_suppressed'])
 
-    def test_second_purchase_guidance_matches_actual_suggestion(self):
+    def test_second_purchase_guidance_is_on_customer_list_and_not_attention(self):
         self.append_order('first',11,13)
         ins=self.client.get('/customer-insights').get_json()['butik a']
-        response=self.client.get('/planning/suggestions?preview_limit=20')
+        response=self.client.get('/planning/attention')
         self.assertEqual(response.status_code,200)
         payload=response.get_json()
-        suggestions=[payload.get('suggestion')]+payload.get('preview',[])
-        selected=next(s for s in suggestions if s and s.get('customer')=='Butik A')
+        self.assertEqual(payload['items'], [])
+        candidates=app_module.planning_suggestion_candidates(
+            self.spreadsheet, {'user_name':'olle','name':'Olle'})
+        selected=next(s for s in candidates if s.get('customer')=='Butik A')
         self.assertEqual(selected['customer_guidance'],ins['customer_guidance'])
         self.assertEqual(selected['reason_text'],ins['primary_reason_text'])
-        self.assertEqual(selected['action_label'],'S\u00e4kra \u00e5terk\u00f6pet')
+        self.assertEqual(selected['action_label'],'Säkra andra köpet')
         self.assertEqual(selected['contact_context']['latest_delivery_dfp'],13)
+        self.assertGreater(ins['contact_priority_raw'], 0)
 
     def test_insights_serializes_unknown_delivery_volume_as_null(self):
         self.append_order('first',10,None); self.append_order('future',-4,15)

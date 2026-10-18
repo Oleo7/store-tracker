@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import app as app_module
 from commercial_orders import order_volume
+from customer_obligations import build_customer_state, attention_items
 from priority import build_order_features, build_priority_customers, calculate_priority_score_v2
 from sales_coaching import group_logical_orders
 from test_priority_v2 import customer, order, contact, priorities
@@ -33,7 +34,8 @@ class CommercialV22Tests(TestCase):
             if count:
                 self.assertEqual(item["primary_trigger_type"], "single_order_reactivation_due" if count == 1 else "repeat_reactivation_due")
             self.assertEqual(ranked, priorities(stores, rows, today=self.today))
-            future = rows + [order("future", "Store", "2026-09-01", 10, "s")]
+            future = rows + [{**order("future", "Store", "2026-09-01", 10, "s"),
+                              "Order date": self.today.isoformat()}]
             item = next(row for row in priorities(stores, future, today=self.today) if row["customer_id"] == "s")
             self.assertEqual(item["history_index"], history)
             self.assertFalse(item["recommendation_eligible"])
@@ -85,12 +87,13 @@ class CommercialV22Tests(TestCase):
         self.assertEqual(calculate_priority_score_v2(60, 100, 100, policy="v2.1"), 74)
         self.assertEqual(calculate_priority_score_v2(60, 100, 100, 60, policy="v2.2"), 72)
 
-    def test_positive_dialogue_day_30_31(self):
-        for age in (30, 31):
+    def test_positive_dialogue_window_extends_to_45_with_legacy_score_preserved(self):
+        for age in (30, 31, 45, 46):
             item = priorities([customer("Store", "s", "C")], contacts=[contact("Store", self.today - timedelta(days=age), "Positiv")], today=self.today)[0]
-            self.assertEqual("positive_dialogue_followup" in item["covered_trigger_keys"], age == 30)
-            self.assertEqual(item["intent_timing"], 55 if age == 30 else 45)
-            if age == 31:
+            self.assertEqual("positive_dialogue_followup" in item["covered_trigger_keys"], age <= 45)
+            if age in (30, 31):
+                self.assertEqual(item["intent_timing"], 55 if age == 30 else 45)
+            if age > 45:
                 self.assertNotIn("Positiv dialog", item["next_action"].get("reason", ""))
 
     def test_click_window_open_only_and_later_handling(self):
@@ -155,17 +158,25 @@ class RouteAndPlanningV22Tests(TestCase):
             self.assertIsNone(error)
             self.assertNotIn(target, {row["customer_id"] for row in result["shipments"]})
 
-    def test_effective_overdue_exact_timestamp_status_and_email(self):
+    def test_attention_excludes_today_while_calendar_keeps_exact_time_status(self):
         owner = {"user_name": "olle", "name": "Olle"}
         now = datetime(2026, 8, 10, 12, tzinfo=app_module.STOCKHOLM_ZONE)
-        past = {"customer_id": "s", "planned_activity_id": "old", "scheduled_at": "2026-08-10T09:00:00+02:00", "status": "planned", **owner}
-        for timestamp, email, visible in (("08:59:59", "", True), ("09:00:00", "", True), ("09:00:01", "", False), ("09:00:01", "event", True)):
+        today_plan = {"customer_id": "s", "planned_activity_id": "old", "scheduled_at": "2026-08-10T09:00:00+02:00", "status": "planned", **owner}
+        active, overdue = app_module.active_planned_activity_queue_state([today_plan], owner, now=now)
+        self.assertEqual(active, {"s"})
+        self.assertEqual([row['planned_activity_id'] for row in overdue], ['old'])
+        state = build_customer_state([{"customer_id": "s", "customer": "Store", "sales_person": "olle"}],
+                                     [], [today_plan], as_of=now)
+        self.assertEqual(attention_items(state, as_of=now, owner_user_name="olle"), [])
+        past = {**today_plan, "scheduled_at": "2026-08-09T09:00:00+02:00"}
+        for timestamp, email in (("08:59:59", ""), ("09:00:00", ""), ("09:00:01", ""), ("09:00:01", "event")):
             contacts = [{"customer_id": "s", "date_time": f"2026-08-10 {timestamp}", "email_id": email}]
             active, overdue = app_module.active_planned_activity_queue_state([past], owner, contact_rows=contacts, now=now)
-            self.assertEqual(bool(overdue), visible)
-            self.assertEqual("s" in active, visible)
+            self.assertEqual([row['planned_activity_id'] for row in overdue], ['old'])
+            self.assertIn("s", active)
         for status in ("planned", "completed", "cancelled", "skipped"):
             future = {**past, "planned_activity_id": "future", "scheduled_at": "2026-08-11T09:00:00+02:00", "status": status}
             _, overdue = app_module.active_planned_activity_queue_state([past, future], owner, now=now)
-            self.assertEqual(bool(overdue), status != "planned")
+            # A separate booking does not silently close the old missed scope.
+            self.assertEqual([row['planned_activity_id'] for row in overdue], ['old'])
             self.assertEqual(past["status"], "planned")

@@ -9,6 +9,16 @@ INDEX_PATH = Path(__file__).resolve().parents[1] / "index.html"
 
 
 class PlanningFrontendContractTests(TestCase):
+    def assertIn(self, member, container, msg=None):
+        if isinstance(container, str) and len(container) > 10000:
+            return self.assertTrue(member in container, msg or f"Missing frontend contract: {member}")
+        return super().assertIn(member, container, msg)
+
+    def assertNotIn(self, member, container, msg=None):
+        if isinstance(container, str) and len(container) > 10000:
+            return self.assertFalse(member in container, msg or f"Unexpected frontend contract: {member}")
+        return super().assertNotIn(member, container, msg)
+
     @classmethod
     def setUpClass(cls):
         cls.html = INDEX_PATH.read_text(encoding="utf-8")
@@ -198,7 +208,7 @@ for (const changes of [{total_minutes:550},{break_minutes:-1},{wait_minutes:0},
         self.assertIsNotNone(refresher)
         self.assertIn("loadInsights()", refresher.group(1))
         self.assertIn("loadPlanningWeek()", refresher.group(1))
-        self.assertIn("loadPlanningRecommendation({", refresher.group(1))
+        self.assertIn("loadPlanningAttention()", refresher.group(1))
 
         load_week = re.search(
             r"async function loadPlanningWeek\(\) \{(.*?)\n  \}",
@@ -206,15 +216,15 @@ for (const changes of [{total_minutes:550},{break_minutes:-1},{wait_minutes:0},
             flags=re.DOTALL,
         )
         self.assertIsNotNone(load_week)
-        self.assertIn("await loadPlanningRecommendation()", load_week.group(1))
+        self.assertIn("await loadPlanningAttention()", load_week.group(1))
 
         mutation = re.search(
-            r"async function mutateVisibleRecommendation\(action\) \{(.*?)\n  \}",
+            r"async function mutatePlanningObligation\(item, action\) \{(.*?)\n  \}",
             self.html,
             flags=re.DOTALL,
         )
         self.assertIsNotNone(mutation)
-        self.assertIn("await refreshWorkflowViews()", mutation.group(1))
+        self.assertIn("await refreshWorkflowViews({ planning: true })", mutation.group(1))
 
         status_update = re.search(
             r"async function updatePlanningActivityStatus\(activity, status\) \{(.*?)\n  \}",
@@ -233,7 +243,6 @@ for (const changes of [{total_minutes:550},{break_minutes:-1},{wait_minutes:0},
             flags=re.DOTALL,
         )
         self.assertIsNotNone(editor_save)
-        self.assertIn("await refreshWorkflowViews()", editor_save.group(1))
         self.assertIn(
             "await refreshWorkflowViews({ planning: true })",
             editor_save.group(1),
@@ -266,7 +275,7 @@ process.on('unhandledRejection', error => unhandled.push(error));
 const context = vm.createContext({assert, URLSearchParams, setImmediate});
 vm.runInContext(`
 const API = '/api', sharedJsonRequests = new Map(), requests = [], toasts = [];
-let planningLoadSerial = 0, planningRecommendationRequestSerial = 0, insightsRequestSerial = 0;
+let planningLoadSerial = 0, planningAttentionRequestSerial = 0, insightsRequestSerial = 0;
 let planningDragMutationSerial = 0;
 const planningDragOperations = new Map();
 const planningDragActivityVersions = new Map();
@@ -277,7 +286,10 @@ let insightsListRenderPending = false;
 let customersLoadSerial = 0, planningLoading = false, planningData = null, planningActiveUsersCache = [];
 let planningWeekStart = '2026-10-05', planningSelectedDate = '2026-10-05', planningSelectedUserName = '';
 let planningRecommendationPreviewLimit = 10, planningRecommendationLoading = false;
-let planningRecommendation = null, planningRecommendationPreview = [], planningRecommendationPendingCount = 0;
+let planningAttention={items:[],total:0,nextOffset:0,owner:'olle',loaded:false,error:null,invalidCount:0}, planningAttentionLoading=false;
+const planningAttentionOwnerKey=()=> 'olle', renderPlanningAttention=()=>{}, planningAttentionItemIsEligible=()=>true;
+const mergePlanningAttentionItems=(existing,incoming)=>[...existing,...incoming];
+const currentCustomer=null;
 let insights = {}, insightsLoaded = false, insightsLoadFailed = false, insightsRevision = 0;
 let emailClickNoOrderActive = false, listRenders = 0;
 const filterState = {emailProposal:new Set()};
@@ -314,6 +326,8 @@ let lastListSignature = '', visibleListCount = 10, filteredCustomers = [];
 const LIST_BATCH_SIZE = 10, getListSignature = () => 'test-list';
 const getBaseFilteredCustomers = () => customers, getRouteProposalStop = () => null;
 const isCancelledCustomer = () => false, currentUserCanPlan = () => true;
+const listSortMode='contact', PLANNING_TIME_ZONE='Europe/Stockholm';
+const bindCustomerDecisionControls=()=>{}, getCustomerWorkflowButtonHtml=()=>'';
 let simulateListScrollJump = false;
 const scrollCalls = [], animationFrames = [];
 const window = {scrollX:0,scrollY:0,scrollTo:(x,y)=>{scrollCalls.push([x,y]);window.scrollX=x;window.scrollY=y;}};
@@ -345,17 +359,18 @@ const simulateCriticalWorkflowMutation = async activity => {
 };
 const buildInsightDropdowns = () => {}, updateEmailClickNoOrderChip = () => {}, updateChip = () => {};
 const showToast = text => toasts.push(text);
-${['fetchJsonShared','loadInsights','loadPlanningRecommendation','loadPlanningWeek','refreshWorkflowViews',
+${['fetchJsonShared','loadInsights','loadPlanningAttention','loadPlanningWeek','refreshWorkflowViews',
    'activeViewName','showView','renderList','esc','escAttr',
    'customerInsightKey','getCustomerInsight','getCustomerGuidance','getCustomerListGuidance','hasPriorityScore',
    'getGuidanceStatusClass','getNextActionColorClass','guidanceContactLabel','getNextActionHtml',
-   'getPrioritySummaryHtml','getPotentialHtml','getCardDateHtml','getDeliveryVolumeText',
+   'getPrioritySummaryHtml','getPriorityWhyHtml','getWorkPriorityValue','sortedModelValue','getPotentialHtml','getCardDateHtml','getDeliveryVolumeText',
+   'getCustomerPlanningSeed','planningContactTypeKey','customerHasContactBan','customerCanStartContact','planningDateFromKey','planningDateKeyFromIso','planningTimeFromIso',
    'getCardDatesHtml','getPriorityCardClass','getCustomerCardAriaLabel','getCardPlanningButtonHtml']
    .map(source).join('\n')}
 `, context);
 vm.runInContext(`(async () => {
   const week = version => ({owner:{user_name:'olle'},activities:[{id:version}],available_users:[]});
-  const suggestions = {suggestion:{id:'next'},queue_preview:[],pending_count:1};
+  const suggestions = {items:[],total:0,offset:0,owner:{user_name:'olle'}};
   const begin = () => requests.length;
 
   // Week and its existing recommendation must finish before background insights start.
@@ -366,13 +381,13 @@ vm.runInContext(`(async () => {
   await tick(); assert.equal(requests.length-first,1); assert.equal(done,false);
   requests[first].resolve(week('server'));
   await tick(); assert.equal(requests.length-first,2);
-  assert.ok(requests[first+1].path.includes('/planning/suggestions'));
+  assert.ok(requests[first+1].path.includes('/planning/attention'));
   assert.equal(done,false); assert.deepEqual(planningData.activities,[{id:'server'}]);
   requests[first+1].resolve(suggestions);
   await critical;
   assert.equal(done,true); assert.equal(requests.length-first,3);
   assert.equal(requests[first+2].path,'/api/customer-insights');
-  assert.equal(planningRecommendation.id,'next');
+  assert.equal(planningAttention.total,0);
   assert.equal(listRenders,0);
   requests[first+2].resolve({version:'background'});
   await tick(); assert.equal(insights.version,'background'); assert.equal(listRenders,0);
@@ -388,7 +403,7 @@ vm.runInContext(`(async () => {
   // Recommendation-only refresh also finishes without waiting for secondary insights.
   first=begin(); done=false;
   const recommendation = refreshWorkflowViews({recommendation:true}).then(() => {done=true;});
-  assert.equal(requests.length-first,1); assert.ok(requests[first].path.includes('/planning/suggestions'));
+  assert.equal(requests.length-first,1); assert.ok(requests[first].path.includes('/planning/attention'));
   requests[first].resolve(suggestions); await recommendation;
   assert.equal(requests.length-first,2); assert.equal(requests[first+1].path,'/api/customer-insights');
   assert.equal(done,true);
@@ -418,7 +433,7 @@ vm.runInContext(`(async () => {
   requests[first].resolve(week('obsolete')); await older;
   assert.equal(requests.length-first,2); assert.deepEqual(planningData.activities,[{id:'saved'}]);
   requests[first+1].resolve(week('newer')); await tick();
-  assert.equal(requests.length-first,3); assert.ok(requests[first+2].path.includes('/planning/suggestions'));
+  assert.equal(requests.length-first,3); assert.ok(requests[first+2].path.includes('/planning/attention'));
   requests[first+2].resolve(suggestions); await newer;
   assert.equal(requests.length-first,4); assert.equal(requests[first+3].path,'/api/customer-insights');
   requests[first+3].resolve({version:'newer'}); await tick();
@@ -508,11 +523,11 @@ vm.runInContext(`(async () => {
   requests[first+1].resolve(suggestions); await currentRecommendation;
   assert.equal(requests.length-first,3);
   requests[first+2].resolve({version:'fresh-background'}); await tick();
-  const originalRecommendationLoader = loadPlanningRecommendation;
-  loadPlanningRecommendation = async () => {throw new Error('unexpected loader rejection');};
+  const originalRecommendationLoader = loadPlanningAttention;
+  loadPlanningAttention = async () => {throw new Error('unexpected loader rejection');};
   first=begin(); await refreshWorkflowViews({recommendation:true});
   assert.equal(requests.length,first);
-  loadPlanningRecommendation = originalRecommendationLoader;
+  loadPlanningAttention = originalRecommendationLoader;
 
   // A newer foreground response still wins over a background request already in progress.
   let backgroundResolve, foregroundResolve;
@@ -589,7 +604,7 @@ vm.runInContext(`(async () => {
     requests[start].resolve({activity:row}); await tick();
     assert.ok(requests[start+1].path.includes('/planning/activities?'));
     requests[start+1].resolve(week(id)); await tick();
-    assert.ok(requests[start+2].path.includes('/planning/suggestions'));
+    assert.ok(requests[start+2].path.includes('/planning/attention'));
     if (failSuggestions) requests[start+2].reject(new Error('suggestions unavailable after save'));
     else requests[start+2].resolve(suggestions);
     await save;
@@ -653,7 +668,7 @@ vm.runInContext(`(async () => {
   // A successful background refresh dirties a hidden list, then navigation renders new guidance once.
   const guidancePayload = (id, date, status, label) => ({'test store':{customer_guidance:{
     focus_key:'repeat_purchase', focus_label:'Repeat purchase', status_key:status, status_label:label,
-    action_label:label, planned_activity_id:id, next_contact_at:date, recommended_contact_type:'visit',
+    action_label:label, planned_activity_id:id, next_contact_at:date, recommended_contact_type:'visit', can_contact_now:status==='act_now',
   }}});
   showView('list');
   await loadInsights({requestPromise:Promise.resolve(guidancePayload('old-activity','2026-10-05','planned','Initial guidance'))});
@@ -715,7 +730,7 @@ vm.runInContext(`(async () => {
   const beforePartialSaveToasts = toasts.length, beforePartialSaveRenders = listRenders;
   first = await commitMutation('partial-recommendation-failure',true);
   assert.deepEqual(planningData.activities,[{id:'partial-recommendation-failure'}]);
-  assert.equal(planningRecommendation,null); assert.equal(planningRecommendationLoading,false);
+  assert.ok(planningAttention.error); assert.equal(planningAttentionLoading,false);
   assert.equal(toasts.length,beforePartialSaveToasts);
   assert.equal(requests.length-first,4); assert.equal(requests[first+3].path,'/api/customer-insights');
   requests[first+3].resolve(guidancePayload('partial-saved','2026-10-08','planned','Saved despite suggestions error'));
@@ -824,7 +839,7 @@ vm.runInContext(`(async () => {
         self.assertIn("customer.address_google", self.html)
         self.assertIn("customer.customer_number", self.html)
         self.assertIn(
-            "if (customer.customer_id) payload.customer_id = customer.customer_id",
+            "customer_id: customer.customer_id, contact_type: contactType",
             self.html,
         )
 
@@ -846,113 +861,50 @@ vm.runInContext(`(async () => {
             self.html,
         )
 
-    def test_planning_preview_uses_backend_queue_without_raw_score_backlog(self):
-        self.assertIn("Fler nästa åtgärder", self.html)
-        self.assertNotIn("Dagens fokus", self.html)
-        self.assertNotIn("Gamla uppföljningar att planera in", self.html)
-        self.assertNotIn("Kommande uppföljningar", self.html)
-        renderer = re.search(
-            r"function renderPlanningCandidates\(\) \{(.*?)\n  \}",
-            self.html,
-            flags=re.DOTALL,
-        )
+    def test_planning_attention_is_separate_from_commercial_ranking(self):
+        self.assertTrue("Att hantera" in self.html)
+        self.assertFalse('id="planning-recommendation"' in self.html)
+        self.assertFalse("Fler nästa åtgärder" in self.html)
+        self.assertFalse("/planning/suggestions" in self.html)
+        renderer = re.search(r"function renderPlanningAttention\(\) \{(.*?)\n  \}", self.html, re.DOTALL)
         self.assertIsNotNone(renderer)
         body = renderer.group(1)
-        self.assertIn("const visible = planningRecommendationPreview", body)
-        self.assertIn("planning-backlog-load-more", body)
-        self.assertIn("Ladda fler", body)
-        self.assertIn(
-            "const hasMore = visible.length < Math.max(",
-            body,
-        )
-        self.assertIn(
-            "0, planningRecommendationPendingCount - 1",
-            body,
-        )
-        self.assertIn("${hasMore ?", body)
-        self.assertNotIn("planningCandidateCustomers()", body)
+        self.assertIn("planningAttention.items", body)
+        self.assertIn("planning-attention-load-more", body)
+        self.assertIn("planningAttention.nextOffset < planningAttention.total", body)
         self.assertNotIn("priority_score", body)
         self.assertNotIn("expected_order_dfp", body)
-        self.assertNotIn("Orderpotential", body)
-        self.assertNotIn("Visa fler", body)
-        self.assertIn("planning-backlog-overdue", body)
-        self.assertIn("planning-backlog-overdue-actions", body)
-        self.assertIn("@container planning-backlog (max-width: 420px)", self.html)
+        self.assertIn('data-attention-action="log"', body)
+        self.assertIn('data-attention-action="skip"', body)
+        self.assertIn('data-attention-action="reschedule"', body)
 
-    def test_planning_preview_load_more_is_snapshot_based_and_resets_by_owner(self):
-        self.assertIn("let planningRecommendationPreviewLimit = 10", self.html)
-        self.assertIn("planningRecommendationPreviewLimit + 5", self.html)
-        self.assertIn('params.set("preview_limit", String(previewLimit))', self.html)
-        self.assertIn(
-            "planningRecommendationPreview = Array.isArray(payload.queue_preview)",
-            self.html,
-        )
-        owner_change = re.search(
-            r'planning-owner-select"\)\.addEventListener\("change".*?\n  \}\);',
-            self.html,
-            flags=re.DOTALL,
-        )
-        self.assertIsNotNone(owner_change)
-        self.assertIn("planningRecommendationPreviewLimit = 10", owner_change.group(0))
+    def test_planning_attention_pagination_and_owner_are_explicit(self):
+        for token in ['offset: String(offset), limit: "50"', "payload.offset ?? offset",
+                      "owner !== planningAttentionOwnerKey()", "planningAttentionRequestSerial += 1"]:
+            self.assertTrue(token in self.html, token)
 
-    def test_phase1_renders_one_nonblocking_recommendation_card(self):
-        self.assertIn('id="planning-recommendation"', self.html)
-        self.assertIn('<div class="planning-recommendation-heading">NÄSTA ÅTGÄRD</div>', self.html)
-        self.assertNotIn("planningRecommendationPendingCount} kvar", self.html)
-        for label in ("Ring nu", "Planera", "Snooza 7 dagar", "Dölj detta förslag"):
-            self.assertIn(f">{label}</button>", self.html)
-        render = re.search(
-            r"function renderPlanningRecommendation\(.*?\) \{(.*?)\n  \}",
-            self.html,
-            flags=re.DOTALL,
-        )
-        self.assertIsNotNone(render)
-        self.assertNotIn(".map(", render.group(1))
-        self.assertNotIn("Orderpotential", render.group(1))
-        self.assertIn("planningRecommendation.recommended_contact_type", render.group(1))
-        self.assertIn("!planningRecommendation.can_call", render.group(1))
-        button_positions = [
-            render.group(1).index(f">{label}</button>")
-            for label in ("Ring nu", "Planera", "Snooza 7 dagar", "Dölj detta förslag")
-        ]
-        self.assertEqual(button_positions, sorted(button_positions))
-        self.assertIn("Kalendern och övrig planering fungerar fortfarande", self.html)
-        self.assertIn("loadPlanningRecommendation();", self.html)
+    def test_attention_only_includes_previous_dates_and_two_obligation_types(self):
+        eligibility = re.search(r"function planningAttentionItemIsEligible\(.*?\) \{(.*?)\n  \}", self.html, re.DOTALL)
+        self.assertIsNotNone(eligibility)
+        body = eligibility.group(1)
+        for token in ["missed_calendar_activity", "overdue_explicit_follow_up", "due >= today", "obligation_id", "customer_id"]:
+            self.assertIn(token, body)
+        self.assertNotIn("planningSelectedDate", body)
+        self.assertNotIn("planningWeekStart", body)
 
-    def test_phase1_actions_wait_for_success_and_lock_suggestion_customer(self):
-        self.assertIn("Kunden är låst för den här rekommendationen", self.html)
-        self.assertIn('contact_type: suggestion.recommended_contact_type || "visit"', self.html)
-        self.assertIn("expected_suggestion_revision", self.html)
-        self.assertIn("suggestionSeed.expected_suggestion_revision ?? 0", self.html)
-        self.assertIn("source_suggestion_id", self.html)
-        self.assertIn("replaceWithNextRecommendation(payload)", self.html)
-        self.assertIn("replaceWithNextRecommendation(result)", self.html)
-        self.assertIn("if (!suggestionLocked) setupPlanningCustomerCombobox", self.html)
-        open_planner = re.search(
-            r"function openRecommendationPlanner\(.*?\) \{(.*?)\n  \}",
-            self.html,
-            flags=re.DOTALL,
-        )
-        self.assertIsNotNone(open_planner)
-        self.assertNotIn("planningFetchJson", open_planner.group(1))
-        self.assertIn("loadPlanningRecommendation().finally", self.html)
-        self.assertRegex(
-            self.html,
-            r"(?s)@media \(max-width: 620px\).*?planning-recommendation-actions.*?repeat\(2",
-        )
+    def test_obligation_actions_lock_identity_preserve_revision_and_source(self):
+        for token in ["Kunden är kopplad till detta åtagande", "obligationSeed.obligation_id",
+                      "obligationSeed.expected_revision", 'payload.action = "reschedule"',
+                      "source_contact_id = planningEditorSeed.source_contact_id",
+                      "if (!suggestionLocked) setupPlanningCustomerCombobox",
+                      '"/customer-obligations/action"']:
+            self.assertTrue(token in self.html, token)
 
-    def test_recommendation_customer_binding_never_falls_back_to_customer_row(self):
-        binding = re.search(
-            r"function planningRecommendationCustomer\(.*?\) \{(.*?)\n  \}",
-            self.html,
-            flags=re.DOTALL,
-        )
-        self.assertIsNotNone(binding)
-        body = binding.group(1)
-        self.assertIn("suggestion.customer_id", body)
-        self.assertIn("if (!customerId) return null", body)
-        self.assertNotIn("customer_row", body)
-        self.assertNotIn("customer.row", body)
+    def test_attention_customer_binding_uses_the_verified_identity_helper(self):
+        handler = re.search(r"async function handlePlanningAttentionAction\(.*?\) \{(.*?)\n  \}", self.html, re.DOTALL)
+        self.assertIsNotNone(handler)
+        self.assertIn("planningCustomerForItem(item)", handler.group(1))
+        self.assertNotIn("customers.find", handler.group(1))
 
     def test_planning_calendar_has_two_compact_time_lanes(self):
         self.assertIn("Telefon/Email", self.html)
@@ -984,7 +936,7 @@ vm.runInContext(`(async () => {
         self.assertIn("planningTruthy(source.appointment_confirmed)", normalizer.group(1))
         self.assertIn('["visit", "phone"].includes(contactType) && planningTruthy(source.appointment_confirmed)', normalizer.group(1))
         self.assertIn('id="planning-editor-appointment"', self.html)
-        self.assertIn("planningEditorActivity?.appointment_confirmed", self.html)
+        self.assertIn("activity?.appointment_confirmed ?? seed?.appointment_confirmed", self.html)
         sync = re.search(
             r"function syncPlanningEditorAppointment\(contactType\) \{(.*?)\n  \}",
             self.html,
@@ -1062,7 +1014,7 @@ vm.runInContext(`(async () => {
     def test_picking_help_controls_calendar_and_detail_contract(self):
         self.assertIn('id="planning-editor-picking-help"', self.html)
         self.assertIn('id="f-followup-picking-help"', self.html)
-        self.assertIn("planningEditorActivity?.picking_help", self.html)
+        self.assertIn("activity?.picking_help ?? seed?.picking_help", self.html)
         self.assertIn("planningTruthy(source.picking_help)", self.html)
         self.assertIn(
             'picking_help: contactType === "visit" && document.getElementById("planning-editor-picking-help").checked',

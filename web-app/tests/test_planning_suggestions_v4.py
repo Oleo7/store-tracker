@@ -149,10 +149,10 @@ class PlanningSuggestionV4IntegrationTests(PlanningApiTestCase):
         today_patch, now_patch = self.clock(date(2026, 8, 2))
         with today_patch, now_patch:
             payload = self.client.get("/planning/suggestions").get_json()
-        self.assertEqual(payload["suggestion"]["trigger_key"], "legacy_missed_followup")
+        self.assertEqual(payload["suggestion"]["trigger_key"], "overdue_explicit_follow_up")
         self.assertEqual(self.planning_rows(), [])
 
-    def test_dismissed_legacy_context_does_not_hide_later_email_business_event(self):
+    def test_dismissed_generic_context_does_not_erase_explicit_promise_after_click(self):
         self.append_legacy_followup()
         today_patch, now_patch = self.clock(date(2026, 8, 4))
         with today_patch, now_patch:
@@ -164,7 +164,7 @@ class PlanningSuggestionV4IntegrationTests(PlanningApiTestCase):
                     "expected_revision": waiting["revision"],
                 },
             )
-        self.assertEqual(waiting["trigger_key"], "legacy_missed_followup")
+        self.assertEqual(waiting["trigger_key"], "overdue_explicit_follow_up")
         self.assertEqual(response.status_code, 200, response.get_json())
         self.append_click()
 
@@ -174,8 +174,8 @@ class PlanningSuggestionV4IntegrationTests(PlanningApiTestCase):
             candidate = app_module.planning_suggestion_candidates(
                 self.spreadsheet, {"user_name": "olle", "name": "Olle"}
             )[0]
-        self.assertEqual(payload["suggestion"]["trigger_key"], "stockfiller_click_followup")
-        self.assertEqual(candidate["primary_trigger_key"], "stockfiller_click_followup")
+        self.assertEqual(payload["suggestion"]["trigger_key"], "overdue_explicit_follow_up")
+        self.assertEqual(candidate["primary_trigger_key"], "overdue_explicit_follow_up")
         self.assertEqual(
             app_module.deterministic_suggestion_id(
                 "olle", candidate["customer_id"], candidate["decision_context_hash"]
@@ -184,7 +184,7 @@ class PlanningSuggestionV4IntegrationTests(PlanningApiTestCase):
         )
         self.assertNotEqual(payload["suggestion"]["suggestion_id"], waiting["suggestion_id"])
 
-    def test_snoozed_legacy_context_does_not_hide_later_email_business_event(self):
+    def test_snoozed_generic_context_does_not_erase_explicit_promise_after_click(self):
         self.append_legacy_followup()
         today_patch, now_patch = self.clock(date(2026, 8, 4))
         with today_patch, now_patch:
@@ -205,8 +205,8 @@ class PlanningSuggestionV4IntegrationTests(PlanningApiTestCase):
             candidate = app_module.planning_suggestion_candidates(
                 self.spreadsheet, {"user_name": "olle", "name": "Olle"}
             )[0]
-        self.assertEqual(payload["suggestion"]["trigger_key"], "stockfiller_click_followup")
-        self.assertEqual(candidate["primary_trigger_key"], "stockfiller_click_followup")
+        self.assertEqual(payload["suggestion"]["trigger_key"], "overdue_explicit_follow_up")
+        self.assertEqual(candidate["primary_trigger_key"], "overdue_explicit_follow_up")
         self.assertEqual(
             app_module.deterministic_suggestion_id(
                 "olle", candidate["customer_id"], candidate["decision_context_hash"]

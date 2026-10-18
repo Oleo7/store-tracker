@@ -356,10 +356,19 @@ class PerformanceInstrumentationHardeningTests(TestCase):
 
     def test_frontend_recovers_from_materialization_conflicts(self):
         html = (WEB_APP_DIR / "index.html").read_text(encoding="utf-8")
-        self.assertIn("suggestion_plan_already_materialized", html)
-        self.assertIn("suggestion_activity_integrity_conflict", html)
-        self.assertIn("loadPlanningWeek()", html)
-        self.assertIn("loadPlanningRecommendation()", html)
+        editor = html.split("  async function savePlanningEditor(event) {", 1)[1].split(
+            "\n  function getPlanningActivity(", 1
+        )[0]
+        for expected in (
+            'if (error.status === 409)',
+            'loadPlanningWeek()',
+            'loadInsights({ render: false })',
+            'Stäng dialogen och öppna den uppdaterade planeringen',
+            'payload.expected_revision',
+            'payload.expected_updated_at',
+        ):
+            self.assertTrue(expected in editor, f"Missing conflict recovery contract: {expected}")
+        self.assertTrue('await loadPlanningAttention()' in html, 'Week reload must refresh current obligations')
 
 
 if __name__ == "__main__":

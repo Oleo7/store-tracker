@@ -82,18 +82,20 @@ const run = async code => await vm.runInContext(`(async()=>{${code}\n})()`, cont
 ENTRY_HARNESS = r'''
 vm.runInContext(`
 let planningActiveUsersCache=[{user_name:'olle',name:'Olle'},{user_name:'johan',name:'Johan'}];
-let formReturnView='', activePlannedActivityId='', contactClientRequestId='', contactRetryPayload=null;
+let formReturnView='', activePlannedActivityId='', activeContactObligation=null, contactClientRequestId='', contactRetryPayload=null;
 let weekLoads=0;
-let planningRecommendationPreviewLimit=0, planningRecommendationRequestSerial=0;
-let planningRecommendation=null, planningRecommendationPreview=[], planningRecommendationPendingCount=0;
+let planningAttentionRequestSerial=0, planningAttention=null;
+const planningAttentionOwnerKey=()=>planningSelectedUserName;
 const esc=value=>String(value), escAttr=value=>String(value);
 const planningClientRequestId=()=> 'test-request';
 const planningSelectableCustomers=()=>[currentCustomer];
 const isCancelledCustomer=()=>false, planningCustomerForItem=()=>currentCustomer;
+const getCustomerInsight=()=>({}), getCustomerListGuidance=()=>({});
+const customerHasContactBan=()=>false, customerCanExecutePlanned=()=>true;
 const setupPlanningCustomerCombobox=()=>{}, savePlanningEditor=()=>{};
 const normalizePlanningUser=value=>value;
 const loadPlanningWeek=async()=>{weekLoads++;};
-const renderPlanningRecommendation=()=>{};
+const renderPlanningAttention=()=>{};
 const openPlanningView=async()=>{throw new Error('customer owner list should already exist');};
 const getPrefilledSellerName=()=>currentUser.name;
 const syncVisitCompetitorButtons=()=>{}, setFreezerSectionInvalid=()=>{}, setContactFormRetryMode=()=>{};
@@ -115,8 +117,9 @@ const openPlanningModal=(_title,_subtitle,body)=>{
     }
   }
 };
-${['planningActivityId','planningTruthy','normalizePlanningActivity','planningSelectedOwner',
+${['planningActivityId','planningTruthy','normalizePlanningActivity','planningSelectedOwner','planningContactTypeKey','getCustomerPlanningSeed',
    'renderContactFollowupOwner','updateFollowupFields','updateFollowupAppointmentField',
+   'updateContactResultFields',
    'openContactFormForCustomer','selectPlanningOwnerForCustomer','openPlanningEditorForCustomer',
    'openPlanningEditor','syncPlanningEditorAppointment'].map(source).join('\n')}
 const chooseType=async value=>{
@@ -128,6 +131,7 @@ const installContactForm=()=>{
     'f-seller','f-contactPerson','f-channel','f-result','f-comment','f-followup-enabled','f-followup-owner',
     'f-followup-type','f-nextFollowUp','f-nextFollowUpTime','f-followup-note','f-followup-appointment',
     'f-followup-picking-help','f-followup-owner-field','f-followup-time-suggestion','followup-fields',
+    'f-permission-fields','f-permission-source','f-permission-reason','f-obligation-outcome','f-obligation-field','f-obligation-help',
     'f-followup-appointment-field','f-followup-picking-help-field','contact-save-error']) node(id);
 };
 installContactForm();

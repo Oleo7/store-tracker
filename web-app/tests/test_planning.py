@@ -947,7 +947,7 @@ class PlanningActivityApiTests(PlanningApiTestCase):
             legacy_headers,
             [
                 {
-                    "date_time": "2026-07-28 11:00",
+                    "date_time": "2026-07-27 09:00",
                     "sales_person": "Olle",
                     "customer": "Butik A",
                     "contact_channel": "Telefon",
@@ -956,7 +956,7 @@ class PlanningActivityApiTests(PlanningApiTestCase):
                     "follow_up_date": "2026-07-31",
                 },
                 {
-                    "date_time": "2026-07-28 12:00",
+                    "date_time": "2026-07-27 09:30",
                     "sales_person": "Sofia",
                     "customer": "Butik B",
                     "contact_channel": "Telefon",
@@ -987,7 +987,7 @@ class PlanningActivityApiTests(PlanningApiTestCase):
         day_summary = next(
             item
             for item in body["day_summaries"]
-            if item["date"] == "2026-07-28"
+            if item["date"] == "2026-07-27"
         )
         self.assertEqual(day_summary["unplanned_count"], 1)
         self.assertEqual(day_summary["planned_activity_count"], 0)
@@ -1587,7 +1587,7 @@ class PlanningActivityApiTests(PlanningApiTestCase):
             },
         )
 
-    def test_later_same_customer_contact_resolves_older_overdue_item(self):
+    def test_later_same_customer_contact_preserves_separate_overdue_promise(self):
         self.append_contact_row(
             contact_id="followup-overdue",
             customer_id="11111111-1111-4111-8111-111111111111",
@@ -1607,7 +1607,7 @@ class PlanningActivityApiTests(PlanningApiTestCase):
 
         self.assertEqual(response.status_code, 200, response.get_json())
         body = response.get_json()
-        self.assertNotIn(
+        self.assertIn(
             "followup-overdue",
             [
                 item["source_contact_id"]
@@ -1622,7 +1622,7 @@ class PlanningActivityApiTests(PlanningApiTestCase):
             ],
         )
 
-    def test_overdue_followup_is_hidden_after_a_later_contact(self):
+    def test_overdue_followup_remains_after_unrelated_contact(self):
         self.append_contact_row(
             contact_id="followup-resolved-by-contact",
             customer_id="11111111-1111-4111-8111-111111111111",
@@ -1641,7 +1641,7 @@ class PlanningActivityApiTests(PlanningApiTestCase):
         )
 
         self.assertEqual(response.status_code, 200, response.get_json())
-        self.assertNotIn(
+        self.assertIn(
             "followup-resolved-by-contact",
             [
                 item["source_contact_id"]
@@ -1649,7 +1649,7 @@ class PlanningActivityApiTests(PlanningApiTestCase):
             ],
         )
 
-    def test_overdue_followup_is_hidden_by_a_future_planned_activity(self):
+    def test_overdue_followup_remains_with_unrelated_future_plan(self):
         self.append_contact_row(
             contact_id="followup-resolved-by-plan",
             customer_id="11111111-1111-4111-8111-111111111111",
@@ -1670,7 +1670,7 @@ class PlanningActivityApiTests(PlanningApiTestCase):
         )
 
         self.assertEqual(response.status_code, 200, response.get_json())
-        self.assertNotIn(
+        self.assertIn(
             "followup-resolved-by-plan",
             [
                 item["source_contact_id"]
@@ -1786,43 +1786,23 @@ class PlanningContactCompletionTests(PlanningApiTestCase):
             row["planned_activity_id"]: row for row in self.planning_rows()
         }
         self.assertEqual(by_id[phone["planned_activity_id"]]["status"], "completed")
-        self.assertEqual(by_id[visit["planned_activity_id"]]["status"], "superseded")
+        self.assertEqual(by_id[visit["planned_activity_id"]]["status"], "planned")
         self.assertEqual(by_id[visit["planned_activity_id"]]["completed_contact_id"], "")
 
-    def test_later_human_contact_supersedes_past_plan_and_keeps_history(self):
-        self.append_planning_row(
-            planned_activity_id="past-plan",
-            scheduled_at="2026-07-26T09:00:00+02:00",
-        )
-        response = self.client.post(
-            "/customers/Butik%20A/contacts",
-            json=self.direct_contact_payload(date_time="2026-07-27 10:00"),
-        )
+    def test_unrelated_human_contact_preserves_past_calendar_commitment(self):
+        self.append_planning_row(planned_activity_id="past-plan", scheduled_at="2026-07-26T09:00:00+02:00")
+        response = self.client.post("/customers/Butik%20A/contacts",
+                                   json=self.direct_contact_payload(date_time="2026-07-27 10:00"))
         self.assertEqual(response.status_code, 200, response.get_json())
         row = self.planning_rows()[0]
-        self.assertEqual(row["status"], "superseded")
-        self.assertEqual(int(row["revision"]), 2)
+        self.assertEqual(row["status"], "planned")
+        self.assertEqual(int(row["revision"]), 1)
         self.assertEqual(row["completed_contact_id"], "")
-        self.assertEqual(row["planned_activity_id"], "past-plan")
-        self.assertFalse(app_module.public_planned_activity(row, now=NOW)["overdue"])
-        calendar = self.client.get(
-            "/planning/activities?start=2026-07-26&end=2026-07-26"
-        ).get_json()
-        self.assertEqual(calendar["activities"][0]["status"], "superseded")
-        self.assertEqual(calendar["days"]["2026-07-26"]["planned"], 0)
-        self.assertEqual(calendar["days"]["2026-07-26"]["activity_count"], 0)
-        mutation = self.client.patch(
-            "/planning/activities/past-plan",
-            json={
-                "client_request_id": "restore-superseded",
-                "expected_revision": int(row["revision"]),
-                "status": "planned",
-            },
-        )
-        self.assertEqual(mutation.status_code, 409, mutation.get_json())
-        self.assertEqual(
-            mutation.get_json()["error"], "superseded_activity_immutable"
-        )
+        self.assertTrue(app_module.public_planned_activity(row, now=NOW)["overdue"])
+        calendar = self.client.get("/planning/activities?start=2026-07-26&end=2026-07-26").get_json()
+        self.assertEqual(calendar["activities"][0]["status"], "planned")
+        self.assertEqual(calendar["days"]["2026-07-26"]["planned"], 1)
+        self.assertEqual(calendar["days"]["2026-07-26"]["activity_count"], 1)
 
     def test_future_plan_after_contact_stays_planned(self):
         self.append_planning_row(
@@ -1849,7 +1829,7 @@ class PlanningContactCompletionTests(PlanningApiTestCase):
         self.assertEqual(self.contact_rows()[0]["planned_activity_id"], "")
         self.assertEqual(self.planning_rows()[0]["status"], "planned")
 
-    def test_later_contact_supersedes_all_old_plans(self):
+    def test_later_contact_does_not_supersede_unrelated_old_plans(self):
         for activity_id, scheduled in (
             ("old-1", "2026-07-25T09:00:00+02:00"),
             ("old-2", "2026-07-26T09:00:00+02:00"),
@@ -1864,7 +1844,7 @@ class PlanningContactCompletionTests(PlanningApiTestCase):
         self.assertEqual(response.status_code, 200, response.get_json())
         self.assertEqual(
             {row["planned_activity_id"]: row["status"] for row in self.planning_rows()},
-            {"old-1": "superseded", "old-2": "superseded"},
+            {"old-1": "planned", "old-2": "planned"},
         )
 
     def test_later_contact_does_not_touch_other_customer(self):
@@ -1915,7 +1895,7 @@ class PlanningContactCompletionTests(PlanningApiTestCase):
         )
         self.assertEqual(self.planning_rows()[0]["status"], "planned")
 
-    def test_reconciliation_ignores_crm_email_and_is_idempotent(self):
+    def test_reconciliation_ignores_email_and_unrelated_human_contact(self):
         self.append_planning_row(
             planned_activity_id="email-only-plan",
             scheduled_at="2026-07-26T09:00:00+02:00",
@@ -1938,7 +1918,7 @@ class PlanningContactCompletionTests(PlanningApiTestCase):
         self.assertEqual(
             app_module.reconcile_superseded_planned_activities(
                 self.spreadsheet, self.contact_rows(), apply=True
-            ), ["email-only-plan"],
+            ), [],
         )
         self.assertEqual(
             app_module.reconcile_superseded_planned_activities(

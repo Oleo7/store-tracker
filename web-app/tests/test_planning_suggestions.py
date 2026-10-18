@@ -386,7 +386,7 @@ class PlanningSuggestionApiTests(PlanningApiTestCase):
             stored["resolved_by_id"], planned.get_json()["activity"]["planned_activity_id"]
         )
 
-    def test_later_contact_supersedes_linked_plan_and_resolves_suggestion(self):
+    def test_later_unlinked_contact_preserves_calendar_while_resolving_commercial_episode(self):
         suggestion = self.current()["suggestion"]
         planned = self.client.post(
             f"/planning/suggestions/{suggestion['suggestion_id']}/plan",
@@ -412,7 +412,7 @@ class PlanningSuggestionApiTests(PlanningApiTestCase):
             },
         )
         self.assertEqual(contact.status_code, 200, contact.get_json())
-        self.assertEqual(self.planning_rows()[0]["status"], "superseded")
+        self.assertEqual(self.planning_rows()[0]["status"], "planned")
         stored = next(
             row for row in self.spreadsheet.worksheet(SUGGESTIONS_SHEET).dict_rows()
             if row["suggestion_id"] == suggestion["suggestion_id"]
@@ -556,7 +556,9 @@ class PersistentAProspectSuggestionTests(PlanningApiTestCase):
         self.assertEqual(stored["status"], "resolved")
         self.assertEqual(stored["resolved_by_type"], "contact")
 
-        later = NOW + timedelta(days=3)
+        # A completed dialogue uses the new routine contact interval. The
+        # persistent opportunity must return when that interval has elapsed.
+        later = NOW + timedelta(days=21)
         owner = {"user_name": "olle", "name": "Olle"}
         with (
             patch.object(app_module, "stockholm_now", return_value=later),
@@ -806,7 +808,9 @@ class PersistentAProspectSuggestionTests(PlanningApiTestCase):
             live_candidate=live,
         )
 
-        hidden = self.current()["suggestion"]
+        payload = self.current()
+        hidden = next(item for item in [payload["suggestion"], *payload["queue_preview"]]
+                      if item["suggestion_id"] == suggestion["suggestion_id"])
         self.assertEqual(hidden["suggestion_id"], suggestion["suggestion_id"])
         self.assertEqual(hidden["status"], "dismissed")
         self.assertEqual(

@@ -19,7 +19,7 @@ class CustomerNextFollowUpTests(PlanningApiTestCase):
         self.assertEqual(response.status_code, 200, response.get_json())
         return response.get_json()
 
-    def test_legacy_candidate_comes_from_true_latest_contact_datetime(self):
+    def test_earliest_open_promise_survives_other_contact_and_future_event(self):
         self.append_contact_row(
             contact_id="same-day-earlier",
             customer_id="11111111-1111-4111-8111-111111111111",
@@ -36,13 +36,14 @@ class CustomerNextFollowUpTests(PlanningApiTestCase):
         payload = self.get_stats()
 
         self.assertEqual(payload["contacts"][0]["follow_up_date"], "2026-08-01")
-        self.assertEqual(payload["next_follow_up"], {
+        self.assertEqual({key: payload["next_follow_up"][key] for key in (
+            "source", "date", "time", "contact_type", "contact_type_label", "contact_id")}, {
             "source": "latest_contact",
-            "date": "2026-08-05",
+            "date": "2026-08-01",
             "time": "",
             "contact_type": "",
             "contact_type_label": "",
-            "contact_id": "same-day-latest",
+            "contact_id": "same-day-earlier",
         })
 
     def test_earliest_future_planned_activity_is_selected_once(self):
@@ -88,7 +89,8 @@ class CustomerNextFollowUpTests(PlanningApiTestCase):
 
         self.assertEqual(get_contacts.call_count, 1)
         self.assertEqual(get_activities.call_count, 1)
-        self.assertEqual(payload["next_follow_up"], {
+        self.assertEqual({key: payload["next_follow_up"][key] for key in (
+            "source", "date", "time", "scheduled_at", "contact_type", "contact_type_label", "planned_activity_id")}, {
             "source": "planned_activity",
             "date": "2026-07-29",
             "time": "14:00",

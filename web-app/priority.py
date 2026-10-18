@@ -2,12 +2,15 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import date, datetime, time, timedelta
+from zoneinfo import ZoneInfo
 import re
 import os
 from commercial_orders import order_volume, commercial_order
 from contact_channel import recommend_contact_channel
+from customer_obligations import stable_contact_source_id
 from statistics import median
 from value_prioritization import (VERSION as VALUE_MODEL_VERSION, POLICY as VALUE_POLICY,
+    POLICY_VERSION as VALUE_POLICY_VERSION,
     REACHED_RESULTS, DO_NOT_CONTACT_RESULTS, complete_deliveries,
     segment_prior, business_opportunity, contact_opportunity,
     business_days_elapsed, store_contact_guidance,
@@ -28,6 +31,105 @@ if SCORE_VERSION not in SCORING_POLICIES:
     raise ValueError("PRIORITY_SCORING_POLICY must be v2.1 or v2.2")
 
 GUIDANCE_VERSION = "1.1"
+STOCKHOLM = ZoneInfo("Europe/Stockholm")
+
+
+class FeatureSnapshot(dict):
+    """In-process provenance for replay; attributes never enter API JSON."""
+    def __init__(self, values, *, source_rows, as_of, canonical):
+        super().__init__(values)
+        self.source_rows = source_rows
+        self.as_of = as_of
+        self.canonical = canonical
+
+
+def _local_datetime(value) -> datetime | None:
+    """Stockholm wall time for legacy comparisons, preserving UTC ordering.
+
+    Public snapshots carry an aware as_of. Historical row timestamps without
+    an offset are Stockholm local time; an offset must never be truncated.
+    """
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        try:
+            parsed = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            parsed = parse_datetime(value)
+    if parsed and parsed.tzinfo:
+        parsed = parsed.astimezone(STOCKHOLM).replace(tzinfo=None)
+    return parsed
+
+
+def _snapshot_time(as_of=None, *, today=None) -> datetime:
+    if as_of is None:
+        return (datetime.combine(today, time.max, STOCKHOLM) if today
+                else datetime.now(STOCKHOLM))
+    parsed = _local_datetime(as_of)
+    if parsed is None:
+        raise ValueError("Invalid as_of timestamp")
+    return parsed.replace(tzinfo=STOCKHOLM)
+
+
+def _event_timestamp(value):
+    local = _local_datetime(value)
+    return local.replace(tzinfo=STOCKHOLM).timestamp() if local else None
+
+
+def _known_at(row: dict, as_of: datetime) -> bool:
+    recorded = _event_timestamp(row.get("recorded_at") or row.get("created_at"))
+    return recorded is None or recorded <= as_of.timestamp()
+
+
+def _canonicalize_rows(rows, customers, *, name_field, number_field):
+    """Resolve identity BEFORE aggregation, using exact unique identities only.
+
+    A conflicting strong identity is quarantined, never rescued by its name.
+    This also keeps old name-only opt-outs/orders when newer rows carry IDs.
+    """
+    rows = list(rows or ())
+    if customers is None:
+        by_number, by_name = _inferred_ids(rows, name_field=name_field, number_field=number_field)
+        result = []
+        for original in rows:
+            row = dict(original)
+            cid, number, name = _identity_parts(row, name_field=name_field, number_field=number_field)
+            inferred = by_number.get(number) if number else by_name.get(name)
+            if not cid and inferred:
+                row["customer_id"] = inferred
+            result.append(row)
+        return result
+    indices = {key: defaultdict(list) for key in ("id", "number", "name")}
+    for master in customers:
+        for key, value in zip(("id", "number", "name"), _identity_parts(
+                master, name_field="customer", number_field="customer_number")):
+            if value:
+                indices[key][value].append(master)
+    result = []
+    for original in rows:
+        row = dict(original)
+        cid, number, name = _identity_parts(row, name_field=name_field, number_field=number_field)
+        matches = indices["id"].get(cid, []) if cid else indices["number"].get(number, []) if number else indices["name"].get(name, [])
+        if len(matches) != 1:
+            # Keep unknown identities isolated; the master lookup cannot use
+            # a name fallback after a conflicting strong key.
+            if cid or number or len(matches) > 1:
+                row["_identity_unresolved"] = True
+            result.append(row)
+            continue
+        master = matches[0]
+        mid, mnumber, _ = _identity_parts(master, name_field="customer", number_field="customer_number")
+        if (cid and mid != cid) or (number and mnumber and number != mnumber):
+            row["_identity_unresolved"] = True
+            result.append(row)
+            continue
+        row["customer_id"] = str(master.get("customer_id") or "").strip()
+        row[number_field] = str(master.get("customer_number") or number).strip()
+        row[name_field] = str(master.get("customer") or row.get(name_field) or "").strip()
+        result.append(row)
+    return result
 
 
 def normalize_customer_key(value: str) -> str:
@@ -226,12 +328,21 @@ def normalize_contact_result(result: str) -> str:
     return mapping.get(value, value)
 
 
-def build_order_features(order_rows: list[dict]) -> dict:
+def build_order_features(order_rows: list[dict], *, customers=None, as_of=None) -> dict:
+    snapshot = _snapshot_time(as_of)
+    source_rows = list(order_rows)
+    # Preserve the commercial-source exclusion before identity resolution can
+    # replace an internal order's raw customer label with the master name.
+    order_rows = [row for row in source_rows
+                  if "polarbär" not in str(row.get("Customer") or "").casefold()]
+    order_rows = _canonicalize_rows(order_rows, customers, name_field="Customer", number_field="Customer number")
     orders = {}
     inferred_by_number, _inferred_by_name = _inferred_ids(
         order_rows, name_field="Customer", number_field="Customer number"
     )
     for idx, row in enumerate(order_rows):
+        if row.get("_identity_unresolved") or not _known_at(row, snapshot):
+            continue
         customer = str(row.get("Customer") or "").strip()
         if not customer or "polarbär" in customer.casefold():
             continue
@@ -239,6 +350,8 @@ def build_order_features(order_rows: list[dict]) -> dict:
         dfp = _order_dfp(row)
         reference = str(row.get("Reference") or "").strip() or str(row.get("Order date") or row.get("Delivery date") or f"row-{idx}")
         order_date = parse_date(row.get("Order date"))
+        if as_of is not None and order_date and _event_timestamp(row.get("Order date")) > snapshot.timestamp():
+            continue
         confirmed_delivery_date = parse_date(row.get("Delivery date"))
         delivery_date = confirmed_delivery_date or order_date
         total = _parse_number(row.get("Total"))
@@ -270,6 +383,7 @@ def build_order_features(order_rows: list[dict]) -> dict:
                 "delivery_volume_complete": True,
                 "confirmed_delivery": bool(confirmed_delivery_date),
                 "skus": set(),
+                "skus_complete": True,
             },
         )
         if dfp is None or delivery_date != order["delivery_date"]:
@@ -284,6 +398,8 @@ def build_order_features(order_rows: list[dict]) -> dict:
         order["sales"] += total
         if sku:
             order["skus"].add(normalize_customer_key(sku))
+        else:
+            order["skus_complete"] = False
         if order_date and (not order["order_date"] or order_date > order["order_date"]):
             order["order_date"] = order_date
         if delivery_date and (not order["delivery_date"] or delivery_date > order["delivery_date"]):
@@ -327,15 +443,23 @@ def build_order_features(order_rows: list[dict]) -> dict:
             )
             for day, rows in delivery_orders.items()
         }
-        confirmed_delivery_dfp_by_date = {
-            day.isoformat(): delivery_dfp_by_date.get(day.isoformat())
+        # A Delivery date is a dated commercial delivery record, not proof
+        # of physical receipt. An undated order whose fallback happens to
+        # share this date must not erase the independently dated records.
+        dated_delivery_orders = {
+            day: [item for item in rows if item["confirmed_delivery"]]
             for day, rows in delivery_orders.items()
-            if all(o["confirmed_delivery"] for o in rows)
         }
-        confirmed_delivery_dates = sorted(
-            day for day, rows in delivery_orders.items()
-            if all(o["confirmed_delivery"] for o in rows)
-        )
+        dated_delivery_orders = {day: rows for day, rows in dated_delivery_orders.items() if rows}
+        confirmed_delivery_dfp_by_date = {
+            day.isoformat(): (_clean_number(sum(o["dfp"] for o in rows))
+                if all(o["dfp"] is not None and o["delivery_volume_complete"] for o in rows) else None)
+            for day, rows in dated_delivery_orders.items()
+        }
+        confirmed_delivery_dates = sorted(dated_delivery_orders)
+        first_dated_rows = dated_delivery_orders.get(confirmed_delivery_dates[0], []) if confirmed_delivery_dates else []
+        first_dated_skus_known = bool(first_dated_rows) and all(o["skus_complete"] for o in first_dated_rows)
+        first_dated_skus = {sku for o in first_dated_rows for sku in o["skus"]}
         known_volumes = [o["dfp"] for o in customer_orders if o["dfp"] is not None]
         total_dfp = sum(known_volumes) if known_volumes else None
         total_sales = sum(o["sales"] for o in customer_orders)
@@ -415,6 +539,10 @@ def build_order_features(order_rows: list[dict]) -> dict:
             "delivery_dfp_by_date": delivery_dfp_by_date,
             "confirmed_delivery_dfp_by_date": confirmed_delivery_dfp_by_date,
             "confirmed_delivery_dates": confirmed_delivery_dates,
+            "confirmed_delivery_evidence": "dated_commercial_record",
+            "first_verified_delivery_date": confirmed_delivery_dates[0] if confirmed_delivery_dates else None,
+            "first_verified_order_sku_count": len(first_dated_skus) if first_dated_skus_known else None,
+            "first_verified_order_sku_known": first_dated_skus_known,
             "delivery_gaps": gaps,
             "latest_order_dfp": _clean_number(latest_dfp),
             "latest_order_value": _clean_number(latest_sales),
@@ -441,10 +569,10 @@ def build_order_features(order_rows: list[dict]) -> dict:
     name_counts = defaultdict(int)
     for feature in features.values():
         name_counts[feature["customer_key"]] += 1
-    return {
+    return FeatureSnapshot({
         (feature["customer_key"] if name_counts[feature["customer_key"]] == 1 else key): feature
         for key, feature in features.items()
-    }
+    }, source_rows=source_rows, as_of=snapshot.isoformat(), canonical=customers is not None)
 
 
 def is_human_contact(row: dict) -> bool:
@@ -455,17 +583,21 @@ def is_human_contact(row: dict) -> bool:
     )
 
 
-def build_contact_features(sales_activities: list[dict], order_features: dict) -> dict:
+def build_contact_features(sales_activities: list[dict], order_features: dict, *, customers=None, as_of=None) -> dict:
     activities_by_customer = defaultdict(list)
     contact_count_30d = defaultdict(int)
-    today = date.today()
+    snapshot = _snapshot_time(as_of)
+    source_rows = list(sales_activities)
+    today = snapshot.date()
+    sales_activities = _canonicalize_rows(sales_activities, customers, name_field="customer", number_field="customer_number")
     inferred_by_number, _inferred_by_name = _inferred_ids(
         sales_activities, name_field="customer", number_field="customer_number"
     )
 
     for idx, row in enumerate(sales_activities):
-        contact_dt = parse_datetime(row.get("date_time"))
-        if not contact_dt:
+        contact_dt = _local_datetime(row.get("date_time"))
+        if (not contact_dt or _event_timestamp(row.get("date_time")) > snapshot.timestamp()
+                or not _known_at(row, snapshot) or row.get("_identity_unresolved")):
             continue
 
         customer_id, customer_number, customer_key = _identity_parts(
@@ -477,12 +609,12 @@ def build_contact_features(sales_activities: list[dict], order_features: dict) -
 
         identity_key = _identity_group_key(customer_id, customer_number, customer_key)
 
-        if (today - contact_dt.date()).days <= 30:
+        if 0 <= (today - contact_dt.date()).days <= 30:
             contact_count_30d[identity_key] += 1
 
         activities_by_customer[identity_key].append(
             {
-                "sort_key": (contact_dt, idx),
+                "sort_key": (_event_timestamp(row.get("date_time")), idx),
                 "datetime": contact_dt,
                 "row": row,
                 "is_email": not is_human_contact(row),
@@ -498,7 +630,8 @@ def build_contact_features(sales_activities: list[dict], order_features: dict) -
     for identity_key, activities in activities_by_customer.items():
         activities.sort(key=lambda activity: activity["sort_key"])
         latest_activity = activities[-1]
-        human_activities = [activity for activity in activities if not activity["is_email"]]
+        human_activities = [activity for activity in activities if not activity["is_email"]
+                            and str(activity["row"].get("result") or "").strip().casefold() != "kontakt tillåten"]
         latest_human = human_activities[-1] if human_activities else None
         reached = [a for a in human_activities if normalize_contact_result(a["row"].get("result")) in REACHED_RESULTS]
         last_reached = reached[-1] if reached else None
@@ -507,6 +640,23 @@ def build_contact_features(sales_activities: list[dict], order_features: dict) -
             a for a in human_activities
             if str(a["row"].get("result") or "").strip().casefold() in DO_NOT_CONTACT_RESULTS
         ]
+        permission_rows = [a for a in activities if not a["is_email"] and (
+            str(a["row"].get("result") or "").strip().casefold() in DO_NOT_CONTACT_RESULTS
+            or str(a["row"].get("result") or "").strip().casefold() == "kontakt tillåten")]
+        latest_permission = permission_rows[-1] if permission_rows else None
+        permission_denied = bool(latest_permission and str(latest_permission["row"].get("result") or "").strip().casefold() in DO_NOT_CONTACT_RESULTS)
+        reported_orders = [a for a in human_activities if normalize_contact_result(a["row"].get("result")) == "Order lagd"]
+        reached_by_purpose = {}
+        completed_by_purpose = {}
+        for activity in reached:
+            purpose = str(activity["row"].get("purpose") or activity["row"].get("action_type") or activity["row"].get("completed_action_type") or "").strip()
+            if purpose:
+                reached_by_purpose[purpose] = activity["datetime"]
+                if (str(activity["row"].get("obligation_outcome") or "").casefold() == "resolved"
+                        or _is_truthy(activity["row"].get("onboarding_completed"))
+                        or activity["row"].get("completed_action_type")
+                        and str(activity["row"].get("obligation_outcome") or "").casefold() not in {"open", "needs_review", "cancelled"}):
+                    completed_by_purpose[purpose] = activity["datetime"]
         # Additional v3.1 read fields; the existing planning-resolution field
         # is deliberately unchanged until the planned phase-2 migration.
         last_reached_sort_key = last_reached["sort_key"] if last_reached else None
@@ -531,13 +681,19 @@ def build_contact_features(sales_activities: list[dict], order_features: dict) -
                 for activity in activities
             )
         )
+        source_plan_id = (str(latest_plan["row"].get("contact_id") or "").strip()
+            or _stable_legacy_contact_id(latest_plan["sort_key"][1] + 2,
+                latest_plan.get("customer_key"), latest_plan["row"].get("date_time"))) if latest_plan else ""
         reached_resolved_followup = bool(
-            latest_plan and any(
+            latest_plan and (str(latest_plan["row"].get("follow_up_status") or "").casefold() in {"resolved", "cancelled"} or any(
                 a["sort_key"] > latest_plan["sort_key"]
                 and a["datetime"].date() >= follow_up_date
                 and normalize_contact_result(a["row"].get("result")) in REACHED_RESULTS
+                and source_plan_id
+                and str(a["row"].get("source_contact_id") or "") == source_plan_id
+                and bool(a["row"].get("resolves_obligation") or a["row"].get("follow_up_resolved"))
                 for a in human_activities
-            )
+            ))
         )
         latest_identity = latest_activity
         latest_order_date = _identity_feature(
@@ -574,9 +730,28 @@ def build_contact_features(sales_activities: list[dict], order_features: dict) -
                 latest_human["datetime"].date() if latest_human else None
             ),
             "latest_reached_date": last_reached["datetime"].date() if last_reached else None,
+            "latest_reached_datetime": last_reached["datetime"] if last_reached else None,
+            "latest_reached_event_order": last_reached["sort_key"][1] if last_reached else None,
+            "latest_reached_by_purpose": reached_by_purpose,
+            "completed_by_purpose": completed_by_purpose,
+            "contact_event_facts": {
+                event_id: {
+                        "occurred_at": a["datetime"], "event_order": a["sort_key"][1],
+                        "purpose": a["row"].get("purpose") or a["row"].get("action_type") or "",
+                } for a in human_activities for event_id in {
+                    str(a["row"].get("contact_id") or _stable_legacy_contact_id(
+                        a["sort_key"][1] + 2, a.get("customer_key"), a["row"].get("date_time"))),
+                    stable_contact_source_id(a["row"])}
+            },
+            "dialogue_purpose_unknown": any(not (a["row"].get("purpose") or a["row"].get("action_type") or a["row"].get("completed_action_type")) for a in reached),
+            "latest_reported_order_date": reported_orders[-1]["datetime"].date() if reported_orders else None,
             "unanswered_attempt_dates": unanswered_dates,
             "unanswered_sequence_dates": unanswered_sequence_dates,
-            "last_opt_out_date": opt_out_rows[-1]["datetime"].date() if opt_out_rows else None,
+            "last_opt_out_date": opt_out_rows[-1]["datetime"].date() if permission_denied else None,
+            "last_opt_out_datetime": opt_out_rows[-1]["datetime"] if opt_out_rows else None,
+            "contact_permission_status": "do_not_contact" if permission_denied else "allowed" if latest_permission else "",
+            "contact_permission_datetime": latest_permission["datetime"] if latest_permission else None,
+            "contact_permission_event_id": str(latest_permission["row"].get("contact_id") or "") if latest_permission else "",
             "latest_reached_result": (
                 normalize_contact_result(last_reached["row"].get("result"))
                 if last_reached else ""
@@ -585,6 +760,9 @@ def build_contact_features(sales_activities: list[dict], order_features: dict) -
             "latest_follow_up_created_date": (
                 latest_plan["datetime"].date() if latest_plan else None
             ),
+            "latest_follow_up_created_datetime": latest_plan["datetime"] if latest_plan else None,
+            "latest_follow_up_event_order": latest_plan["sort_key"][1] if latest_plan else None,
+            "latest_follow_up_source_contact_id": source_plan_id,
             "latest_human_contact_id": str(
                 latest_human_row.get("contact_id") or ""
             ).strip() or (
@@ -620,10 +798,10 @@ def build_contact_features(sales_activities: list[dict], order_features: dict) -
     name_counts = defaultdict(int)
     for feature in features.values():
         name_counts[feature["customer_key"]] += 1
-    return {
+    return FeatureSnapshot({
         (feature["customer_key"] if name_counts[feature["customer_key"]] == 1 else key): feature
         for key, feature in features.items()
-    }
+    }, source_rows=source_rows, as_of=snapshot.isoformat(), canonical=customers is not None)
 
 
 def _build_priority_customers_legacy(
@@ -949,7 +1127,7 @@ def _planned_activity_index(planned_activities):
     for row in planned_activities or ():
         if str(row.get("status") or "planned").strip().casefold() != "planned":
             continue
-        scheduled_at = parse_datetime(row.get("scheduled_at"))
+        scheduled_at = _local_datetime(row.get("scheduled_at"))
         if not scheduled_at:
             continue
         customer_id = str(row.get("customer_id") or "").strip()
@@ -1002,13 +1180,17 @@ def _planned_activity_state(
             if row_owner and owner_key and row_owner != owner_key:
                 continue
         scheduled = item["scheduled_at"].replace(tzinfo=None)
-        if scheduled >= current:
+        if scheduled.date() >= current.date():
             future.append(item)
-        elif not latest_human or latest_human <= scheduled:
+        else:
+            # Completion belongs to the persisted activity/obligation, never
+            # inferred from an unrelated later (possibly unanswered) contact.
             overdue.append(item)
     return {
         "future": future[0] if future else None,
-        "overdue": overdue[0] if overdue and not future else None,
+        "overdue": overdue[0] if overdue else None,
+        "future_all": future,
+        "overdue_all": overdue,
     }
 
 
@@ -1059,14 +1241,16 @@ def _stable_legacy_contact_id(row_index, customer_key, date_time_value):
 
 
 def _active_email_intent(
-    email_feature, latest_human_contact, last_order_date, *, blocked=False, today=None
+    email_feature, latest_human_contact, last_order_date, *, blocked=False, today=None, as_of=None
 ):
     status = str(email_feature.get("email_followup_status") or "").strip()
     intent = EMAIL_INTENT_STATUS.get(status)
     if not intent:
         return {}
-    first_event = parse_datetime(email_feature.get(intent["event_field"]))
+    first_event = _local_datetime(email_feature.get(intent["event_field"]))
     if not first_event:
+        return {}
+    if as_of is not None and _event_timestamp(first_event) > _snapshot_time(as_of).timestamp():
         return {}
     age = ((today or date.today()) - first_event.date()).days
     if age < 0:
@@ -1571,8 +1755,25 @@ def build_priority_customers(
     scoring_version: str = SCORE_VERSION,
     now: datetime | None = None,
     planning_owner_user_names: dict[str, str] | None = None,
+    obligation_states: dict | None = None,
+    contact_permissions: dict | None = None,
+    as_of: datetime | None = None,
 ) -> list[dict]:
     """Build the authoritative current score for every active, in-scope customer."""
+    snapshot = _snapshot_time(as_of or now, today=today)
+    today = snapshot.date()
+    # Replay the actual feature pipeline when a caller supplied features made
+    # without the master or at another time. This prevents split name-only
+    # history and future facts even for backwards-compatible entry points.
+    if isinstance(order_features, FeatureSnapshot) and (
+            not order_features.canonical or order_features.as_of != snapshot.isoformat()):
+        order_features = build_order_features(order_features.source_rows, customers=customers, as_of=snapshot)
+    if isinstance(contact_features, FeatureSnapshot) and (
+            not contact_features.canonical or contact_features.as_of != snapshot.isoformat()):
+        contact_features = build_contact_features(contact_features.source_rows, order_features, customers=customers, as_of=snapshot)
+    planned_activities = [row for row in _canonicalize_rows(
+        planned_activities, customers, name_field="customer", number_field="customer_number")
+        if _known_at(row, snapshot) and not row.get("_identity_unresolved")]
     if str(scoring_version or "").strip().casefold() == "legacy":
         return _build_priority_customers_legacy(
             customers,
@@ -1594,10 +1795,14 @@ def build_priority_customers(
     contact_indices = _feature_identity_indices(contact_features)
     email_indices = _feature_identity_indices(email_features)
     master_name_counts = defaultdict(int)
+    master_id_counts = defaultdict(int)
     for master_customer in customers:
         master_name = normalize_customer_key(master_customer.get("customer"))
         if master_name:
             master_name_counts[master_name] += 1
+        master_id = normalize_customer_key(master_customer.get("customer_id"))
+        if master_id:
+            master_id_counts[master_id] += 1
     ambiguous_master_names = {
         name for name, count in master_name_counts.items() if count > 1
     }
@@ -1610,7 +1815,7 @@ def build_priority_customers(
     )
     activity_index = _planned_activity_index(planned_activities)
     value_priors = _value_v31_priors(customers, order_indices, ambiguous_master_names, today)
-    guidance_now = now or datetime.combine(today, time.min)
+    guidance_now = snapshot
     represented_source_contact_ids = {
         str(row.get("source_contact_id") or "").strip()
         for row in planned_activities or ()
@@ -1738,6 +1943,7 @@ def build_priority_customers(
             last_order,
             blocked=bool(activity or has_current_explicit_follow_up),
             today=today,
+            as_of=snapshot,
         )
         business_email_intent = _active_email_intent(
             email_feature,
@@ -1745,6 +1951,7 @@ def build_priority_customers(
             last_order,
             blocked=False,
             today=today,
+            as_of=snapshot,
         )
         lifecycle = _v2_lifecycle(delivery_count, days_since_delivery, overdue_days)
         context_lifecycle = decision_context_lifecycle(delivery_count)
@@ -1836,7 +2043,7 @@ def build_priority_customers(
         if pending_unconfirmed_order_date and (
             pending_unconfirmed_order_date > today
             or (business_last_delivery
-                and pending_unconfirmed_order_date <= business_last_delivery)
+                and pending_unconfirmed_order_date < business_last_delivery)
         ):
             pending_unconfirmed_order_date = None
         store_fmt = store_format(name)
@@ -2048,88 +2255,156 @@ def build_priority_customers(
             status_text=status_text,
             now=guidance_now,
         )
-        # Do not change the legacy guidance/trigger consumed by Planering.
-        # Stage 1 has its own canonical store-list action paired with its score.
+        legacy_customer_guidance = customer_guidance
         latest_reached_result = contact.get("latest_reached_result") or ""
         positive_dialogue_without_order = bool(
-            latest_reached_result == "Positiv"
-            and latest_reached_date is not None
-            and (not last_order or last_order < latest_reached_date)
-        )
-        positive_prospect_signal = bool(
-            business_delivery_count == 0
-            and order_count == 0
-            and positive_dialogue_without_order
-        )
-        positive_buyer_signal = bool(
-            business_delivery_count >= 1 and positive_dialogue_without_order
-        )
-        # A later missed call is not a fresh neutral reply. A later order
-        # or genuine reached reply supersedes the negative dialogue.
-        negative_dialogue_signal = bool(
-            latest_reached_result == "Negativ"
-            and latest_reached_date is not None
-            and (not last_order or last_order <= latest_reached_date)
-        )
-        materially_overdue = bool(
-            business_delivery_count >= 2
-            and business_overdue_days is not None
-            and business_overdue_days >= int(VALUE_POLICY["material_reorder_overdue_days"])
-            and (days_since_reached is None
-                 or days_since_reached >= int(VALUE_POLICY["material_reorder_min_dialogue_days"]))
-        )
-        list_guidance = store_contact_guidance(
-            legacy=customer_guidance,
-            today=today,
-            business_value_raw=business_result["business_value_raw"],
-            latest_attempt_date=latest_human_date,
-            latest_attempt_result=latest_contact_class,
-            latest_reached_date=latest_reached_date,
-            latest_reached_result=contact.get("latest_reached_result") or "",
-            last_opt_out_date=contact.get("last_opt_out_date"),
-            latest_follow_up_date=latest_follow_up_date,
+            latest_reached_result == "Positiv" and latest_reached_date is not None
+            and (not last_order or last_order < latest_reached_date))
+        positive_prospect_signal = bool(business_delivery_count == 0 and order_count == 0 and positive_dialogue_without_order)
+        positive_buyer_signal = bool(business_delivery_count >= 1 and positive_dialogue_without_order)
+        negative_dialogue_signal = bool(latest_reached_result == "Negativ" and latest_reached_date is not None
+            and (not last_order or last_order <= latest_reached_date))
+        business_lifecycle = _v2_lifecycle(business_delivery_count, business_days_since_delivery, business_overdue_days)
+        materially_overdue = bool(business_delivery_count >= 2 and business_lifecycle != "reactivation"
+            and business_overdue_days is not None and business_overdue_days >= int(VALUE_POLICY["material_reorder_overdue_days"])
+            and (days_since_reached is None or days_since_reached >= int(VALUE_POLICY["material_reorder_min_dialogue_days"])))
+        permission_status = contact.get("contact_permission_status") or ("do_not_contact" if contact.get("last_opt_out_date") else "")
+        permission_event = contact.get("contact_permission_event_id") or ""
+        permission_at = contact.get("contact_permission_datetime")
+        permission = (contact_permissions or {}).get(customer_id) or {}
+        explicit_permission_at = _local_datetime(permission.get("occurred_at"))
+        if permission and explicit_permission_at and _event_timestamp(explicit_permission_at) <= snapshot.timestamp() and (
+                permission_at is None or _event_timestamp(explicit_permission_at) > _event_timestamp(permission_at)
+                or _event_timestamp(explicit_permission_at) == _event_timestamp(permission_at) and permission_status != "do_not_contact"):
+            permission_status = str(permission.get("status") or permission_status)
+            permission_at = explicit_permission_at
+            permission_event = str(permission.get("event_id") or "")
+        last_opt_out_date = ((permission_at or contact.get("last_opt_out_datetime") or snapshot).date()
+                            if permission_status == "do_not_contact" else None)
+        obligations = None if obligation_states is None else []
+        for obligation in ((obligation_states or {}).get(customer_id) or []):
+            if not _known_at(obligation, snapshot):
+                continue
+            item = dict(obligation)
+            source = (contact.get("contact_event_facts") or {}).get(str(item.get("source_contact_id") or "")) or {}
+            if not source:
+                agreed = _local_datetime(item.get("agreed_at") or item.get("source_created_at") or item.get("created_at"))
+                matched = {fact["event_order"]: fact for fact in (contact.get("contact_event_facts") or {}).values()
+                           if agreed is not None and fact.get("occurred_at") == agreed}
+                if len(matched) == 1:
+                    source = next(iter(matched.values()))
+            if source:
+                item.setdefault("created_at", source.get("occurred_at"))
+                item.setdefault("event_order", source.get("event_order"))
+            obligations.append(item)
+        first_verified_sku_count = order.get("first_verified_order_sku_count") if "first_verified_order_sku_count" in order else first_order_sku_count or None
+        final_plan = activity_state.get("future") or activity_state.get("overdue")
+        decision_arguments = dict(
+            legacy=legacy_customer_guidance, today=today, business_value_raw=business_result["business_value_raw"],
+            latest_attempt_date=latest_human_date, latest_attempt_result=latest_contact_class,
+            latest_attempt_at=contact.get("latest_human_contact_datetime"),
+            latest_reached_date=latest_reached_date, latest_reached_result=latest_reached_result,
+            latest_reached_at=contact.get("latest_reached_datetime"),
+            latest_reached_event_order=contact.get("latest_reached_event_order"),
+            last_opt_out_date=last_opt_out_date, latest_follow_up_date=latest_follow_up_date,
             follow_up_reached_resolved=bool(contact.get("follow_up_reached_resolved")),
-            unanswered_sequence_count=sum(
-                1 for attempt_date in contact.get("unanswered_sequence_dates", ())
-                if 0 <= (today - attempt_date).days <= 30
-            ),
-            last_order_date=last_order,
-            delivery_count=business_delivery_count,
-            days_since_delivery=business_days_since_delivery,
-            overdue_days=business_overdue_days,
+            unanswered_sequence_count=sum(1 for attempt_date in contact.get("unanswered_sequence_dates", ()) if 0 <= (today - attempt_date).days <= 30),
+            last_order_date=last_order, delivery_count=business_delivery_count,
+            days_since_delivery=business_days_since_delivery, overdue_days=business_overdue_days,
             expected_cycle_days=business_expected_cycle,
-            follow_up_has_later_order=bool(
-                latest_follow_up_date and last_order
-                and last_order >= latest_follow_up_date
-            ),
+            follow_up_has_later_order=bool(latest_follow_up_date and last_order and last_order >= latest_follow_up_date),
             follow_up_created_date=contact.get("latest_follow_up_created_date"),
-            unverified_order_without_delivery=bool(
-                order_count > 0 and business_delivery_count == 0
-            ),
-            positive_prospect_signal=positive_prospect_signal,
-            positive_buyer_signal=positive_buyer_signal,
+            follow_up_created_at=contact.get("latest_follow_up_created_datetime"),
+            follow_up_event_order=contact.get("latest_follow_up_event_order"),
+            source_contact_id=contact.get("latest_follow_up_source_contact_id") or "",
+            unverified_order_without_delivery=bool(order_count > 0 and business_delivery_count == 0),
+            positive_prospect_signal=positive_prospect_signal, positive_buyer_signal=positive_buyer_signal,
             pending_unconfirmed_order_date=pending_unconfirmed_order_date,
+            reported_order_date=contact.get("latest_reported_order_date"),
             future_delivery=future_delivery,
-            qualified_email_trigger=active_email_intent.get("trigger", "")
-                if active_email_intent.get("ready") else "",
+            qualified_email_trigger=business_email_intent.get("trigger", "") if business_email_intent.get("ready") else "",
+            qualified_email_reason=business_email_intent.get("reason", ""),
+            first_order_sku_count=first_verified_sku_count, legacy_value_index=value_index, segment=segment,
+            first_delivery_date=order.get("first_verified_delivery_date"),
+            reached_by_purpose=contact.get("latest_reached_by_purpose"),
+            completed_by_purpose=contact.get("completed_by_purpose"),
+            obligations=obligations, planned_activity=final_plan, workflow_suppression=workflow_reason,
+            planned_activity_options=activity_state.get("future_all", []) + activity_state.get("overdue_all", []),
+            invalid_identity=not customer_id or not sales_person or (
+                planning_owner_user_names is not None and not planning_owner_user_names.get(customer_id))
+                or master_id_counts[normalize_customer_key(customer_id)] != 1,
         )
-        contact_result = contact_opportunity(
-            business_value_raw=business_result["business_value_raw"],
-            days_since_reached=days_since_reached,
-            latest_attempt_date=latest_human_date,
-            today=today, latest_result=latest_contact_class,
-            status=list_guidance["status_key"],
-            trigger=list_guidance.get("reason_code", ""),
-            positive_prospect_signal=positive_prospect_signal,
-            positive_buyer_signal=positive_buyer_signal,
-            negative_dialogue_signal=negative_dialogue_signal,
-            materially_overdue=materially_overdue,
+        list_guidance = store_contact_guidance(**decision_arguments)
+        score_arguments = dict(
+            business_value_raw=business_result["business_value_raw"], days_since_reached=days_since_reached,
+            latest_attempt_date=latest_human_date, today=today, latest_result=latest_contact_class,
+            positive_prospect_signal=positive_prospect_signal, positive_buyer_signal=positive_buyer_signal,
+            negative_dialogue_signal=negative_dialogue_signal, materially_overdue=materially_overdue,
+            days_since_delivery=business_days_since_delivery, first_order_sku_count=first_verified_sku_count,
         )
+        contact_result = contact_opportunity(**score_arguments, decision=list_guidance,
+            status=list_guidance["status_key"], trigger=list_guidance.get("reason_code", ""))
+        work_decision = (store_contact_guidance(**decision_arguments, ignore_planning=True)
+                         if list_guidance.get("status_key") == "planned" else list_guidance)
+        work_result = contact_opportunity(**score_arguments, decision=work_decision,
+            status=work_decision["status_key"], trigger=work_decision.get("reason_code", ""))
+        contact_result.update(work_priority_raw=work_result["contact_priority_raw"],
+            work_priority_score=work_result["contact_priority_score"],
+            work_contact_factor=work_result["contact_relevance_factor"],
+            work_can_start_unscheduled_contact=bool(work_decision.get("can_start_unscheduled_contact")),
+            work_priority_reason_code=work_decision.get("reason_code", ""))
+        final_trigger = list_guidance["reason_code"]
+        channel = recommend_contact_channel(
+            lifecycle=business_lifecycle, overdue_days=business_overdue_days, trigger_key=final_trigger,
+            segment=segment, has_human_contact=bool(latest_human_date), phone=customer.get("phone"),
+            email_available=bool(customer.get("email") or customer.get("email_last_order")),
+            visible=bool(list_guidance["can_start_unscheduled_contact"] or list_guidance["status_key"] == "planned"),
+        ) or {}
+        if list_guidance["status_key"] == "planned":
+            list_guidance["recommended_contact_type"] = _activity_contact_type(final_plan["row"]) if final_plan else ""
+        else:
+            list_guidance["recommended_contact_type"] = channel.get("recommended_contact_type", "")
+        list_guidance["channel_reason_code"] = channel.get("channel_reason_code", "")
+        positive_window = positive_dialogue_without_order and days_since_reached is not None and days_since_reached <= 45
+        focus_key = _focus_key(lifecycle=business_lifecycle, segment=segment, order_count=order_count,
+            delivery_count=business_delivery_count, has_future_delivery=bool(future_delivery),
+            positive_signal=positive_window, qualified_email_signal=bool(business_email_intent.get("ready") or business_email_intent.get("waiting")))
+        focus_label = ("En leverans, 11–90 dagar sedan"
+                       if focus_key == "second_purchase" and business_delivery_count == 1
+                       and business_days_since_delivery is not None and 11 <= business_days_since_delivery <= 90
+                       else FOCUS_LABELS[focus_key])
+        list_guidance.update(focus_key=focus_key, focus_label=focus_label,
+            guidance_version="2.0", as_of=snapshot.isoformat(), model_version=VALUE_MODEL_VERSION,
+            contact_permission_status=permission_status or "not_recorded",
+            contact_permission_event_id=permission_event,
+            evidence_quality="legacy_purpose_unknown" if contact.get("dialogue_purpose_unknown") and not list_guidance.get("obligation_id") else list_guidance.get("evidence_quality"))
+        # Compatibility guidance/action/eligibility are projections of exactly
+        # the same final decision. The v2.2 numeric score remains reference-only.
+        customer_guidance = dict(list_guidance)
+        recommendation_eligible = bool(list_guidance["can_start_unscheduled_contact"])
+        suppression = "" if recommendation_eligible else final_trigger
+        status_text = list_guidance["reason_text"]
+        reason_code, reason_text = final_trigger, list_guidance["reason_text"]
+        next_action = _decision_next_action(list_guidance, segment=segment)
         result.append({
             "value_model_version": VALUE_MODEL_VERSION,
+            "policy_version": VALUE_POLICY_VERSION,
+            "as_of": snapshot.isoformat(),
             **business_result, **contact_result,
             "list_guidance": list_guidance,
+            **{field: list_guidance.get(field) for field in (
+                "action_type", "action_scope", "reason_codes", "can_contact_now",
+                "can_start_unscheduled_contact", "can_execute_planned_contact", "contact_not_before",
+                "planned_activity_id", "has_planned_contact", "obligation_ids", "obligation_id",
+                "obligation_revision", "source_contact_id", "requires_handling", "review_only", "requires_review", "review_obligation_ids",
+                "recommended_contact_type", "contact_permission_status", "contact_permission_event_id",
+                "evidence_quality")},
+            "owner_user_name": (planning_owner_user_names or {}).get(customer_id, sales_person),
             "business_verified_delivery_count": business_delivery_count,
+            "business_latest_verified_delivery_date": _iso_date(business_last_delivery),
+            "business_latest_verified_delivery_dfp": (order.get("confirmed_delivery_dfp_by_date") or {}).get(_iso_date(business_last_delivery)) if business_last_delivery else None,
+            "business_delivery_evidence": "dated_commercial_record",
+            "business_first_order_sku_count": first_verified_sku_count,
             "business_expected_cycle_days": business_expected_cycle,
             "business_cycle_prior_days": business_cycle_prior,
             "business_days_since_delivery": business_days_since_delivery,
@@ -2143,8 +2418,9 @@ def build_priority_customers(
             "customer_number": str(customer.get("customer_number") or "").strip(),
             "sales_person": sales_person,
             "segment": segment,
-            "lifecycle": lifecycle,
-            "decision_context_lifecycle": context_lifecycle,
+            "lifecycle": business_lifecycle,
+            "legacy_lifecycle": lifecycle,
+            "decision_context_lifecycle": decision_context_lifecycle(business_delivery_count),
             "score_version": scoring_version,
             "priority_score": priority_score,
             "intent_timing": intent_timing,
@@ -2157,9 +2433,10 @@ def build_priority_customers(
             "recommendation_suppression_source_id": suppression_source_id,
             "primary_reason_code": reason_code,
             "primary_reason_text": reason_text,
-            "primary_trigger_type": trigger_snapshot["primary_trigger_type"],
-            "primary_trigger_key": trigger_snapshot["primary_trigger_key"],
-            "covered_trigger_keys": trigger_snapshot["covered_trigger_keys"],
+            "primary_trigger_type": final_trigger if recommendation_eligible else "",
+            "primary_trigger_key": final_trigger if recommendation_eligible else "scoring_context",
+            "covered_trigger_keys": [final_trigger] if recommendation_eligible else [],
+            "legacy_primary_trigger_type": trigger_snapshot["primary_trigger_type"],
             "active_email_intent_event": active_email_intent.get("event_id", ""),
             "decision_context_email_event": (
                 "" if customer_guidance["focus_key"] == "a_prospect"
@@ -2169,8 +2446,8 @@ def build_priority_customers(
             "planning_status_text": status_text,
             "priority_level": _priority_level(priority_score),
             "priority_type": priority_type,
-            "recommended_action": _recommended_action(priority_type),
-            "recommended_channel": _recommended_channel(next_action.get("action_type")),
+            "recommended_action": list_guidance["action_label"],
+            "recommended_channel": _decision_channel_label(list_guidance["recommended_contact_type"]),
             "next_action": next_action,
             "customer_guidance": customer_guidance,
             "reasons": [status_text or reason_text],
@@ -2237,81 +2514,46 @@ def build_priority_customers(
 
 
 def apply_workflow_suppressions(priority_customers, suppressions):
-    """Overlay exact suggestion-state suppression without changing score/visibility."""
+    """Project a matched workflow pause through every canonical decision field.
+
+    Generic suggestion state never erases a commitment or replaces a safety
+    reason. Scoped obligation rescheduling belongs to the obligation reducer.
+    """
     result = []
     for customer in priority_customers:
         updated = dict(customer)
-        reason = str(
-            (suppressions or {}).get(str(customer.get("customer_id") or ""), "")
-            or ""
-        ).strip()
-        if reason:
-            guidance = dict(updated.get("customer_guidance") or {})
-            # Explicit operational state has precedence over workflow state.
-            # A snoozed/dismissed suggestion must never hide a real missed
-            # follow-up, and a real future booking should keep its concrete
-            # date/type instead of being replaced by generic suggestion state.
-            # Likewise, a stored suggestion marked "planned" is not enough to
-            # make the customer green if the actual planned activity is gone;
-            # planned_activities / follow_up_date remain the source of truth.
-            if (
-                reason == "suggestion_planned"
-                or guidance.get("status_key") in {
-                    "data_missing", "planned", "overdue_followup"
-                }
-            ):
-                result.append(updated)
-                continue
-            updated["recommendation_eligible"] = False
-            updated["recommendation_suppression_reason"] = reason
-            updated["contact_priority_score"] = 0
-            updated["contact_priority_raw"] = 0.0
-            updated["contact_relevance_factor"] = 0.0
-            updated["contact_priority_bucket"] = 3
-            list_guidance = dict(updated.get("list_guidance") or {})
-            if list_guidance.get("status_key") not in {"planned", "overdue_followup", "data_missing"}:
-                list_guidance.update({
-                    "status_key": "wait", "status_label": "Avvakta",
-                    "action_label": "Avvakta" if reason == "snoozed" else "Återuppta förslag",
-                    "reason_code": reason, "reason_text": "Rekommendationen är pausad eller dold",
-                    "can_contact_now": False, "recommended_contact_type": "",
-                })
-                updated["list_guidance"] = list_guidance
-            updated["planning_status_text"] = {
-                "snoozed": "Rekommendation snoozad",
-                "dismissed": "Samma beslutsunderlag markerat Ej relevant",
-                "suggestion_planned": "Rekommendationsaktivitet planerad",
-            }.get(reason, updated.get("planning_status_text") or reason)
-            if guidance:
-                if reason == "suggestion_planned":
-                    guidance.update({
-                        "status_key": "planned",
-                        "status_label": STATUS_LABELS["planned"],
-                        "action_key": "open_planning",
-                        "action_label": "Nästa kontakt",
-                        "reason_code": reason,
-                        "reason_text": "Nästa kontakt är planerad",
-                        "can_contact_now": False,
-                    })
-                else:
-                    guidance.update({
-                        "status_key": "wait",
-                        "status_label": STATUS_LABELS["wait"],
-                        "action_key": (
-                            "resume_suggestion" if reason == "dismissed" else "wait"
-                        ),
-                        "action_label": (
-                            "Återuppta förslag" if reason == "dismissed" else "Avvakta"
-                        ),
-                        "reason_code": reason,
-                        "reason_text": (
-                            "Tidigare förslag dolt"
-                            if reason == "dismissed"
-                            else updated["planning_status_text"]
-                        ),
-                        "can_contact_now": False,
-                    })
-                updated["customer_guidance"] = guidance
+        state = (suppressions or {}).get(str(customer.get("customer_id") or "")) or ""
+        reason = str(state.get("reason") or state.get("status") or "") if isinstance(state, dict) else str(state)
+        scope = str(state.get("source_scope") or state.get("action_scope") or "") if isinstance(state, dict) else ""
+        guidance = dict(updated.get("list_guidance") or updated.get("customer_guidance") or {})
+        current_scope = str(guidance.get("action_scope") or "")
+        protected = (guidance.get("reason_code") in {"do_not_contact", "negative_contact_cooldown", "invalid_customer_identity",
+            "future_delivery", "reported_order_sync_wait", "reported_order_sync_review", "recent_order_pending_confirmation",
+            "stale_unconfirmed_order_review", "order_without_verified_delivery", "unanswered_retry_wait"}
+            or guidance.get("status_key") == "data_missing" or guidance.get("review_only"))
+        commitment = current_scope.startswith(("obligation:", "planned_activity:")) or guidance.get("status_key") in {"planned", "overdue_followup"}
+        if not reason or reason == "suggestion_planned" or protected or commitment and (not scope or scope != current_scope):
+            result.append(updated)
+            continue
+        guidance.update(status_key="wait", status_label="Avvakta", action_type=reason,
+            action_key="resume_suggestion" if reason == "dismissed" else "wait",
+            action_label="Återuppta förslag" if reason == "dismissed" else "Avvakta",
+            reason_code=reason, reason_codes=[reason],
+            reason_text="Förslaget är snoozat" if reason == "snoozed" else "Tidigare förslag dolt",
+            can_contact_now=False, can_start_unscheduled_contact=False, can_execute_planned_contact=False,
+            recommended_contact_type="", channel_reason_code="")
+        updated.update(list_guidance=dict(guidance), customer_guidance=dict(guidance),
+            recommendation_eligible=False, recommendation_suppression_reason=reason,
+            contact_priority_score=0, contact_priority_raw=0.0, contact_relevance_factor=0.0, contact_factor=0.0,
+            work_priority_raw=0.0, work_priority_score=0, work_contact_factor=0.0,
+            work_can_start_unscheduled_contact=False,
+            contact_priority_bucket=3, primary_trigger_type="", primary_trigger_key="scoring_context", covered_trigger_keys=[],
+            primary_reason_code=reason, primary_reason_text=guidance["reason_text"], planning_status_text=guidance["reason_text"],
+            recommended_action=guidance["action_label"], recommended_channel="avvakta",
+            next_action=_decision_next_action(guidance, segment=updated.get("segment")))
+        for field in ("action_type", "reason_codes", "can_contact_now", "can_start_unscheduled_contact",
+                      "can_execute_planned_contact", "recommended_contact_type"):
+            updated[field] = guidance[field]
         result.append(updated)
     return result
 
@@ -2481,6 +2723,59 @@ def _recommended_channel(action_type: str | None) -> str:
     }:
         return "telefon"
     return "avvakta"
+
+
+def _decision_channel_label(contact_type: str | None) -> str:
+    """Retain the legacy display field without using it as an action type."""
+    return {"phone": "telefon", "email": "email", "visit": "besök"}.get(contact_type, "avvakta")
+
+
+def _decision_next_action(guidance: dict, *, segment="") -> dict:
+    """Project the final decision to legacy action semantics, never a new rule.
+
+    Older consumers filter by action_type and render label. Contact channel
+    stays separate, and an old consumer can still see that waiting/planned
+    actions do not authorize an extra outbound contact.
+    """
+    code = str(guidance.get("reason_code") or "")
+    status = guidance.get("status_key")
+    allowed = bool(guidance.get("can_start_unscheduled_contact"))
+    if guidance.get("review_only") or status == "data_missing":
+        action_type = "review"
+    elif code == "do_not_contact":
+        action_type = "do_not_contact"
+    elif status == "planned":
+        action_type = "scheduled_followup"
+    elif not allowed:
+        action_type = "pause" if status == "wait" else "monitor"
+    else:
+        action_type = {
+            "first_order_onboarding": "first_order_onboarding",
+            "second_purchase_due": "trial_reorder",
+            "established_reorder_due": "reorder",
+            "positive_dialogue_followup": "warm_lead",
+            "positive_buyer_followup": "warm_lead",
+            "unanswered_retry_due": "retry",
+            "unanswered_verify_contact_due": "retry",
+            "overdue_explicit_follow_up": "follow_up",
+            "overdue_planned_activity": "follow_up",
+            "follow_up_due_today": "follow_up",
+            "single_order_reactivation_due": "trial_reorder",
+            "repeat_reactivation_due": "reactivation",
+            "relationship_care_due": "route_fill",
+            "value_based_contact_due": "new_ab" if str(segment).upper() in {"A", "B"} else "route_fill",
+        }.get(code, code or "none")
+    channel = str(guidance.get("recommended_contact_type") or "")
+    label = str(guidance.get("action_label") or "")
+    return {"action_type": action_type, "action_key": guidance.get("action_key", ""),
+            "label": label, "action_label": label,
+            "reason": guidance.get("reason_text", ""), "reason_code": code,
+            "contact_type": channel, "can_contact_now": allowed,
+            "can_start_unscheduled_contact": allowed,
+            "can_execute_planned_contact": bool(guidance.get("can_execute_planned_contact")),
+            "tone": "urgent" if status == "overdue_followup" and allowed else "neutral" if allowed else "low",
+            "primary_cta": ({"phone": "Ring", "email": "Mejla", "visit": "Planera besök"}.get(channel, "Öppna")
+                            if allowed else "Öppna")}
 
 
 def _next_action(

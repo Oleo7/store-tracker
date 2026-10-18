@@ -69,7 +69,9 @@ class ValuePriorityStage1Tests(TestCase):
         self.assertGreater(rows["c"]["business_value_raw"], rows["a"]["business_value_raw"])
 
     def test_future_delivery_not_historical(self):
-        row = get([customer()], [delivery("a", "Butik", "2026-11-01", 900)])[0]
+        future = delivery("a", "Butik", "2026-11-01", 900)
+        future["Order date"] = "2026-10-01"  # Known order, future planned delivery.
+        row = get([customer()], [future])[0]
         self.assertEqual(row["delivery_count"], 0)
         self.assertEqual(row["business_deliveries_used"], 0)
         self.assertEqual(row["customer_guidance"]["status_key"], "wait")
@@ -197,7 +199,7 @@ class ValuePriorityStage1Tests(TestCase):
         self.assertIn("priority_score", row)
         self.assertIn("business_value_raw", row)
         self.assertIn("contact_priority_raw", row)
-        self.assertEqual(row["value_model_version"], "v3.2-preview")
+        self.assertEqual(row["value_model_version"], "v3.3-preview")
 
 
     def test_contact_priority_follows_real_dialogue_age_not_value_score(self):
@@ -253,8 +255,9 @@ class ValuePriorityStage1Tests(TestCase):
             customer("ICA Maxi A", "a", "A"),
             customer("ICA Nära C", "c", "C"),
         ])}
-        self.assertEqual(by_id["c"]["list_guidance"]["status_key"], "idle")
-        self.assertEqual(by_id["c"]["contact_priority_score"], 0)
+        self.assertEqual(by_id["c"]["list_guidance"]["status_key"], "act_now")
+        self.assertGreater(by_id["c"]["contact_priority_score"], 0)
+        self.assertLess(by_id["c"]["contact_priority_raw"], by_id["a"]["contact_priority_raw"])
         self.assertGreater(by_id["c"]["business_value_score"], 0)
         self.assertEqual(by_id["a"]["list_guidance"]["status_key"], "act_now")
 
@@ -361,16 +364,19 @@ class ValuePriorityStage1Tests(TestCase):
             item = get([customer()], contacts=[contact("a", "Butik", day, "Positiv")])[0]
             scores.append(item["contact_priority_score"])
             if days == 7:
-                self.assertEqual(item["list_guidance"]["status_key"], "wait")
-                self.assertEqual(item["contact_priority_score"], 0)
-        self.assertEqual(scores, sorted(scores))
+                self.assertEqual(item["list_guidance"]["status_key"], "act_now")
+                self.assertGreater(item["contact_priority_score"], 0)
+            if days > 45:
+                neutral = get([customer()], contacts=[contact("a", "Butik", day, "Neutral")])[0]
+                self.assertEqual(item["contact_priority_raw"], neutral["contact_priority_raw"])
+        self.assertEqual(scores[:4], sorted(scores[:4]))
         self.assertGreater(scores[2], scores[1])
 
     def test_positive_signal_applies_to_c_prospect_despite_low_routine_value(self):
         day = "2026-09-17"  # exactly 30 days old
         neutral = get([customer(segment="C")], contacts=[contact("a", "Butik", day, "Neutral")])[0]
         positive = get([customer(segment="C")], contacts=[contact("a", "Butik", day, "Positiv")])[0]
-        self.assertEqual(neutral["list_guidance"]["status_key"], "idle")
+        self.assertEqual(neutral["list_guidance"]["status_key"], "act_now")
         self.assertEqual(positive["list_guidance"]["status_key"], "act_now")
         self.assertGreater(positive["contact_priority_score"], 0)
         self.assertEqual(positive["business_value_raw"], neutral["business_value_raw"])
@@ -446,8 +452,8 @@ class ValuePriorityStage1Tests(TestCase):
 
     def test_positive_buyer_boosts_materially_overdue_ranking_without_changing_value(self):
         orders = [
-            delivery("a", "Butik", "2026-05-01", 40, "a-1"),
-            delivery("a", "Butik", "2026-06-01", 40, "a-2"),
+            delivery("a", "Butik", "2026-07-01", 40, "a-1"),
+            delivery("a", "Butik", "2026-08-01", 40, "a-2"),
         ]
         positive = get([customer()], orders=orders, contacts=[
             contact("a", "Butik", "2026-09-17", "Positiv")
@@ -456,7 +462,7 @@ class ValuePriorityStage1Tests(TestCase):
             contact("a", "Butik", "2026-09-17", "Neutral")
         ])[0]
         self.assertEqual(positive["business_value_raw"], neutral["business_value_raw"])
-        self.assertEqual(positive["list_guidance"]["reason_code"], "established_reorder_due")
+        self.assertEqual(positive["list_guidance"]["reason_code"], "positive_buyer_followup")
         self.assertEqual(neutral["list_guidance"]["reason_code"], "established_reorder_due")
         self.assertGreater(positive["contact_priority_raw"], neutral["contact_priority_raw"])
 
@@ -622,11 +628,15 @@ class ValuePriorityStage1Tests(TestCase):
 
 
 class ValuePriorityFrontendStage1Tests(TestCase):
-    def test_frontend_sort_and_stage2_remains(self):
+    def test_frontend_has_one_primary_priority_and_obligation_attention(self):
         html = (Path(__file__).resolve().parents[1] / "index.html").read_text(encoding="utf-8")
-        for expected in ['id="list-sort-mode"', 'value="contact">Kontaktprioritet',
+        for expected in ['id="list-sort-mode"', 'value="contact">Prioritet',
                          'value="value">Affärsvärde', 'contactPrioritySort(a, b)',
-                         'businessValueSort(a, b)', 'score("contact_priority_score")',
-                         'score("business_value_score")', 'id="planning-recommendation"',
-                         'id="planning-backlog"']:
-            self.assertIn(expected, html)
+                         'businessValueSort(a, b)', 'getWorkPriorityValue(ib, "raw")',
+                         'getPriorityWhyHtml(c)', 'id="planning-backlog"',
+                         'data-work-filter="all"', 'data-work-filter="planned"',
+                         '"/customer-obligations/action"', '"/customer-workflow/action"',
+                         '"/customer-contact-permission"', '"v3.3"']:
+            self.assertTrue(expected in html, f"Missing frontend contract: {expected}")
+        for forbidden in ['id="planning-recommendation"', 'Fler nästa åtgärder', '/planning/suggestions']:
+            self.assertFalse(forbidden in html, f"Obsolete frontend contract: {forbidden}")

@@ -259,6 +259,7 @@ class PlanningSuggestionV2IntegrationTests(PlanningApiTestCase):
             planned_activity_id="manual-same-day-overdue",
             scheduled_at="2026-07-27T09:00:00+02:00",
             source="manual",
+            created_at="2026-07-26T12:00:00+02:00",
         )
         before = datetime(2026, 7, 27, 8, 59, tzinfo=app_module.STOCKHOLM_ZONE)
         after = datetime(2026, 7, 27, 9, 1, tzinfo=app_module.STOCKHOLM_ZONE)
@@ -286,7 +287,7 @@ class PlanningSuggestionV2IntegrationTests(PlanningApiTestCase):
         )
         self.assertEqual(self.planning_rows()[0]["status"], "planned")
 
-    def test_overdue_activity_is_hidden_after_a_later_logged_contact(self):
+    def test_overdue_activity_survives_a_later_unlinked_contact(self):
         self.append_repeat_orders()
         activity = self.append_planning_row(
             planned_activity_id="overdue-resolved-by-contact",
@@ -308,7 +309,7 @@ class PlanningSuggestionV2IntegrationTests(PlanningApiTestCase):
                 payload = self.client.get("/planning/suggestions").get_json()
 
         queue_items = [payload.get("suggestion")] + payload["queue_preview"]
-        self.assertFalse(any(
+        self.assertTrue(any(
             item
             and item.get("customer_id") == activity["customer_id"]
             and item.get("queue_item_type") == "overdue_activity"
@@ -316,7 +317,7 @@ class PlanningSuggestionV2IntegrationTests(PlanningApiTestCase):
         ))
         self.assertEqual(self.planning_rows()[0]["status"], "planned")
 
-    def test_overdue_activity_is_hidden_by_a_future_planned_activity(self):
+    def test_overdue_activity_survives_an_unrelated_future_plan(self):
         self.append_repeat_orders()
         overdue = self.append_planning_row(
             planned_activity_id="overdue-resolved-by-plan",
@@ -338,8 +339,8 @@ class PlanningSuggestionV2IntegrationTests(PlanningApiTestCase):
                 payload = self.client.get("/planning/suggestions").get_json()
 
         queue_items = [payload.get("suggestion")] + payload["queue_preview"]
-        self.assertFalse(any(
-            item and item.get("customer_id") == overdue["customer_id"]
+        self.assertTrue(any(
+            item and item.get("planned_activity_id") == overdue["planned_activity_id"]
             for item in queue_items
         ))
         self.assertEqual(
@@ -350,7 +351,7 @@ class PlanningSuggestionV2IntegrationTests(PlanningApiTestCase):
             },
         )
 
-    def test_later_contact_only_resolves_older_overdue_activity(self):
+    def test_unlinked_contact_resolves_neither_separate_overdue_activity(self):
         owner = {"user_name": "olle", "name": "Olle"}
         customer_id = "11111111-1111-4111-8111-111111111111"
         activities = [
@@ -386,7 +387,7 @@ class PlanningSuggestionV2IntegrationTests(PlanningApiTestCase):
         self.assertEqual(active_ids, {customer_id})
         self.assertEqual(
             [item["planned_activity_id"] for item in overdue_items],
-            ["newer-overdue"],
+            ["older-overdue", "newer-overdue"],
         )
 
     def test_suggestion_planned_activity_uses_same_overdue_semantics(self):
@@ -438,6 +439,7 @@ class PlanningSuggestionV2IntegrationTests(PlanningApiTestCase):
             planned_activity_id="cached-same-day-overdue",
             scheduled_at="2026-07-27T09:00:00+02:00",
             source="manual",
+            created_at="2026-07-26T12:00:00+02:00",
         )
         before = datetime(2026, 7, 27, 8, 59, tzinfo=app_module.STOCKHOLM_ZONE)
         after = datetime(2026, 7, 27, 9, 1, tzinfo=app_module.STOCKHOLM_ZONE)

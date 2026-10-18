@@ -1342,13 +1342,18 @@ class PriorityTests(TestCase):
                 "Västra Götalands län",
             ],
         ]
+        customers[0].append("customer_id")
+        customers[1].append("11111111-1111-4111-8111-111111111111")
+        customers[2].append("22222222-2222-4222-8222-222222222222")
         fake_spreadsheet = FakeSpreadsheet(
             {
                 "customers_enriched": customers,
                 "order_rows": [app_module.ORDER_COLUMNS],
                 "sales_activities": [app_module.CONTACT_COLUMNS],
+                "users": _users({"user_name": "Daniel", "name": "Daniel", "active": "Y", "role": "Säljare"}),
             }
         )
+        app_module.invalidate_priority_snapshot()
 
         with patch.object(
             app_module,
@@ -1368,6 +1373,8 @@ class PriorityTests(TestCase):
                 self.assertEqual(insight["next_action"]["action_type"], action_type)
                 self.assertTrue(insight["email_proposal_due"])
                 self.assertEqual(insight["recommended_channel"], "besök")
+                self.assertEqual(insight["next_action"]["contact_type"], "visit")
+                self.assertTrue(insight["next_action"]["can_contact_now"])
 
     def test_customer_insights_later_contact_clears_old_missed_followup(self):
         customers = [

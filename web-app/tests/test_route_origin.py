@@ -83,6 +83,7 @@ class PlanningRouteOriginTests(TestCase):
     def snapshot(self, *_args, **_kwargs):
         customers = app_module.get_customer_rows(self.sheet)
         return {"customers": customers, "contact_rows": [],
+                "customer_state": app_module.customer_state_snapshot(self.sheet),
                 "priorities": [{"row": item["row"], "customer_id": item["customer_id"], "priority_score": 80}
                                for item in customers]}
 

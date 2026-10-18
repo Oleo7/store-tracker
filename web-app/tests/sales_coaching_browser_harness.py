@@ -332,6 +332,9 @@ body.qa-screenshot.qa-mobile #view-insights { width: 390px !important; max-width
         app_module._sheet_read_cache.clear()
         return {"ok": True}
 
+    from priority_workflow_browser_fixtures import install_priority_workflow_fixtures
+    install_priority_workflow_fixtures(app_module, spreadsheet)
+
     app_module.app.run(
         host="127.0.0.1",
         port=int(os.environ.get("SALES_COACHING_BROWSER_PORT", "5065")),

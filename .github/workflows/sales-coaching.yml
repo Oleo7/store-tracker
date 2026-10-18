@@ -47,7 +47,7 @@ jobs:
         run: node web-app/tests/sales_coaching_browser_smoke.cjs mobile
       - name: Guidance and delivery browser regressions
         run: node web-app/tests/guidance_integrity_browser_smoke.cjs
-      - name: Stage 1 customer value and contact priority browser smoke
+      - name: Priority, commitments and seller workflow browser regressions
         run: node web-app/tests/value_priority_browser_smoke.cjs
       - name: Calendar drag desktop and touch regressions
         env:

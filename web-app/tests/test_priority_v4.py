@@ -240,7 +240,7 @@ class Phase4EmailIntentTests(TestCase):
         self.assertEqual(
             with_activity["recommendation_suppression_source_id"], "future"
         )
-        self.assertEqual(with_followup["recommendation_suppression_reason"], "explicit_follow_up")
+        self.assertEqual(with_followup["recommendation_suppression_reason"], "future_follow_up_date")
         self.assertNotIn("stockfiller_click_followup", with_activity["covered_trigger_keys"])
         self.assertNotIn("stockfiller_click_followup", with_followup["covered_trigger_keys"])
 
@@ -303,7 +303,8 @@ class Phase4EmailIntentTests(TestCase):
         )
         by_id = {item["customer_id"]: item for item in result}
         self.assertEqual(by_id["cid-1"]["primary_trigger_type"], "stockfiller_click_followup")
-        self.assertEqual(by_id["cid-2"]["primary_trigger_type"], "")
+        self.assertEqual(by_id["cid-2"]["primary_trigger_type"], "value_based_contact_due")
+        self.assertFalse(by_id["cid-2"]["active_email_intent_event"])
 
     def test_renamed_customer_keeps_email_intent_by_customer_id(self):
         messages, recipients = email_rows(name="Gammalt namn")
@@ -318,29 +319,33 @@ class Phase4EmailIntentTests(TestCase):
 
 
 class Phase4LegacyFollowupTests(TestCase):
-    def test_past_unresolved_followup_creates_stable_legacy_trigger(self):
+    def test_past_unresolved_followup_preserves_stable_explicit_obligation(self):
         legacy = contact("2026-07-01 10:00:00", contact_id="", follow_up="2026-07-10")
         first = scored(today=date(2026, 8, 2), contacts=[legacy])[0]
         later = scored(today=date(2026, 8, 8), contacts=[legacy])[0]
-        self.assertEqual(first["primary_trigger_type"], "legacy_missed_followup")
+        self.assertEqual(first["primary_trigger_type"], "overdue_explicit_follow_up")
+        self.assertEqual(first["obligation_id"], later["obligation_id"])
+        self.assertTrue(first["requires_handling"])
         self.assertEqual(first["latest_human_contact_id"], later["latest_human_contact_id"])
         self.assertTrue(first["latest_human_contact_id"])
 
-    def test_later_contact_resolves_legacy_need(self):
+    def test_unlinked_later_contact_does_not_close_explicit_promise(self):
         rows = [
             contact("2026-07-01 10:00:00", contact_id="old", follow_up="2026-07-10"),
             contact("2026-07-20 10:00:00", contact_id="new"),
         ]
         item = scored(today=date(2026, 8, 2), contacts=rows)[0]
-        self.assertNotIn("legacy_missed_followup", item["covered_trigger_keys"])
+        self.assertEqual(item["primary_trigger_type"], "overdue_explicit_follow_up")
+        self.assertEqual(item["source_contact_id"], "old")
 
-    def test_later_order_resolves_legacy_need(self):
+    def test_later_order_does_not_close_explicit_promise(self):
         legacy = contact("2026-07-01 10:00:00", contact_id="source", follow_up="2026-07-10")
         item = scored(
             today=date(2026, 8, 2), contacts=[legacy],
             orders=[order("later", "2026-07-20")],
         )[0]
-        self.assertNotIn("legacy_missed_followup", item["covered_trigger_keys"])
+        self.assertEqual(item["primary_trigger_type"], "overdue_explicit_follow_up")
+        self.assertEqual(item["source_contact_id"], "source")
 
     def test_modern_linked_activity_prevents_legacy_duplicate(self):
         legacy = contact("2026-07-01 10:00:00", contact_id="source-1", follow_up="2026-07-10")
@@ -352,9 +357,11 @@ class Phase4LegacyFollowupTests(TestCase):
                 "scheduled_at": "2026-07-10 09:00:00", "source_contact_id": "source-1",
             }],
         )[0]
-        self.assertNotIn("legacy_missed_followup", item["covered_trigger_keys"])
+        self.assertEqual(item["primary_trigger_type"], "overdue_explicit_follow_up")
+        self.assertEqual(len(item["obligation_ids"]), 1)
+        self.assertEqual(item["customer_guidance"]["overdue_activity_id"], "activity-1")
 
-    def test_ready_email_triggers_beat_legacy_and_keep_exact_modifiers(self):
+    def test_explicit_obligation_wins_over_click_and_reference_modifiers_are_preserved(self):
         legacy = contact(
             "2026-07-01 10:00:00", contact_id="legacy-email",
             follow_up="2026-07-10",
@@ -375,12 +382,13 @@ class Phase4LegacyFollowupTests(TestCase):
                     today=date(2026, 8, 5), contacts=[legacy],
                     email_feature=snapshot,
                 )[0]
-                self.assertEqual(item["primary_trigger_type"], trigger)
-                self.assertIn(trigger, item["covered_trigger_keys"])
-                self.assertIn("legacy_missed_followup", item["covered_trigger_keys"])
+                self.assertEqual(item["primary_trigger_type"], "overdue_explicit_follow_up")
+                self.assertEqual(item["covered_trigger_keys"], ["overdue_explicit_follow_up"])
+                self.assertEqual(item["email_intent_trigger"], trigger)
+                self.assertEqual(item["obligation_id"], baseline["obligation_id"])
                 self.assertEqual(item["intent_timing"], baseline["intent_timing"] + modifier)
 
-    def test_positive_dialogue_beats_legacy_for_prospect_and_existing_customer(self):
+    def test_explicit_obligation_wins_over_positive_dialogue_for_prospect_and_buyer(self):
         cases = (
             ([], 10),
             ([order("FIRST", "2026-07-15")], 20),
@@ -403,10 +411,10 @@ class Phase4LegacyFollowupTests(TestCase):
                 )[0]
                 self.assertEqual(
                     item["primary_trigger_type"],
-                    "first_order_reorder" if orders else "positive_dialogue_followup",
+                    "overdue_explicit_follow_up",
                 )
-                self.assertIn("positive_dialogue_followup", item["covered_trigger_keys"])
-                self.assertIn("legacy_missed_followup", item["covered_trigger_keys"])
+                self.assertEqual(item["covered_trigger_keys"], ["overdue_explicit_follow_up"])
+                self.assertTrue(item["requires_handling"])
                 self.assertEqual(item["intent_timing"], baseline["intent_timing"] + modifier)
 
     def test_future_explicit_followup_still_blocks_email_and_positive(self):
@@ -429,12 +437,12 @@ class Phase4LegacyFollowupTests(TestCase):
             today=date(2026, 8, 5), contacts=[future_positive],
             email_feature=ready,
         )[0]
-        self.assertEqual(item["recommendation_suppression_reason"], "explicit_follow_up")
+        self.assertEqual(item["recommendation_suppression_reason"], "future_follow_up_date")
         self.assertNotIn("stockfiller_click_followup", item["covered_trigger_keys"])
         self.assertNotIn("positive_dialogue_followup", item["covered_trigger_keys"])
         self.assertEqual(item["intent_timing"], baseline["intent_timing"])
 
-    def test_wait_boundary_with_legacy_keeps_context_and_changes_live_primary(self):
+    def test_click_wait_boundary_keeps_explicit_obligation_and_context(self):
         legacy = contact(
             "2026-07-01 10:00:00", contact_id="legacy-wait",
             follow_up="2026-07-10",
@@ -456,13 +464,13 @@ class Phase4LegacyFollowupTests(TestCase):
             today=date(2026, 8, 5), contacts=[legacy],
             email_feature=ready_feature,
         )[0]
-        self.assertEqual(waiting["primary_trigger_type"], "legacy_missed_followup")
-        self.assertEqual(ready["primary_trigger_type"], "stockfiller_click_followup")
+        self.assertEqual(waiting["primary_trigger_type"], "overdue_explicit_follow_up")
+        self.assertEqual(ready["primary_trigger_type"], "overdue_explicit_follow_up")
         self.assertTrue(waiting["active_email_intent_event"])
         self.assertEqual(waiting["intent_timing"] + 8, ready["intent_timing"])
         self.assertEqual(suggestion_identity(waiting), suggestion_identity(ready))
 
-    def test_full_precedence_keeps_email_above_reorder_positive_and_legacy(self):
+    def test_explicit_promise_precedes_click_reorder_and_positive_dialogue(self):
         legacy_positive = contact(
             "2026-07-01 10:00:00", result="Positiv",
             contact_id="all-signals", follow_up="2026-07-10",
@@ -476,14 +484,12 @@ class Phase4LegacyFollowupTests(TestCase):
             orders=[order("O-1", "2026-05-01"), order("O-2", "2026-05-21")],
             email_feature=ready,
         )[0]
-        self.assertEqual(item["primary_trigger_type"], "stockfiller_click_followup")
+        self.assertEqual(item["primary_trigger_type"], "overdue_explicit_follow_up")
         self.assertEqual(
             item["covered_trigger_keys"],
-            [
-                "established_reorder_due",
-                "stockfiller_click_followup", "legacy_missed_followup",
-            ],
+            ["overdue_explicit_follow_up"],
         )
+        self.assertTrue(item["requires_handling"])
 
 
 class Phase4CalibrationTests(TestCase):

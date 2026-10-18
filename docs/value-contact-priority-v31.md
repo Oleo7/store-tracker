@@ -1,5 +1,11 @@
 # Store Tracker – steg 1: Affärsvärde och Kontaktprioritet (v3.2-preview)
 
+> **Historiskt underlag.** Detta dokument beskriver PR48 före granskningens
+> rättningar och beslutet om en synlig poäng. Gällande produkt- och
+> implementationsbeskrivning finns i [V3.3: en prioritet i säljarens arbetslista](value-contact-priority-v33.md).
+> Påståenden nedan om oförändrad planering eller två framträdande poäng gäller
+> den tidigare iterationen.
+
 **Status:** PR #48 för granskning, ännu inte mergad eller deployad. Beräkningsmodellen är en policy/pilot, inte en validerad prognos för köpchans, omsättning eller täckningsbidrag.
 
 ## Varför två poäng?

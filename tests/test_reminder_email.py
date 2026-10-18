@@ -3,6 +3,7 @@ import unittest
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -100,7 +101,10 @@ class FakeSpreadsheet:
         self.sheets = {sheet.title: sheet for sheet in sheets}
 
     def worksheet(self, title):
-        return self.sheets[title]
+        try:
+            return self.sheets[title]
+        except KeyError as error:
+            raise app_module.WorksheetNotFound(title) from error
 
 
 class ReminderEmailHelperTests(unittest.TestCase):
@@ -484,6 +488,7 @@ class ReminderEmailHelperTests(unittest.TestCase):
             "overdue_days": 8,
             "latest_contact_date": "2026-07-01",
             "next_action": {"action_type": "reorder"},
+            "can_start_unscheduled_contact": True,
         }
         status = app_module.build_reminder_email_status(
             customer,
@@ -1095,7 +1100,8 @@ class EmailPerformanceTests(unittest.TestCase):
         self.assertIn("recipient.last_opened_at", html)
         self.assertIn("recipient.product_sheet_last_clicked_at", html)
         self.assertIn("recipient.stockfiller_last_clicked_at", html)
-        self.assertIn('<span class="card-date-primary">${deliveryLabel} ${delivery}${volumeText}</span>', html)
+        self.assertIn('${deliveryLabel} ${delivery}${volumeText}', html)
+        self.assertIn('leveransdatum saknas', html)
         self.assertIn('<span class="card-date-secondary">', html)
         self.assertNotIn("match[1].slice(2)", html)
 
@@ -1351,16 +1357,16 @@ class EmailInsightsEndpointTests(unittest.TestCase):
         customer_headers = [
             "customer", "cancelled_flag", "sales_person", "customer_segment",
             "customer_number", "name", "phone", "email", "email_last_order",
-            "city_google", "region_google",
+            "city_google", "region_google", "customer_id",
         ]
         customers = FakeWorksheet("customers_enriched", customer_headers, [
             {
                 "customer": "Butik A", "sales_person": "Sofia", "customer_segment": "A",
-                "customer_number": "A-1", "email": "a@example.com",
+                "customer_number": "A-1", "customer_id": "email-customer-a", "email": "a@example.com",
             },
             {
                 "customer": "Butik B", "sales_person": "Olle", "customer_segment": "B",
-                "customer_number": "B-1", "email": "b@example.com",
+                "customer_number": "B-1", "customer_id": "email-customer-b", "email": "b@example.com",
             },
         ])
         orders = FakeWorksheet("order_rows", app_module.ORDER_COLUMNS, [])
@@ -1372,6 +1378,10 @@ class EmailInsightsEndpointTests(unittest.TestCase):
             {
                 "user_name": "Sofia", "name": "Sofia Andersson",
                 "active": "Y", "admin": "N",
+            },
+            {
+                "user_name": "olle", "name": "Olle",
+                "active": "Y", "admin": "Y",
             },
         ])
         messages = FakeWorksheet("email_messages", EMAIL_MESSAGES_COLUMNS, [
@@ -1427,8 +1437,13 @@ class EmailInsightsEndpointTests(unittest.TestCase):
         self.today_patcher = patch.object(
             app_module, "stockholm_today", return_value=date(2026, 7, 22)
         )
+        self.now_patcher = patch.object(
+            app_module, "stockholm_now",
+            return_value=datetime(2026, 7, 22, 12, tzinfo=ZoneInfo("Europe/Stockholm")),
+        )
         self.spreadsheet_patcher.start()
         self.today_patcher.start()
+        self.now_patcher.start()
         self.client = app_module.app.test_client()
         with self.client.session_transaction() as flask_session:
             flask_session["user"] = {
@@ -1437,6 +1452,7 @@ class EmailInsightsEndpointTests(unittest.TestCase):
             }
 
     def tearDown(self):
+        self.now_patcher.stop()
         self.today_patcher.stop()
         self.spreadsheet_patcher.stop()
         app_module._email_sheets_cache = None
@@ -1483,22 +1499,23 @@ class ReminderSendRouteTests(unittest.TestCase):
     def setUp(self):
         customer_headers = [
             "customer", "cancelled_flag", "customer_number", "name", "email",
-            "email_last_order", "sales_person",
+            "email_last_order", "sales_person", "customer_id", "customer_segment",
         ]
         customers = FakeWorksheet("customers_enriched", customer_headers, [
             {
                 "customer": "Butiken", "customer_number": "C-1", "name": "Klara Kund",
                 "email": "klara@example.com", "email_last_order": "anna@example.com",
-                "sales_person": "Olle",
+                "sales_person": "Olle", "customer_id": "customer-1", "customer_segment": "C",
             },
             {
                 "customer": "Gamla butiken", "customer_number": "C-2", "name": "Gunnar Kund",
                 "email": "gunnar@example.com", "email_last_order": "gunnar@example.com",
-                "sales_person": "Olle",
+                "sales_person": "Olle", "customer_id": "customer-2", "customer_segment": "C",
             },
             {
                 "customer": "Nya butiken", "customer_number": "C-3", "name": "Nina Kund",
                 "email": "nina@example.com", "email_last_order": "", "sales_person": "Olle",
+                "customer_id": "customer-3", "customer_segment": "C",
             },
         ])
         order_rows = FakeWorksheet("order_rows", app_module.ORDER_COLUMNS, [
@@ -1514,6 +1531,10 @@ class ReminderSendRouteTests(unittest.TestCase):
             },
         ])
         contacts = FakeWorksheet("sales_activities", app_module.CONTACT_COLUMNS, [])
+        activities = FakeWorksheet("planned_activities", app_module.PLANNED_ACTIVITY_COLUMNS, [])
+        users = FakeWorksheet("users", USER_COLUMNS, [
+            {"user_name": "olle", "name": "Olle", "active": "Y", "admin": "Y"},
+        ])
         settings = FakeWorksheet("settings", ["key", "value", "description"], [
             {"key": "reminder_product_sheet_url", "value": "https://drive.google.com/product"},
             {"key": "reactivation_product_sheet_url", "value": "https://drive.google.com/reactivation"},
@@ -1532,7 +1553,7 @@ class ReminderSendRouteTests(unittest.TestCase):
         suggestions = FakeWorksheet(SUGGESTIONS_SHEET, SUGGESTION_COLUMNS, [])
         score_events = FakeWorksheet(SCORE_EVENTS_SHEET, SCORE_EVENT_COLUMNS, [])
         self.spreadsheet = FakeSpreadsheet([
-            customers, order_rows, contacts, settings, messages, recipients,
+            customers, order_rows, contacts, activities, users, settings, messages, recipients,
             events, suggestions, score_events,
         ])
         app_module.app.config.update(TESTING=True, SECRET_KEY="test-secret")
@@ -1542,6 +1563,11 @@ class ReminderSendRouteTests(unittest.TestCase):
             app_module, "stockholm_today", return_value=date(2026, 7, 22)
         )
         self.today_patcher.start()
+        self.now_patcher = patch.object(
+            app_module, "stockholm_now",
+            return_value=datetime(2026, 7, 22, 12, tzinfo=ZoneInfo("Europe/Stockholm")),
+        )
+        self.now_patcher.start()
         self.client = app_module.app.test_client()
         with self.client.session_transaction() as flask_session:
             flask_session["user"] = {
@@ -1550,6 +1576,7 @@ class ReminderSendRouteTests(unittest.TestCase):
             }
 
     def tearDown(self):
+        self.now_patcher.stop()
         self.today_patcher.stop()
         self.spreadsheet_patcher.stop()
 

@@ -727,6 +727,7 @@ class RouteEndpointTests(TestCase):
         self.patchers = [
             patch.object(app_module, "stockholm_now", return_value=datetime(2026, 7, 28, 8, tzinfo=ZoneInfo("Europe/Stockholm"))),
             patch.object(app_module, "read_planned_activity_snapshot", return_value=(None, [], [])),
+            patch.object(app_module, "read_customer_state_events", return_value=[]),
             patch.object(app_module, "get_spreadsheet_with_retry", return_value=object()),
             patch.object(app_module, "get_customer_rows", return_value=self.customers),
             patch.object(app_module, "get_contact_rows", return_value=[]),

@@ -128,7 +128,7 @@ class PlanningSuggestionV3IntegrationTests(PlanningApiTestCase):
         with today_patch, now_patch:
             current = self.client.get("/planning/suggestions").get_json()["suggestion"]
             self.assertEqual(current["suggestion_id"], onboarding["suggestion_id"])
-            self.assertEqual(current["trigger_key"], "first_order_reorder")
+            self.assertEqual(current["trigger_key"], "second_purchase_due")
             self.assertEqual(current["reason_text"], "24 dagar sedan första leveransen · dags att säkra andra köpet")
             planned = self.client.post(
                 f"/planning/suggestions/{current['suggestion_id']}/plan",
@@ -144,7 +144,7 @@ class PlanningSuggestionV3IntegrationTests(PlanningApiTestCase):
 
         self.assertEqual(planned.status_code, 201, planned.get_json())
         activity = self.planning_rows()[0]
-        self.assertEqual(activity["source_trigger_key"], "first_order_reorder")
+        self.assertEqual(activity["source_trigger_key"], "second_purchase_due")
         self.assertEqual(activity["contact_type"], "email")
         stored = self.spreadsheet.worksheet(SUGGESTIONS_SHEET).dict_rows()[0]
         self.assertEqual(stored["primary_trigger_key"], "first_order_onboarding")
@@ -152,7 +152,7 @@ class PlanningSuggestionV3IntegrationTests(PlanningApiTestCase):
             row for row in self.spreadsheet.worksheet(SCORE_EVENTS_SHEET).dict_rows()
             if row["status_after"] == "planned"
         )
-        self.assertEqual(planned_event["primary_trigger_key"], "first_order_reorder")
+        self.assertEqual(planned_event["primary_trigger_key"], "second_purchase_due")
 
     def test_queue_sort_uses_score_value_precedence_then_stable_customer(self):
         candidates = [
@@ -197,7 +197,7 @@ class PlanningSuggestionV3IntegrationTests(PlanningApiTestCase):
         self.assertIsNone(payload["suggestion"])
         row = self.spreadsheet.worksheet(SUGGESTIONS_SHEET).dict_rows()[0]
         self.assertEqual(row["status"], "dismissed")
-        self.assertEqual(candidate["primary_trigger_key"], "first_order_reorder")
+        self.assertEqual(candidate["primary_trigger_key"], "second_purchase_due")
         expected_id = app_module.deterministic_suggestion_id(
             "olle", candidate["customer_id"], candidate["decision_context_hash"]
         )
@@ -232,12 +232,12 @@ class PlanningSuggestionV3IntegrationTests(PlanningApiTestCase):
 
         suggestion = payload["suggestion"]
         self.assertEqual(payload["pending_count"], 1)
-        self.assertEqual(suggestion["trigger_key"], "a_prospect_due")
+        self.assertEqual(suggestion["trigger_key"], "value_based_contact_due")
         rows = self.spreadsheet.worksheet(SUGGESTIONS_SHEET).dict_rows()
         self.assertEqual(len(rows), 1)
         self.assertEqual(
             json.loads(rows[0]["covered_trigger_keys_json"]),
-            ["a_prospect_due"],
+            ["value_based_contact_due"],
         )
 
         self._append_contact("2026-07-20 10:00:00", "Neutral", "later-contact")

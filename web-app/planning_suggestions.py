@@ -626,6 +626,9 @@ class PlanningSuggestionService:
                     candidate.get("primary_trigger_key")
                     or candidate.get("primary_trigger_type")
                 )
+                compatible_triggers = {
+                    _key(value) for value in candidate.get("compatible_trigger_keys", [current_trigger])
+                }
                 for legacy_id in compatible_ids[1:]:
                     stored_entry = stored_by_id.get(legacy_id)
                     if not stored_entry:
@@ -634,7 +637,7 @@ class PlanningSuggestionService:
                         stored_entry[1].get("primary_trigger_key")
                         or stored_entry[1].get("primary_trigger_type")
                     )
-                    if stored_trigger == current_trigger:
+                    if stored_trigger in compatible_triggers:
                         accepted_ids.append(legacy_id)
                 for suggestion_id in accepted_ids:
                     candidate_by_id[suggestion_id] = candidate
@@ -898,6 +901,9 @@ class PlanningSuggestionService:
                 candidate.get("primary_trigger_key")
                 or candidate.get("primary_trigger_type")
             )
+            compatible_triggers = {
+                _key(value) for value in candidate.get("compatible_trigger_keys", [current_trigger])
+            }
             matches = []
             for _index, existing in stored:
                 existing_id = _text(existing.get("suggestion_id"))
@@ -912,7 +918,7 @@ class PlanningSuggestionService:
                         existing.get("primary_trigger_key")
                         or existing.get("primary_trigger_type")
                     )
-                    if stored_trigger != current_trigger:
+                    if stored_trigger not in compatible_triggers:
                         continue
                 matches.append(existing)
             if matches:

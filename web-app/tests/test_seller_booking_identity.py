@@ -93,7 +93,7 @@ class SellerBookingIdentityTests(TestCase):
             "planned",
         )
 
-    def test_future_booking_replaces_missed_and_cancellation_restores_it(self):
+    def test_future_booking_is_primary_while_unrelated_missed_obligation_remains(self):
         customer, user, activity = self.fixture()
         missed = {
             **activity, "planned_activity_id": "missed-1",
@@ -105,6 +105,7 @@ class SellerBookingIdentityTests(TestCase):
                 guidance = self.score(customer, [user], [missed, future])["customer_guidance"]
                 self.assertEqual(guidance["status_key"], "planned")
                 self.assertEqual(guidance["overdue_activity_id"], "")
+                self.assertTrue(guidance["requires_handling"])
                 for terminal in ("cancelled", "skipped", "completed"):
                     remaining = [missed, {**future, "status": terminal}]
                     guidance = self.score(customer, [user], remaining)["customer_guidance"]
@@ -114,7 +115,7 @@ class SellerBookingIdentityTests(TestCase):
                     [missed, future], user, now=NOW
                 )
                 self.assertEqual(active, {"store-1"})
-                self.assertEqual(overdue, [])
+                self.assertEqual([row["planned_activity_id"] for row in overdue], ["missed-1"])
 
     def test_customer_transfer_does_not_inherit_previous_sellers_booking(self):
         customer, user, activity = self.fixture()
