@@ -160,6 +160,12 @@ Ett `completed` försök med resultatet `Ej anträffbar` är inte ett uppfyllt l
 Källkontakt, kund-ID, planerad aktivitet, ansvarig, revision och händelse-ID
 bevaras genom loggning, ombokning och upplösning.
 
+En uttryckligen överhoppad (`skipped`) kalenderaktivitet får inte återkomma som
+ett nytt kontaktuppdrag. Ett rent kalenderåtagande avslutas då. Finns ett separat
+uttryckligt uppföljningslöfte behålls det för granskning, eftersom det överhoppade
+försöket inte bevisar att löftet har uppfyllts. Återställd planering använder
+samma källkoppling och rätt åtagande.
+
 Att hantera får bara innehålla:
 
 1. Fortfarande öppna kalenderåtaganden med lokalt kalenderdatum **före idag**.

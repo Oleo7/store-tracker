@@ -393,7 +393,7 @@ def build_customer_state(customers, contact_rows, planned_activity_rows, state_e
         elif linked_plans and item["status"] not in CLOSED_STATUSES:
             last = linked_plans[-1]
             last_status = key(last.get("status"))
-            if last_status in {"cancelled", "superseded"}:
+            if last_status in {"cancelled", "skipped", "superseded"}:
                 if item["purpose"] == "calendar_activity":
                     item.update(status="cancelled", resolution_event_id=text(last.get("planned_activity_id")))
                 else:
@@ -451,7 +451,7 @@ def build_customer_state(customers, contact_rows, planned_activity_rows, state_e
                     scheduled = instant(linked.get("scheduled_at"))
                     item.update(due_at=scheduled.isoformat() if scheduled else "", due_date=scheduled.date().isoformat() if scheduled else item["due_date"],
                                 contact_type=text(linked.get("contact_type")), note=text(linked.get("note")))
-                elif linked and key(linked.get("status")) in {"cancelled", "superseded"}:
+                elif linked and key(linked.get("status")) in {"cancelled", "skipped", "superseded"}:
                     item.update(status="needs_review" if item["purpose"] == "explicit_followup" else "cancelled",
                                 evidence_quality="calendar_closed_promise_unresolved")
                 elif linked and key(linked.get("status")) == "completed":
