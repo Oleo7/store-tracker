@@ -419,6 +419,7 @@ def store_contact_guidance(
     reached_by_purpose=None, completed_by_purpose=None, first_delivery_date=None,
     obligations=None, planned_activity=None, planned_activity_options=(), workflow_suppression=None,
     invalid_identity=False, ignore_planning=False,
+    _selected_obligation_id=None,
 ) -> dict:
     """One read-only contact decision for list, calendar and workflow consumers.
 
@@ -426,6 +427,10 @@ def store_contact_guidance(
     a contact is blocked. A booking suppresses duplicate contact only in its
     own scope; an unrelated overdue promise is never silently closed.
     """
+    # Retain the actual inputs for a bounded second pass through this same
+    # decision function. Candidate evaluation never rebuilds customer features
+    # and keeps the full obligation list, including independent review cases.
+    candidate_arguments = dict(locals()) if _selected_obligation_id is None else None
     guidance = dict(legacy or {})
     plan = planned_activity or {}
     plan_row = plan.get("row", plan)
@@ -472,7 +477,10 @@ def store_contact_guidance(
     # valid other appointment into a zero-priority historical review case.
     scope_due_items = ([item for item in due_items if plan_id and str(item.get("planned_activity_id") or "") == plan_id]
                        if planned_current else due_items)
-    selected = scope_due_items[0] if scope_due_items else None
+    selected = (next((item for item in scope_due_items
+                      if str(item.get("obligation_id") or "") == _selected_obligation_id), None)
+                if _selected_obligation_id is not None else
+                scope_due_items[0] if scope_due_items else None)
     # A missed calendar appointment is an explicit commitment even in legacy
     # snapshots with no obligation table yet. Today's appointments are planned.
     if selected is None and plan_day and plan_day < today:
@@ -545,7 +553,8 @@ def store_contact_guidance(
                 if planned_current else str(selected.get("due_at") or selected.get("due_date") or "") if future_selected else None,
             overdue_activity_id=(str(selected.get("planned_activity_id") or "") if selected.get("_due") and selected["_due"] < today else ""),
             obligation_ids=obligation_ids, obligation_id=str(selected.get("obligation_id") or ""),
-            obligation_revision=selected.get("revision"), source_contact_id=selected_source or str(source_contact_id or ""),
+            obligation_revision=selected.get("revision"),
+            source_contact_id=selected_source if explicit else str(source_contact_id or ""),
             explicit_agreement_overrides_negative=agreement_after_negative,
             timing_source="first_order_phase" if delivery_count == 1 and days_since_delivery is not None and 7 <= days_since_delivery <= 90
                 and (code in {"first_order_onboarding", "second_purchase_due"}
@@ -554,6 +563,40 @@ def store_contact_guidance(
                 if delivery_count == 1 and days_since_delivery is not None and 7 <= days_since_delivery <= 90 else code,
             recommended_contact_type="", policy_version=POLICY_VERSION,
             evidence_quality=selected.get("evidence_quality") or "current_snapshot")
+        if review and selected.get("obligation_id") and str(selected["obligation_id"]) not in result["review_obligation_ids"]:
+            result["review_obligation_ids"].append(str(selected["obligation_id"]))
+        # A blocked historical scope must not hide a different, valid task
+        # from the customer list. Current bookings retain their own primary
+        # decision, including real contact restrictions. For unbooked work,
+        # try due scopes in stable date/ID order and use exactly the same
+        # negative, order, retry and snooze policy for each one's evidence.
+        if (candidate_arguments is not None and not planned_current
+                and not result["can_start_unscheduled_contact"]
+                and not result["can_execute_planned_contact"]):
+            review_ids = list(result["review_obligation_ids"])
+            for item in due_items:
+                candidate_id = str(item.get("obligation_id") or "")
+                if not candidate_id or candidate_id == str(selected.get("obligation_id") or ""):
+                    continue
+                arguments = dict(candidate_arguments)
+                arguments.update(
+                    _selected_obligation_id=candidate_id,
+                    obligations=open_items,
+                    # Never lend an unrelated missed appointment's identity,
+                    # channel or agreement evidence to an unbooked promise.
+                    planned_activity=plans_by_id.get(str(item.get("planned_activity_id") or "")),
+                )
+                candidate = store_contact_guidance(**arguments)
+                for review_id in candidate.get("review_obligation_ids", ()):
+                    if review_id not in review_ids:
+                        review_ids.append(review_id)
+                if (candidate.get("obligation_id") == candidate_id
+                        and not candidate.get("review_only")
+                        and (candidate.get("can_start_unscheduled_contact")
+                             or candidate.get("can_execute_planned_contact"))):
+                    candidate["review_obligation_ids"] = review_ids
+                    candidate["requires_review"] = bool(review_ids) or candidate["requires_review"]
+                    return candidate
         return result
 
     if invalid_identity or guidance.get("status_key") == "data_missing":

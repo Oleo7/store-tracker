@@ -204,6 +204,13 @@ granskas. Då är bokningen primär på kortet, medan `requires_handling`,
 Det äldre osäkra ärendet ger inte tillåtelse att ta en extra kontakt och får
 inte ensamt förbjuda den nya, giltiga bokningen.
 
+Samma princip gäller en giltig förfallen uppföljning utan aktuell bokning.
+Om den först valda äldre uppgiften är blockerad prövas andra förfallna
+åtaganden med samma fullständiga beslutsfunktion. Ett giltigt kontaktbart
+åtagande kan då bli huvuduppgift och ge kunden Prioritet i Butiker. Alla äldre
+granskningsärenden, källkopplingar och revisionsvärden finns kvar. Detta är val
+av rätt huvuduppgift, utan extra vikt eller undantag från kontaktspärrarna.
+
 Äldre uppföljningar som har exakt länkad källa, kalenderaktivitet och nådd
 slutförandekontakt kan behålla sitt dokumenterade avslut enligt det gamla
 gränssnittets kontrakt. Ett senare olänkat samtal, en orderregistrering eller

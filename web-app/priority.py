@@ -2360,8 +2360,10 @@ def build_priority_customers(
             email_available=bool(customer.get("email") or customer.get("email_last_order")),
             visible=bool(list_guidance["can_start_unscheduled_contact"] or list_guidance["status_key"] == "planned"),
         ) or {}
-        if list_guidance["status_key"] == "planned":
-            list_guidance["recommended_contact_type"] = _activity_contact_type(final_plan["row"]) if final_plan else ""
+        selected_plan = next((item for item in decision_arguments["planned_activity_options"]
+            if str(item["row"].get("planned_activity_id") or "") == list_guidance.get("planned_activity_id")), None)
+        if list_guidance["status_key"] == "planned" or list_guidance.get("can_execute_planned_contact"):
+            list_guidance["recommended_contact_type"] = _activity_contact_type(selected_plan["row"]) if selected_plan else ""
         else:
             list_guidance["recommended_contact_type"] = channel.get("recommended_contact_type", "")
         list_guidance["channel_reason_code"] = channel.get("channel_reason_code", "")
