@@ -3,6 +3,13 @@
 This supersedes the v3.3/v3.4 ranking and rollback sections. Deployment and merge
 require separate approval. CRM history is not rewritten by this change.
 
+The [independent audit corrections and production gates](pr48-audit-release.md)
+supersede the earlier safety/readiness claims below. Production route saving
+requires a verified exclusive-writer protocol. The server emergency stop is
+`CRM_RISKY_OPERATIONS_STOPPED=true`; drain workers and pause external writers.
+Unanswered retry sequences expire after 30 days, and uncertain service bookings
+require documented clarification through the existing Att hantera workflow.
+
 ## Exactly one active scoring model
 
 `value_prioritization.VERSION` and `priority.SCORE_VERSION` are `v3.5`. The active
@@ -94,7 +101,7 @@ a provider's achieved global optimum is not guaranteed or claimed.
 
 ## Cached data, preview and apply safety
 
-Both engines use the new `v35-priority-lexicographic-1` ranking contract. Old route
+Both engines use the new `v35-priority-lexicographic-2` ranking contract. Old route
 caches/preview tokens are rejected and must be recalculated; they cannot reintroduce
 v2.2. Google cache reuse also requires the current solver version and exact current
 request fingerprint. Client/server routes do not infer a current score from a
