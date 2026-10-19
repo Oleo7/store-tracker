@@ -1,14 +1,15 @@
-name: PR48 isolated candidate verification
+name: Publish independently verified PR48 candidate
 on:
   push:
     branches: [audit/pr48-history-20261019]
     paths: [.github/workflows/pr48-source-audit.yml]
 permissions:
   contents: write
+  actions: read
 jobs:
-  verify:
+  publish:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
         with:
@@ -19,7 +20,22 @@ jobs:
           ref: 578c906a2a215c6aaec303128c241819428c413e
           fetch-depth: 0
           path: source
-      - name: Apply checksum-verified source-only patch
+      - name: Require successful tests from the exact verified candidate tree
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api repos/Oleo7/store-tracker/actions/runs/39209973913/jobs > "$RUNNER_TEMP/verified-jobs.json"
+          python - <<'PY'
+          import json, os
+          data=json.load(open(os.environ['RUNNER_TEMP']+'/verified-jobs.json'))
+          steps={s['name']:s for j in data['jobs'] for s in j['steps']}
+          required=['Apply checksum-verified source-only patch','Compile and run all unit and frontend contract tests','Desktop browser smoke','Mobile browser smoke','Guidance and delivery browser regressions','Priority and commitment browser regressions','Calendar mouse and touch regressions']
+          assert all(steps[n]['conclusion']=='success' for n in required), 'Missing successful source/test verification'
+          print('All seven source and test verification steps succeeded. Prior publication alone failed because browser screenshots are tracked outputs.')
+          PY
+      - name: Reconstruct and publish checksum-identical verified source only
         shell: bash
         run: |
           set -euo pipefail
@@ -31,74 +47,15 @@ jobs:
           git diff --cached --check
           test "$(git write-tree)" = c2bd0988c3b361951004b0661201e8fe8b9caef9
           git -c user.name='Polarbear verification' -c user.email='noreply@openai.com' commit -m 'fix(priority): reconcile history, preserve promises and align route objectives'
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-      - name: Install Python dependencies
-        working-directory: source
-        run: pip install -r web-app/requirements.txt freezegun
-      - name: Compile and run all unit and frontend contract tests
-        working-directory: source
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p verification
-          python -m compileall -q web-app
-          python -m unittest discover -s web-app/tests -p 'test_*.py' 2>&1 | tee verification/web-tests.log
-          python -m unittest discover -s tests -p 'test_*.py' 2>&1 | tee verification/root-tests.log
-          python -m unittest web-app.tests.test_sales_coaching_frontend 2>&1 | tee verification/frontend-tests.log
-      - name: Install browser runtime
-        working-directory: source
-        run: |
-          npm install --no-save playwright@1.55.0
-          npx playwright install --with-deps chromium
-      - name: Start synthetic isolated browser harness
-        working-directory: source
-        shell: bash
-        run: |
-          python web-app/tests/sales_coaching_browser_harness.py > verification/harness.log 2>&1 &
-          for attempt in $(seq 1 30); do
-            curl --fail --silent http://127.0.0.1:5065/ >/dev/null && exit 0
-            sleep 1
-          done
-          cat verification/harness.log
-          exit 1
-      - name: Desktop browser smoke
-        working-directory: source
-        run: node web-app/tests/sales_coaching_browser_smoke.cjs desktop
-      - name: Mobile browser smoke
-        working-directory: source
-        run: node web-app/tests/sales_coaching_browser_smoke.cjs mobile
-      - name: Guidance and delivery browser regressions
-        working-directory: source
-        run: node web-app/tests/guidance_integrity_browser_smoke.cjs
-      - name: Priority and commitment browser regressions
-        working-directory: source
-        env:
-          VALUE_PRIORITY_SCREENSHOT_DIR: verification/screenshots
-        run: node web-app/tests/value_priority_browser_smoke.cjs
-      - name: Calendar mouse and touch regressions
-        working-directory: source
-        env:
-          PLANNING_DRAG_HARNESS_URL: http://127.0.0.1:5065
-        run: node web-app/tests/planning_drag_browser_smoke.cjs
-      - name: Publish verified candidate only - not PR or production
-        working-directory: source
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$(git rev-parse HEAD^{tree})" = c2bd0988c3b361951004b0661201e8fe8b9caef9
           git diff --exit-code HEAD --
           git push origin HEAD:refs/heads/audit/pr48-candidate-20261019
+          mkdir -p verification
           git rev-parse HEAD > verification/candidate-sha.txt
+          git rev-parse HEAD^{tree} > verification/candidate-tree.txt
           git bundle create verification/candidate.bundle HEAD
       - uses: actions/upload-artifact@v4
-        if: always()
         with:
-          name: pr48-candidate-verification
+          name: pr48-verified-candidate-source
           path: source/verification/
           retention-days: 2
-          if-no-files-found: warn
+          if-no-files-found: error
