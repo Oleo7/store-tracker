@@ -1,0 +1,124 @@
+name: Verify exact v3.5 candidate
+on:
+  push:
+    branches: [audit/pr48-v35-20261019]
+    paths: [.github/workflows/pr48-v35-verify.yml]
+permissions:
+  contents: write
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Reconstruct and verify pinned candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          git worktree add --detach "$RUNNER_TEMP/v35-candidate" c4dcdf5a7b695b66893cd405541891cc44aab2fb
+          python - <<'PY'
+          import os, json, hashlib, base64, lzma, subprocess
+          from pathlib import Path, PurePosixPath
+          source = Path(os.environ['GITHUB_WORKSPACE'])
+          target = Path(os.environ['RUNNER_TEMP']) / 'v35-candidate'
+          encoded = ''.join((source / f'.audit/v35.delta.{i}.b64').read_text().strip() for i in range(3))
+          packed = base64.b64decode(encoded, validate=True)
+          assert hashlib.sha256(packed).hexdigest() == '0b7ab6b99b063e2de72f255f6868e9ce292455d4827161c3dedf53428df64eca'
+          data = json.loads(lzma.decompress(packed))
+          assert data['base'] == 'c4dcdf5a7b695b66893cd405541891cc44aab2fb'
+          assert data['commit'] == 'a49c57eeb5d11c4b062f5fc2fccbf5689cc2d9a0'
+          assert data['tree'] == '337675d88ccae91157550b55be08e6af47a026ff'
+          def git(*args, input=None):
+              return subprocess.check_output(['git', *args], cwd=target, input=input)
+          def safe(path):
+              p = PurePosixPath(path)
+              assert not p.is_absolute() and '..' not in p.parts and '.git' not in p.parts
+              return target / path
+          for item in data['files']:
+              base = git('show', data['base'] + ':' + item['base_path']).decode() if item['base_path'] else ''
+              assert hashlib.sha256(base.encode()).hexdigest() == item['base_sha256'], item['path']
+              lines = base.splitlines(keepends=True)
+              for start, end, replacement in reversed(item['edits']):
+                  assert 0 <= start <= end <= len(lines)
+                  lines[start:end] = [replacement]
+              content = ''.join(lines).encode()
+              assert hashlib.sha256(content).hexdigest() == item['sha256'], item['path']
+              path = safe(item['path'])
+              path.parent.mkdir(parents=True, exist_ok=True)
+              path.write_bytes(content)
+          for path in data['delete']:
+              safe(path).unlink()
+          git('add', '-A')
+          assert git('write-tree').decode().strip() == data['tree']
+          commit = git('hash-object', '-t', 'commit', '-w', '--stdin', input=data['commit_text'].encode()).decode().strip()
+          assert commit == data['commit']
+          git('checkout', '--detach', commit)
+          assert not git('status', '--porcelain').strip()
+          print('Verified exact candidate:', commit)
+          print('Verified tree:', data['tree'])
+          PY
+      - name: Python dependencies and compile
+        working-directory: ${{ runner.temp }}/v35-candidate
+        run: |
+          pip install -r web-app/requirements.txt
+          python -m compileall -q web-app
+      - name: Full web and root regression suites
+        working-directory: ${{ runner.temp }}/v35-candidate
+        run: |
+          python -m unittest discover -s web-app/tests -p 'test_*.py'
+          python -m unittest discover -s tests -p 'test_*.py'
+          python -m unittest web-app.tests.test_sales_coaching_frontend
+      - name: Install isolated browser runtime
+        working-directory: ${{ runner.temp }}/v35-candidate
+        run: |
+          npm install --no-save playwright@1.55.0
+          npx playwright install --with-deps chromium
+      - name: Start synthetic harness
+        working-directory: ${{ runner.temp }}/v35-candidate
+        run: |
+          python web-app/tests/sales_coaching_browser_harness.py > "$RUNNER_TEMP/v35-harness.log" 2>&1 &
+          for attempt in $(seq 1 30); do
+            curl --fail --silent http://127.0.0.1:5065/ >/dev/null && exit 0
+            sleep 1
+          done
+          cat "$RUNNER_TEMP/v35-harness.log"
+          exit 1
+      - name: Desktop browser smoke
+        working-directory: ${{ runner.temp }}/v35-candidate
+        run: node web-app/tests/sales_coaching_browser_smoke.cjs desktop
+      - name: Mobile browser smoke
+        working-directory: ${{ runner.temp }}/v35-candidate
+        run: node web-app/tests/sales_coaching_browser_smoke.cjs mobile
+      - name: Guidance browser regressions
+        working-directory: ${{ runner.temp }}/v35-candidate
+        run: node web-app/tests/guidance_integrity_browser_smoke.cjs
+      - name: Priority and commitments browser regressions
+        working-directory: ${{ runner.temp }}/v35-candidate
+        env:
+          VALUE_PRIORITY_SCREENSHOT_DIR: ${{ runner.temp }}/v35-browser-screenshots
+        run: node web-app/tests/value_priority_browser_smoke.cjs
+      - name: Calendar desktop and touch regressions
+        working-directory: ${{ runner.temp }}/v35-candidate
+        env:
+          PLANNING_DRAG_HARNESS_URL: http://127.0.0.1:5065
+        run: node web-app/tests/planning_drag_browser_smoke.cjs
+      - name: Publish verified candidate object on audit branch only
+        run: |
+          git push origin a49c57eeb5d11c4b062f5fc2fccbf5689cc2d9a0:refs/heads/audit/pr48-v35-verified
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v35-isolated-browser-verification
+          path: |
+            ${{ runner.temp }}/v35-browser-screenshots/
+            ${{ runner.temp }}/v35-harness.log
+          retention-days: 3
+          if-no-files-found: ignore
