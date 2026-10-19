@@ -27,8 +27,9 @@ jobs:
           echo "846f54d49731fa7d5af0a2a078781a47970a26291ab72f8e57b94ca73d41728e  $RUNNER_TEMP/source.patch" | sha256sum --check
           cd source
           git apply --index --unidiff-zero "$RUNNER_TEMP/source.patch"
+          git apply --index --unidiff-zero ../transport/.audit/browser-readiness.patch
           git diff --cached --check
-          test "$(git write-tree)" = 3999a05e0cb700100176ec0409c7493ad0de39e0
+          test "$(git write-tree)" = c2bd0988c3b361951004b0661201e8fe8b9caef9
           git -c user.name='Polarbear verification' -c user.email='noreply@openai.com' commit -m 'fix(priority): reconcile history, preserve promises and align route objectives'
       - uses: actions/setup-python@v5
         with:
@@ -76,6 +77,8 @@ jobs:
         run: node web-app/tests/guidance_integrity_browser_smoke.cjs
       - name: Priority and commitment browser regressions
         working-directory: source
+        env:
+          VALUE_PRIORITY_SCREENSHOT_DIR: verification/screenshots
         run: node web-app/tests/value_priority_browser_smoke.cjs
       - name: Calendar mouse and touch regressions
         working-directory: source
@@ -87,7 +90,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD^{tree})" = 3999a05e0cb700100176ec0409c7493ad0de39e0
+          test "$(git rev-parse HEAD^{tree})" = c2bd0988c3b361951004b0661201e8fe8b9caef9
           git diff --exit-code HEAD --
           git push origin HEAD:refs/heads/audit/pr48-candidate-20261019
           git rev-parse HEAD > verification/candidate-sha.txt
