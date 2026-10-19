@@ -643,7 +643,7 @@ def calculate_route_proposal(
         for candidate in ordered_candidates
         if direct_seconds[candidate.row] is not None
         and direct_seconds[candidate.row] + service_seconds_per_stop
-        < max_total_seconds
+        <= max_total_seconds
     )
     road_reachable_rows = {candidate.row for candidate in road_reachable}
     if any(
@@ -745,7 +745,7 @@ def calculate_route_proposal(
         excluded_over_budget=sum(
             direct_seconds[candidate.row] is not None
             and direct_seconds[candidate.row] + service_seconds_per_stop
-            >= max_total_seconds
+            > max_total_seconds
             for candidate in ordered_candidates
         ),
         provider_request_count=(
@@ -811,6 +811,10 @@ def shortlist_candidates(
             item.row,
         ),
     )
+    # Dense areas must not consume every cluster slot. Reuse the existing
+    # cluster ranking, but visit distinct cells in pairs before deepening one
+    # cell. Keeping neighbours together preserves multi-stop opportunities.
+    by_cluster_value = _diverse_cluster_ranking(by_cluster_value)
     approximate_route = _approximate_route_ranking(
         start,
         ordered,
@@ -857,6 +861,25 @@ def shortlist_candidates(
 
     # Stable solver node order makes complete ties reproducible.
     return tuple(sorted(selected, key=lambda item: item.row))
+
+
+def _diverse_cluster_ranking(ranked):
+    if not ranked:
+        return []
+    longitude_scale = 111.320 * max(0.05, math.cos(math.radians(
+        sum(c.coordinate.latitude for c in ranked) / len(ranked))))
+    cells = {}
+    for candidate in ranked:
+        cell = (math.floor(candidate.coordinate.longitude * longitude_scale / LOCAL_CLUSTER_RADIUS_KM),
+                math.floor(candidate.coordinate.latitude * 110.574 / LOCAL_CLUSTER_RADIUS_KM))
+        cells.setdefault(cell, []).append(candidate)
+    result = []
+    depth = 0
+    while len(result) < len(ranked):
+        for members in cells.values():
+            result.extend(members[depth:depth + 2])
+        depth += 2
+    return result
 
 
 def solve_route(
@@ -956,7 +979,7 @@ def verify_route(
         cumulative_total = (
             cumulative_drive + sequence * service_seconds_per_stop
         )
-        if cumulative_total >= max_total_seconds:
+        if cumulative_total > max_total_seconds:
             raise RouteVerificationError()
 
         candidate = candidates[candidate_index]
@@ -985,7 +1008,7 @@ def verify_route(
     service_seconds = len(stops) * service_seconds_per_stop
     drive_seconds_total = cumulative_drive + return_drive_seconds
     total_seconds = drive_seconds_total + service_seconds
-    if total_seconds >= max_total_seconds:
+    if total_seconds > max_total_seconds:
         raise RouteVerificationError()
     return VerifiedRoute(
         stops=tuple(stops),
@@ -1038,7 +1061,7 @@ def _solve_exact_dp(
     path_code_base = count + 1
     for index in range(count):
         leg = drive_seconds[0][index]
-        if leg is None or leg + service_seconds_per_stop >= max_total_seconds:
+        if leg is None or leg + service_seconds_per_stop > max_total_seconds:
             continue
         mask = 1 << index
         costs[mask][index] = leg
@@ -1060,7 +1083,7 @@ def _solve_exact_dp(
             if return_leg is not None and mask & required_mask == required_mask:
                 round_trip_drive = drive + return_leg
                 total = round_trip_drive + service_seconds
-                if total < max_total_seconds:
+                if total <= max_total_seconds:
                     route_indices = _reconstruct_path(
                         mask,
                         last,
@@ -1093,7 +1116,7 @@ def _solve_exact_dp(
                             new_drive
                             + new_mask.bit_count() * service_seconds_per_stop
                         )
-                        if new_total < max_total_seconds:
+                        if new_total <= max_total_seconds:
                             current = costs[new_mask].get(next_index)
                             new_path_code = (
                                 path_codes[mask][last] * path_code_base
@@ -1197,7 +1220,7 @@ def _solve_beam(
                             new_drive
                             + new_stop_count * service_seconds_per_stop
                         )
-                        if new_total < max_total_seconds:
+                        if new_total <= max_total_seconds:
                             new_state = (
                                 new_mask,
                                 next_index,
@@ -1221,7 +1244,7 @@ def _solve_beam(
                                 next_by_state[state_key] = new_state
                             if (
                                 return_leg is not None
-                                and new_total + return_leg < max_total_seconds
+                                and new_total + return_leg <= max_total_seconds
                                 and new_mask & required_mask == required_mask
                                 and (
                                     best_state is None

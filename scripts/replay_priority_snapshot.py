@@ -28,7 +28,7 @@ from freezegun import freeze_time
 def model_source_hashes(repo):
     sources = {}
     for name in ("app.py", "priority.py", "value_prioritization.py", "customer_obligations.py",
-                 "contact_channel.py", "planning_suggestions.py", "route_proposal.py", "route_optimization.py", "routing_objective.py", "index.html"):
+                 "contact_channel.py", "contact_permissions.py", "planning_suggestions.py", "route_proposal.py", "route_optimization.py", "routing_objective.py", "index.html"):
         source = repo / "web-app" / name
         if source.is_file():
             sources["web-app/" + name] = hashlib.sha256(source.read_bytes()).hexdigest()

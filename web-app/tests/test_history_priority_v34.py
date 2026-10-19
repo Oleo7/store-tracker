@@ -287,7 +287,7 @@ class AdditionalCommercialRegressionTests(TestCase):
     def test_newer_reached_dialogue_applies_even_with_older_phase_contact(self):
         cs=[contact(8,'Neutral',purpose='second_purchase_due'),contact(1,'Positiv')]
         row,_=model(cs,orders=[order(24)])
-        self.assertEqual(row['action_type'],'recent_same_purpose_dialogue_wait')
+        self.assertEqual(row['action_type'],'positive_buyer_followup_wait')
 
     def test_explicit_completion_on_delivery_day_counts_but_plain_dialogue_does_not(self):
         plain,_=model([contact(8,'Positiv')],orders=[order(8)])

@@ -15,6 +15,7 @@ from meta_ads import AdsService
 from meta_ads_api import SheetsChangeStore, create_blueprint as create_meta_ads_blueprint
 from meta_giveaway import GiveawayService, GiveawayStore, create_blueprint as create_meta_instagram_blueprint
 from contextlib import contextmanager
+from functools import wraps
 import gspread
 from gspread.exceptions import WorksheetNotFound
 from google.oauth2.service_account import Credentials
@@ -484,6 +485,19 @@ def performance_step(step):
 
 
 @app.before_request
+def enforce_crm_emergency_stop():
+    # Server-side stop, including direct API clients. Read-only access and
+    # authentication remain available for investigation. Drain/restart workers
+    # to stop already in-flight operations; this cannot recall sent mail.
+    stopped = str(os.environ.get("CRM_RISKY_OPERATIONS_STOPPED", "false")).casefold() != "false"
+    if stopped and request.method not in {"GET", "HEAD", "OPTIONS"} and request.path not in {"/login", "/logout"}:
+        return jsonify(ok=False, code="crm_operations_stopped",
+                       error="Kontakt- och skrivfunktioner är tillfälligt stoppade."), 503
+    if stopped and request.path == "/route-proposal":
+        return jsonify(ok=False, code="crm_operations_stopped", error="Ruttplaneringen är tillfälligt stoppad."), 503
+
+
+@app.before_request
 def start_performance_measurement():
     if not performance_logging_enabled() or not _performance_endpoint():
         return None
@@ -547,6 +561,11 @@ def health():
         "reason": lock_health["reason"] or route_health["reason"],
         "planning_write_lock": lock_health,
         "route_optimization": route_health,
+        "score_version": SCORE_VERSION,
+        "ranking_contract": ROUTE_RANKING_CONTRACT,
+        "release_commit": os.environ.get("RENDER_GIT_COMMIT", ""),
+        "crm_operations_stopped": str(os.environ.get("CRM_RISKY_OPERATIONS_STOPPED", "false")).casefold() != "false",
+        "exclusive_writer_confirmed": os.environ.get("CRM_EXCLUSIVE_WRITER_CONFIRMED", "").casefold() == "true",
     }), status
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
@@ -749,6 +768,25 @@ _route_optimization_provider = None
 _route_optimization_provider_config = None
 _planning_write_lock = threading.RLock()
 _planning_write_lock_state = threading.local()
+_fresh_sheet_scope = threading.local()
+
+
+@contextmanager
+def fresh_decision_reads(spreadsheet):
+    """Uncached request-local source reads under the caller's write lock.
+
+    This freezes each sheet on first read, not an atomic cross-sheet snapshot.
+    Production requires the exclusive-writer operating protocol: external
+    imports/edits happen only while this service is stopped and drained.
+    """
+    previous = getattr(_fresh_sheet_scope, "entry", None)
+    invalidate_sheet_cache(spreadsheet, worksheets=True)
+    _fresh_sheet_scope.entry = (spreadsheet, {})
+    try:
+        yield
+    finally:
+        _fresh_sheet_scope.entry = previous
+        invalidate_sheet_cache(spreadsheet)
 
 
 @contextmanager
@@ -775,6 +813,14 @@ def planning_write_lock():
         finally:
             _planning_write_lock_state.depth = depth
             _planning_write_lock.release()
+
+
+def serialized_crm_write(function):
+    @wraps(function)
+    def locked(*args, **kwargs):
+        with planning_write_lock():
+            return function(*args, **kwargs)
+    return locked
 
 
 READ_CACHE_TITLES = {
@@ -1066,6 +1112,14 @@ def cached_worksheet_values(sheet, spreadsheet=None):
         or _spreadsheet_cache
     )
     title = str(getattr(sheet, "title", "") or "").strip()
+    scope = getattr(_fresh_sheet_scope, "entry", None)
+    if scope is not None and scope[0] is spreadsheet:
+        rows = scope[1]
+        if title not in rows:
+            rows[title] = read_with_retry(sheet.get_all_values,
+                on_retry=_log_sheet_read_retry(f"fresh.{title or 'other'}"))
+            record_google_sheet_read(True)
+        return copy.deepcopy(rows[title]), False
     if (
         title not in READ_CACHE_TITLES
         or not sheet_cache_enabled(spreadsheet)
@@ -1104,6 +1158,13 @@ def invalidate_priority_snapshot():
 
 
 def invalidate_sheet_cache(spreadsheet, *titles, worksheets=False):
+    scope = getattr(_fresh_sheet_scope, "entry", None)
+    if scope is not None and (spreadsheet is None or scope[0] is spreadsheet):
+        if titles:
+            for title in titles:
+                scope[1].pop(title, None)
+        else:
+            scope[1].clear()
     _sheet_read_cache.invalidate(spreadsheet, *titles, worksheets=worksheets)
     if not titles or set(titles) & PRIORITY_SNAPSHOT_CACHE_TITLES:
         invalidate_priority_snapshot()
@@ -2383,7 +2444,7 @@ def parse_planning_date(value):
         return None
 
 
-def parse_planning_datetime(value, *, preserve_seconds=False):
+def parse_planning_datetime(value, *, preserve_seconds=True):
     if isinstance(value, datetime):
         parsed = value
     else:
@@ -2422,7 +2483,11 @@ def parse_planning_datetime(value, *, preserve_seconds=False):
 
 def planning_datetime_text(value):
     parsed = parse_planning_datetime(value)
-    return parsed.isoformat(timespec="minutes") if parsed else ""
+    return route_time_text(parsed) if parsed else ""
+
+
+def route_time_text(moment):
+    return moment.isoformat(timespec="microseconds" if moment.microsecond else "seconds" if moment.second else "minutes")
 
 
 def planning_timestamp(value=None):
@@ -2598,7 +2663,7 @@ def public_planned_activity(row, *, now=None):
         "contact_type": normalize_planning_contact_type(row.get("contact_type")),
         "contact_type_label": planning_contact_label(row.get("contact_type")),
         "scheduled_at": (
-            scheduled_at.isoformat(timespec="minutes") if scheduled_at else ""
+            route_time_text(scheduled_at) if scheduled_at else ""
         ),
         "duration_minutes": duration_minutes,
         "time_is_estimated": is_yes(row.get("time_is_estimated")),
@@ -4035,7 +4100,7 @@ def build_planned_activity_row(
         "customer": customer_name,
         "contact_type": contact_type,
         "scheduled_at": (
-            scheduled.isoformat(timespec="minutes") if scheduled else ""
+            route_time_text(scheduled) if scheduled else ""
         ),
         "duration_minutes": PLANNING_CONTACT_DURATIONS.get(contact_type, 0),
         "time_is_estimated": "Y" if time_is_estimated else "N",
@@ -5631,6 +5696,7 @@ def _recipient_summary(recipient, event_rows):
     return {**recipient, **updates}
 
 
+@serialized_crm_write
 def process_brevo_events(spreadsheet, sheets, payloads):
     """Persist a batch with one read/append/update cycle and semantic deduplication."""
     message_headers, message_rows = worksheet_snapshot(
@@ -6997,7 +7063,7 @@ def get_authoritative_priority_snapshot(
     today = as_of.date()
     state_events = read_customer_state_events(spreadsheet)
     date_key = today.isoformat() if isinstance(today, date) else str(today)
-    cache_enabled = sheet_cache_enabled(spreadsheet)
+    cache_enabled = sheet_cache_enabled(spreadsheet) and getattr(_fresh_sheet_scope, "entry", None) is None
     dependency_signature = (
         _sheet_read_cache.generation_signature(
             spreadsheet,
@@ -7592,6 +7658,20 @@ def mutate_customer_obligation():
                 validate_customer_state_revision(data, item)
             updated = dict(item)
             updated["reason"] = str(data.get("reason") or "").strip()[:1000]
+            if item.get("identity_conflict") and action not in {"cancel", "snooze"}:
+                raise CustomerStateConflict("cross_customer_source",
+                    "Aktivitetens kundkoppling är felaktig. Avskriv den och skapa en ny aktivitet för rätt kund.")
+            if (item.get("evidence_status") == "uncertain" and action == "reschedule"
+                    and normalize_planning_appointment_confirmed(data.get("customer_agreement_confirmed"), "visit")):
+                reason = str(data.get("reason") or data.get("note") or "").strip()
+                if not reason:
+                    raise CustomerStateConflict("review_evidence_required",
+                        "Dokumentera vad som klarlagts och överenskommits innan serviceuppgiften aktiveras.", 400)
+                updated.update(evidence_status="documented", review_status="clarified",
+                    commitment_kind="customer_promise", customer_agreement_confirmed=True,
+                    agreed_at=planning_timestamp(), review_resolution={"reason": reason[:1000],
+                        "actor_user_name": current_user().get("user_name"), "occurred_at": planning_timestamp(),
+                        "client_request_id": request_id})
             activity = None
             if action in {"resolve", "cancel"}:
                 updated.update(status="resolved" if action == "resolve" else "cancelled", snooze_until="",
@@ -9658,6 +9738,10 @@ def update_planning_activity(activity_id):
 
         updates = {}
         if "customer_id" in data:
+            if (str(updated_customer.get("customer_id") or "") != str(current.get("customer_id") or "")
+                    and any(current.get(field) for field in ("obligation_id", "source_contact_id", "source_suggestion_id"))):
+                return planning_error("linked_activity_customer_immutable",
+                    "En källkopplad aktivitet kan inte byta kund. Hantera den gamla aktiviteten och skapa en ny.", 409)
             updates.update({
                 "customer_id": str(
                     updated_customer.get("customer_id") or ""
@@ -9724,7 +9808,7 @@ def update_planning_activity(activity_id):
                     400,
                     field="scheduled_at",
                 )
-            updates["scheduled_at"] = scheduled_at.isoformat(timespec="minutes")
+            updates["scheduled_at"] = route_time_text(scheduled_at)
             updates["time_is_estimated"] = "N"
         if "note" in data:
             note = str(data.get("note") or "").strip()
@@ -9928,6 +10012,7 @@ def build_route_proposal_payload(
                 "ranking_mode": "v3",
             "required": bool(getattr(candidate, "required", False)),
             "leg_drive_minutes": seconds_to_minutes(stop.leg_drive_seconds),
+            "leg_drive_seconds": stop.leg_drive_seconds,
             "cumulative_drive_minutes": seconds_to_minutes(
                 stop.cumulative_drive_seconds
             ),
@@ -9960,6 +10045,8 @@ def build_route_proposal_payload(
             "total_commercial_value": round(sum(stop.candidate.objective_value for stop in proposal.route.stops), 6),
             "ranking_mode": "v3",
             "drive_minutes": seconds_to_minutes(proposal.route.drive_seconds),
+            "drive_seconds": proposal.route.drive_seconds,
+            "return_drive_seconds": proposal.route.return_drive_seconds,
             "return_drive_minutes": seconds_to_minutes(
                 proposal.route.return_drive_seconds
             ),
@@ -10564,7 +10651,11 @@ def planning_next_unblocked_start(
     duration_minutes,
     fixed_intervals,
 ):
-    duration = timedelta(minutes=max(0, duration_minutes))
+    return planning_next_unblocked_instant(earliest_start, duration_minutes * 60, fixed_intervals)
+
+
+def planning_next_unblocked_instant(earliest_start, duration_seconds, fixed_intervals):
+    duration = timedelta(seconds=max(0, duration_seconds))
     start = earliest_start
     while True:
         shifted = False
@@ -10588,6 +10679,7 @@ def schedule_planning_route_timeline(
     fixed_non_route,
     route_start_at,
     return_drive_minutes,
+    return_drive_seconds=None,
     confirmed_visits=(),
 ):
     route_start_at, fixed_intervals, fixed_error = planning_route_fixed_intervals(
@@ -10602,10 +10694,11 @@ def schedule_planning_route_timeline(
     for raw_stop in stops:
         stop = dict(raw_stop)
         try:
-            drive_minutes = max(
+            drive_seconds = max(
                 0,
                 int(math.ceil(float(
-                    stop.get("leg_drive_minutes") or 0
+                    stop["leg_drive_seconds"] if stop.get("leg_drive_seconds") is not None
+                    else float(stop.get("leg_drive_minutes") or 0) * 60
                 ))),
             )
             service_minutes = max(
@@ -10621,18 +10714,18 @@ def schedule_planning_route_timeline(
                 422,
             )
 
-        departure = planning_next_unblocked_start(
+        departure = planning_next_unblocked_instant(
             cursor,
-            drive_minutes,
+            drive_seconds,
             fixed_intervals,
         )
-        arrival = departure + timedelta(minutes=drive_minutes)
-        if drive_minutes:
+        arrival = departure + timedelta(seconds=drive_seconds)
+        if drive_seconds:
             timeline_segments.append({
                 "kind": "drive",
                 "customer_row": stop.get("customer_row"),
-                "start": departure.isoformat(timespec="minutes"),
-                "end": arrival.isoformat(timespec="minutes"),
+                "start": route_time_text(departure),
+                "end": route_time_text(arrival),
             })
 
         required = bool(stop.get("required"))
@@ -10671,12 +10764,8 @@ def schedule_planning_route_timeline(
                         "planned_activity_id",
                         "",
                     ),
-                    scheduled_at=booked_at.isoformat(
-                        timespec="minutes"
-                    ),
-                    estimated_at=service_start.isoformat(
-                        timespec="minutes"
-                    ),
+                    scheduled_at=route_time_text(booked_at),
+                    estimated_at=route_time_text(service_start),
                     delta_minutes=round(delta_minutes),
                 )
         service_end = service_start + timedelta(
@@ -10689,19 +10778,17 @@ def schedule_planning_route_timeline(
                 "planned_activity_id",
                 "",
             ),
-            "start": service_start.isoformat(timespec="minutes"),
-            "end": service_end.isoformat(timespec="minutes"),
+            "start": route_time_text(service_start),
+            "end": route_time_text(service_end),
         })
         stop.update({
-            "leg_departure_at": departure.isoformat(timespec="minutes"),
-            "arrival_at": arrival.isoformat(timespec="minutes"),
-            "estimated_at": service_start.isoformat(timespec="minutes"),
-            "service_end_at": service_end.isoformat(timespec="minutes"),
+            "leg_departure_at": route_time_text(departure),
+            "arrival_at": route_time_text(arrival),
+            "estimated_at": route_time_text(service_start),
+            "service_end_at": route_time_text(service_end),
             "scheduled_at": (
-                booked_at.isoformat(timespec="minutes")
-                if booked_at else service_start.isoformat(
-                    timespec="minutes"
-                )
+                route_time_text(booked_at)
+                if booked_at else route_time_text(service_start)
             ),
             "time_is_estimated": booked_at is None,
         })
@@ -10709,9 +10796,10 @@ def schedule_planning_route_timeline(
         cursor = service_end
 
     try:
-        return_minutes = max(
+        return_seconds = max(
             0,
-            int(math.ceil(float(return_drive_minutes or 0))),
+            int(math.ceil(float(return_drive_seconds if return_drive_seconds is not None
+                                else float(return_drive_minutes or 0) * 60))),
         )
     except (TypeError, ValueError, OverflowError):
         return None, None, planning_error(
@@ -10719,23 +10807,23 @@ def schedule_planning_route_timeline(
             "Rutten saknar en giltig returtid.",
             422,
         )
-    return_departure = planning_next_unblocked_start(
+    return_departure = planning_next_unblocked_instant(
         cursor,
-        return_minutes,
+        return_seconds,
         fixed_intervals,
     )
-    route_end = return_departure + timedelta(minutes=return_minutes)
-    if return_minutes:
+    route_end = return_departure + timedelta(seconds=return_seconds)
+    if return_seconds:
         timeline_segments.append({
             "kind": "return_drive",
-            "start": return_departure.isoformat(timespec="minutes"),
-            "end": route_end.isoformat(timespec="minutes"),
+            "start": route_time_text(return_departure),
+            "end": route_time_text(route_end),
         })
     for interval in fixed_intervals:
         if interval["activity"].get("contact_type") == "lunch":
             timeline_segments.append({
-                "kind": "lunch", "start": interval["start"].isoformat(timespec="minutes"),
-                "end": interval["end"].isoformat(timespec="minutes"),
+                "kind": "lunch", "start": route_time_text(interval["start"]),
+                "end": route_time_text(interval["end"]),
             })
             route_end = max(route_end, interval["end"])
     timeline_segments.sort(key=lambda segment: (segment["start"], segment["kind"]))
@@ -10750,10 +10838,8 @@ def schedule_planning_route_timeline(
             total_minutes=round(elapsed_minutes, 1),
         )
     return scheduled_stops, {
-        "route_end_at": route_end.isoformat(timespec="minutes"),
-        "return_departure_at": return_departure.isoformat(
-            timespec="minutes"
-        ),
+        "route_end_at": route_time_text(route_end),
+        "return_departure_at": route_time_text(return_departure),
         "elapsed_minutes": seconds_to_minutes(
             int(math.ceil(elapsed_minutes * 60))
         ),
@@ -10828,8 +10914,8 @@ def schedule_planning_route_with_anchors(
                 "planned_activity_id", ""
             ),
             "contact_type": interval["activity"].get("contact_type", ""),
-            "start": interval["start"].isoformat(timespec="minutes"),
-            "end": interval["end"].isoformat(timespec="minutes"),
+            "start": route_time_text(interval["start"]),
+            "end": route_time_text(interval["end"]),
         }
         for interval in fixed_intervals
     ]
@@ -10837,23 +10923,23 @@ def schedule_planning_route_with_anchors(
     current_index = 0
     route_limit = route_workday_end(route_start_at)
 
-    def drive_minutes(origin_index, destination_index):
+    def drive_seconds(origin_index, destination_index):
         try:
             seconds = matrix[origin_index][destination_index]
         except (IndexError, TypeError):
             seconds = None
         if seconds is None:
             return None
-        return max(0, int(math.ceil(float(seconds) / 60)))
+        return max(0, int(math.ceil(float(seconds))))
 
     def simulate(stop, from_cursor, from_index):
-        minutes = drive_minutes(from_index, stop["_matrix_index"])
-        if minutes is None:
+        seconds = drive_seconds(from_index, stop["_matrix_index"])
+        if seconds is None:
             return None
-        departure = planning_next_unblocked_start(
-            from_cursor, minutes, fixed_intervals
+        departure = planning_next_unblocked_instant(
+            from_cursor, seconds, fixed_intervals
         )
-        arrival = departure + timedelta(minutes=minutes)
+        arrival = departure + timedelta(seconds=seconds)
         try:
             service_minutes = max(
                 1, int(math.ceil(float(stop.get("duration_minutes") or 20)))
@@ -10864,9 +10950,9 @@ def schedule_planning_route_with_anchors(
             parse_planning_datetime(stop.get("scheduled_at"))
             if stop.get("required") and stop.get("appointment_confirmed", True) else None
         )
-        service_start = planning_next_unblocked_start(
+        service_start = planning_next_unblocked_instant(
             max(arrival, booked_at) if booked_at else arrival,
-            service_minutes,
+            service_minutes * 60,
             fixed_intervals,
         )
         service_end = service_start + timedelta(minutes=service_minutes)
@@ -10875,7 +10961,7 @@ def schedule_planning_route_with_anchors(
             "arrival": arrival,
             "service_start": service_start,
             "service_end": service_end,
-            "drive_minutes": minutes,
+            "drive_seconds": seconds,
             "service_minutes": service_minutes,
             "booked_at": booked_at,
         }
@@ -10896,14 +10982,14 @@ def schedule_planning_route_with_anchors(
                 return False
             tail_cursor = timing["service_end"]
             tail_index = tail_anchor["_matrix_index"]
-        return_minutes = drive_minutes(tail_index, 0)
-        if return_minutes is None:
+        return_seconds = drive_seconds(tail_index, 0)
+        if return_seconds is None:
             return False
-        return_departure = planning_next_unblocked_start(
-            tail_cursor, return_minutes, fixed_intervals
+        return_departure = planning_next_unblocked_instant(
+            tail_cursor, return_seconds, fixed_intervals
         )
         return (
-            return_departure + timedelta(minutes=return_minutes)
+            return_departure + timedelta(seconds=return_seconds)
             <= route_limit
         )
 
@@ -10916,31 +11002,26 @@ def schedule_planning_route_with_anchors(
         }
         public_stop.update({
             "sequence": len(scheduled) + 1,
-            "leg_drive_minutes": timing["drive_minutes"],
-            "leg_departure_at": timing["departure"].isoformat(
-                timespec="minutes"
-            ),
-            "arrival_at": timing["arrival"].isoformat(timespec="minutes"),
-            "estimated_at": timing["service_start"].isoformat(
-                timespec="minutes"
-            ),
-            "service_end_at": timing["service_end"].isoformat(
-                timespec="minutes"
-            ),
+            "leg_drive_seconds": timing["drive_seconds"],
+            "leg_drive_minutes": math.ceil(timing["drive_seconds"] / 60),
+            "leg_departure_at": route_time_text(timing["departure"]),
+            "arrival_at": route_time_text(timing["arrival"]),
+            "estimated_at": route_time_text(timing["service_start"]),
+            "service_end_at": route_time_text(timing["service_end"]),
             "scheduled_at": (
-                timing["booked_at"].isoformat(timespec="minutes")
+                route_time_text(timing["booked_at"])
                 if timing["booked_at"]
-                else timing["service_start"].isoformat(timespec="minutes")
+                else route_time_text(timing["service_start"])
             ),
             "time_is_estimated": not bool(stop.get("required") and stop.get("appointment_confirmed", True)),
         })
-        if timing["drive_minutes"]:
+        if timing["drive_seconds"]:
             segments.append({
                 "kind": "drive",
                 "customer_id": stop.get("customer_id", ""),
                 "customer_row": stop.get("customer_row"),
-                "start": timing["departure"].isoformat(timespec="minutes"),
-                "end": timing["arrival"].isoformat(timespec="minutes"),
+                "start": route_time_text(timing["departure"]),
+                "end": route_time_text(timing["arrival"]),
             })
         segments.append({
             "kind": "visit",
@@ -10948,8 +11029,8 @@ def schedule_planning_route_with_anchors(
             "customer_row": stop.get("customer_row"),
             "planned_activity_id": stop.get("planned_activity_id", ""),
             "required": bool(stop.get("required")),
-            "start": timing["service_start"].isoformat(timespec="minutes"),
-            "end": timing["service_end"].isoformat(timespec="minutes"),
+            "start": route_time_text(timing["service_start"]),
+            "end": route_time_text(timing["service_end"]),
         })
         scheduled.append(public_stop)
         cursor = timing["service_end"]
@@ -10970,10 +11051,10 @@ def schedule_planning_route_with_anchors(
         for state in states:
             clock, last, mask, next_anchor, reward, driven, path = state
             missing_required = [identity for identity in required_ids if not mask & (1 << identity)]
-            back = drive_minutes(last, 0)
+            back = drive_seconds(last, 0)
             if not missing_required and path and back is not None:
-                departure = planning_next_unblocked_start(clock, back, fixed_intervals)
-                if departure + timedelta(minutes=back) <= route_limit:
+                departure = planning_next_unblocked_instant(clock, back, fixed_intervals)
+                if departure + timedelta(seconds=back) <= route_limit:
                     key = (-reward, driven + back,
                            tuple(str(stop.get("customer_id") or stop.get("customer_row")) for stop, _ in path))
                     if best is None or key < best[0]:
@@ -11000,7 +11081,7 @@ def schedule_planning_route_with_anchors(
                 # waypoint can be faster on a directed/non-metric road matrix.
                 # Each actual anchor is checked when it is visited instead.
                 child = (timing["service_end"], identity, new_mask, following_anchor,
-                         reward + values[identity], driven + timing["drive_minutes"], path + ((stop, timing),))
+                         reward + values[identity], driven + timing["drive_seconds"], path + ((stop, timing),))
                 state_key = (new_mask, identity, following_anchor)
                 frontier = children.setdefault(state_key, [])
                 if any(old[0] <= child[0] and old[5] <= child[5] for old in frontier):
@@ -11026,30 +11107,30 @@ def schedule_planning_route_with_anchors(
     selected_ids = {stop["_matrix_index"] for stop, _ in best[1]}
     remaining = [stop for stop in optional if stop["_matrix_index"] not in selected_ids]
 
-    return_minutes = drive_minutes(current_index, 0)
-    if return_minutes is None:
+    return_seconds = drive_seconds(current_index, 0)
+    if return_seconds is None:
         return None, None, planning_error(
             "required_schedule_not_feasible",
             "Returen till startpunkten saknar en körbar väg.",
             422,
         )
-    return_departure = planning_next_unblocked_start(
-        cursor, return_minutes, fixed_intervals
+    return_departure = planning_next_unblocked_instant(
+        cursor, return_seconds, fixed_intervals
     )
-    route_end = return_departure + timedelta(minutes=return_minutes)
+    route_end = return_departure + timedelta(seconds=return_seconds)
     if route_start_at >= route_limit or route_end > route_limit or any(stop.get("required") for stop in remaining):
         return None, None, planning_error(
             "required_schedule_not_feasible",
             "Dagens obligatoriska besök och retur måste rymmas före 17:00.",
             422,
-            scheduled_at=route_start_at.isoformat(timespec="minutes"),
-            estimated_at=route_end.isoformat(timespec="minutes"),
+            scheduled_at=route_time_text(route_start_at),
+            estimated_at=route_time_text(route_end),
         )
-    if return_minutes:
+    if return_seconds:
         segments.append({
             "kind": "return_drive",
-            "start": return_departure.isoformat(timespec="minutes"),
-            "end": route_end.isoformat(timespec="minutes"),
+            "start": route_time_text(return_departure),
+            "end": route_time_text(route_end),
         })
     route_end = max([route_end] + [interval["end"] for interval in fixed_intervals
                                   if interval["activity"].get("contact_type") == "lunch"])
@@ -11058,9 +11139,10 @@ def schedule_planning_route_with_anchors(
         (route_end - route_start_at).total_seconds() / 60
     ))
     return scheduled, {
-        "route_end_at": route_end.isoformat(timespec="minutes"),
-        "return_departure_at": return_departure.isoformat(timespec="minutes"),
-        "return_drive_minutes": return_minutes,
+        "route_end_at": route_time_text(route_end),
+        "return_departure_at": route_time_text(return_departure),
+        "return_drive_seconds": return_seconds,
+        "return_drive_minutes": math.ceil(return_seconds / 60),
         "elapsed_minutes": elapsed_minutes,
         "blocked_minutes": sum(
             int((item["end"] - item["start"]).total_seconds() / 60)
@@ -11069,9 +11151,12 @@ def schedule_planning_route_with_anchors(
         "segments": segments,
         "ranking_contract": ROUTE_RANKING_CONTRACT,
         "objective_priority_sum": -best[0][0] / 1_000_000,
-        "objective_drive_minutes": best[0][1],
+        "objective_drive_seconds": best[0][1],
+        "objective_drive_minutes": math.ceil(best[0][1] / 60),
         "selection_algorithm": "priority-sum-pareto" if beam_limit is None else "priority-sum-beam",
-        "selection_optimality_proven": beam_limit is None,
+        "selection_optimality_proven": False,
+        "candidate_pool_optimality_proven": beam_limit is None,
+        "optimality_scope": "provided_candidate_pool",
         "matrix_request_count": matrix_result.request_count,
         "matrix_cache_hits": matrix_result.cache_hits,
     }, None
@@ -13235,6 +13320,26 @@ def saved_route_request_conflicts(
 
 
 def apply_planning_route(
+    *, spreadsheet, owner, preview, client_request_id, preview_token=None,
+):
+    if preview.get("ranking_contract") != ROUTE_RANKING_CONTRACT:
+        return None, planning_error("route_preview_expired_or_legacy",
+            "Prioriteringsmodellen har uppdaterats. Beräkna rutten igen.", 409)
+    if str(os.environ.get("CRM_RISKY_OPERATIONS_STOPPED", "false")).casefold() != "false":
+        return None, planning_error("crm_operations_stopped", "Ruttsparande är tillfälligt stoppat.", 503)
+    if (not app.testing and application_environment() != "test"
+            and os.environ.get("CRM_EXCLUSIVE_WRITER_CONFIRMED", "").casefold() != "true"):
+        return None, planning_error("exclusive_writer_required",
+            "Ruttsparande kräver verifierat skydd mot samtidiga externa CRM-skrivningar.", 503)
+    with planning_write_lock(), fresh_decision_reads(spreadsheet):
+        fresh_owner, error = resolve_planning_owner(spreadsheet, owner.get("user_name"))
+        if error is not None:
+            return None, error
+        return _apply_planning_route_current(spreadsheet=spreadsheet, owner=fresh_owner,
+            preview=preview, client_request_id=client_request_id, preview_token=preview_token)
+
+
+def _apply_planning_route_current(
     *,
     spreadsheet,
     owner,
@@ -13514,7 +13619,7 @@ def apply_planning_route(
                             return None, planning_error(
                                 "invalid_route_preview", "Ett flexibelt obligatoriskt besök saknar beräknad tid.", 400,
                             )
-                        estimated_text = estimated.isoformat(timespec="minutes")
+                        estimated_text = route_time_text(estimated)
                         if planning_datetime_text(row.get("scheduled_at")) != estimated_text:
                             updates["scheduled_at"] = estimated_text
                         if not is_yes(row.get("time_is_estimated")):
@@ -13810,6 +13915,7 @@ def create_route_proposal():
                 stops=payload.get("stops") or [], fixed_non_route=[],
                 route_start_at=route_start_at,
                 return_drive_minutes=(payload.get("summary") or {}).get("return_drive_minutes"),
+                return_drive_seconds=(payload.get("summary") or {}).get("return_drive_seconds"),
                 confirmed_visits=planning_route_booked_rows(
                     [row for _index, row in read_planned_activity_snapshot(spreadsheet)[2]], user, route_date,
                 ),
@@ -14140,6 +14246,7 @@ def planning_route_import():
         stops=stops,
         fixed_non_route=fixed_non_route,
         route_start_at=start_at,
+        return_drive_seconds=summary.get("return_drive_seconds"),
         return_drive_minutes=summary.get(
             "return_drive_minutes",
             0,
@@ -14835,6 +14942,7 @@ def get_followup_insights():
 
 
 @app.route("/customers/<int:row>/contact", methods=["PATCH"])
+@serialized_crm_write
 def update_customer_contact(row):
     data = request.get_json() or {}
     spreadsheet = get_spreadsheet_with_retry()

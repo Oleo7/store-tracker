@@ -319,7 +319,7 @@ class DialogueAndStrategicPhase3Tests(TestCase):
         # follow-up window and the seven-day minimum for material reorder.
         self.assertEqual(established["primary_trigger_type"], "")
         self.assertEqual(established["covered_trigger_keys"], [])
-        self.assertEqual(established["primary_reason_code"], "recent_reached_routine_wait")
+        self.assertEqual(established["primary_reason_code"], "positive_buyer_followup_wait")
         self.assertFalse(established["can_start_unscheduled_contact"])
 
         reactivation = priorities(

@@ -12,6 +12,7 @@ import hashlib
 import json
 import re
 from zoneinfo import ZoneInfo
+from contact_permissions import REFUSALS, ALLOWANCES, permission_order
 
 STOCKHOLM = ZoneInfo("Europe/Stockholm")
 STATE_EVENT_COLUMNS = [
@@ -21,8 +22,6 @@ STATE_EVENT_COLUMNS = [
 ]
 OPEN_STATUSES = {"open", "scheduled", "needs_review"}
 CLOSED_STATUSES = {"resolved", "cancelled"}
-REFUSALS = {"återkom ej", "kontakta ej", "ring ej"}
-ALLOWANCES = {"kontakt tillåten"}
 UNREACHED = {"ej anträffbar", "unreachable", "not_reached"}
 
 
@@ -119,6 +118,12 @@ def commitment_evidence(source, activity):
     service_hint = bool(re.search(r"reklamation|krediter|ers\u00e4ttningsleverans|leveransproblem|utlovad|lovat kunden", note)
         or re.search(r"(?:bokad|bokat|bekr\u00e4ftad|bekr\u00e4ftat|kommit \u00f6verens|vi ska|vi kommer|ska k\u00f6ra).{0,90}(?:demo|provsmakning)", note)
         or re.search(r"(?:demo|provsmakning).{0,45}(?:bokad|bokat|bekr\u00e4ftad|bekr\u00e4ftat)", note))
+    source_explicit = key(source.get("follow_up_purpose") or source.get("purpose")) in {
+        "customer_followup", "explicit_followup", "service_followup", "service"}
+    if source and service_hint and not source_explicit and not confirmed(source.get("follow_up_agreement_confirmed")):
+        # A confirmed calendar time is not confirmation of a legacy service's
+        # scope. A traced manual clarification is applied from state events.
+        return "uncertain_service", False
     if agreed or explicit:
         return "customer_promise", agreed
     if service_hint:
@@ -329,6 +334,9 @@ def build_customer_state(customers, contact_rows, planned_activity_rows, state_e
             "owner_user_name": text(owner),
             "purpose": "explicit_followup" if explicit else "internal_followup" if kind == "internal_reminder" else "calendar_activity",
             "commitment_kind": kind, "identity_ambiguous": bool(source.get("_identity_ambiguous")),
+            "evidence_status": "uncertain" if kind == "uncertain_service" else "documented",
+            "review_status": "pending" if kind == "uncertain_service" else "not_required",
+            "calendar_status": "",
             "source_scope": "obligation:" + oid, "status": "open",
             "source_contact_id": stable_contact_source_id(source) if source else text(activity.get("source_contact_id")),
             "source_contact_row": source.get("_source_row"),
@@ -396,9 +404,23 @@ def build_customer_state(customers, contact_rows, planned_activity_rows, state_e
         if not aid:
             continue
         source = by_contact.get(text(plan.get("source_contact_id")))
-        if source and source["customer_id"] != plan["customer_id"]:
-            source = None
         oid = text(plan.get("obligation_id")) or (obligation_id_for_contact(source) if source else obligation_id_for_activity(plan))
+        if (source and source["customer_id"] != plan["customer_id"]
+                or oid in commitments and commitments[oid]["customer_id"] != plan["customer_id"]):
+            # Preserve the bad row for Att hantera, never attach it to another
+            # customer's promise or borrow the other customer's agreement.
+            conflict_id = "calendar-conflict:" + aid
+            item = make(plan["customer_id"], conflict_id, activity={**plan,
+                "source_contact_id": "", "obligation_id": "", "appointment_confirmed": False,
+                "customer_agreement_confirmed": False})
+            item.update(purpose="explicit_followup", status="needs_review",
+                        identity_conflict=True, evidence_status="uncertain", review_status="pending",
+                        evidence_quality="cross_customer_source", review_reasons=["cross_customer_source"],
+                        source_contact_id="", customer_agreement_confirmed=False)
+            item["_plans"].append(plan)
+            commitments[conflict_id] = item
+            plan_obligation_ids[aid] = conflict_id
+            continue
         # Only an unambiguous exact legacy source match may deduplicate a row.
         if not source and not text(plan.get("source_contact_id")) and key(plan.get("source")) == "follow_up":
             matches = [row for row in contacts if row["customer_id"] == plan["customer_id"]
@@ -412,7 +434,8 @@ def build_customer_state(customers, contact_rows, planned_activity_rows, state_e
         item = commitments[oid]
         kind, agreed = commitment_evidence(source or {}, plan)
         if kind == "customer_promise" and not item.get("identity_ambiguous"):
-            item.update(purpose="explicit_followup", commitment_kind=kind)
+            item.update(purpose="explicit_followup", commitment_kind=kind,
+                        evidence_status="documented", review_status="not_required")
         if agreed and not item.get("identity_ambiguous"):
             item["customer_agreement_confirmed"] = True
             # Moving an internal appointment is not a new customer agreement.
@@ -474,7 +497,8 @@ def build_customer_state(customers, contact_rows, planned_activity_rows, state_e
         if active and item["status"] not in CLOSED_STATUSES:
             selected = active[-1]
             due = instant(selected.get("scheduled_at"))
-            item.update(status="scheduled", planned_activity_id=text(selected.get("planned_activity_id")),
+            item.update(status="needs_review" if item.get("evidence_status") == "uncertain" else "scheduled",
+                        calendar_status="planned", planned_activity_id=text(selected.get("planned_activity_id")),
                         due_date=due.date().isoformat() if due else item["due_date"],
                         due_at=due.isoformat() if due else "", contact_type=text(selected.get("contact_type")),
                         note=text(selected.get("note")) or item["note"],
@@ -495,7 +519,7 @@ def build_customer_state(customers, contact_rows, planned_activity_rows, state_e
                 item.update(status="needs_review", evidence_quality="missing_completion_contact")
 
     permissions = {}
-    for row in sorted(contacts, key=lambda row: (instant(row.get("date_time")), row.get("_source_row", 0), stable_contact_source_id(row))):
+    for row in sorted(contacts, key=lambda row: permission_order(row, instant(row.get("date_time")))):
         result = key(row.get("result"))
         if result in REFUSALS | ALLOWANCES:
             permissions[row["customer_id"]] = {
@@ -536,7 +560,8 @@ def build_customer_state(customers, contact_rows, planned_activity_rows, state_e
                         owner_user_name=text((owner_user_names or {}).get(cid)) if owner_user_names is not None else item["owner_user_name"])
             # Calendar editor changes remain authoritative for the same link.
             if item["status"] == "scheduled":
-                linked = next((p for p in plans if text(p.get("planned_activity_id")) == item.get("planned_activity_id")), None)
+                linked = next((p for p in plans if p["customer_id"] == cid
+                               and text(p.get("planned_activity_id")) == item.get("planned_activity_id")), None)
                 if linked and key(linked.get("status")) == "planned":
                     scheduled = instant(linked.get("scheduled_at"))
                     item.update(due_at=scheduled.isoformat() if scheduled else "", due_date=scheduled.date().isoformat() if scheduled else item["due_date"],
@@ -567,6 +592,14 @@ def build_customer_state(customers, contact_rows, planned_activity_rows, state_e
             "status", "event_id", "source_contact_id", "occurred_at", "reason", "actor_user_name")})[:12], 16)
     grouped = defaultdict(list)
     for item in commitments.values():
+        # Legacy scheduled payloads and snooze/restore do not prove service scope.
+        clarification = item.get("review_resolution") or {}
+        if item.get("identity_conflict") or (item.get("commitment_kind") == "uncertain_service"
+                and not (clarification.get("reason") and clarification.get("actor_user_name")
+                         and clarification.get("occurred_at"))):
+            item.update(evidence_status="uncertain", review_status="pending")
+            if item["status"] not in CLOSED_STATUSES:
+                item["status"] = "needs_review"
         # A safe JS integer acts as an optimistic revision for both materialized
         # and virtual obligations. Editing a legacy date in Sheets changes it.
         item["revision"] = int(fingerprint({name: item.get(name, "") for name in (

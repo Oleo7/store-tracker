@@ -8,7 +8,7 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import math
 
 PRIORITY_UNITS_PER_POINT = 1_000_000
-ROUTE_RANKING_CONTRACT = "v35-priority-lexicographic-1"
+ROUTE_RANKING_CONTRACT = "v35-priority-lexicographic-2"
 
 
 def priority_units(value):

@@ -2394,7 +2394,7 @@ class RouteOptimizationIntegrationTests(TestCase):
             )
         self.assertIsNone(input_error)
         valid_preview = {
-            "ranking_contract": "v35-priority-lexicographic-1",
+            "ranking_contract": "v35-priority-lexicographic-2",
             "route_date": NOW.date().isoformat(), "user_name": "olle",
             "route_engine_version": ROUTE_ENGINE_VERSION,
             "route_optimization_fingerprint": inputs["fingerprint"],
@@ -2431,7 +2431,7 @@ class RouteOptimizationIntegrationTests(TestCase):
         self.assertEqual(len(self.spreadsheet.worksheet(app_module.ROUTE_PROPOSALS_SHEET).dict_rows()), 1)
 
         preview = {
-            "ranking_contract": "v35-priority-lexicographic-1",
+            "ranking_contract": "v35-priority-lexicographic-2",
             "route_date": NOW.date().isoformat(), "user_name": "olle",
             "route_engine_version": ROUTE_ENGINE_VERSION, "route_optimization_fingerprint": "stale",
             "start": {"latitude": 57.7, "longitude": 11.9},

@@ -544,6 +544,10 @@ def build_request_fingerprint(**kwargs: Any) -> str:
 def build_legacy_ro_v1_request_fingerprint(**kwargs: Any) -> str:
     """Recreate the deployed ro-v1 fingerprint for exact recovery only."""
     input_payload = _request_input_fingerprint_payload(**kwargs)
+    # Historical identity is immutable even when the active ranking contract
+    # changes. This helper never authorizes reuse of an old route preview.
+    for shipment in input_payload["shipments"]:
+        shipment["ranking_contract"] = "v35-priority-lexicographic-1"
     input_payload.pop("workday_policy", None)
     input_payload.pop("blocked_contact_activities", None)
     return request_fingerprint({
@@ -1341,6 +1345,7 @@ def parse_optimize_tours_response(
             "travel_seconds": travel_seconds,
             "travel_minutes": round(travel_seconds / 60, 1),
             "drive_minutes": round(travel_seconds / 60, 1),
+            "return_drive_seconds": return_seconds,
             "return_drive_minutes": round(return_seconds / 60, 1),
             "wait_seconds": wait_seconds,
             "wait_minutes": round(wait_seconds / 60, 1),
@@ -1348,7 +1353,7 @@ def parse_optimize_tours_response(
             "break_minutes": round(break_seconds / 60, 1),
             "visit_seconds": visit_seconds,
             "service_minutes": round(visit_seconds / 60, 1),
-            "route_end_at": vehicle_end.isoformat(timespec="minutes"),
+            "route_end_at": vehicle_end.isoformat(timespec="seconds" if vehicle_end.second else "minutes"),
         },
         "performed_count": len(stops),
         "skipped_count": len(shipment_list) - len(stops),

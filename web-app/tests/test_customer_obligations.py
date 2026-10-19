@@ -326,11 +326,11 @@ class CustomerObligationApiTests(PlanningApiTestCase):
         self.assertEqual([item["obligation_id"] for item in state["obligations"][CID]], ["followup:valid-number"])
         self.assertEqual(state["contact_permissions"][CID]["source_contact_id"], "valid-number")
 
-    def test_permission_identical_timestamps_follow_actual_event_order(self):
+    def test_permission_identical_timestamps_refusal_wins(self):
         contacts = [{"customer_id": CID, "date_time": "2026-07-20 09:00", "contact_id": "z-refusal", "result": "Återkom ej"},
                     {"customer_id": CID, "date_time": "2026-07-20 09:00", "contact_id": "a-permission", "result": "Kontakt tillåten"}]
         state = build_customer_state(app_module.get_customer_rows(self.spreadsheet), contacts, [], as_of=NOW)
-        self.assertEqual(state["contact_permissions"][CID]["status"], "allowed")
+        self.assertEqual(state["contact_permissions"][CID]["status"], "do_not_contact")
 
     def test_stale_contact_form_cannot_reopen_resolved_obligation(self):
         self.source()

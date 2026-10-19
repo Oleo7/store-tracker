@@ -94,11 +94,11 @@ class SolverTests(TestCase):
         self.assertEqual(route.return_drive_seconds, 120)
         self.assertEqual(route.total_seconds, 1380)
 
-    def test_exact_solver_rejects_exactly_nine_hours(self):
+    def test_exact_solver_accepts_exactly_nine_hours(self):
         candidates = [candidate(2, 75)]
         matrix = [[31200], [0]]
         solution = solve_route(candidates, matrix)
-        self.assertEqual(solution.route_indices, ())
+        self.assertEqual(solution.route_indices, (0,))
 
     def test_exact_solver_accepts_one_second_under_nine_hours(self):
         candidates = [candidate(2, 75)]
@@ -166,12 +166,12 @@ class SolverTests(TestCase):
         self.assertEqual(route.total_priority_score, 0)
         self.assertTrue(route.stops[0].candidate.required)
 
-    def test_required_stop_over_strict_budget_has_stable_422_error(self):
+    def test_required_stop_one_second_over_budget_has_stable_422_error(self):
         candidates = [candidate(2, 0, required=True)]
         with self.assertRaises(RequiredStopsNotFeasible) as raised:
             solve_route(
                 candidates,
-                [[800], [0]],
+                [[801], [0]],
                 max_total_seconds=2000,
                 service_seconds_per_stop=1200,
             )
@@ -212,7 +212,7 @@ class SolverTests(TestCase):
     def test_geography_can_select_a_slightly_lower_scored_customer(self):
         candidates = [candidate(2, 60), candidate(3, 55)]
         matrix = complete_matrix(
-            [600, 60],
+            [601, 60],
             [
                 [0, 40000],
                 [40000, 0],
@@ -344,7 +344,7 @@ class SolverTests(TestCase):
         with self.assertRaises(RouteVerificationError):
             verify_route(
                 candidates=candidates,
-                drive_seconds=[[31200], [0]],
+                drive_seconds=[[31201], [0]],
                 route_indices=[0],
             )
 
@@ -521,8 +521,8 @@ class SolverTests(TestCase):
             service_seconds_per_stop=600,
         )
 
-        self.assertEqual(len(proposal.route.stops), 1)
-        self.assertLess(proposal.route.total_seconds, 1380)
+        self.assertEqual(len(proposal.route.stops), 2)
+        self.assertEqual(proposal.route.total_seconds, 1380)
 
     def test_required_stop_without_direct_road_has_stable_422_error(self):
         with self.assertRaises(RequiredStopsNotFeasible) as raised:

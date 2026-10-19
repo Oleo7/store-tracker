@@ -9773,7 +9773,7 @@
             <input id="planning-editor-agreement" type="checkbox" ${planningTruthy(activity?.customer_agreement_confirmed ?? seed?.customer_agreement_confirmed) ? "checked" : ""} />
             Överenskommen uppföljning med kunden
           </label>
-          <p class="planning-field-help">Behåll kundens överenskommelse separat tills den har utförts eller avskrivits.</p>
+          <p class="planning-field-help">Behåll kundens överenskommelse separat tills den har utförts eller avskrivits. För ett osäkert serviceärende: skriv i anteckningen vad som klarlagts och bekräfta kundens överenskommelse för att aktivera uppgiften.</p>
         </div>
         <div class="planning-appointment-field" id="planning-editor-appointment-field" ${["visit", "phone"].includes(selectedType) ? "" : "hidden"}>
           <label class="planning-followup-toggle" for="planning-editor-appointment">

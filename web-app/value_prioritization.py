@@ -13,7 +13,7 @@ import math
 import unicodedata
 
 VERSION = "v3.5"
-POLICY_VERSION = "2026-10-history-reconciled"
+POLICY_VERSION = "2026-10-audit-corrected"
 POLICY = {
     "shrinkage_purchases": 3.0, "horizon_days": 90,
     "realization_prospect": 0.50, "realization_first_order": 0.70,
@@ -24,6 +24,7 @@ POLICY = {
     # Does NOT imply an 80% purchase chance; must be portfolio-calibrated.
     "maximum_repeat_frequency": 6.0, "score_scale_dfp": 2.625,
     "unknown_dialogue_factor": 0.70, "retry_business_days": 2,
+    "retry_sequence_max_days": 30,
     "stale_repeat_after_cycles": 3.0, "stale_repeat_factor": 0.75,
     "very_stale_repeat_after_cycles": 6.0, "very_stale_repeat_factor": 0.60,
     "stale_first_order_after_days": 180, "stale_first_order_factor": 0.70,
@@ -132,7 +133,7 @@ def segment_prior(values: list[float], segment: str, all_values: list[float]) ->
 def validate_policy(policy: dict) -> None:
     """Reject invalid policy, even while admin editing is intentionally disabled."""
     positives = ("shrinkage_purchases", "horizon_days", "score_scale_dfp",
-                 "retry_business_days", "maximum_repeat_frequency",
+                 "retry_business_days", "retry_sequence_max_days", "maximum_repeat_frequency",
                  "format_prior_min_buyers", "format_prior_strength",
                  "stale_followup_review_days",
                  "stale_followup_order_review_days",
@@ -600,7 +601,8 @@ def store_contact_guidance(
         # decision, including real contact restrictions. For unbooked work,
         # try due scopes in stable date/ID order and use exactly the same
         # negative, order, retry and snooze policy for each one's evidence.
-        if (candidate_arguments is not None and not planned_current
+        if (candidate_arguments is not None and (not planned_current or
+                review and selected.get("commitment_kind") == "uncertain_service")
                 and not result["can_start_unscheduled_contact"]
                 and not result["can_execute_planned_contact"]):
             review_ids = list(result["review_obligation_ids"])
@@ -633,9 +635,13 @@ def store_contact_guidance(
             # never authorize execution of the uncertain obligation itself.
             if allow_commercial_fallback and review and code == "stale_follow_up_review":
                 arguments = dict(candidate_arguments)
+                review_plan_ids = {str(item.get("planned_activity_id") or "") for item in open_items
+                                   if str(item.get("obligation_id") or "") in review_ids}
+                other_plans = [p for p in all_plans
+                    if str(p.get("row", p).get("planned_activity_id") or "") not in review_plan_ids]
                 arguments.update(obligations=[item for item in open_items
                     if str(item.get("obligation_id") or "") not in review_ids] + internal_reminders,
-                    planned_activity=None, planned_activity_options=(),
+                    planned_activity=other_plans[0] if other_plans else None, planned_activity_options=other_plans,
                     _selected_obligation_id=None)
                 routine = store_contact_guidance(**arguments)
                 routine["review_obligation_ids"] = review_ids
@@ -671,6 +677,7 @@ def store_contact_guidance(
 
     order_after_attempt = bool(last_order_date and latest_attempt_date and last_order_date >= latest_attempt_date)
     retry_needed = bool(latest_attempt_result == "Ej anträffbar" and latest_attempt_date
+                            and 0 <= (today - latest_attempt_date).days <= int(policy["retry_sequence_max_days"])
                             and (explicit or not order_after_attempt))
     if retry_needed:
         retry = next_business_day_retry(latest_attempt_date, int(policy["retry_business_days"]))
@@ -727,6 +734,14 @@ def store_contact_guidance(
         return choose("idle", "Granska historisk orderstatus" if delivery_count else "Granska order-/leveransstatus", "Äldre order saknar känt leveransdatum", code="stale_unconfirmed_order_review" if delivery_count else "order_without_verified_delivery", review=True)
     if delivery_count == 0 and unverified_order_without_delivery:
         return choose("idle", "Granska order-/leveransstatus", "Registrerad order utan känt leveransdatum", code="order_without_verified_delivery", review=True)
+    # Default spacing applies to the commercial follow-up, including the first
+    # / second purchase phase and unconfirmed calendar reminders. A documented
+    # separate promise or agreed date has already been evaluated in its scope.
+    if positive_buyer_signal and age is not None and 0 <= age < int(policy["positive_buyer_followup_min_days"]):
+        return choose("wait", "Avvakta positiv köparkontakt",
+            "Positiv köpardialog – standarduppföljning efter tio dagar",
+            code="positive_buyer_followup_wait",
+            until=latest_reached_date + timedelta(days=int(policy["positive_buyer_followup_min_days"])))
     if booking_selected:
         return choose("planned", "Nästa kontakt", planned_reason, code="future_planned_activity", key="open_planning")
     if future_selected:

@@ -7,6 +7,7 @@ import re
 from commercial_orders import order_volume, commercial_order
 from contact_channel import recommend_contact_channel
 from customer_obligations import stable_contact_source_id
+from contact_permissions import permission_order
 from statistics import median
 from value_prioritization import (VERSION as VALUE_MODEL_VERSION, POLICY as VALUE_POLICY,
     POLICY_VERSION as VALUE_POLICY_VERSION,
@@ -635,7 +636,7 @@ def build_contact_features(sales_activities: list[dict], order_features: dict, *
         permission_rows = [a for a in activities if not a["is_email"] and (
             str(a["row"].get("result") or "").strip().casefold() in DO_NOT_CONTACT_RESULTS
             or str(a["row"].get("result") or "").strip().casefold() == "kontakt tillåten")]
-        latest_permission = permission_rows[-1] if permission_rows else None
+        latest_permission = max(permission_rows, key=lambda a: permission_order(a["row"], a["datetime"])) if permission_rows else None
         permission_denied = bool(latest_permission and str(latest_permission["row"].get("result") or "").strip().casefold() in DO_NOT_CONTACT_RESULTS)
         reported_orders = [a for a in human_activities if normalize_contact_result(a["row"].get("result")) == "Order lagd"]
         reached_by_purpose = {}

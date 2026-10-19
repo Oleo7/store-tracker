@@ -132,9 +132,8 @@ class GuidanceIntegrityTests(TestCase):
                 self.assertEqual(g['action_label'],'Följ upp positiv dialog')
                 self.assertEqual(g['reason_code'], 'positive_buyer_followup' if rows else 'positive_dialogue_followup')
         reorder=scored(orders=[order('first',19)],contacts=[contact(3,'Positiv')])
-        self.assertEqual(reorder['primary_trigger_type'],'second_purchase_due')
-        self.assertEqual(reorder['covered_trigger_keys'], ['second_purchase_due'])
-        self.assertEqual(self.assert_canonical(reorder)['action_label'],'Säkra andra köpet')
+        self.assertFalse(reorder['can_start_unscheduled_contact'])
+        self.assertEqual(self.assert_canonical(reorder)['reason_code'],'positive_buyer_followup_wait')
 
     def test_a_prospect_explanation_never_changes_context_identity(self):
         baseline=scored(store=customer('A'))
