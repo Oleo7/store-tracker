@@ -666,7 +666,7 @@ vm.runInContext(`(async () => {
   assert.equal(insightsBackgroundRefreshPending,false); assert.equal(requests.length-first,2);
 
   // A successful background refresh dirties a hidden list, then navigation renders new guidance once.
-  const guidancePayload = (id, date, status, label) => ({'test store':{customer_guidance:{
+  const guidancePayload = (id, date, status, label) => ({'test store':{value_model_version:'v3.5',customer_guidance:{
     focus_key:'repeat_purchase', focus_label:'Repeat purchase', status_key:status, status_label:label,
     action_label:label, planned_activity_id:id, next_contact_at:date, recommended_contact_type:'visit', can_contact_now:status==='act_now',
   }}});

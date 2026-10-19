@@ -156,13 +156,13 @@ class PlanningSuggestionV3IntegrationTests(PlanningApiTestCase):
 
     def test_queue_sort_uses_score_value_precedence_then_stable_customer(self):
         candidates = [
-            {"customer_id": "c", "customer_row": 4, "priority_score": 80,
+            {"customer_id": "c", "customer_row": 4, "priority_score": 80, "contact_priority_precise":80.0,
              "expected_order_dfp": 20, "trigger_precedence": 3},
-            {"customer_id": "b", "customer_row": 3, "priority_score": 80,
+            {"customer_id": "b", "customer_row": 3, "priority_score": 80, "contact_priority_precise":80.0,
              "expected_order_dfp": 20, "trigger_precedence": 2},
-            {"customer_id": "a", "customer_row": 2, "priority_score": 80,
+            {"customer_id": "a", "customer_row": 2, "priority_score": 80, "contact_priority_precise":80.0,
              "expected_order_dfp": 30, "trigger_precedence": 3},
-            {"customer_id": "d", "customer_row": 5, "priority_score": 90,
+            {"customer_id": "d", "customer_row": 5, "priority_score": 90, "contact_priority_precise":90.0,
              "expected_order_dfp": 10, "trigger_precedence": 3},
         ]
         ordered = sorted(candidates, key=app_module.planning_suggestion_sort_key)

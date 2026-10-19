@@ -33,7 +33,7 @@ ${functions.map(source).join('\n')}
 `, context);
 vm.runInContext(String.raw`
 const g = {focus_key:'repeat_purchase',status_key:'wait'};
-const data = {delivery_count:2,latest_delivery_date:'2026-09-08',latest_delivery_dfp:13,
+const data = {value_model_version:'v3.5',delivery_count:2,latest_delivery_date:'2026-09-08',latest_delivery_dfp:13,
   next_delivery_date:'2026-09-22',next_delivery_dfp:15,latest_order_dfp:99,
   customer_guidance:g};
 const original = JSON.stringify(data);

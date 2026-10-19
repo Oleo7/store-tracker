@@ -1,3 +1,5 @@
+> Historical contract. Active ranking, routing and recovery are superseded by [v3.5](value-contact-priority-v35.md).
+
 > Historical v3.3 reference. For the current PR48 rules, see [v3.4](value-contact-priority-v34.md), especially legacy reminders, routing and rollback.
 
 # V3.3: en prioritet i säljarens arbetslista

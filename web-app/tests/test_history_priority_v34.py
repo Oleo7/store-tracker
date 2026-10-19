@@ -219,27 +219,27 @@ class ContactAndRankingTests(TestCase):
         with patch.dict(os.environ,{'PRIORITY_RANKING_MODE':'v2.2'}):
             old,st2=model([c])
             self.assertEqual(old['work_priority_score'],old['priority_score'])
-            self.assertEqual(old['ranking_mode'],'v2.2')
+            self.assertEqual(old['ranking_mode'],'v3')
+            self.assertEqual(old['work_priority_raw'],v3['work_priority_raw'])
             self.assertEqual(old['can_start_unscheduled_contact'],v3['can_start_unscheduled_contact'])
             banned,_=model([c,contact(1,'\u00c5terkom ej')]);self.assertEqual(banned['work_priority_raw'],0)
         self.assertEqual(st,st2)
 
-    def test_raw_route_value_not_rounded_display_or_old_score(self):
-        a={'value_model_version':'v3.4-preview','priority_score':99,'contact_priority_score':95,'contact_priority_raw':50.0,
-           'work_priority_raw':60.,'work_priority_score':96,'ranking_mode':'v3'}
-        b={**a,'priority_score':5,'contact_priority_raw':55.0}
+    def test_normalized_route_index_is_not_raw_dfp_or_old_score(self):
+        a={'value_model_version':'v3.5','score_version':'v3.5','priority_score':99,
+           'contact_priority_score':95,'contact_priority_precise':95.1,'contact_priority_raw':50.,
+           'work_priority_raw':60.,'work_priority_precise':96.2,'work_priority_score':96}
+        b={**a,'priority_score':5,'contact_priority_precise':95.2,'contact_priority_raw':9999.}
         va=application.route_priority_values(a);vb=application.route_priority_values(b)
         self.assertEqual(va['priority_score'],vb['priority_score'])
-        self.assertGreater(vb['commercial_value'],va['commercial_value'])
+        self.assertEqual(va['commercial_value'],95.1)
+        self.assertEqual(vb['commercial_value'],95.2)
         self.assertGreater(shipment_penalty(vb),shipment_penalty(va))
-        ca=RouteCandidate(2,'A',Coordinate(57.,12.),95,commercial_value=50.)
-        cb=RouteCandidate(3,'B',Coordinate(57.,12.),95,commercial_value=55.)
-        self.assertGreater(cb.objective_value,ca.objective_value)
-        self.assertEqual(application.route_priority_values(a,required=True)['commercial_value'],60.)
+        self.assertEqual(application.route_priority_values(a,required=True)['commercial_value'],96.2)
 
     def test_route_corrupt_value_fails_closed(self):
         for bad in (None,True,float('nan'),float('inf'),-1):
-            p={'value_model_version':'v3.4-preview','priority_score':99,
+            p={'value_model_version':'v3.5','priority_score':99,
                'contact_priority_raw':bad,'contact_priority_score':90}
             self.assertIsNone(application.route_priority_values(p))
 

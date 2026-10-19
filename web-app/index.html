@@ -4722,7 +4722,7 @@
     // An opt-in header adds the ID-keyed value read model without breaking
     // older consumers of the name-keyed /customer-insights response.
     const options = path.endsWith("/customer-insights")
-      ? { headers: { "X-PB-Value-Model": "v3.4" } }
+      ? { headers: { "X-PB-Value-Model": "v3.5" } }
       : undefined;
     const requestPromise = fetch(path, options)
       .then(async response => {
@@ -5134,22 +5134,11 @@
   }
 
   function hasPriorityScore(insight) {
-    return insight?.priority_score !== undefined && insight?.priority_score !== null && insight?.priority_score !== "";
+    return getWorkPriorityValue(insight) !== null;
   }
 
   function prioritySort(a, b) {
-    const ia = getCustomerInsight(a);
-    const ib = getCustomerInsight(b);
-
-    return (
-      (Number(hasPriorityScore(ib)) - Number(hasPriorityScore(ia))) ||
-      (Number(ib.priority_score || 0) - Number(ia.priority_score || 0)) ||
-      (Number(ib.expected_order_dfp || 0) - Number(ia.expected_order_dfp || 0)) ||
-      (segmentRank(b.customer_segment) - segmentRank(a.customer_segment)) ||
-      (Number(ib.overdue_days ?? -999) - Number(ia.overdue_days ?? -999)) ||
-      (Number(ib.total_dfp || 0) - Number(ia.total_dfp || 0)) ||
-      String(a.customer || "").localeCompare(String(b.customer || ""), "sv")
-    );
+    return contactPrioritySort(a, b);
   }
 
   function sortedModelValue(insight, key) {
@@ -5186,9 +5175,9 @@
   }
 
   function getWorkPriorityValue(insight, suffix = "score") {
-    const key = `work_priority_${suffix}`;
-    return sortedModelValue(insight, Object.prototype.hasOwnProperty.call(insight || {}, key)
-      ? key : `contact_priority_${suffix}`);
+    if (insight?.value_model_version !== "v3.5") return null;
+    const key = `work_priority_${suffix === "raw" ? "precise" : suffix}`;
+    return sortedModelValue(insight, key);
   }
 
   function getCustomerWorkState(customer) {
@@ -5232,14 +5221,16 @@
     const insight = customerOrInsight?.customer_guidance
       ? customerOrInsight
       : getCustomerInsight(customerOrInsight);
-    return insight?.list_guidance || insight?.customer_guidance || {};
+    return insight?.value_model_version === "v3.5"
+      ? (insight.list_guidance || insight.customer_guidance || {}) : {};
   }
 
   function getCustomerListGuidance(customerOrInsight) {
     const insight = customerOrInsight?.list_guidance || customerOrInsight?.customer_guidance
       ? customerOrInsight
       : getCustomerInsight(customerOrInsight);
-    return insight?.list_guidance || insight?.customer_guidance || {};
+    return insight?.value_model_version === "v3.5"
+      ? (insight.list_guidance || insight.customer_guidance || {}) : {};
   }
 
   function getGuidanceStatusClass(statusKey) {
@@ -5304,7 +5295,6 @@
       ${getPotentialHtml(c)}
       ${ins.business_value_confidence ? `<span>Underlag: ${esc(ins.business_value_confidence)}</span>` : ""}
       ${guidance.status_key === "planned" ? "<span>Kundens planerade arbete ingår i prioriteten. Extra obokad kontakt är inte rekommenderad.</span>" : ""}
-      ${ins.ranking_mode === "v2.2" ? "<span>Reservsortering enligt v2.2. Aktuella kontakt- och uppföljningsregler gäller fortfarande.</span>" : ""}
       ${ins.history_note ? `<span>${esc(ins.history_note)}</span>` : ""}
       ${(ins.data_warnings || guidance.data_warnings || []).map(warning => `<span class="customer-history-warning">${esc(warning.text || "")}</span>`).join("")}
       <span>Poängen är ett index, inte en köpchans eller en försäljningsprognos.</span>
@@ -5752,18 +5742,11 @@
   }
 
   function mapPriorityValue(insight, suffix = "score") {
-    if (Object.prototype.hasOwnProperty.call(insight || {}, "value_model_version")
-        || Object.prototype.hasOwnProperty.call(insight || {}, "work_priority_raw")) {
-      return getWorkPriorityValue(insight, suffix);
-    }
-    return sortedModelValue(insight, "priority_score");
+    return getWorkPriorityValue(insight, suffix);
   }
 
   function mapPrioritySort(a, b) {
-    const ia = getCustomerInsight(a), ib = getCustomerInsight(b);
-    if (Object.prototype.hasOwnProperty.call(ia, "value_model_version")
-        || Object.prototype.hasOwnProperty.call(ib, "value_model_version")) return contactPrioritySort(a, b);
-    return prioritySort(a, b);
+    return contactPrioritySort(a, b);
   }
 
   function getRouteProposalBaseCustomers() {
@@ -11488,7 +11471,7 @@
     mapReturnView = "list";
     const MAP_LIMIT = 150;
     // Stage 1 only changes the Butiker list. Preserve the pre-existing
-    // v2.2 route/map ordering regardless of its new sort selector.
+    // All map and list ranking uses the same current v3 priority.
     const customersWithCoordinates = getFilteredCustomers().slice()
       .sort(mapPrioritySort).filter(hasMapCoordinates);
     mapStops = customersWithCoordinates.slice(0, MAP_LIMIT);

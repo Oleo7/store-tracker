@@ -202,7 +202,7 @@ class ValuePriorityStage1Tests(TestCase):
         self.assertIn("priority_score", row)
         self.assertIn("business_value_raw", row)
         self.assertIn("contact_priority_raw", row)
-        self.assertEqual(row["value_model_version"], "v3.4-preview")
+        self.assertEqual(row["value_model_version"], "v3.5")
 
 
     def test_contact_priority_follows_real_dialogue_age_not_value_score(self):
@@ -644,7 +644,7 @@ class ValuePriorityFrontendStage1Tests(TestCase):
                          'getPriorityWhyHtml(c)', 'id="planning-backlog"',
                          'data-work-filter="all"', 'data-work-filter="planned"',
                          '"/customer-obligations/action"', '"/customer-workflow/action"',
-                         '"/customer-contact-permission"', '"v3.4"']:
+                         '"/customer-contact-permission"', '"v3.5"']:
             self.assertTrue(expected in html, f"Missing frontend contract: {expected}")
         for forbidden in ['id="planning-recommendation"', 'Fler nästa åtgärder', '/planning/suggestions']:
             self.assertFalse(forbidden in html, f"Obsolete frontend contract: {forbidden}")

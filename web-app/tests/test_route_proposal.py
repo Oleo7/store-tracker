@@ -17,6 +17,8 @@ sys.path.insert(0, str(WEB_APP_DIR))
 
 import app as app_module
 import route_proposal as route_proposal_module
+from v3_fixtures import current_rank
+
 from route_proposal import (
     Coordinate,
     GoogleRoutesTravelTimeProvider,
@@ -54,7 +56,7 @@ def candidate(
         ),
         priority_score=score,
         required=required,
-    )
+     commercial_value=score)
 
 
 def complete_matrix(start_legs, between):
@@ -720,8 +722,8 @@ class RouteEndpointTests(TestCase):
             },
         ]
         self.priorities = [
-            {"row": 2, "customer": "Authoritative Store", "priority_score": 88},
-            {"row": 3, "customer": "Other Store", "priority_score": 42},
+            current_rank({"row": 2, "customer": "Authoritative Store", "priority_score": 88}),
+            current_rank({"row": 3, "customer": "Other Store", "priority_score": 42}),
         ]
         self.provider = FormulaProvider()
         self.patchers = [
@@ -824,13 +826,10 @@ class RouteEndpointTests(TestCase):
             for row in range(2, 77)
         ]
         self.priorities[:] = [
-            {
-                "row": row,
-                "customer_id": f"route-{row}",
-                "customer": f"Store {row}",
-                "priority_score": 90, "contact_priority_score": 90,
-                "contact_priority_raw": 1000 - row, "value_model_version": "v3.4-preview",
-            }
+            current_rank({
+                "row": row, "customer_id": f"route-{row}", "customer": f"Store {row}",
+                "priority_score": 90,
+            })
             for row in range(2, 77)
         ]
 

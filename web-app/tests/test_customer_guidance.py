@@ -62,7 +62,7 @@ def contact(when, *, result="Neutral", follow_up="", contact_id="contact-1"):
 
 
 def scored(*, customers=None, orders=(), contacts=(), planned=(), today=TODAY,
-           now=NOW, scoring_version="v2.2"):
+           now=NOW, scoring_version="v3.5"):
     customers = customers or [customer()]
     order_features = build_order_features(list(orders))
     return build_priority_customers(
@@ -91,7 +91,7 @@ class CustomerGuidanceTests(TestCase):
             contacts=[contact(NOW - timedelta(days=14))],
         )[0]
 
-        self.assertEqual(item["priority_score"], 82)
+        self.assertEqual(item["priority_score"], 91)
         self.assertEqual(item["customer_guidance"]["focus_key"], "second_purchase")
         self.assertEqual(item["customer_guidance"]["status_key"], "act_now")
         self.assertEqual(
@@ -102,7 +102,7 @@ class CustomerGuidanceTests(TestCase):
             scored(
                 customers=[torp], orders=[torp_order],
                 contacts=[contact(NOW - timedelta(days=14))],
-                scoring_version="v2.1",
+                scoring_version="v3.5",
             )[0]["customer_guidance"]["action_label"],
             "Säkra andra köpet",
         )
@@ -342,7 +342,8 @@ class CustomerGuidanceTests(TestCase):
             ("dismissed", "Tidigare förslag dolt"),
         ):
             updated = apply_workflow_suppressions([base], {"store-1": reason})[0]
-            self.assertEqual(updated["priority_score"], base["priority_score"])
+            self.assertEqual(updated["priority_score"], 0)
+            self.assertEqual(updated["business_value_raw"], base["business_value_raw"])
             self.assertEqual(updated["customer_guidance"]["status_key"], "wait")
             self.assertIn(expected_text, updated["customer_guidance"]["reason_text"])
 

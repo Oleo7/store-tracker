@@ -1,7 +1,7 @@
 """V3.3 preview: independent business potential and contact urgency.
 
 DFP-based opportunity indices, NOT calibrated probabilities, SEK forecasts
-or causal sales uplift. Keep legacy priority_score as a rollback/comparison reference only.
+or causal sales uplift. One live model supplies every ranking surface; no historical-score fallback.
 Constants are centralized for a future validated admin-adjustable policy.
 """
 from __future__ import annotations
@@ -12,7 +12,7 @@ from statistics import median
 import math
 import unicodedata
 
-VERSION = "v3.4-preview"
+VERSION = "v3.5"
 POLICY_VERSION = "2026-10-history-reconciled"
 POLICY = {
     "shrinkage_purchases": 3.0, "horizon_days": 90,
@@ -169,15 +169,22 @@ def validate_policy(policy: dict) -> None:
 validate_policy(POLICY)
 
 
-def display_score(raw: float, policy: dict = POLICY) -> int:
-    """Monotonic index; sort by raw values to preserve large opportunities."""
-    raw = float(raw or 0)
-    if not math.isfinite(raw):
-        raise ValueError("Non-finite opportunity")
-    raw = max(0.0, raw)
-    scale = float(policy["score_scale_dfp"])
-    return round(100.0 * raw / (raw + scale))
+def precise_score(raw: float, policy: dict = POLICY) -> float:
+    """Common 0-100 priority index, at six decimal places for stable route sums.
 
+    The quantum is numerical precision, not an extra commercial weight. Zero
+    means no contact opportunity. Missing/nonfinite inputs never become a score.
+    """
+    if isinstance(raw, bool) or raw is None:
+        raise ValueError("Missing/invalid opportunity")
+    raw = float(raw)
+    if not math.isfinite(raw) or raw < 0:
+        raise ValueError("Invalid opportunity")
+    return round(100.0 * raw / (raw + float(policy["score_scale_dfp"])), 6)
+
+
+def display_score(raw: float, policy: dict = POLICY) -> int:
+    return round(precise_score(raw, policy))
 
 def business_opportunity(*, delivery_values: list[float], prior_dfp: float,
                          delivery_count: int, cycle_days: int | None,
@@ -275,7 +282,7 @@ def business_days_elapsed(start: date | None, end: date) -> int:
 
 
 def first_order_contact_factor(days_since_delivery: int | None, sku_count: int | None) -> float:
-    """Reviewed v2.2 phase policy, normalized independently of dialogue recency.
+    """Standalone first-delivery phase policy, normalized independently of dialogue recency.
 
     This is a timing index, not a probability. Unknown SKU is not one SKU.
     """
@@ -336,6 +343,7 @@ def contact_opportunity(*, business_value_raw: float,
     raw = max(0.0, float(business_value_raw or 0) * relevance)
     return {"contact_priority_raw": round(raw, 6),
             "contact_priority_score": display_score(raw, policy),
+            "contact_priority_precise": precise_score(raw, policy),
             "contact_priority_bucket": bucket,
             "contact_relevance_factor": round(relevance, 4),
             "contact_factor": round(relevance, 4)}
@@ -397,7 +405,7 @@ def _decision_moment(value):
 
 
 def store_contact_guidance(
-    *, legacy: dict, today: date, business_value_raw: float,
+    *, context: dict, today: date, business_value_raw: float,
     latest_attempt_date: date | None, latest_attempt_result: str,
     latest_reached_date: date | None, latest_reached_result: str,
     last_opt_out_date: date | None,
@@ -416,7 +424,7 @@ def store_contact_guidance(
     latest_attempt_at=None, latest_reached_at=None, follow_up_created_at=None,
     latest_reached_event_order=None, follow_up_event_order=None,
     source_contact_id="", reported_order_date=None, latest_verified_delivery_date=None,
-    first_order_sku_count=None, legacy_value_index=0, segment="",
+    first_order_sku_count=None, onboarding_value_index=0, segment="",
     reached_by_purpose=None, completed_by_purpose=None, first_delivery_date=None,
     obligations=None, planned_activity=None, planned_activity_options=(), workflow_suppression=None,
     invalid_identity=False, ignore_planning=False, allow_commercial_fallback=True, self_ordering_signal=False,
@@ -432,7 +440,7 @@ def store_contact_guidance(
     # decision function. Candidate evaluation never rebuilds customer features
     # and keeps the full obligation list, including independent review cases.
     candidate_arguments = dict(locals()) if _selected_obligation_id is None else None
-    guidance = dict(legacy or {})
+    guidance = dict(context or {})
     data_warnings = []
     # A historical order hint is not a perpetual sales prohibition. Keep the
     # uncertainty explicit and use only dated imported deliveries for value.
@@ -809,7 +817,7 @@ def store_contact_guidance(
         if days_since_delivery is None or days_since_delivery < 7:
             return choose("idle", "Ingen åtgärd nu", "Första leveransen är nyligen genomförd", code="first_order_new")
         if days_since_delivery <= 10:
-            if str(segment).upper() in {"A", "B"} or first_order_sku_count == 1 or legacy_value_index >= 70:
+            if str(segment).upper() in {"A", "B"} or first_order_sku_count == 1 or onboarding_value_index >= 70:
                 return choose("act_now", "Kontrollera placering och start", f"Första leverans för {days_since_delivery} dagar sedan – planera uppföljning", code="first_order_onboarding", key="check_placement")
             return choose("idle", "Invänta andra köpets uppföljning", "Ingen särskild tidig onboardingindikator", code="first_order_onboarding_not_required")
         return choose("act_now", "Säkra andra köpet", f"{days_since_delivery} dagar sedan första leveransen · dags att säkra andra köpet", code="second_purchase_due", key="secure_repeat_purchase")

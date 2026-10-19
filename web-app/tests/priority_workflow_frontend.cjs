@@ -71,21 +71,21 @@ vm.runInContext(`(async()=>{
  openContactFormForCustomer({...booked,customer:'Historical inbound',contact_permission:{status:'do_not_contact'}});
  assert.deepEqual(formViews,['form'],'ordinary historical or inbound logging remains available without initiating a scoped contact');
  assert.equal(activePlannedActivityId,'');assert.equal(activeContactObligation,null);
- assert.equal(getWorkPriorityValue({work_priority_raw:0,contact_priority_raw:99},'raw'),0);
- assert.equal(getWorkPriorityValue({contact_priority_raw:7},'raw'),7);
+ assert.equal(getWorkPriorityValue({value_model_version:'v3.5',work_priority_precise:0,contact_priority_raw:99},'raw'),0);
+ assert.equal(getWorkPriorityValue({contact_priority_raw:7,priority_score:99},'raw'),null);
  assert.equal(getWorkPriorityValue({work_priority_raw:null,contact_priority_raw:99},'raw'),null);
- assert.equal(mapPriorityValue({value_model_version:'v3.4-preview',work_priority_raw:15,priority_score:99},'raw'),15);
- assert.equal(mapPriorityValue({value_model_version:'v3.4-preview',work_priority_raw:null,priority_score:99},'raw'),null);
- assert.equal(mapPriorityValue({priority_score:70},'raw'),70);
- const mapRanked=[{customer:'Old high',customer_id:'a',value_model_version:'v3.4-preview',priority_score:99,work_priority_raw:5},
-                  {customer:'New high',customer_id:'b',value_model_version:'v3.4-preview',priority_score:5,work_priority_raw:99}].sort(mapPrioritySort);
+ assert.equal(mapPriorityValue({value_model_version:'v3.5',work_priority_precise:15,priority_score:99},'raw'),15);
+ assert.equal(mapPriorityValue({value_model_version:'v3.5',work_priority_raw:null,priority_score:99},'raw'),null);
+ assert.equal(mapPriorityValue({priority_score:70},'raw'),null);
+ const mapRanked=[{customer:'Old high',customer_id:'a',value_model_version:'v3.5',priority_score:99,work_priority_precise:5},
+                  {customer:'New high',customer_id:'b',value_model_version:'v3.5',priority_score:5,work_priority_precise:99}].sort(mapPrioritySort);
  assert.equal(mapRanked[0].customer,'New high');
 
  assert.equal(customerWorkflowCanDismiss({customer_workflow:{can_dismiss:false},delivery_count:4}),false,'explicit backend decision wins');
  assert.equal(customerWorkflowCanDismiss({customer_workflow:{can_dismiss:true},customer_segment:'A'}),true,'explicit backend decision wins over fallback');
  assert.equal(customerWorkflowCanDismiss({customer_segment:'A',business_verified_delivery_count:0}),false,'old A prospect responses stay snooze-only');
  assert.equal(customerWorkflowCanDismiss({customer_segment:'B',business_verified_delivery_count:0}),true);
- const ranked=[{customer:'Act',customer_id:'a',work_priority_raw:20,business_value_raw:40},{customer:'Booked',customer_id:'b',work_priority_raw:90,business_value_raw:100,contact_priority_raw:0,list_guidance:{status_key:'planned'}},{customer:'Wait',customer_id:'c',work_priority_raw:0,business_value_raw:200}].sort(contactPrioritySort);
+ const ranked=[{customer:'Act',customer_id:'a',value_model_version:'v3.5',work_priority_precise:20,business_value_raw:40},{customer:'Booked',customer_id:'b',value_model_version:'v3.5',work_priority_precise:90,business_value_raw:100,contact_priority_raw:0,list_guidance:{status_key:'planned'}},{customer:'Wait',customer_id:'c',value_model_version:'v3.5',work_priority_precise:0,business_value_raw:200}].sort(contactPrioritySort);
  assert.deepEqual(ranked.map(c=>c.customer),['Booked','Act','Wait']);
  const seed=getCustomerPlanningSeed({planning_seed:{contact_type:'Telefon',source_contact_id:'source',obligation_id:'promise',expected_revision:4,owner_user_name:'olle',note:'Promised phone call',appointment_confirmed:true,picking_help:false},list_guidance:{recommended_contact_type:'phone'}});
  assert.equal(seed.contact_type,'phone');assert.equal(seed.obligation_revision,4);assert.equal(seed.source_contact_id,'source');assert.equal(seed.note,'Promised phone call');assert.equal(seed.appointment_confirmed,true);

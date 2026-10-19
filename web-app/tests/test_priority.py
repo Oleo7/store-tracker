@@ -13,8 +13,6 @@ sys.path.insert(0, str(WEB_APP_DIR))
 
 import app as app_module
 from priority import (
-    _negative_contact_score_cap,
-    _recommended_channel,
     build_contact_features,
     build_order_features,
     build_priority_customers,
@@ -23,12 +21,14 @@ from priority import (
 )
 
 
-_build_priority_customers = build_priority_customers
+from historical_priority_reference import (_build_priority_customers_legacy, _negative_contact_score_cap, _recommended_channel)
+
+_build_priority_customers = _build_priority_customers_legacy
 
 
 def build_priority_customers(*args, **kwargs):
-    """Keep legacy expectations isolated while v2 has dedicated contract tests."""
-    kwargs["scoring_version"] = "legacy"
+    """Historical formula tests only; endpoint tests still use the real v3 app."""
+    kwargs.pop("scoring_version", None)
     return _build_priority_customers(*args, **kwargs)
 
 

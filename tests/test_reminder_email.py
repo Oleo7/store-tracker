@@ -11,6 +11,15 @@ WEB_APP = ROOT / "web-app"
 sys.path.insert(0, str(WEB_APP))
 
 import app as app_module  # noqa: E402
+# Frozen historical formula assertions remain test-only, never an app fallback.
+sys.path.insert(0, str(WEB_APP / "tests"))
+from historical_priority_reference import _build_priority_customers_legacy
+from v3_fixtures import current_rank
+
+def archived_email_priority(*args, **kwargs):
+    kwargs.pop("scoring_version", None)
+    return _build_priority_customers_legacy(*args, **kwargs)
+
 from reminder_email import (  # noqa: E402
     EMAIL_EVENTS_COLUMNS,
     EMAIL_MESSAGES_COLUMNS,
@@ -483,13 +492,14 @@ class ReminderEmailHelperTests(unittest.TestCase):
             "email_last_order": "buyer@example.com",
             "email": "info@example.com",
         }
-        priority = {
+        priority = current_rank({
+            "priority_score": 80,
             "order_count": 3,
             "overdue_days": 8,
             "latest_contact_date": "2026-07-01",
             "next_action": {"action_type": "reorder"},
             "can_start_unscheduled_contact": True,
-        }
+        })
         status = app_module.build_reminder_email_status(
             customer,
             priority,
@@ -1106,7 +1116,7 @@ class EmailPerformanceTests(unittest.TestCase):
         self.assertNotIn("match[1].slice(2)", html)
 
 
-class EmailPriorityScoringTests(unittest.TestCase):
+class ArchivedEmailPriorityScoringTests(unittest.TestCase):
     TODAY = date(2026, 7, 24)
 
     @staticmethod
@@ -1169,7 +1179,7 @@ class EmailPriorityScoringTests(unittest.TestCase):
             "ordered": self._email("ordered_within_10_days"),
         }
 
-        priority = app_module.build_priority_customers(
+        priority = archived_email_priority(
             customers,
             {},
             {},
@@ -1238,7 +1248,7 @@ class EmailPriorityScoringTests(unittest.TestCase):
             ),
         }
 
-        result = app_module.build_priority_customers(
+        result = archived_email_priority(
             customers,
             {},
             handled_contact,
@@ -1249,7 +1259,7 @@ class EmailPriorityScoringTests(unittest.TestCase):
             scoring_version="legacy",
         )
         by_customer = {item["customer"]: item for item in result}
-        handled_without_email = app_module.build_priority_customers(
+        handled_without_email = archived_email_priority(
             [self._customer("Handled")],
             {},
             handled_contact,
@@ -1296,7 +1306,7 @@ class EmailPriorityScoringTests(unittest.TestCase):
             "low value click": self._email("stockfiller_clicked_no_order"),
         }
 
-        result = app_module.build_priority_customers(
+        result = archived_email_priority(
             customers,
             order_features,
             {},
@@ -1326,17 +1336,17 @@ class EmailPriorityScoringTests(unittest.TestCase):
             event_at="2026-07-10 09:00:00",
         )
 
-        recent_result = app_module.build_priority_customers(
+        recent_result = archived_email_priority(
             [customer], {}, {}, None, self.TODAY, limit=1,
             email_features={"ordered": recent},
             scoring_version="legacy",
         )[0]
-        stale_result = app_module.build_priority_customers(
+        stale_result = archived_email_priority(
             [customer], {}, {}, None, self.TODAY, limit=1,
             email_features={"ordered": stale},
             scoring_version="legacy",
         )[0]
-        baseline = app_module.build_priority_customers(
+        baseline = archived_email_priority(
             [customer], {}, {}, None, self.TODAY, limit=1,
             scoring_version="legacy",
         )[0]

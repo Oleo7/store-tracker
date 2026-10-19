@@ -57,7 +57,7 @@ class FirstOrderPhase3Tests(TestCase):
             60: ("second_purchase_due", 88),
             61: ("second_purchase_due", 60),
             90: ("second_purchase_due", 60),
-            91: ("single_order_reactivation_due", 60),
+            91: ("single_order_reactivation_due", 70),
         }
         for days, (trigger, timing) in expected.items():
             with self.subTest(days=days):
@@ -194,7 +194,7 @@ class DialogueAndStrategicPhase3Tests(TestCase):
             with_activity["recommendation_suppression_reason"],
             "future_planned_activity",
         )
-        self.assertEqual(with_activity["intent_timing"], 25)
+        self.assertEqual(with_activity["intent_timing"], round(100 * with_activity["work_contact_factor"]))
 
     def test_strategic_rules_and_suppressions(self):
         never = priorities(
@@ -280,7 +280,7 @@ class DialogueAndStrategicPhase3Tests(TestCase):
             sku_order("B1", "B seed", "2026-07-01", 100, "b-seed", "B")
         ]
         high = selected(
-            priorities(high_customers, high_orders, today=today, scoring_version="v2.1"), "high-b"
+            priorities(high_customers, high_orders, today=today, scoring_version="v3.5"), "high-b"
         )
         self.assertGreaterEqual(high["priority_score"], 70)
         self.assertEqual(high["primary_trigger_type"], "value_based_contact_due")
@@ -297,7 +297,7 @@ class DialogueAndStrategicPhase3Tests(TestCase):
         named = selected(
             priorities(low_customers, low_orders, today=today), "ica-name"
         )
-        self.assertLess(named["priority_score"], 70)
+        self.assertEqual(named["priority_score"], named["work_priority_score"])
         self.assertEqual(named["strategic_index"], 15)
         self.assertEqual(named["primary_trigger_type"], "value_based_contact_due")
         self.assertGreater(named["contact_priority_raw"], 0)

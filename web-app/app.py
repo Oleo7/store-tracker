@@ -47,7 +47,6 @@ from requests.exceptions import ConnectionError as RequestsConnectionError
 load_dotenv()
 
 from priority import (
-    ranking_mode,
     SCORE_VERSION,
     apply_workflow_suppressions,
     build_contact_features,
@@ -70,6 +69,7 @@ from sales_coaching import (
     strip_internal_analysis,
 )
 from commercial_orders import order_volume, commercial_order
+from routing_objective import priority_units, route_objective_key, ROUTE_RANKING_CONTRACT
 from customer_obligations import (
     STATE_EVENT_COLUMNS, OPEN_STATUSES as OPEN_OBLIGATION_STATUSES,
     build_customer_state, attention_items, stable_contact_source_id,
@@ -161,7 +161,6 @@ from planning_suggestions import (
     SCORE_EVENTS_SHEET,
     SUGGESTION_COLUMNS,
     SuggestionError,
-    build_phase1_stub_candidates,
     candidate_suggestion_ids,
     decision_context_hash,
     deterministic_suggestion_id,
@@ -2717,30 +2716,23 @@ def route_blocked_customer_ids(activity_rows, owner, route_date, customers, cont
 
 
 def route_priority_values(priority, *, required=False, use_work=False):
-    """One commercial ranking adapter for both route engines and rollback.
-
-    Missing v3 values fail closed. The legacy fallback is only for callers
-    with an explicitly old snapshot, never for a malformed v3 customer.
-    """
+    """Use only the current v3 index, never historical/cached legacy scores."""
     priority = priority or {}
-    mode = priority.get("ranking_mode") or ranking_mode()
-    modern = bool(priority.get("value_model_version"))
-    if modern:
-        raw = priority.get("work_priority_raw" if required or use_work else "contact_priority_raw")
-        display = priority.get("work_priority_score" if required or use_work else "contact_priority_score")
-    else:
-        raw = display = priority.get("priority_score", 0)
+    if priority.get("value_model_version") != SCORE_VERSION or priority.get("score_version") != SCORE_VERSION:
+        return None
+    prefix = "work" if required or use_work else "contact"
+    value = priority.get(prefix + "_priority_precise")
+    display = priority.get(prefix + "_priority_score")
     try:
-        if isinstance(raw, bool) or raw is None:
-            raise ValueError("Missing route value")
-        value = float(raw)
-        score = int(round(float(display)))
-        if not math.isfinite(value) or value < 0 or not 0 <= score <= 100:
-            raise ValueError("Invalid route value")
+        if isinstance(value, bool) or value is None or isinstance(display, bool) or display is None:
+            return None
+        value, display = float(value), float(display)
+        if not math.isfinite(value) or not 0 <= value <= 100 or not math.isfinite(display) or round(value) != display:
+            return None
     except (TypeError, ValueError, OverflowError):
         return None
-    return {"priority_score": score, "commercial_value": value, "ranking_mode": mode}
-
+    return {"priority_score": int(display), "commercial_value": round(value, 6),
+            "score_version": SCORE_VERSION, "ranking_contract": ROUTE_RANKING_CONTRACT}
 
 def route_optional_priority_values(priority, activities, route_date):
     """Preserve the existing other-day phone/email exception, with new value.
@@ -2760,7 +2752,10 @@ def route_optional_priority_values(priority, activities, route_date):
 
 
 def route_candidate_value(candidate):
-    return float(candidate.get("commercial_value", candidate.get("priority_score", 0)) or 0)
+    value = candidate.get("commercial_value")
+    if isinstance(value, bool) or value is None or not math.isfinite(float(value)) or not 0 <= float(value) <= 100:
+        raise ValueError("Missing current v3 route priority")
+    return round(float(value), 6)
 
 def priority_has_contact_ban(priority):
     priority = priority or {}
@@ -2791,16 +2786,17 @@ def route_priority_suppressed(priority, activity_rows):
                 return not bool(priority["work_can_start_unscheduled_contact"])
             if priority.get("value_model_version"):
                 return True
-            # Pre-v3.3 snapshots lack the counterfactual permission. They retain
-            # the historical route-only date exception; current snapshots always
-            # carry the work decision above.
-            return False
+            return True
+    # Inconsistent payloads fail closed; current decisions keep this reason
+    # synchronized with permission. Never revive an old paused suggestion.
+    if reason:
+        return True
     guidance = priority.get("list_guidance") or priority.get("customer_guidance") or {}
     if "can_start_unscheduled_contact" in guidance:
         return not bool(guidance["can_start_unscheduled_contact"])
     if "can_start_unscheduled_contact" in priority:
         return not bool(priority["can_start_unscheduled_contact"])
-    return bool(reason)
+    return True  # Missing permission is never permission to initiate a visit.
 
 
 def _scoped_contact_decision_inputs(snapshot, current, prepared):
@@ -2916,11 +2912,8 @@ def route_planned_contact_decision(priority, activity, *, snapshot, route_date, 
     guidance = priority.get("list_guidance") or priority.get("customer_guidance") or {}
     if priority_has_contact_ban(priority):
         return {"allowed": False, "reason_code": "do_not_contact", "guidance": guidance, "priority": priority}
-    if "can_execute_planned_contact" not in guidance and not priority.get("value_model_version"):
-        # Pre-v3.3 internal route fixtures have no persisted obligation read model.
-        reason = str(priority.get("recommendation_suppression_reason") or "")
-        return {"allowed": not reason or reason in {"future_planned_activity", "suggestion_planned"},
-                "reason_code": reason, "guidance": guidance, "priority": priority}
+    if priority.get("value_model_version") != SCORE_VERSION:
+        return {"allowed": False, "reason_code": "current_priority_unavailable", "guidance": guidance, "priority": priority}
     current = parse_planning_instant(priority.get("as_of") or snapshot.get("snapshot_created_at"))
     if current is None or current.date() != route_date:
         current = datetime.combine(route_date, datetime_time.max, tzinfo=STOCKHOLM_ZONE)
@@ -3593,16 +3586,6 @@ def get_customer_by_row(spreadsheet, row_number):
     return customer if str(customer.get("customer", "")).strip() else None
 
 
-def planning_suggestion_stub_enabled():
-    configured = app.config.get("PLANNING_SUGGESTIONS_STUB")
-    if configured is None:
-        configured = os.environ.get("PLANNING_SUGGESTIONS_STUB")
-    enabled = str(configured or "").strip().casefold() in {
-        "1", "true", "yes", "on"
-    }
-    return enabled and application_environment() not in PILOT_ENVIRONMENTS
-
-
 def planning_suggestion_service(spreadsheet):
     return PlanningSuggestionService(
         spreadsheet,
@@ -3619,7 +3602,7 @@ def planning_suggestion_service(spreadsheet):
 
 def planning_suggestion_sort_key(item):
     return (
-        -float(item.get("priority_score") or 0),
+        -float(item.get("contact_priority_precise") or 0),
         -float(item.get("expected_order_dfp") or 0),
         int(item.get("trigger_precedence") or 99),
         str(item.get("customer_row") or item.get("customer_id") or ""),
@@ -3703,130 +3686,124 @@ def priority_compatible_trigger_keys(priority):
 
 
 def planning_suggestion_candidates(spreadsheet, owner, activity_rows=()):
-    if planning_suggestion_stub_enabled():
-        customers = get_customer_rows(spreadsheet)
-        contacts = get_contact_rows(spreadsheet)
-        orders = get_order_rows(spreadsheet)
-        candidates = build_phase1_stub_candidates(
-            owner, customers, contacts=contacts, orders=orders
+    snapshot = get_authoritative_priority_snapshot(
+        spreadsheet,
+        today=stockholm_today(),
+        planned_activity_rows=activity_rows,
+    )
+    customers = snapshot["customers"]
+    contacts = snapshot["contact_rows"]
+    with performance_step("suggestions.scoring") as measurement:
+        priorities = snapshot["priorities"]
+        measurement["row_count"] = len(priorities)
+    owner_keys = user_route_identity_keys(owner)
+    priorities = [
+        priority for priority in priorities
+        if normalize_key(priority.get("sales_person")) in owner_keys
+    ]
+    # Workflow visibility may blank the canonical action, but cannot
+    # change a stored suggestion's business identity or attribution.
+    raw_priorities = {str(row.get("customer_id") or ""): row for row in priorities}
+    priorities = apply_workflow_suppressions(
+        priorities,
+        priority_workflow_suppressions(spreadsheet, priorities),
+    )
+    candidates = []
+    for priority in priorities:
+        if not str(priority.get("customer_id") or "").strip():
+            continue
+        suppression = str(
+            priority.get("recommendation_suppression_reason") or ""
+        ).strip()
+        raw_priority = raw_priorities[str(priority.get("customer_id") or "")]
+        primary_trigger = str(
+            raw_priority.get("primary_trigger_type") or ""
+        ).strip()
+        guidance = priority.get("customer_guidance") or {}
+        recommendation_visible = bool(
+            primary_trigger
+            and route_priority_values(priority) is not None
+            and priority.get("recommendation_eligible")
+            and guidance.get("can_contact_now")
         )
-    else:
-        snapshot = get_authoritative_priority_snapshot(
-            spreadsheet,
-            today=stockholm_today(),
-            planned_activity_rows=activity_rows,
+        context_hash = priority_decision_context_hash(
+            priority, owner.get("user_name")
         )
-        customers = snapshot["customers"]
-        contacts = snapshot["contact_rows"]
-        with performance_step("suggestions.scoring") as measurement:
-            priorities = snapshot["priorities"]
-            measurement["row_count"] = len(priorities)
-        owner_keys = user_route_identity_keys(owner)
-        priorities = [
-            priority for priority in priorities
-            if normalize_key(priority.get("sales_person")) in owner_keys
-        ]
-        # Workflow visibility may blank the canonical action, but cannot
-        # change a stored suggestion's business identity or attribution.
-        raw_priorities = {str(row.get("customer_id") or ""): row for row in priorities}
-        priorities = apply_workflow_suppressions(
-            priorities,
-            priority_workflow_suppressions(spreadsheet, priorities),
-        )
-        candidates = []
-        for priority in priorities:
-            if not str(priority.get("customer_id") or "").strip():
-                continue
-            suppression = str(
-                priority.get("recommendation_suppression_reason") or ""
-            ).strip()
-            raw_priority = raw_priorities[str(priority.get("customer_id") or "")]
-            primary_trigger = str(
-                raw_priority.get("primary_trigger_type") or ""
-            ).strip()
-            guidance = priority.get("customer_guidance") or {}
-            recommendation_visible = bool(
-                primary_trigger
-                and priority.get("recommendation_eligible")
-                and guidance.get("can_contact_now")
-            )
-            context_hash = priority_decision_context_hash(
-                priority, owner.get("user_name")
-            )
-            candidates.append({
-                "decision_context_hash": context_hash,
-                "compatible_decision_context_hashes": (
-                    priority_compatible_decision_context_hashes(
-                        priority, owner.get("user_name")
-                    )
-                ),
-                "compatible_trigger_keys": priority_compatible_trigger_keys(raw_priority),
-                "customer_id": priority.get("customer_id"),
-                "customer_key": (
-                    priority.get("customer_number")
-                    or normalize_key(priority.get("customer"))
-                ),
-                "customer_row": priority.get("row"),
-                "customer": priority.get("customer"),
-                "priority_score": priority.get("priority_score"),
-                "expected_order_dfp": priority.get("expected_order_dfp"),
-                "lifecycle": priority.get("lifecycle"),
-                "segment": priority.get("segment"),
-                "decision_context_lifecycle": priority.get(
-                    "decision_context_lifecycle"
-                ),
-                "score_version": priority.get("score_version", SCORE_VERSION),
-                "intent_timing": priority.get("intent_timing"),
-                "value_index": priority.get("value_index"),
-                "strategic_index": priority.get("strategic_index"),
-                "history_index": priority.get("history_index"),
-                "contact_context": {
-                    "date": priority.get("latest_human_contact_date"),
-                    "result": priority.get("latest_contact_result"),
-                    "comment": priority.get("latest_contact_comment"),
-                    "contact_person": priority.get("latest_contact_person"),
-                    "latest_order_dfp": priority.get("latest_order_dfp"),
-                    "latest_delivery_date": priority.get("latest_delivery_date", ""),
-                    "latest_delivery_dfp": priority.get("latest_delivery_dfp"),
-                    "next_delivery_date": priority.get("next_delivery_date", ""),
-                    "next_delivery_dfp": priority.get("next_delivery_dfp"),
-                    "follow_up": priority.get("latest_follow_up_date") if priority.get("follow_up_due") else "",
-                },
-                "recommendation_eligible": priority.get("recommendation_eligible"),
-                "recommendation_suppression_reason": suppression,
-                "reason_code": priority.get("primary_reason_code"),
-                "reason_text": (
-                    guidance.get("reason_text")
-                    or priority.get("primary_reason_text")
-                ),
-                "action_label": guidance.get("action_label", ""),
-                "customer_guidance": guidance,
-                "primary_trigger_type": primary_trigger or "scoring_context",
-                "primary_trigger_key": primary_trigger or "scoring_context",
-                "covered_trigger_keys": raw_priority.get("covered_trigger_keys") or [],
-                "trigger_precedence": {
-                    "a_prospect_due": 1,
-                    "stockfiller_click_followup": 2,
-                    "product_sheet_click_followup": 3,
-                    "email_open_followup": 4,
-                    "established_reorder_due": 5,
-                    "first_order_onboarding": 6,
-                    "first_order_reorder": 7,
-                    "positive_dialogue_followup": 8,
-                    "repeat_reactivation_due": 9,
-                    "single_order_reactivation_due": 10,
-                    "strategic_contact_due": 11,
-                    "legacy_missed_followup": 12,
-                }.get(primary_trigger, 99),
-                "externally_suppressed": not recommendation_visible,
-                "overdue_days": priority.get("overdue_days"),
-                "latest_human_contact_id": priority.get(
-                    "latest_human_contact_id"
-                ),
-                "latest_human_contact_date": priority.get(
-                    "latest_human_contact_date"
-                ),
-            })
+        candidates.append({
+            "decision_context_hash": context_hash,
+            "compatible_decision_context_hashes": (
+                priority_compatible_decision_context_hashes(
+                    priority, owner.get("user_name")
+                )
+            ),
+            "compatible_trigger_keys": priority_compatible_trigger_keys(raw_priority),
+            "customer_id": priority.get("customer_id"),
+            "customer_key": (
+                priority.get("customer_number")
+                or normalize_key(priority.get("customer"))
+            ),
+            "customer_row": priority.get("row"),
+            "customer": priority.get("customer"),
+            "priority_score": priority.get("priority_score"),
+            "contact_priority_precise": priority.get("contact_priority_precise"),
+            "expected_order_dfp": priority.get("expected_order_dfp"),
+            "lifecycle": priority.get("lifecycle"),
+            "segment": priority.get("segment"),
+            "decision_context_lifecycle": priority.get(
+                "decision_context_lifecycle"
+            ),
+            "score_version": priority.get("score_version", SCORE_VERSION),
+            "intent_timing": priority.get("intent_timing"),
+            "value_index": priority.get("value_index"),
+            "strategic_index": priority.get("strategic_index"),
+            "history_index": priority.get("history_index"),
+            "contact_context": {
+                "date": priority.get("latest_human_contact_date"),
+                "result": priority.get("latest_contact_result"),
+                "comment": priority.get("latest_contact_comment"),
+                "contact_person": priority.get("latest_contact_person"),
+                "latest_order_dfp": priority.get("latest_order_dfp"),
+                "latest_delivery_date": priority.get("latest_delivery_date", ""),
+                "latest_delivery_dfp": priority.get("latest_delivery_dfp"),
+                "next_delivery_date": priority.get("next_delivery_date", ""),
+                "next_delivery_dfp": priority.get("next_delivery_dfp"),
+                "follow_up": priority.get("latest_follow_up_date") if priority.get("follow_up_due") else "",
+            },
+            "recommendation_eligible": priority.get("recommendation_eligible"),
+            "recommendation_suppression_reason": suppression,
+            "reason_code": priority.get("primary_reason_code"),
+            "reason_text": (
+                guidance.get("reason_text")
+                or priority.get("primary_reason_text")
+            ),
+            "action_label": guidance.get("action_label", ""),
+            "customer_guidance": guidance,
+            "primary_trigger_type": primary_trigger or "scoring_context",
+            "primary_trigger_key": primary_trigger or "scoring_context",
+            "covered_trigger_keys": raw_priority.get("covered_trigger_keys") or [],
+            "trigger_precedence": {
+                "a_prospect_due": 1,
+                "stockfiller_click_followup": 2,
+                "product_sheet_click_followup": 3,
+                "email_open_followup": 4,
+                "established_reorder_due": 5,
+                "first_order_onboarding": 6,
+                "first_order_reorder": 7,
+                "positive_dialogue_followup": 8,
+                "repeat_reactivation_due": 9,
+                "single_order_reactivation_due": 10,
+                "strategic_contact_due": 11,
+                "legacy_missed_followup": 12,
+            }.get(primary_trigger, 99),
+            "externally_suppressed": not recommendation_visible,
+            "overdue_days": priority.get("overdue_days"),
+            "latest_human_contact_id": priority.get(
+                "latest_human_contact_id"
+            ),
+            "latest_human_contact_date": priority.get(
+                "latest_human_contact_date"
+            ),
+        })
     externally_planned_customer_ids, _overdue = (
         active_planned_activity_queue_state(
             activity_rows, owner, contact_rows=contacts
@@ -4659,6 +4636,8 @@ def email_contact_decision(priority, *, planned_activity_id=""):
     reason = str(guidance.get("reason_code") or priority.get("recommendation_suppression_reason") or "contact_permission_unavailable")
     if priority_has_contact_ban(priority):
         return {"allowed": False, "reason_code": "do_not_contact"}
+    if route_priority_values(priority, required=bool(planned_activity_id)) is None:
+        return {"allowed": False, "reason_code": "current_priority_unavailable"}
     if planned_activity_id:
         allowed = bool(guidance.get("can_execute_planned_contact") is True
                        and str(guidance.get("planned_activity_id") or "") == str(planned_activity_id))
@@ -7006,7 +6985,7 @@ def priority_planned_activity_time_signature(rows, *, now=None):
 def get_authoritative_priority_snapshot(
     spreadsheet, *, today, planned_activity_rows=None, as_of=None
 ):
-    """Return one short-lived global Scoring v2 universe before owner filtering."""
+    """Return one short-lived global v3 universe before owner filtering."""
     global _priority_snapshot_entry
     explicit_as_of = as_of is not None
     if as_of is None:
@@ -7043,7 +7022,7 @@ def get_authoritative_priority_snapshot(
         planned_activity_rows
     )
     key = (
-        id(spreadsheet), date_key, dependency_signature, planning_signature, ranking_mode(),
+        id(spreadsheet), date_key, dependency_signature, planning_signature, "v3",
         planning_time_signature, canonical_payload_fingerprint(state_events),
         as_of.isoformat(timespec="microseconds" if explicit_as_of else "minutes"),
     )
@@ -7959,6 +7938,7 @@ def get_customer_insights():
             "customer_risk": risk,
             "priority_level": priority.get("priority_level", ""),
             "priority_score": priority.get("priority_score"),
+            "contact_priority_precise": priority.get("contact_priority_precise"),
             "score_version": priority.get("score_version", SCORE_VERSION),
             # Stage 1: model read fields. Preserve legacy score for existing
             # route/planning consumers and older clients.
@@ -8047,7 +8027,7 @@ def get_customer_insights():
             "reminder_email_latest_sent_at": email_proposal["latest_sent_at"],
         }
 
-    if request.headers.get("X-PB-Value-Model") in {"v3.1", "v3.2", "v3.3", "v3.4"}:
+    if request.headers.get("X-PB-Value-Model") in {"v3.1", "v3.2", "v3.3", "v3.4", "v3.5"}:
         # Identity-safe read model for the new store list. Name-only legacy data
         # are copied only when the master-name mapping is unambiguous.
         by_customer_id = {}
@@ -8059,7 +8039,7 @@ def get_customer_insights():
             "contact_priority_raw", "contact_priority_bucket",
             "contact_relevance_factor", "latest_reached_date",
             "days_since_reached", "latest_human_contact_date",
-            "work_priority_raw", "work_priority_score", "work_can_start_unscheduled_contact",
+            "work_priority_raw", "work_priority_score", "work_priority_precise", "contact_priority_precise", "priority_score_precise", "work_can_start_unscheduled_contact",
             "ranking_mode", "history_note", "historical_reminders_resolved", "data_warnings",
             "latest_reported_order_date", "latest_unconfirmed_order_date",
             "can_contact_now", "can_start_unscheduled_contact",
@@ -8317,7 +8297,7 @@ def planning_suggestions():
         "preview_limit": preview_limit,
         "generated_at": planning_timestamp(),
         "score_version": (
-            "phase1" if planning_suggestion_stub_enabled() else SCORE_VERSION
+            SCORE_VERSION
         ),
     })
 
@@ -9945,7 +9925,7 @@ def build_route_proposal_payload(
             "sequence": stop.sequence,
             "priority_score": candidate.priority_score,
                 "commercial_value": candidate.objective_value,
-                "ranking_mode": ranking_mode(),
+                "ranking_mode": "v3",
             "required": bool(getattr(candidate, "required", False)),
             "leg_drive_minutes": seconds_to_minutes(stop.leg_drive_seconds),
             "cumulative_drive_minutes": seconds_to_minutes(
@@ -9978,7 +9958,7 @@ def build_route_proposal_payload(
             "stop_count": len(stops),
             "total_priority_score": proposal.route.total_priority_score,
             "total_commercial_value": round(sum(stop.candidate.objective_value for stop in proposal.route.stops), 6),
-            "ranking_mode": ranking_mode(),
+            "ranking_mode": "v3",
             "drive_minutes": seconds_to_minutes(proposal.route.drive_seconds),
             "return_drive_minutes": seconds_to_minutes(
                 proposal.route.return_drive_seconds
@@ -10140,6 +10120,8 @@ def calculate_route_proposal_for_user(
                 return None, route_proposal_error("do_not_contact", "Ett obligatoriskt stopp har Återkom ej. Hantera kontaktförbudet innan en rutt skapas.", 409)
             continue
         if row in required_set:
+            if str(customer.get("customer_id") or "") in route_contact_customer_ids(route_activity_rows, owner or user, route_date, customers):
+                return None, route_proposal_error("same_day_contact_conflict", "Butiken har redan en telefon- eller mejlaktivitet denna ruttdag. Hantera dubbelbokningen forst.", 409)
             appointments = [activity for activity in booked_rows
                             if str(activity.get("customer_id") or "") == str(customer.get("customer_id") or "")]
             for activity in appointments:
@@ -10256,7 +10238,7 @@ def calculate_route_proposal_for_user(
             "longitude": candidate.coordinate.longitude,
             "priority_score": candidate.priority_score,
                 "commercial_value": candidate.objective_value,
-                "ranking_mode": ranking_mode(),
+                "ranking_mode": "v3",
             "required": candidate.required,
             "sequence": 0,
             "leg_drive_minutes": 0,
@@ -10363,8 +10345,8 @@ def calculate_route_proposal_for_user(
         max_total_seconds=max_total_seconds,
     )
     payload["workday_policy"] = WORKDAY_POLICY_VERSION
-    payload["ranking_mode"] = ranking_mode()
-    payload["ranking_contract"] = "v34-raw"
+    payload["ranking_mode"] = "v3"
+    payload["ranking_contract"] = ROUTE_RANKING_CONTRACT
     payload["route_start_at"] = route_start_at.isoformat(timespec="minutes")
     payload["plan_fingerprint"] = planning_state_fingerprint(planning_rows_for_date(
         list(enumerate(route_activity_rows, start=2)), owner or user, route_date,
@@ -10973,140 +10955,76 @@ def schedule_planning_route_with_anchors(
         cursor = timing["service_end"]
         current_index = stop["_matrix_index"]
 
-    remaining = list(optional)
-    for anchor_index, anchor in enumerate(anchors):
-        anchor_booked = parse_planning_datetime(anchor.get("scheduled_at"))
-        if anchor_booked is None:
-            return None, None, planning_error(
-                "required_schedule_not_feasible",
-                "Ett fast besök saknar giltig bokad tid.",
-                422,
-                planned_activity_id=anchor.get("planned_activity_id", ""),
-            )
-        anchors_still_to_schedule = len(anchors) - anchor_index
-        while (
-            remaining
-            and len(scheduled) + anchors_still_to_schedule < MAX_ROUTE_STOPS
-        ):
-            best = None
-            direct_to_anchor = drive_minutes(
-                current_index, anchor["_matrix_index"]
-            )
-            if direct_to_anchor is None:
-                break
-            for candidate in remaining:
-                optional_timing = simulate(candidate, cursor, current_index)
-                if optional_timing is None:
-                    continue
-                anchor_timing = simulate(
-                    anchor,
-                    optional_timing["service_end"],
-                    candidate["_matrix_index"],
-                )
-                if (
-                    anchor_timing is None
-                    or anchor_timing["service_start"] != anchor_booked
-                ):
-                    continue
-                if not required_tail_is_feasible(
-                    anchor_timing["service_end"],
-                    anchor["_matrix_index"],
-                    anchor_index + 1,
-                ):
-                    continue
-                marginal_minutes = max(1, (
-                    optional_timing["drive_minutes"]
-                    + optional_timing["service_minutes"]
-                    + anchor_timing["drive_minutes"]
-                    - direct_to_anchor
-                ))
-                value_rate = route_candidate_value(candidate) / max(
-                    1, marginal_minutes
-                )
-                score = (
-                    bool(candidate.get("required")),
-                    value_rate,
-                    route_candidate_value(candidate),
-                    -marginal_minutes,
-                    -int(candidate.get("customer_row") or candidate.get("row") or 0),
-                )
-                if best is None or score > best[0]:
-                    best = (score, candidate, optional_timing)
-            if best is None:
-                break
-            _score, candidate, timing = best
-            append_stop(candidate, timing)
-            remaining.remove(candidate)
-
-        anchor_timing = simulate(anchor, cursor, current_index)
-        if (
-            anchor_timing is None
-            or anchor_timing["service_start"] != anchor_booked
-        ):
-            estimated = (
-                anchor_timing["service_start"].isoformat(timespec="minutes")
-                if anchor_timing else ""
-            )
-            return None, None, planning_error(
-                "required_schedule_not_feasible",
-                "Ett fast besök kan inte nås från föregående aktivitet i tid.",
-                422,
-                planned_activity_id=anchor.get("planned_activity_id", ""),
-                scheduled_at=anchor_booked.isoformat(timespec="minutes"),
-                estimated_at=estimated,
-            )
-        append_stop(anchor, anchor_timing)
-
-    while remaining and len(scheduled) < MAX_ROUTE_STOPS:
-        best = None
-        for candidate in remaining:
-            timing = simulate(candidate, cursor, current_index)
-            if timing is None:
+    # Compare COMPLETE feasible tours by total v3 priority, then total driving
+    # time. An insertion value/minute ratio is not the business objective.
+    # Small pools are exhaustively Pareto-pruned; larger pools use a bounded
+    # beam and honestly report that global optimality has not been proven.
+    required_ids = {stop["_matrix_index"] for stop in indexed if stop.get("required")}
+    values = {stop["_matrix_index"]: priority_units(route_candidate_value(stop)) for stop in indexed}
+    beam_limit = None if len(indexed) <= 9 else 256
+    # time, last node, visited mask, next anchor, reward, drive, (stop,timing) path
+    states = [(route_start_at, 0, 0, 0, 0, 0, ())]
+    best = None
+    for depth in range(MAX_ROUTE_STOPS + 1):
+        children = {}
+        for state in states:
+            clock, last, mask, next_anchor, reward, driven, path = state
+            missing_required = [identity for identity in required_ids if not mask & (1 << identity)]
+            back = drive_minutes(last, 0)
+            if not missing_required and path and back is not None:
+                departure = planning_next_unblocked_start(clock, back, fixed_intervals)
+                if departure + timedelta(minutes=back) <= route_limit:
+                    key = (-reward, driven + back,
+                           tuple(str(stop.get("customer_id") or stop.get("customer_row")) for stop, _ in path))
+                    if best is None or key < best[0]:
+                        best = (key, path)
+            if depth == MAX_ROUTE_STOPS:
                 continue
-            return_minutes = drive_minutes(candidate["_matrix_index"], 0)
-            if return_minutes is None:
-                continue
-            return_departure = planning_next_unblocked_start(
-                timing["service_end"], return_minutes, fixed_intervals
-            )
-            route_end = return_departure + timedelta(minutes=return_minutes)
-            if route_end > route_limit:
-                continue
-            if anchors:
-                direct_return = drive_minutes(current_index, 0)
-                if direct_return is None:
+            choices = [stop for stop in optional if not mask & (1 << stop["_matrix_index"])]
+            if next_anchor < len(anchors):
+                choices.append(anchors[next_anchor])
+            for stop in choices:
+                identity = stop["_matrix_index"]
+                timing = simulate(stop, clock, last)
+                if timing is None or timing["service_end"] > route_limit:
                     continue
-                marginal_minutes = max(1, (
-                    timing["drive_minutes"]
-                    + timing["service_minutes"]
-                    + return_minutes
-                    - direct_return
-                ))
-                value_rate = route_candidate_value(candidate) / max(
-                    1, marginal_minutes
-                )
-                score = (
-                    bool(candidate.get("required")),
-                    value_rate,
-                    route_candidate_value(candidate),
-                    -marginal_minutes,
-                    -int(candidate.get("customer_row") or candidate.get("row") or 0),
-                )
-            else:
-                extra = (
-                    timing["drive_minutes"]
-                    + timing["service_minutes"]
-                    + return_minutes
-                )
-                value_rate = route_candidate_value(candidate) / max(1, extra)
-                score = (bool(candidate.get("required")), value_rate, route_candidate_value(candidate))
-            if best is None or score > best[0]:
-                best = (score, candidate, timing)
-        if best is None:
+                is_anchor = next_anchor < len(anchors) and identity == anchors[next_anchor]["_matrix_index"]
+                following_anchor = next_anchor + int(is_anchor)
+                if is_anchor and timing["service_start"] != parse_planning_datetime(stop.get("scheduled_at")):
+                    continue
+                new_mask = mask | (1 << identity)
+                still_required = sum(not new_mask & (1 << node) for node in required_ids)
+                if still_required > MAX_ROUTE_STOPS - depth - 1:
+                    continue
+                # Do not prune from a direct-to-anchor tour: an intermediate
+                # waypoint can be faster on a directed/non-metric road matrix.
+                # Each actual anchor is checked when it is visited instead.
+                child = (timing["service_end"], identity, new_mask, following_anchor,
+                         reward + values[identity], driven + timing["drive_minutes"], path + ((stop, timing),))
+                state_key = (new_mask, identity, following_anchor)
+                frontier = children.setdefault(state_key, [])
+                if any(old[0] <= child[0] and old[5] <= child[5] for old in frontier):
+                    continue
+                frontier[:] = [old for old in frontier if not (child[0] <= old[0] and child[5] <= old[5])]
+                frontier.append(child)
+        if not children:
             break
-        _score, candidate, timing = best
-        append_stop(candidate, timing)
-        remaining.remove(candidate)
+        states = [state for frontier in children.values() for state in frontier]
+        if beam_limit is not None and len(states) > beam_limit:
+            def optimistic_key(state):
+                available = sorted((value for identity, value in values.items()
+                                    if not state[2] & (1 << identity)), reverse=True)
+                bound = state[4] + sum(available[:MAX_ROUTE_STOPS - len(state[6])])
+                return (-bound, -state[4], state[0], state[5], state[2], state[1])
+            states.sort(key=optimistic_key)
+            states = states[:beam_limit]
+    if best is None:
+        return None, None, planning_error("required_schedule_not_feasible",
+            "Ingen genomforbar rutt hittades med dagens bokningar och retur fore 17:00.", 422)
+    for stop, timing in best[1]:
+        append_stop(stop, timing)
+    selected_ids = {stop["_matrix_index"] for stop, _ in best[1]}
+    remaining = [stop for stop in optional if stop["_matrix_index"] not in selected_ids]
 
     return_minutes = drive_minutes(current_index, 0)
     if return_minutes is None:
@@ -11149,6 +11067,11 @@ def schedule_planning_route_with_anchors(
             for item in fixed_intervals
         ),
         "segments": segments,
+        "ranking_contract": ROUTE_RANKING_CONTRACT,
+        "objective_priority_sum": -best[0][0] / 1_000_000,
+        "objective_drive_minutes": best[0][1],
+        "selection_algorithm": "priority-sum-pareto" if beam_limit is None else "priority-sum-beam",
+        "selection_optimality_proven": beam_limit is None,
         "matrix_request_count": matrix_result.request_count,
         "matrix_cache_hits": matrix_result.cache_hits,
     }, None
@@ -11385,6 +11308,8 @@ def build_route_optimization_inputs(
                     "Ett bokat besök omfattas av en kontaktpaus. Hantera bokningen innan rutten optimeras.", 409,
                     planned_activity_ids=[str(row.get("planned_activity_id") or "").strip()],
                     contact_block_reason=permission["reason_code"])
+            if customer_id in route_contact_customer_ids(planned_rows, owner, route_date, customers):
+                return None, planning_error("same_day_contact_conflict", "Butiken har redan en telefon- eller mejlaktivitet denna ruttdag. Hantera dubbelbokningen forst.", 409)
             mandatory_by_customer[customer_id].append(row)
     duplicates = {
         customer_id: [str(row.get("planned_activity_id") or "").strip() for row in rows]
@@ -11456,9 +11381,11 @@ def build_route_optimization_inputs(
             ))
         coordinate_entry = quality.get(customer_id, {})
         priority = priorities_by_id.get(customer_id, {})
+        if route_priority_values(priority, required=True) is None:
+            return None, planning_error("current_priority_unavailable", "Bokningen saknar aktuell v3-prioritet. Ladda om innan rutten beraknas.", 503)
         shipments.append({
             "customer_id": customer_id,
-            **(route_priority_values(priority, required=True) or {"priority_score": 0, "commercial_value": 0.0, "ranking_mode": ranking_mode()}),
+            **route_priority_values(priority, required=True),
             "coordinate": coordinate_entry["coordinate"],
             "required": True,
             "fixed_at": fixed_at,
@@ -11555,8 +11482,6 @@ def build_route_optimization_inputs(
     input_fingerprint = build_route_optimization_input_fingerprint(
         **fingerprint_kwargs
     )
-    # Old ro-v1 requests had neither the workday boundary nor mandatory lunch.
-    legacy_request_fingerprints = {}
     return {
         "route_start_at": route_start_at,
         "start": trusted_start,
@@ -11567,7 +11492,6 @@ def build_route_optimization_inputs(
         "timeout_seconds": timeout_seconds,
         "fingerprint": fingerprint,
         "input_fingerprint": input_fingerprint,
-        "legacy_request_fingerprints": legacy_request_fingerprints,
         "customers_by_id": customers_by_id,
         "date_rows": date_rows,
         "excluded_untrusted_coordinates": excluded_untrusted,
@@ -11671,6 +11595,8 @@ _ROUTE_FAILURE_DIAGNOSTIC_DETAIL_KEYS = frozenset({
     "quadratic_soft_duration_enabled",
     "quadratic_soft_exceedance_seconds",
     "quadratic_soft_max_seconds",
+    "hard_duration_buffer_seconds",
+    "hard_duration_max_seconds",
     "required_count",
     "route_break_duration_seconds",
     "route_delay_duration_seconds",
@@ -11761,41 +11687,18 @@ def _route_failure_diagnostic_json(
 
 
 def _route_operation_input_matches(row, inputs):
-    """Match an idempotent operation without conflating input and policy.
+    """Replay only the exact current solver AND objective contract.
 
-    New rows carry a policy-independent input fingerprint.  Rows deployed
-    before that column use their exact policy-bound fingerprint, with a narrow
-    ro-v1 reconstruction for completed-operation recovery across the ro-v2
-    deployment.
+    Historical result data remains readable for audit, never as a new route.
+    An unchanged geography-only fingerprint does not establish a current score.
     """
-    current_input_fingerprint = str(
-        inputs.get("input_fingerprint") or ""
-    ).strip()
-    stored_input_fingerprint = str(
-        row.get("input_fingerprint") or ""
-    ).strip()
-    if stored_input_fingerprint:
-        return bool(
-            current_input_fingerprint
-            and stored_input_fingerprint == current_input_fingerprint
-        )
-
-    stored_request_fingerprint = str(
-        row.get("request_fingerprint") or ""
-    ).strip()
-    if stored_request_fingerprint == str(inputs.get("fingerprint") or ""):
-        return True
-    engine_version = str(row.get("engine_version") or "").strip()
-    legacy_fingerprint = str(
-        (inputs.get("legacy_request_fingerprints") or {}).get(
-            engine_version
-        ) or ""
-    ).strip()
-    return bool(
-        stored_request_fingerprint
-        and legacy_fingerprint
-        and stored_request_fingerprint == legacy_fingerprint
-    )
+    if str(row.get("engine_version") or "") != ROUTE_ENGINE_VERSION:
+        return False
+    expected = str(inputs.get("fingerprint") or "")
+    if not expected or str(row.get("request_fingerprint") or "") != expected:
+        return False
+    stored_input = str(row.get("input_fingerprint") or "")
+    return not stored_input or stored_input == str(inputs.get("input_fingerprint") or "")
 
 
 _ROUTE_FALLBACK_TRIGGER_CODES = frozenset({"route_traffic_infeasible"})
@@ -11965,6 +11868,8 @@ _ROUTE_ATTEMPT_TRAFFIC_KEYS = (
     "quadratic_soft_duration_cost",
     "quadratic_soft_exceedance_seconds",
     "quadratic_soft_max_seconds",
+    "hard_duration_buffer_seconds",
+    "hard_duration_max_seconds",
     "route_total_duration_seconds",
     "route_travel_duration_seconds",
     "route_visit_duration_seconds",
@@ -12789,6 +12694,7 @@ def build_route_optimization_preview(
     route_payload = {
         "ok": True,
         "engine": "route_optimization",
+        "ranking_contract": ROUTE_RANKING_CONTRACT,
         "origin_source": origin_source,
         "engine_version": ROUTE_ENGINE_VERSION,
         "stops": stops,
@@ -12810,6 +12716,7 @@ def build_route_optimization_preview(
     generated_at = planning_timestamp()
     preview = {
         "ok": True,
+        "ranking_contract": ROUTE_RANKING_CONTRACT,
         "owner": owner,
         "route_date": route_date.isoformat(),
         "route_start_at": inputs["route_start_at"].isoformat(timespec="minutes"),
@@ -13217,8 +13124,8 @@ def build_planning_route_preview(
         ),
     })
     route_payload["workday_policy"] = WORKDAY_POLICY_VERSION
-    route_payload["ranking_mode"] = ranking_mode()
-    route_payload["ranking_contract"] = "v34-raw"
+    route_payload["ranking_mode"] = "v3"
+    route_payload["ranking_contract"] = ROUTE_RANKING_CONTRACT
     route_payload["plan_fingerprint"] = planning_state_fingerprint(date_rows)
     gps_notice = (
         "Start och retur: din position nu"
@@ -13229,6 +13136,7 @@ def build_planning_route_preview(
         gps_notice = planning_route_origin_notice(owner, origin_source)
     preview = {
         "ok": True,
+        "ranking_contract": ROUTE_RANKING_CONTRACT,
         "owner": owner,
         "route_date": route_date.isoformat(),
         "route_start_at": route_start_at.isoformat(timespec="minutes"),
@@ -13334,6 +13242,9 @@ def apply_planning_route(
     client_request_id,
     preview_token=None,
 ):
+    if preview.get("ranking_contract") != ROUTE_RANKING_CONTRACT:
+        return None, planning_error("route_preview_expired_or_legacy",
+            "Prioriteringsmodellen har uppdaterats. Beräkna rutten igen.", 409)
     route_date = parse_planning_date(preview.get("route_date"))
     if route_date is None:
         return None, planning_error(
@@ -13469,6 +13380,43 @@ def apply_planning_route(
                 "Planeringen ändrades efter förhandsgranskningen. Beräkna rutten igen.",
                 409,
             )
+
+        # Even a signed, unexpired local-engine preview cannot authorize an
+        # obsolete contact. Re-evaluate current source data immediately before
+        # writes, excluding only replaceable route-generated activities.
+        if preview.get("route_engine_version") != ROUTE_ENGINE_VERSION:
+            route_rows = [row for _index, row in all_rows if not (
+                row.get("source") == "route" and planning_owner_matches(row, owner)
+                and parse_date_value(row.get("scheduled_at")) == route_date
+                and str(row.get("status") or "planned") == "planned")]
+            live = get_authoritative_priority_snapshot(spreadsheet, today=route_date,
+                planned_activity_rows=route_rows)
+            live_priorities = apply_workflow_suppressions(live["priorities"],
+                priority_workflow_suppressions(spreadsheet, live["priorities"]))
+            by_customer = {str(p.get("customer_id") or ""): p for p in live_priorities}
+            phone_email_ids = route_contact_customer_ids(route_rows, owner, route_date, live["customers"])
+            prepared = {}
+            for stop in preview_stops:
+                cid = str(stop.get("customer_id") or "")
+                current_priority = by_customer.get(cid)
+                required = bool(stop.get("required"))
+                ranking = (route_priority_values(current_priority, required=True) if required
+                           else route_optional_priority_values(current_priority, route_rows, route_date))
+                if cid in phone_email_ids:
+                    return None, planning_error("same_day_contact_conflict",
+                        "Kunden har redan telefon eller mejl planerat denna dag. Beräkna rutten igen.", 409)
+                if ranking is None or (not required and (ranking["commercial_value"] <= 0
+                        or route_priority_suppressed(current_priority, route_rows))):
+                    return None, planning_error("route_contact_changed",
+                        "Kontaktläget har ändrats efter förhandsgranskningen. Beräkna rutten igen.", 409)
+                if required:
+                    ids = stop.get("required_activity_ids") or [stop.get("planned_activity_id")]
+                    for aid in ids:
+                        row = next((p for p in route_rows if p.get("planned_activity_id") == aid), None)
+                        if row is None or not route_planned_contact_decision(current_priority, row,
+                                snapshot=live, route_date=route_date, prepared=prepared)["allowed"]:
+                            return None, planning_error("route_required_contact_blocked",
+                                "Ett bokat besök är inte längre tillåtet. Hantera bokningen innan rutten sparas.", 409)
 
         existing_by_id = {
             str(row.get("planned_activity_id") or "").strip(): (row_index, row)
@@ -13737,7 +13685,7 @@ def route_payload_accessible(
 
 
 def legacy_route_cache_current(payload, spreadsheet, owner, route_date):
-    if payload.get("ranking_contract") != "v34-raw" or payload.get("ranking_mode") != ranking_mode():
+    if payload.get("ranking_contract") != ROUTE_RANKING_CONTRACT or payload.get("ranking_mode") != "v3":
         return False
     if payload.get("workday_policy") != WORKDAY_POLICY_VERSION:
         return False
@@ -14222,6 +14170,7 @@ def planning_route_import():
         "summary": summary,
         "conflicts": conflicts,
         "timeline": route_timeline,
+        "ranking_contract": saved.get("ranking_contract"),
         "gps_notice": "Planen beräknades från din position vid skapandet",
         "plan_fingerprint": planning_state_fingerprint(date_rows),
         "route_payload": {

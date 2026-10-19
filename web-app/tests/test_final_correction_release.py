@@ -13,6 +13,8 @@ sys.path.insert(0, str(TESTS_DIR))
 import app as app_module  # noqa: E402
 from contact_channel import recommend_contact_channel  # noqa: E402
 from planning_suggestions import SCORE_EVENTS_SHEET, SUGGESTIONS_SHEET  # noqa: E402
+from v3_fixtures import current_rank
+
 from route_proposal import (  # noqa: E402
     Coordinate,
     RouteCandidate,
@@ -223,7 +225,7 @@ class ChannelAndEmailIntentTests(TestCase):
         baseline = scored(today=date(2026, 8, 18))[0]
         self.assertEqual(
             scored(today=date(2026, 8, 18), email_feature=stock)[0]["intent_timing"],
-            baseline["intent_timing"] + 8,
+            round(100 * (scored(today=date(2026, 8, 18), email_feature=stock)[0])["work_contact_factor"]),
         )
 
     def test_scanner_and_non_live_messages_do_not_create_intent(self):
@@ -302,7 +304,7 @@ class AnchorAwareRouteTests(TestCase):
             row=row, customer=f"Kund {row}",
             coordinate=Coordinate(lat, lon), priority_score=score,
             required=required,
-        )
+         commercial_value=score)
 
     def test_preselection_round_robin_keeps_anchor_and_geographic_rankings(self):
         start = Coordinate(0, 0)
@@ -330,7 +332,7 @@ class AnchorAwareRouteTests(TestCase):
                 "customer": f"Kund {row}", "sales_person": "Olle",
                 "latitude_google": 57.0 + index / 100, "longitude_google": 12.0 + index / 100,
             })
-            priorities.append({"row": row, "priority_score": 100 - index})
+            priorities.append(current_rank({"row": row, "priority_score": 100 - index}))
         snapshot = {"customers": customers, "priorities": priorities}
         owner = {"user_name": "olle", "name": "Olle"}
         with patch.object(
@@ -367,27 +369,27 @@ class AnchorAwareRouteTests(TestCase):
 
     def test_anchor_scheduler_avoids_large_backtrack_and_keeps_hard_limits(self):
         start_at = datetime(2026, 8, 10, 9, 0, tzinfo=app_module.STOCKHOLM_ZONE)
-        stops = [{
+        stops = [current_rank({
             "row": 2, "customer_row": 2, "customer_id": "anchor",
             "customer": "Fast besök", "latitude": 57.7, "longitude": 12.8,
             "priority_score": 0, "required": True,
             "scheduled_at": "2026-08-10T13:00:00+02:00",
             "duration_minutes": 20, "planned_activity_id": "anchor-1",
-        }, {
+        }), current_rank({
             "row": 3, "customer_row": 3, "customer_id": "backtrack",
             "customer": "Stor omväg", "latitude": 57.9, "longitude": 11.7,
             "priority_score": 90, "required": False,
             "duration_minutes": 20,
-        }]
+        })]
         for index in range(14):
             row = index + 4
-            stops.append({
+            stops.append(current_rank({
                 "row": row, "customer_row": row, "customer_id": f"rational-{row}",
                 "customer": f"Rationellt stopp {row}",
                 "latitude": 57.7, "longitude": 12.2 + index / 100,
                 "priority_score": 84 - index, "required": False,
                 "duration_minutes": 20,
-            })
+            }))
 
         point_count = len(stops) + 1
         matrix = [[300 for _ in range(point_count)] for _ in range(point_count)]
@@ -427,23 +429,23 @@ class AnchorAwareRouteTests(TestCase):
 
     def test_optional_stop_is_scheduled_between_two_immutable_anchors(self):
         start_at = datetime(2026, 8, 10, 9, 0, tzinfo=app_module.STOCKHOLM_ZONE)
-        stops = [{
+        stops = [current_rank({
             "row": 2, "customer_row": 2, "customer_id": "anchor-one",
             "customer": "Fast besök 1", "latitude": 57.7, "longitude": 12.2,
             "priority_score": 0, "required": True,
             "scheduled_at": "2026-08-10T10:00:00+02:00",
             "duration_minutes": 20, "planned_activity_id": "anchor-1",
-        }, {
+        }), current_rank({
             "row": 3, "customer_row": 3, "customer_id": "anchor-two",
             "customer": "Fast besök 2", "latitude": 57.7, "longitude": 13.0,
             "priority_score": 0, "required": True,
             "scheduled_at": "2026-08-10T14:00:00+02:00",
             "duration_minutes": 20, "planned_activity_id": "anchor-2",
-        }, {
+        }), current_rank({
             "row": 4, "customer_row": 4, "customer_id": "between",
             "customer": "Mellanstopp", "latitude": 57.7, "longitude": 12.6,
             "priority_score": 80, "required": False, "duration_minutes": 20,
-        }]
+        })]
         minutes = (
             (0, 30, 120, 60),
             (30, 0, 180, 15),

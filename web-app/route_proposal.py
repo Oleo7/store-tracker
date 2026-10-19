@@ -9,6 +9,7 @@ from typing import Callable, Protocol, Sequence
 
 import requests
 from route_workday import WORKDAY_SECONDS
+from routing_objective import priority_value, priority_units
 
 
 MAX_TOTAL_SECONDS = WORKDAY_SECONDS
@@ -91,12 +92,14 @@ class RouteCandidate:
 
     @property
     def objective_value(self) -> float:
-        # None is the explicit legacy fixture/rollback adapter. Production v3
-        # always supplies raw commercial priority, separate from its display.
-        value = self.priority_score if self.commercial_value is None else self.commercial_value
-        if isinstance(value, bool) or not math.isfinite(float(value)) or float(value) < 0:
-            raise RouteVerificationError("Invalid commercial route value")
-        return float(value)
+        try:
+            return priority_value(self.commercial_value)
+        except ValueError as exc:
+            raise RouteVerificationError("Missing or invalid current v3 priority") from exc
+
+    @property
+    def objective_units(self) -> int:
+        return priority_units(self.objective_value)
 
 
 def _haversine_km(origin: Coordinate, destination: Coordinate) -> float:
@@ -1020,7 +1023,7 @@ def _solve_exact_dp(
         lowest = mask & -mask
         index = lowest.bit_length() - 1
         subset_scores[mask] = (
-            subset_scores[mask ^ lowest] + candidates[index].objective_value
+            subset_scores[mask ^ lowest] + candidates[index].objective_units
         )
 
     costs: list[dict[int, int]] = [dict() for _ in range(state_count)]
@@ -1150,7 +1153,7 @@ def _solve_beam(
         if candidate.required
     )
     ordered_scores = sorted(
-        ((candidate.objective_value, index) for index, candidate in enumerate(candidates)),
+        ((candidate.objective_units, index) for index, candidate in enumerate(candidates)),
         reverse=True,
     )
 
@@ -1199,7 +1202,7 @@ def _solve_beam(
                                 new_mask,
                                 next_index,
                                 new_drive,
-                                score + candidates[next_index].objective_value,
+                                score + candidates[next_index].objective_units,
                                 (*path, next_index),
                             )
                             state_key = (new_mask, next_index)

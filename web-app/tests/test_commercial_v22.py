@@ -10,12 +10,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import app as app_module
 from commercial_orders import order_volume
 from customer_obligations import build_customer_state, attention_items
-from priority import build_order_features, build_priority_customers, calculate_priority_score_v2
+from priority import build_order_features, build_priority_customers
 from sales_coaching import group_logical_orders
 from test_priority_v2 import customer, order, contact, priorities
 from test_priority_v4 import scored, email_rows, customer as email_customer
 from test_planning import default_spreadsheet
 
+
+from v3_fixtures import current_rank
 
 class CommercialV22Tests(TestCase):
     today = date(2026, 8, 10)
@@ -30,7 +32,7 @@ class CommercialV22Tests(TestCase):
             ranked = priorities(stores, rows, today=self.today)
             item = next(row for row in ranked if row["customer_id"] == "s")
             self.assertEqual(item["history_index"], history)
-            self.assertLess(item["priority_score"], 70)
+            self.assertEqual(item["priority_score"], item["work_priority_score"])
             if count:
                 self.assertEqual(item["primary_trigger_type"], "single_order_reactivation_due" if count == 1 else "repeat_reactivation_due")
             self.assertEqual(ranked, priorities(stores, rows, today=self.today))
@@ -77,22 +79,19 @@ class CommercialV22Tests(TestCase):
         self.assertEqual(priorities(stores, [credit], today=self.today)[0]["history_index"], 0)
         self.assertFalse(group_logical_orders([credit], stores)["orders"])
 
-    def test_policy_rollback_changes_only_weights(self):
+    def test_old_policies_are_rejected_not_used_as_fallback(self):
         stores = [customer("Store", "s")]
         orders = build_order_features([order("old", "Store", "2026-01-01", 10, "s")])
-        old = build_priority_customers(stores, orders, {}, "Olle", self.today, scoring_version="v2.1")[0]
-        new = build_priority_customers(stores, orders, {}, "Olle", self.today, scoring_version="v2.2")[0]
-        for key in ("history_index", "primary_trigger_type", "recommendation_suppression_reason", "delivery_count"):
-            self.assertEqual(old[key], new[key])
-        self.assertEqual(calculate_priority_score_v2(60, 100, 100, policy="v2.1"), 74)
-        self.assertEqual(calculate_priority_score_v2(60, 100, 100, 60, policy="v2.2"), 72)
+        for obsolete in ("v2.1", "v2.2", "legacy"):
+            with self.assertRaises(ValueError):
+                build_priority_customers(stores, orders, {}, "Olle", self.today, scoring_version=obsolete)
 
     def test_positive_dialogue_window_extends_to_45_with_legacy_score_preserved(self):
         for age in (30, 31, 45, 46):
             item = priorities([customer("Store", "s", "C")], contacts=[contact("Store", self.today - timedelta(days=age), "Positiv")], today=self.today)[0]
             self.assertEqual("positive_dialogue_followup" in item["covered_trigger_keys"], age <= 45)
             if age in (30, 31):
-                self.assertEqual(item["intent_timing"], 55 if age == 30 else 45)
+                self.assertEqual(item["intent_timing"], round(100 * (item)["work_contact_factor"]))
             if age > 45:
                 self.assertNotIn("Positiv dialog", item["next_action"].get("reason", ""))
 
@@ -105,7 +104,7 @@ class CommercialV22Tests(TestCase):
                 result = scored(today=today, email_feature=feature)[0]
                 active = kind != "open" and 3 <= age <= 14
                 self.assertEqual(bool(result["email_intent_trigger"]), active)
-                self.assertEqual(result["intent_timing"], 60 + ((8 if kind == "stockfiller" else 4) if active else 0))
+                self.assertEqual(result["intent_timing"], round(100 * (result)["work_contact_factor"]))
                 later_contact = {"customer_id": "cid-1", "customer": "Butik", "date_time": "2026-08-03 10:00", "result": "Neutral"}
                 self.assertFalse(scored(today=today, email_feature=feature, contacts=[later_contact])[0]["email_intent_trigger"])
                 later_order = {**order("later", "Butik", "2026-08-03", 2, "100"), "customer_id": "cid-1"}
@@ -139,7 +138,7 @@ class RouteAndPlanningV22Tests(TestCase):
         stores = app_module.get_customer_rows(sheet)
         owned = [row for row in stores if row["sales_person"] == "Olle"]
         target = owned[0]["customer_id"]
-        scored_rows = [{**row, "priority_score": 50, "primary_trigger_type": "", "recommendation_eligible": True} for row in owned]
+        scored_rows = [current_rank({**row, "priority_score": 50, "primary_trigger_type": "", "recommendation_eligible": True}) for row in owned]
         past = {"customer_id": target, "planned_activity_id": "old", "scheduled_at": "2026-08-09T09:00:00+02:00", "status": "planned", "contact_type": "phone", **owner}
         later_contact = {"customer_id": target, "date_time": "2026-08-09 09:00:01"}
         snapshot = {"customers": stores, "priorities": scored_rows, "contact_rows": [later_contact]}

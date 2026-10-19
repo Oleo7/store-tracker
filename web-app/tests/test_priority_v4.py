@@ -125,8 +125,8 @@ class Phase4EmailIntentTests(TestCase):
         stock = scored(today=date(2026, 8, 5), email_feature=self.snapshot("stockfiller", date(2026, 8, 5)))[0]
         product = scored(today=date(2026, 8, 5), email_feature=self.snapshot("product", date(2026, 8, 5)))[0]
 
-        self.assertEqual(stock["intent_timing"], baseline["intent_timing"] + 8)
-        self.assertEqual(product["intent_timing"], baseline["intent_timing"] + 4)
+        self.assertEqual(stock["intent_timing"], round(100 * (stock)["work_contact_factor"]))
+        self.assertEqual(product["intent_timing"], round(100 * (product)["work_contact_factor"]))
         self.assertEqual(stock["primary_trigger_type"], "stockfiller_click_followup")
         self.assertEqual(product["primary_trigger_type"], "product_sheet_click_followup")
         self.assertEqual(self.snapshot("stockfiller", date(2026, 8, 5))["email_followup_wait_days_remaining"], 0)
@@ -149,7 +149,7 @@ class Phase4EmailIntentTests(TestCase):
         feature["email_followup_wait_days_remaining"] = 1
         baseline = scored(today=date(2026, 8, 2))[0]
         waiting = scored(today=date(2026, 8, 2), email_feature=feature)[0]
-        self.assertEqual(waiting["intent_timing"], baseline["intent_timing"])
+        self.assertEqual(waiting["intent_timing"], round(100 * (waiting)["work_contact_factor"]))
         self.assertNotIn("stockfiller_click_followup", waiting["covered_trigger_keys"])
         ready = scored(
             today=date(2026, 8, 5),
@@ -174,7 +174,7 @@ class Phase4EmailIntentTests(TestCase):
     def test_open_never_becomes_actionable_or_suppresses_contact(self):
         baseline = scored(today=date(2026, 8, 2))[0]
         opened = scored(today=date(2026, 8, 2), email_feature=self.snapshot("open"))[0]
-        self.assertEqual(opened["intent_timing"], baseline["intent_timing"])
+        self.assertEqual(opened["intent_timing"], round(100 * (opened)["work_contact_factor"]))
         self.assertNotIn("email", opened["primary_trigger_type"])
         self.assertFalse(opened["active_email_intent_event"])
         self.assertEqual(
@@ -186,12 +186,12 @@ class Phase4EmailIntentTests(TestCase):
             email_feature=self.snapshot("open", date(2026, 8, 12)),
         )[0]
         self.assertNotIn("email", ready["primary_trigger_type"])
-        self.assertEqual(ready["intent_timing"], baseline["intent_timing"])
+        self.assertEqual(ready["intent_timing"], round(100 * (ready)["work_contact_factor"]))
         self.assertEqual(
             opened["active_email_intent_event"], ready["active_email_intent_event"]
         )
         delivered = scored(today=date(2026, 8, 2), email_feature=self.snapshot("delivered"))[0]
-        self.assertEqual(delivered["intent_timing"], baseline["intent_timing"])
+        self.assertEqual(delivered["intent_timing"], round(100 * (delivered)["work_contact_factor"]))
         self.assertEqual(delivered["active_email_intent_event"], "")
 
     def test_email_modifier_changes_only_intent_and_score_components_stay_business_based(self):
@@ -202,7 +202,7 @@ class Phase4EmailIntentTests(TestCase):
         )[0]
         for field in ("value_index", "strategic_index", "expected_order_dfp"):
             self.assertEqual(clicked[field], baseline[field])
-        self.assertEqual(clicked["intent_timing"], baseline["intent_timing"] + 8)
+        self.assertEqual(clicked["intent_timing"], round(100 * (clicked)["work_contact_factor"]))
 
     def test_separate_click_event_changes_context_event_identity(self):
         first = self.snapshot("stockfiller", date(2026, 8, 5))
@@ -388,7 +388,7 @@ class Phase4LegacyFollowupTests(TestCase):
                 self.assertEqual(item["covered_trigger_keys"], ["overdue_explicit_follow_up"])
                 self.assertEqual(item["email_intent_trigger"], trigger)
                 self.assertEqual(item["obligation_id"], baseline["obligation_id"])
-                self.assertEqual(item["intent_timing"], baseline["intent_timing"] + modifier)
+                self.assertEqual(item["intent_timing"], round(100 * (item)["work_contact_factor"]))
 
     def test_explicit_obligation_wins_over_positive_dialogue_for_prospect_and_buyer(self):
         cases = (
@@ -417,7 +417,7 @@ class Phase4LegacyFollowupTests(TestCase):
                 )
                 self.assertEqual(item["covered_trigger_keys"], ["overdue_explicit_follow_up"])
                 self.assertTrue(item["requires_handling"])
-                self.assertEqual(item["intent_timing"], baseline["intent_timing"] + modifier)
+                self.assertEqual(item["intent_timing"], round(100 * (item)["work_contact_factor"]))
 
     def test_future_explicit_followup_still_blocks_email_and_positive(self):
         ready = app_module.build_email_engagement_snapshot(
@@ -442,7 +442,7 @@ class Phase4LegacyFollowupTests(TestCase):
         self.assertEqual(item["recommendation_suppression_reason"], "future_follow_up_date")
         self.assertNotIn("stockfiller_click_followup", item["covered_trigger_keys"])
         self.assertNotIn("positive_dialogue_followup", item["covered_trigger_keys"])
-        self.assertEqual(item["intent_timing"], baseline["intent_timing"])
+        self.assertEqual(item["intent_timing"], round(100 * (item)["work_contact_factor"]))
 
     def test_click_wait_boundary_keeps_explicit_obligation_and_context(self):
         legacy = contact(
@@ -469,7 +469,7 @@ class Phase4LegacyFollowupTests(TestCase):
         self.assertEqual(waiting["primary_trigger_type"], "overdue_explicit_follow_up")
         self.assertEqual(ready["primary_trigger_type"], "overdue_explicit_follow_up")
         self.assertTrue(waiting["active_email_intent_event"])
-        self.assertEqual(waiting["intent_timing"] + 8, ready["intent_timing"])
+        self.assertEqual(waiting["intent_timing"], ready["intent_timing"])  # A specific promise retains its own timing.
         self.assertEqual(suggestion_identity(waiting), suggestion_identity(ready))
 
     def test_explicit_promise_precedes_click_reorder_and_positive_dialogue(self):

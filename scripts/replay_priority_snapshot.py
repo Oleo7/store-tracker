@@ -28,7 +28,7 @@ from freezegun import freeze_time
 def model_source_hashes(repo):
     sources = {}
     for name in ("app.py", "priority.py", "value_prioritization.py", "customer_obligations.py",
-                 "contact_channel.py", "planning_suggestions.py", "route_proposal.py", "route_optimization.py", "index.html"):
+                 "contact_channel.py", "planning_suggestions.py", "route_proposal.py", "route_optimization.py", "routing_objective.py", "index.html"):
         source = repo / "web-app" / name
         if source.is_file():
             sources["web-app/" + name] = hashlib.sha256(source.read_bytes()).hexdigest()
@@ -41,7 +41,7 @@ def main():
     parser.add_argument("--snapshot", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--as-of", required=True, help="Timezone-aware frozen replay time")
-    parser.add_argument("--model-header", default="v3.4", help="API read-model version; use v3.3 for earlier PR48")
+    parser.add_argument("--model-header", default="v3.5", help="API read-model version; use v3.3 for earlier PR48")
     parser.add_argument("--policy", default="{}")
     parser.add_argument("--scenario", default="baseline")
     parser.add_argument("--skip-user-endpoints", action="store_true")
@@ -62,7 +62,6 @@ def main():
     raw = snapshot_path.read_bytes()
     snapshot = json.loads(raw)
     os.environ["APP_ENV"] = "test"
-    os.environ["PRIORITY_SCORING_POLICY"] = "v2.2"
     os.environ["GOOGLE_CREDENTIALS"] = "{}"
     os.environ["FLASK_SECRET_KEY"] = "local-crm-review-only"
     sys.path.insert(0, str(repo / "web-app"))
@@ -242,7 +241,7 @@ def main():
                     "user_verification_scope": args.user_name or ("skipped" if args.skip_user_endpoints else "all"),
                     "policy_overrides": policy_overrides,
                     "model": getattr(priority, "VALUE_MODEL_VERSION", None),
-                    "legacy_score_policy": priority.SCORE_VERSION,
+                    "score_version": priority.SCORE_VERSION,
                     "python": sys.version,
                     "dependencies": {name: importlib.metadata.version(name) for name in
                         ("flask", "flask-cors", "gunicorn", "gspread", "google-auth", "python-dotenv", "requests", "tzdata", "freezegun")},

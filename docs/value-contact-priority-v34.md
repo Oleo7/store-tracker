@@ -1,3 +1,5 @@
+> Historical contract. Active ranking, routing and recovery are superseded by [v3.5](value-contact-priority-v35.md).
+
 # V3.4: reconciled history, one seller priority and aligned routing
 
 This document supersedes the v3.3 interpretation of legacy follow-up dates.

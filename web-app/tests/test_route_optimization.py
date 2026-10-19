@@ -45,6 +45,8 @@ from route_workday import lunch_breaks
 
 
 STOCKHOLM = ZoneInfo("Europe/Stockholm")
+from v3_fixtures import current_snapshot, current_rank
+
 NOW = datetime(2026, 8, 10, 8, 0, tzinfo=STOCKHOLM)
 START = TrustedCoordinate(57.70887, 11.97456)
 
@@ -53,7 +55,7 @@ def shipment(index=1, *, required=False, score=50, fixed_at=None):
     return {
         "customer_id": f"00000000-0000-4000-8000-{index:012d}",
         "coordinate": TrustedCoordinate(57.0 + index / 100000, 11.0 + index / 100000),
-        "priority_score": score,
+        "priority_score": score, "commercial_value": float(score),
         "required": required,
         "fixed_at": fixed_at,
         "activity_id": f"activity-{index}" if required else "",
@@ -146,22 +148,18 @@ class RouteOptimizationModelTests(TestCase):
             with self.subTest(value=value):
                 self.assertIsNone(_diagnostic_duration_seconds(value))
 
-    def test_t1_penalty_proof_and_clamping(self):
-        self.assertEqual(ROUTE_ENGINE_VERSION, "ro-v5")
+    def test_t1_penalty_dominates_all_feasible_driving_without_clamping(self):
+        self.assertEqual(ROUTE_ENGINE_VERSION, "ro-v6")
         self.assertEqual(MAX_PROVIDER_ATTEMPTS_PER_OPERATION, 3)
-        self.assertEqual(QUADRATIC_SOFT_DURATION_BUFFER_SECONDS, 300)
+        self.assertEqual(QUADRATIC_SOFT_DURATION_BUFFER_SECONDS, 0)
         self.assertEqual(FALLBACK_SAFER_SOFT_DURATION_BUFFER_SECONDS, 900)
-        self.assertEqual(
-            QUADRATIC_SOFT_DURATION_COST_PER_SQUARE_HOUR, 28800
-        )
-        self.assertGreater(PRIORITY_PENALTY_MULTIPLIER, ROUTE_MAX_SECONDS / 3600)
-        self.assertEqual(priority_penalty(0), 10.0)
-        self.assertEqual(priority_penalty(20), 200.0)
-        self.assertEqual(priority_penalty(40), 400.0)
-        self.assertEqual(priority_penalty(60.4), 600.0)
-        self.assertEqual(priority_penalty(80), 800.0)
-        self.assertEqual(priority_penalty(100), 1000.0)
-        self.assertEqual(priority_penalty(999), 1000.0)
+        self.assertEqual(QUADRATIC_SOFT_DURATION_COST_PER_SQUARE_HOUR, 0)
+        self.assertEqual(priority_penalty(0), 0)
+        self.assertEqual(priority_penalty(20), 20_000_000 * (ROUTE_MAX_SECONDS + 1))
+        self.assertGreater(priority_penalty(80.000001)-priority_penalty(80), ROUTE_MAX_SECONDS)
+        for value in (None, True, -1, 999, float("nan"), float("inf")):
+            with self.assertRaises((ValueError, RouteOptimizationError)):
+                priority_penalty(value)
 
     def test_t2_exact_request_schema_optional_and_mandatory(self):
         fixed = NOW + timedelta(hours=2)
@@ -176,7 +174,7 @@ class RouteOptimizationModelTests(TestCase):
         self.assertEqual(body["label"], "store-tracker:run-1")
         self.assertNotIn("considerRoadTraffic", model)
         self.assertNotIn("label", model)
-        self.assertEqual(model["shipments"][0]["penaltyCost"], 740.0)
+        self.assertEqual(model["shipments"][0]["penaltyCost"], priority_penalty(74))
         self.assertNotIn("penaltyCost", model["shipments"][1])
         self.assertEqual(model["shipments"][0]["loadDemands"]["visit_slots"]["amount"], "1")
         vehicle = model["vehicles"][0]
@@ -185,14 +183,10 @@ class RouteOptimizationModelTests(TestCase):
         self.assertEqual(vehicle["loadLimits"]["visit_slots"]["startLoadInterval"], {"min": "0", "max": "0"})
         self.assertEqual(vehicle["startLocation"], vehicle["endLocation"])
         duration_limit = vehicle["routeDurationLimit"]
-        self.assertEqual(duration_limit, {
-            "maxDuration": "32400s",
-            "quadraticSoftMaxDuration": "32100s",
-            "costPerSquareHourAfterQuadraticSoftMax": 28800,
-        })
+        self.assertEqual(duration_limit, {"maxDuration": "32400s"})
         rendered = str(body)
         for forbidden in (
-            "deliveries", "costPerKilometer", "costPerTraveledHour",
+            "deliveries", "costPerKilometer",
             "fixedCost", "softMaxDuration", "costPerHourAfterSoftMax",
             "travelDurationMultiple",
         ):
@@ -248,14 +242,10 @@ class RouteOptimizationModelTests(TestCase):
         self.assertEqual(
             vehicle["loadLimits"]["visit_slots"]["maxLoad"], "15"
         )
-        self.assertEqual(vehicle["routeDurationLimit"], {
-            "maxDuration": "32400s",
-            "quadraticSoftMaxDuration": "31500s",
-            "costPerSquareHourAfterQuadraticSoftMax": 28800,
-        })
+        self.assertEqual(vehicle["routeDurationLimit"], {"maxDuration": "31500s"})
         self.assertEqual(
             [item.get("penaltyCost") for item in safer["model"]["shipments"]],
-            [740.0, None],
+            [priority_penalty(74), None],
         )
         primary_comparable = json.loads(json.dumps(primary))
         safer_comparable = json.loads(json.dumps(safer))
@@ -402,10 +392,8 @@ class RouteOptimizationModelTests(TestCase):
         )
         reduced_limit = reduced["model"]["vehicles"][0]["routeDurationLimit"]
         self.assertEqual(reduced_limit["maxDuration"], "31800s")
-        self.assertEqual(reduced_limit["quadraticSoftMaxDuration"], "31500s")
-        self.assertEqual(
-            reduced_limit["costPerSquareHourAfterQuadraticSoftMax"], 28800
-        )
+        self.assertNotIn("quadraticSoftMaxDuration", reduced_limit)
+        self.assertNotIn("costPerSquareHourAfterQuadraticSoftMax", reduced_limit)
 
         small_capacity = build_optimize_tours_request(
             run_id="small-capacity",
@@ -420,34 +408,14 @@ class RouteOptimizationModelTests(TestCase):
             {"maxDuration": "300s"},
         )
 
-    def test_t5b_quadratic_soft_duration_diagnostics_use_stable_decimal_cost(self):
-        at_hard_max = quadratic_soft_duration_diagnostics(
-            model_route_max_seconds=32400,
-            route_duration_seconds=32400,
-        )
-        self.assertEqual(at_hard_max, {
-            "quadratic_soft_duration_enabled": True,
-            "quadratic_soft_buffer_seconds": 300,
-            "quadratic_soft_max_seconds": 32100,
-            "quadratic_soft_cost_per_square_hour": 28800,
-            "quadratic_soft_exceedance_seconds": 300,
-            "quadratic_soft_duration_cost": 200,
-        })
-        sofia_completed = quadratic_soft_duration_diagnostics(
-            model_route_max_seconds=32400,
-            route_duration_seconds=32251,
-        )
-        self.assertEqual(
-            sofia_completed["quadratic_soft_exceedance_seconds"], 151
-        )
-        self.assertEqual(sofia_completed["quadratic_soft_duration_cost"], 50.7)
-        disabled = quadratic_soft_duration_diagnostics(
-            model_route_max_seconds=300,
-            route_duration_seconds=300,
-        )
-        self.assertFalse(disabled["quadratic_soft_duration_enabled"])
-        self.assertIsNone(disabled["quadratic_soft_max_seconds"])
-        self.assertIsNone(disabled["quadratic_soft_duration_cost"])
+    def test_t5b_duration_diagnostics_never_report_a_competing_soft_cost(self):
+        for buffer in (0, 900):
+            d = quadratic_soft_duration_diagnostics(model_route_max_seconds=32400,
+                route_duration_seconds=32251, buffer_seconds=buffer)
+            self.assertFalse(d["quadratic_soft_duration_enabled"])
+            self.assertIsNone(d["quadratic_soft_duration_cost"])
+            self.assertEqual(d["hard_duration_buffer_seconds"], buffer)
+            self.assertEqual(d["hard_duration_max_seconds"], 32400-buffer)
 
     def test_t6_fingerprint_ignores_names_but_tracks_business_inputs(self):
         base = [shipment(1, score=70)]
@@ -462,7 +430,7 @@ class RouteOptimizationModelTests(TestCase):
             owner_user_name="Olle", route_date="2026-08-10", route_start=NOW,
             route_mode="automatic", start=START, shipments=copied, fixed_activities=[],
         ))
-        changed = [{**base[0], "priority_score": 71}]
+        changed = [{**base[0], "priority_score": 71, "commercial_value": 71.0}]
         self.assertNotEqual(first, build_request_fingerprint(
             owner_user_name="Olle", route_date="2026-08-10", route_start=NOW,
             route_mode="automatic", start=START, shipments=changed, fixed_activities=[],
@@ -482,7 +450,7 @@ class RouteOptimizationModelTests(TestCase):
         )
         self.assertEqual(
             build_legacy_ro_v1_request_fingerprint(**fingerprint_kwargs),
-            "25cddb37f7a5570658ce7c9908ded3ddc65e0ed1f6bd69fbcbe4d66bb027d00a",
+            "c52c855504da8f01c92112a2eb7f2397c7fba59eb2b995f0910e5d15410a00d5",
         )
         with patch.object(
             route_optimization_module,
@@ -640,14 +608,14 @@ class RouteOptimizationModelTests(TestCase):
         })
         self.assertEqual(error.details["absolute_route_max_seconds"], 32400)
         self.assertEqual(error.details["model_route_max_seconds"], 31800)
-        self.assertTrue(error.details["quadratic_soft_duration_enabled"])
-        self.assertEqual(error.details["quadratic_soft_buffer_seconds"], 300)
-        self.assertEqual(error.details["quadratic_soft_max_seconds"], 31500)
+        self.assertFalse(error.details["quadratic_soft_duration_enabled"])
+        self.assertEqual(error.details["quadratic_soft_buffer_seconds"], 0)
+        self.assertEqual(error.details["quadratic_soft_max_seconds"], None)
         self.assertEqual(
-            error.details["quadratic_soft_cost_per_square_hour"], 28800
+            error.details["quadratic_soft_cost_per_square_hour"], 0
         )
-        self.assertEqual(error.details["quadratic_soft_exceedance_seconds"], 0)
-        self.assertEqual(error.details["quadratic_soft_duration_cost"], 0)
+        self.assertEqual(error.details["quadratic_soft_exceedance_seconds"], None)
+        self.assertEqual(error.details["quadratic_soft_duration_cost"], None)
         self.assertEqual(error.details["required_count"], 1)
         self.assertTrue(error.details["has_required_visits"])
         self.assertEqual(error.details["fixed_visit_count"], 1)
@@ -881,14 +849,9 @@ class RouteOptimizationIntegrationTests(TestCase):
 
     def priority_snapshot(self, customers=None):
         customers = customers or app_module.get_customer_rows(self.spreadsheet)
-        return {
-            "customers": customers,
-            "priorities": [{
-                "customer_id": customer["customer_id"],
-                "priority_score": 80 - (index % 20),
-            } for index, customer in enumerate(customers) if not app_module.customer_is_cancelled(customer)],
-            "contact_rows": [],
-        }
+        scores = [{"customer_id": c["customer_id"], "priority_score":80-(i%20)} for i,c in enumerate(customers)]
+        return current_snapshot(customers, scores,
+            self.spreadsheet.worksheet(app_module.PLANNED_ACTIVITIES_SHEET).dict_rows(), as_of=NOW)
 
     def legacy_ro_v1_fingerprint(self, inputs):
         return build_legacy_ro_v1_request_fingerprint(
@@ -1299,18 +1262,20 @@ class RouteOptimizationIntegrationTests(TestCase):
         persisted = json.loads(str(rows[0]["result_payload_json"]))
         self.assertRegex(rows[0]["input_fingerprint"], r"^[0-9a-f]{64}$")
         self.assertEqual(persisted["model_diagnostics"], {
-            "route_engine_version": "ro-v5",
-            "primary_model_version": "ro-v3",
-            "fallback_policy_version": "route-fallback-v1",
+            "route_engine_version": "ro-v6",
+            "primary_model_version": "ro-v4",
+            "fallback_policy_version": "route-fallback-v2",
             "attempt_number": 1,
             "fallback_strategy": "primary",
             "model_route_max_seconds": 32400,
-            "quadratic_soft_duration_enabled": True,
-            "quadratic_soft_buffer_seconds": 300,
-            "quadratic_soft_max_seconds": 32100,
-            "quadratic_soft_cost_per_square_hour": 28800,
-            "quadratic_soft_exceedance_seconds": 0,
-            "quadratic_soft_duration_cost": 0,
+            "quadratic_soft_duration_enabled": False,
+            "quadratic_soft_buffer_seconds": 0,
+            "quadratic_soft_max_seconds": None,
+            "quadratic_soft_cost_per_square_hour": 0,
+            "quadratic_soft_exceedance_seconds": None,
+            "quadratic_soft_duration_cost": None,
+            "hard_duration_buffer_seconds": 0,
+            "hard_duration_max_seconds": 32400,
         })
         self.assertFalse(persisted["fallback"]["used"])
         self.assertEqual(persisted["fallback"]["attempt_count"], 1)
@@ -1527,11 +1492,8 @@ class RouteOptimizationIntegrationTests(TestCase):
                 },
             )
 
-        self.assertEqual(recovered.status_code, 200, recovered.get_json())
-        self.assertEqual(
-            recovered.get_json()["route_optimization_run_id"],
-            "completed-ro-v2",
-        )
+        self.assertEqual(recovered.status_code, 409, recovered.get_json())
+        self.assertEqual(recovered.get_json()["code"], "route_request_id_conflict")
         self.assertEqual(changed.status_code, 409)
         self.assertEqual(changed.get_json()["code"], "route_request_id_conflict")
         provider.assert_not_called()
@@ -1778,14 +1740,14 @@ class RouteOptimizationIntegrationTests(TestCase):
         self.assertEqual(payload["aggregate_timeline_residual_seconds"], -116)
         self.assertEqual(payload["absolute_route_max_seconds"], 32400)
         self.assertEqual(payload["model_route_max_seconds"], 32400)
-        self.assertTrue(payload["quadratic_soft_duration_enabled"])
-        self.assertEqual(payload["quadratic_soft_buffer_seconds"], 300)
-        self.assertEqual(payload["quadratic_soft_max_seconds"], 32100)
+        self.assertFalse(payload["quadratic_soft_duration_enabled"])
+        self.assertEqual(payload["quadratic_soft_buffer_seconds"], 0)
+        self.assertEqual(payload["quadratic_soft_max_seconds"], None)
         self.assertEqual(
-            payload["quadratic_soft_cost_per_square_hour"], 28800
+            payload["quadratic_soft_cost_per_square_hour"], 0
         )
-        self.assertEqual(payload["quadratic_soft_exceedance_seconds"], 0)
-        self.assertEqual(payload["quadratic_soft_duration_cost"], 0)
+        self.assertEqual(payload["quadratic_soft_exceedance_seconds"], None)
+        self.assertEqual(payload["quadratic_soft_duration_cost"], None)
         self.assertEqual(payload["route_elapsed_seconds"], 25199)
         self.assertTrue(payload["route_elapsed_matches_total_duration"])
         self.assertEqual(payload["negative_wait_transition_count"], 1)
@@ -1823,11 +1785,7 @@ class RouteOptimizationIntegrationTests(TestCase):
 
         request = calls[0]
         vehicle = request["model"]["vehicles"][0]
-        self.assertEqual(vehicle["routeDurationLimit"], {
-            "maxDuration": "32400s",
-            "quadraticSoftMaxDuration": "32100s",
-            "costPerSquareHourAfterQuadraticSoftMax": 28800,
-        })
+        self.assertEqual(vehicle["routeDurationLimit"], {"maxDuration": "32400s"})
         self.assertEqual(request["searchMode"], "CONSUME_ALL_AVAILABLE_TIME")
         self.assertEqual(request["solvingMode"], "DEFAULT_SOLVE")
         self.assertTrue(request["considerRoadTraffic"])
@@ -2024,11 +1982,7 @@ class RouteOptimizationIntegrationTests(TestCase):
         self.assertEqual(safer_vehicle["endLocation"], primary_vehicle["endLocation"])
         self.assertEqual(
             safer_vehicle["routeDurationLimit"],
-            {
-                "maxDuration": "32400s",
-                "quadraticSoftMaxDuration": "31500s",
-                "costPerSquareHourAfterQuadraticSoftMax": 28800,
-            },
+            {"maxDuration": "31500s"},
         )
         self.assertTrue(safer["considerRoadTraffic"])
         self.assertNotIn("injectedFirstSolutionRoutes", safer)
@@ -2162,7 +2116,7 @@ class RouteOptimizationIntegrationTests(TestCase):
         self.assertEqual(len(calls[2]["model"]["shipments"]), 5)
         self.assertEqual(
             calls[2]["model"]["vehicles"][0]["routeDurationLimit"]
-            ["quadraticSoftMaxDuration"],
+            ["maxDuration"],
             "31500s",
         )
         row = self.spreadsheet.worksheet(
@@ -2175,7 +2129,7 @@ class RouteOptimizationIntegrationTests(TestCase):
         self.assertEqual(history[1]["strategy"], "alternate_safer")
         self.assertEqual(history[1]["quadratic_soft_buffer_seconds"], 900)
         self.assertEqual(
-            history[1]["traffic_diagnostics"]["quadratic_soft_max_seconds"],
+            history[1]["traffic_diagnostics"]["hard_duration_max_seconds"],
             31500,
         )
         self.assertEqual(history[2]["strategy"], "reduced_cap")
@@ -2440,6 +2394,7 @@ class RouteOptimizationIntegrationTests(TestCase):
             )
         self.assertIsNone(input_error)
         valid_preview = {
+            "ranking_contract": "v35-priority-lexicographic-1",
             "route_date": NOW.date().isoformat(), "user_name": "olle",
             "route_engine_version": ROUTE_ENGINE_VERSION,
             "route_optimization_fingerprint": inputs["fingerprint"],
@@ -2476,6 +2431,7 @@ class RouteOptimizationIntegrationTests(TestCase):
         self.assertEqual(len(self.spreadsheet.worksheet(app_module.ROUTE_PROPOSALS_SHEET).dict_rows()), 1)
 
         preview = {
+            "ranking_contract": "v35-priority-lexicographic-1",
             "route_date": NOW.date().isoformat(), "user_name": "olle",
             "route_engine_version": ROUTE_ENGINE_VERSION, "route_optimization_fingerprint": "stale",
             "start": {"latitude": 57.7, "longitude": 11.9},

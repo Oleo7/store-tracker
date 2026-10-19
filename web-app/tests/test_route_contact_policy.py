@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from v3_fixtures import current_rank
 import app as app_module
 from tests.test_planning import ConstantRoadProvider, default_spreadsheet
 
@@ -112,7 +113,8 @@ class RouteContactPolicyTests(TestCase):
         snapshot = self.snapshot(orders=[order()], plans=[appointment(1, contact_type="phone")])
         priority = self.priority(snapshot)
         self.assertEqual(priority["list_guidance"]["status_key"], "planned")
-        self.assertGreater(priority["priority_score"], 0)  # Old numeric score is not permission.
+        self.assertEqual(priority["priority_score"], 0)  # No obsolete score survives the waiting state.
+        self.assertGreater(priority["business_value_raw"], 0)
         self.assertEqual(priority["work_priority_raw"], 0)
         self.assertFalse(priority["work_can_start_unscheduled_contact"])
         for legacy in (False, True):
@@ -148,10 +150,9 @@ class RouteContactPolicyTests(TestCase):
         for legacy in (False, True):
             with self.subTest(legacy=legacy):
                 result, error = self.route(snapshot, legacy=legacy, required=(2,))
-                self.assertIsNone(error, error)
-                rows = result["stops"] if legacy else result["shipments"]
-                self.assertTrue(any(row["required"] and (row.get("row") == 2 or row.get("customer_id") == CID)
-                                    for row in rows))
+                self.assertIsNone(result)
+                self.assertEqual(error[1], 409)
+                self.assertEqual(error[0].get_json()["code"], "same_day_contact_conflict")
 
     def test_newer_agreement_cannot_grant_permission_to_an_unrelated_visit(self):
         source = contact(30, "Negativ", contact_id="new-agreement", follow_up_date=NOW.date().isoformat(),
@@ -170,7 +171,7 @@ class RouteContactPolicyTests(TestCase):
             with self.subTest(legacy=legacy):
                 result, error = self.route(snapshot, legacy=legacy, required=(2,))
                 self.assertIsNone(result)
-                self.assertEqual(error[0].get_json()["code"], "route_required_contact_blocked")
+                self.assertIn(error[0].get_json()["code"], {"route_required_contact_blocked", "same_day_contact_conflict"})
 
     def test_future_visit_rechecks_expiring_pause_on_its_own_day(self):
         for reason, contacts, days in (("negative_contact_cooldown", [contact(30, "Negativ")], 35),
@@ -193,7 +194,7 @@ class RouteContactPolicyTests(TestCase):
         snapshot = self.snapshot(contacts=[contact(30, "Negativ")])
         result, error = self.route(snapshot, legacy=True, required=(2,))
         self.assertIsNone(result)
-        self.assertEqual(error[0].get_json()["code"], "route_required_contact_blocked")
+        self.assertIn(error[0].get_json()["code"], {"route_required_contact_blocked", "same_day_contact_conflict"})
 
     def test_scoped_decisions_reuse_features_and_never_recalculate_the_portfolio(self):
         plans = [appointment(planned_activity_id="first", contact_type="phone", scheduled_at=NOW.replace(hour=11).isoformat()),

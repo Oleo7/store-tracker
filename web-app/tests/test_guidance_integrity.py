@@ -168,7 +168,7 @@ class GuidanceIntegrityTests(TestCase):
                       'primary_trigger_key':'strategic_contact_due',
                       'covered_trigger_keys':['strategic_contact_due'],
                       'primary_reason_code':'strategic_contact_due','primary_reason_text':text}
-            with patch.object(p,'_phase3_trigger_snapshot',return_value=snapshot):
+            with patch.object(p,'_phase3_trigger_snapshot',return_value=snapshot,create=True):
                 item=scored(orders=[order('old',200)])
             g=self.assert_canonical(item)
             self.assertEqual(g['action_label'],'Återaktivera kunden')
@@ -226,7 +226,7 @@ class GuidanceIntegrityTests(TestCase):
                   'covered_trigger_keys':['new_signal'],'primary_reason_code':'new_signal',
                   'primary_reason_text':'Verifierad ny signal'}
         for reason in ('Verifierad ny signal',''):
-            with patch.object(p,'_phase3_trigger_snapshot',return_value={**snapshot,'primary_reason_text':reason}):
+            with patch.object(p,'_phase3_trigger_snapshot',return_value={**snapshot,'primary_reason_text':reason}, create=True):
                 g=scored()['customer_guidance']
             self.assertEqual(g['action_label'],'Ta nästa steg mot första ordern')
             self.assertEqual(g['reason_code'], 'value_based_contact_due')

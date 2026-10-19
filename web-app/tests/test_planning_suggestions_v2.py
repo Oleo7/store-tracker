@@ -170,15 +170,15 @@ class PlanningSuggestionV2IntegrationTests(PlanningApiTestCase):
         payload = response.get_json()
 
         self.assertEqual(response.status_code, 200, payload)
-        self.assertEqual(payload["score_version"], "v2.2")
+        self.assertEqual(payload["score_version"], "v3.5")
         self.assertGreaterEqual(payload["pending_count"], 1)
         self.assertEqual(payload["suggestion"]["customer"], "Butik A")
         rows = self.spreadsheet.worksheet(SUGGESTIONS_SHEET).dict_rows()
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["primary_trigger_type"], "established_reorder_due")
-        self.assertEqual(rows[0]["score_version"], "v2.2")
+        self.assertEqual(rows[0]["score_version"], "v3.5")
         event = self.spreadsheet.worksheet(SCORE_EVENTS_SHEET).dict_rows()[0]
-        self.assertEqual(event["score_version"], "v2.2")
+        self.assertEqual(event["score_version"], "v3.5")
         self.assertEqual(event["lifecycle"], "established")
         self.assertEqual(event["recommendation_eligible"], "Y")
         for field in (
@@ -215,6 +215,8 @@ class PlanningSuggestionV2IntegrationTests(PlanningApiTestCase):
         customer = next(item for item in priorities if item["customer"] == "Butik A")
         self.assertFalse(customer["recommendation_eligible"])
         self.assertGreater(customer["priority_score"], 0)
+        self.assertEqual(customer["contact_priority_score"], 0)
+        self.assertGreater(customer["business_value_raw"], 0)
 
     def test_cached_snapshot_does_not_reuse_empty_planning_input_for_queue(self):
         self.spreadsheet._store_tracker_enable_read_cache = True
@@ -510,7 +512,8 @@ class PlanningSuggestionV2IntegrationTests(PlanningApiTestCase):
         customer = insights["butik a"]
         self.assertFalse(customer["recommendation_eligible"])
         self.assertEqual(customer["recommendation_suppression_reason"], "snoozed")
-        self.assertGreater(customer["priority_score"], 0)
+        self.assertEqual(customer["priority_score"], 0)
+        self.assertGreater(customer["business_value_raw"], 0)
 
     def test_pending_context_is_not_closed_when_only_time_crosses_day_90(self):
         self.append_boundary_repeat_orders()

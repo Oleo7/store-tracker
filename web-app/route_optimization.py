@@ -20,6 +20,7 @@ import time
 from typing import Any, Iterable, Mapping
 
 import requests
+from routing_objective import priority_value, skipped_priority_penalty, ROUTE_RANKING_CONTRACT
 from google.auth.transport.requests import Request as GoogleAuthRequest
 from google.oauth2.service_account import Credentials
 from route_workday import (
@@ -28,17 +29,18 @@ from route_workday import (
 )
 
 
-ROUTE_ENGINE_VERSION = "ro-v5"
-PRIMARY_MODEL_VERSION = "ro-v3"
-FALLBACK_POLICY_VERSION = "route-fallback-v1"
-ROUTE_COST_PER_HOUR = 1.0
-PRIORITY_PENALTY_MULTIPLIER = 10.0
-COMMERCIAL_VALUE_PENALTY_MULTIPLIER = 10.0
+ROUTE_ENGINE_VERSION = "ro-v6"
+PRIMARY_MODEL_VERSION = "ro-v4"
+FALLBACK_POLICY_VERSION = "route-fallback-v2"
+ROUTE_COST_PER_HOUR = 0.0
+ROUTE_TRAVEL_COST_PER_HOUR = 3600.0
+PRIORITY_PENALTY_MULTIPLIER = WORKDAY_SECONDS + 1
+COMMERCIAL_VALUE_PENALTY_MULTIPLIER = WORKDAY_SECONDS + 1
 ROUTE_MAX_SECONDS = WORKDAY_SECONDS
 SERVICE_SECONDS = 1200
 MAX_VISITS = 15
-QUADRATIC_SOFT_DURATION_BUFFER_SECONDS = 300
-QUADRATIC_SOFT_DURATION_COST_PER_SQUARE_HOUR = 28800
+QUADRATIC_SOFT_DURATION_BUFFER_SECONDS = 0
+QUADRATIC_SOFT_DURATION_COST_PER_SQUARE_HOUR = 0
 FALLBACK_SAFER_SOFT_DURATION_BUFFER_SECONDS = 900
 MAX_PROVIDER_ATTEMPTS_PER_OPERATION = 3
 GOOGLE_OAUTH_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
@@ -143,32 +145,26 @@ def coordinate_quality(customers: Iterable[Mapping[str, Any]]) -> dict[str, dict
 
 
 def clamp_priority_score(value: Any) -> int:
+    # Kept as a transport-name alias, not a clamp/fallback to old scores.
     try:
-        score = int(round(float(value)))
-    except (TypeError, ValueError, OverflowError):
-        score = 1
-    return max(1, min(100, score))
+        return round(priority_value(value))
+    except ValueError as exc:
+        raise RouteOptimizationError("invalid_priority_score", "Aktuell v3-prioritet saknas.", 422) from exc
 
 
 def priority_penalty(value: Any) -> float:
-    return clamp_priority_score(value) * PRIORITY_PENALTY_MULTIPLIER
+    return skipped_priority_penalty(value, ROUTE_MAX_SECONDS)
 
 
 def shipment_commercial_value(shipment: Mapping[str, Any]) -> float:
-    if "commercial_value" not in shipment:
-        return float(clamp_priority_score(shipment.get("priority_score")))
-    value = shipment["commercial_value"]
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
-        raise RouteOptimizationError("invalid_commercial_value", "Ruttens affärsprioritet är ogiltig.", 422)
-    return float(value)
+    try:
+        return priority_value(shipment.get("commercial_value"))
+    except ValueError as exc:
+        raise RouteOptimizationError("invalid_commercial_value", "Aktuell v3-prioritet saknas.", 422) from exc
 
 
 def shipment_penalty(shipment: Mapping[str, Any]) -> float:
-    # Linear raw value preserves the difference between, for example, 10 and
-    # 40 opportunity units. The bounded 0-100 display is not a solver utility.
-    multiplier = COMMERCIAL_VALUE_PENALTY_MULTIPLIER if "commercial_value" in shipment else PRIORITY_PENALTY_MULTIPLIER
-    return shipment_commercial_value(shipment) * multiplier
-
+    return priority_penalty(shipment_commercial_value(shipment))
 
 def quadratic_soft_duration_diagnostics(
     *,
@@ -179,47 +175,17 @@ def quadratic_soft_duration_diagnostics(
         QUADRATIC_SOFT_DURATION_COST_PER_SQUARE_HOUR
     ),
 ) -> dict[str, Any]:
-    """Return the configured policy and Store Tracker-derived duration cost.
-
-    Cost is calculated with Decimal and rounded half-up to one decimal for
-    stable diagnostic JSON.  It is derived from the configured model formula,
-    not copied from a Google response cost field.
-    """
-    enabled = model_route_max_seconds > buffer_seconds
-    result = {
-        "quadratic_soft_duration_enabled": enabled,
-        "quadratic_soft_buffer_seconds": (
-            buffer_seconds
-        ),
-        "quadratic_soft_max_seconds": (
-            model_route_max_seconds - buffer_seconds
-            if enabled else None
-        ),
-        "quadratic_soft_cost_per_square_hour": (
-            cost_per_square_hour
-        ),
+    """Compatibility diagnostics: time is a hard constraint, never a soft cost."""
+    return {
+        "quadratic_soft_duration_enabled": False,
+        "quadratic_soft_buffer_seconds": 0,
+        "quadratic_soft_max_seconds": None,
+        "quadratic_soft_cost_per_square_hour": 0,
         "quadratic_soft_exceedance_seconds": None,
         "quadratic_soft_duration_cost": None,
+        "hard_duration_buffer_seconds": int(buffer_seconds),
+        "hard_duration_max_seconds": max(0, int(model_route_max_seconds) - int(buffer_seconds)),
     }
-    if not enabled:
-        return result
-    try:
-        duration = Decimal(str(route_duration_seconds))
-    except InvalidOperation:
-        return result
-    if not duration.is_finite():
-        return result
-    threshold = Decimal(result["quadratic_soft_max_seconds"])
-    exceedance = max(Decimal(0), duration - threshold)
-    cost = (
-        Decimal(cost_per_square_hour)
-        * (exceedance / Decimal(3600)) ** 2
-    ).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
-    result["quadratic_soft_exceedance_seconds"] = _diagnostic_decimal_number(
-        exceedance
-    )
-    result["quadratic_soft_duration_cost"] = _diagnostic_decimal_number(cost)
-    return result
 
 
 def _utc_text(value: datetime) -> str:
@@ -400,16 +366,17 @@ def build_optimize_tours_request(
         },
         "routeDurationLimit": {"maxDuration": f"{available_seconds}s"},
         "costPerHour": ROUTE_COST_PER_HOUR,
+        "costPerTraveledHour": ROUTE_TRAVEL_COST_PER_HOUR,
     }
-    if available_seconds > quadratic_soft_buffer_seconds:
-        vehicle["routeDurationLimit"].update({
-            "quadraticSoftMaxDuration": (
-                f"{available_seconds - quadratic_soft_buffer_seconds}s"
-            ),
-            "costPerSquareHourAfterQuadraticSoftMax": (
-                quadratic_soft_cost_per_square_hour
-            ),
-        })
+    # Traffic-recovery safety margin is a HARD feasibility constraint. A soft
+    # duration cost would compete with priority and violate the chosen objective.
+    if quadratic_soft_cost_per_square_hour != 0:
+        raise ValueError("Soft duration costs are incompatible with priority-first routing")
+    if quadratic_soft_buffer_seconds:
+        safe_duration = available_seconds - quadratic_soft_buffer_seconds
+        if safe_duration <= 0:
+            raise RouteOptimizationError("route_day_capacity_exhausted", "Otillräcklig tid för trafiksäker rutt.")
+        vehicle["routeDurationLimit"]["maxDuration"] = f"{safe_duration}s"
     if breaks:
         latest_break_end = max(
             item["scheduled_at"] + timedelta(seconds=int(item["duration_seconds"]))
@@ -482,9 +449,8 @@ def _request_input_fingerprint_payload(
         shipment_values.append({
             "customer_id": str(item["customer_id"]),
             "priority_score": clamp_priority_score(item.get("priority_score")),
-            **({"commercial_value": shipment_commercial_value(item),
-                "ranking_mode": str(item.get("ranking_mode") or "v3")}
-               if "commercial_value" in item else {}),
+            "commercial_value": shipment_commercial_value(item),
+            "ranking_contract": ROUTE_RANKING_CONTRACT,
             "latitude": round(coordinate.latitude, 5),
             "longitude": round(coordinate.longitude, 5),
             "required": bool(item.get("required")),
@@ -533,6 +499,8 @@ def _request_fingerprint_for_policy(
 ) -> str:
     constants = {
         "route_cost_per_hour": ROUTE_COST_PER_HOUR,
+        "route_travel_cost_per_hour": ROUTE_TRAVEL_COST_PER_HOUR,
+        "ranking_contract": ROUTE_RANKING_CONTRACT,
         "priority_penalty_multiplier": PRIORITY_PENALTY_MULTIPLIER,
         "commercial_value_penalty_multiplier": COMMERCIAL_VALUE_PENALTY_MULTIPLIER,
         "route_max_seconds": ROUTE_MAX_SECONDS,
@@ -1113,9 +1081,8 @@ def parse_optimize_tours_response(
             "estimated_at": str(visit.get("startTime") or ""),
             "duration_minutes": SERVICE_SECONDS // 60,
             "priority_score": clamp_priority_score(shipment.get("priority_score")),
-            **({"commercial_value": shipment_commercial_value(shipment),
-                "ranking_mode": str(shipment.get("ranking_mode") or "v3")}
-               if "commercial_value" in shipment else {}),
+            "commercial_value": shipment_commercial_value(shipment),
+            "ranking_contract": ROUTE_RANKING_CONTRACT,
         })
     skipped_value = response.get("skippedShipments")
     if skipped_value is not None and not isinstance(skipped_value, list):
@@ -1300,6 +1267,8 @@ def parse_optimize_tours_response(
         )
 
     available_seconds = available_route_seconds(route_start) - max(0, int(pre_route_fixed_seconds))
+    # Recovery safety buffer is a HARD constraint, never a competing cost.
+    available_seconds = max(0, available_seconds - max(0, int(quadratic_soft_buffer_seconds)))
     route_seconds = int((vehicle_end - vehicle_start).total_seconds())
     expected_start = route_start.astimezone(timezone.utc)
     if (

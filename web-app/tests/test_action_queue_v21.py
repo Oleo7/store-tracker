@@ -13,7 +13,8 @@ sys.path.insert(0, str(TESTS_DIR))
 import app as app_module
 from contact_channel import normalized_phone, recommend_contact_channel
 from planning_suggestions import SCORE_EVENTS_SHEET, SUGGESTIONS_SHEET
-from priority import SCORE_VERSION, established_intent_timing
+from priority import SCORE_VERSION
+from historical_priority_reference import established_intent_timing
 from sheets_availability import SheetReadCache
 from test_planning import PlanningApiTestCase
 
@@ -222,7 +223,7 @@ class ActionQueueV21ApiTests(PlanningApiTestCase):
         self.assertEqual(stale.get_json()["code"], "suggestion_stale")
 
         self.login("admin")
-        olle_preview = self.queue("?user_name=olle")["queue_preview"][0]
+        olle_preview = self.queue("?user_name=olle")["suggestion"]
         wrong_owner = self.client.post(
             f"/planning/suggestions/{olle_preview['suggestion_id']}/plan",
             json={
@@ -268,7 +269,7 @@ class ActionQueueV21ApiTests(PlanningApiTestCase):
             },
         )
         self.assertEqual(response.status_code, 409)
-        self.assertEqual(response.get_json()["code"], "suggestion_not_pending")
+        self.assertEqual(response.get_json()["code"], "suggestion_stale")
         self.assertEqual(self.planning_rows(), [])
 
     def test_manual_future_activity_is_reversible_suppression(self):
@@ -298,6 +299,9 @@ class ActionQueueV21ApiTests(PlanningApiTestCase):
         )
 
     def test_version_and_live_channel_change_do_not_revive_dismissed_context(self):
+        sheet = self.spreadsheet.worksheet("customers_enriched")
+        sheet.update_cell(2, sheet.row_values(1).index("customer_segment") + 1, "B")
+        app_module.invalidate_sheet_for_write(sheet)
         top = self.queue()["suggestion"]
         dismissed = self.client.post(
             f"/planning/suggestions/{top['suggestion_id']}/dismiss",
@@ -317,7 +321,7 @@ class ActionQueueV21ApiTests(PlanningApiTestCase):
         )
         changed_live = {
             **live,
-            "score_version": "v2.1",
+            "score_version": SCORE_VERSION,
             "priority_score": 100,
             "recommended_contact_type": "email",
         }
@@ -339,7 +343,7 @@ class ScoreAndCacheV21Tests(TestCase):
         for days, score in expected.items():
             with self.subTest(days=days):
                 self.assertEqual(established_intent_timing(days), score)
-        self.assertEqual(SCORE_VERSION, "v2.2")
+        self.assertEqual(SCORE_VERSION, "v3.5")
 
     def test_score_version_and_channel_are_not_context_inputs(self):
         base = dict(

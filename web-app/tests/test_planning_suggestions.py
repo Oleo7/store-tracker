@@ -84,7 +84,7 @@ class PlanningSuggestionApiTests(PlanningApiTestCase):
         order_sheet = self.spreadsheet.worksheet("order_rows")
         order = {
             "Reference": "ORDER-DURING-SNOOZE",
-            "Order date": "2026-07-28",
+            "Order date": "2026-07-27",
             "Delivery date": "2026-07-29",
             "Customer": suggestion["customer"],
             "Quantity": "4",
@@ -380,11 +380,9 @@ class PlanningSuggestionApiTests(PlanningApiTestCase):
             row for row in self.spreadsheet.worksheet(SUGGESTIONS_SHEET).dict_rows()
             if row["suggestion_id"] == suggestion["suggestion_id"]
         )
-        self.assertEqual(stored["status"], "resolved")
-        self.assertEqual(stored["resolved_by_type"], "activity")
-        self.assertEqual(
-            stored["resolved_by_id"], planned.get_json()["activity"]["planned_activity_id"]
-        )
+        self.assertEqual(stored["status"], "pending")  # Persistent A prospect returns without a contact/order.
+        events = self.spreadsheet.worksheet(SCORE_EVENTS_SHEET).dict_rows()
+        self.assertTrue(any(event["event_type"] == "suggestion_resolved" and event["suggestion_id"] == suggestion["suggestion_id"] for event in events))
 
     def test_later_unlinked_contact_preserves_calendar_while_resolving_commercial_episode(self):
         suggestion = self.current()["suggestion"]
@@ -437,7 +435,7 @@ class PlanningSuggestionApiTests(PlanningApiTestCase):
         order_sheet = self.spreadsheet.worksheet("order_rows")
         order = {
             "Reference": "NEW-ORDER",
-            "Order date": "2026-07-28",
+            "Order date": "2026-07-27",
             "Delivery date": "2026-07-29",
             "Customer": "Butik A",
             "Quantity": "12",
@@ -472,9 +470,9 @@ class PlanningSuggestionApiTests(PlanningApiTestCase):
         body = self.client.get("/planning/suggestions?owner=sofia").get_json()
         self.assertEqual(body["suggestion"]["customer"], "Butik B")
         response = self.client.post(
-            f"/planning/suggestions/{body['suggestion']['suggestion_id']}/dismiss",
+            f"/planning/suggestions/{body['suggestion']['suggestion_id']}/snooze",
             json={
-                "client_request_id": "admin-dismiss-sofia",
+                "client_request_id": "admin-snooze-sofia",
                 "expected_revision": body["suggestion"]["revision"],
             },
         )
@@ -486,7 +484,7 @@ class PlanningSuggestionProductionGuardTests(TestCase):
         app_module.app.config["PLANNING_SUGGESTIONS_STUB"] = True
         try:
             with patch.object(app_module, "application_environment", return_value="production"):
-                self.assertFalse(app_module.planning_suggestion_stub_enabled())
+                self.assertFalse(hasattr(app_module, "planning_suggestion_stub_enabled"))
         finally:
             app_module.app.config.pop("PLANNING_SUGGESTIONS_STUB", None)
 

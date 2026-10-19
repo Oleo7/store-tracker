@@ -15,6 +15,8 @@ WEB_APP_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(WEB_APP_DIR))
 
 import app as app_module
+from v3_fixtures import current_rank
+
 from route_proposal import TravelTimeResult
 
 
@@ -2402,7 +2404,7 @@ class PlanningRouteApiTests(PlanningApiTestCase):
             self.spreadsheet,
             customer_row,
         )
-        return {
+        return current_rank({
             "row": customer_row,
             "customer_row": customer_row,
             "customer_id": customer_data["customer_id"],
@@ -2418,10 +2420,11 @@ class PlanningRouteApiTests(PlanningApiTestCase):
             "leg_drive_minutes": 1,
             "cumulative_drive_minutes": sequence,
             "cumulative_total_minutes": cumulative_total_minutes,
-        }
+        })
 
     def route_payload(self, stops):
         return {
+            "ranking_contract": app_module.ROUTE_RANKING_CONTRACT,
             "ok": True,
             "cached": False,
             "generated_at": NOW.isoformat(timespec="seconds"),
@@ -2610,7 +2613,7 @@ class PlanningRouteApiTests(PlanningApiTestCase):
         users.update_cell(sofia_row, name_column, "Sofia Andersson")
         self.login("sofia")
         priorities = [
-            {"row": 3, "customer": "Butik B", "priority_score": 50},
+            current_rank({"row": 3, "customer": "Butik B", "priority_score": 50}),
         ]
 
         with (
@@ -2658,8 +2661,8 @@ class PlanningRouteApiTests(PlanningApiTestCase):
             scheduled_at="2026-07-28T10:30:00+02:00",
         )
         priorities = [
-            {"row": 2, "customer": "Butik A", "priority_score": 0},
-            {"row": 4, "customer": "Butik C", "priority_score": 0},
+            current_rank({"row": 2, "customer": "Butik A", "priority_score": 0}),
+            current_rank({"row": 4, "customer": "Butik C", "priority_score": 0}),
         ]
         provider = ConstantRoadProvider()
 
@@ -2917,7 +2920,7 @@ class PlanningRouteApiTests(PlanningApiTestCase):
         self.assertEqual(rows[required["planned_activity_id"]]["status"], "planned")
         self.assertEqual(
             rows[required["planned_activity_id"]]["route_sequence"],
-            1,
+            next(stop["sequence"] for stop in preview.get_json()["stops"] if stop.get("planned_activity_id") == required["planned_activity_id"]),
         )
         self.assertEqual(rows[old_open["planned_activity_id"]]["status"], "cancelled")
         self.assertEqual(
