@@ -8,24 +8,25 @@ permissions:
 jobs:
   source:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          ref: 578c906a2a215c6aaec303128c241819428c413e
           persist-credentials: false
-      - name: Export pinned source only
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Download public dependency wheels for isolated verification
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/pr48-sources"
-          git archive --format=tar 578c906a2a215c6aaec303128c241819428c413e > "$RUNNER_TEMP/pr48-sources/pr48-head.tar"
-          git archive --format=tar 6b97c4d77b19010ae955cb84f3dbf741fe4a0060 > "$RUNNER_TEMP/pr48-sources/v22-base.tar"
-          git ls-tree -r 578c906a2a215c6aaec303128c241819428c413e > "$RUNNER_TEMP/pr48-sources/pr48-tree.txt"
-          sha256sum "$RUNNER_TEMP/pr48-sources/"*.tar
+          mkdir -p "$RUNNER_TEMP/pr48-wheels"
+          python -m pip download --only-binary=:all: --dest "$RUNNER_TEMP/pr48-wheels" -r web-app/requirements.txt freezegun
+          sha256sum "$RUNNER_TEMP/pr48-wheels/"*.whl
       - uses: actions/upload-artifact@v4
         with:
-          name: pr48-pinned-source
-          path: ${{ runner.temp }}/pr48-sources/
+          name: pr48-dependency-wheels
+          path: ${{ runner.temp }}/pr48-wheels/
           retention-days: 1
           if-no-files-found: error
