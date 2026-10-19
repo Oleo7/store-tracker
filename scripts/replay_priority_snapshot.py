@@ -28,7 +28,7 @@ from freezegun import freeze_time
 def model_source_hashes(repo):
     sources = {}
     for name in ("app.py", "priority.py", "value_prioritization.py", "customer_obligations.py",
-                 "contact_channel.py", "planning_suggestions.py"):
+                 "contact_channel.py", "planning_suggestions.py", "route_proposal.py", "route_optimization.py", "index.html"):
         source = repo / "web-app" / name
         if source.is_file():
             sources["web-app/" + name] = hashlib.sha256(source.read_bytes()).hexdigest()
@@ -41,10 +41,13 @@ def main():
     parser.add_argument("--snapshot", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--as-of", required=True, help="Timezone-aware frozen replay time")
-    parser.add_argument("--model-header", default="v3.3", help="API read-model version; use v3.1 for historical PR48")
+    parser.add_argument("--model-header", default="v3.4", help="API read-model version; use v3.3 for earlier PR48")
     parser.add_argument("--policy", default="{}")
     parser.add_argument("--scenario", default="baseline")
     parser.add_argument("--skip-user-endpoints", action="store_true")
+    parser.add_argument("--verification-only", action="store_true", help="Omit repeated portfolio payloads from a user verification shard")
+    parser.add_argument("--user-name", help="Verify one actual user for sharded replay; default verifies all")
+    parser.add_argument("--progress", action="store_true", help="Log endpoint/count progress, never customer data")
     args = parser.parse_args()
     try:
         replay_time = datetime.fromisoformat(args.as_of.replace("Z", "+00:00"))
@@ -107,6 +110,10 @@ def main():
                 raise AttributeError(name)
 
         class ReadOnlySpreadsheet:
+            # Exercise the same actual cache path as production gspread. The
+            # adapter remains read-only; no cached calculations are fabricated.
+            _store_tracker_enable_read_cache = True
+
             def __init__(self):
                 self.sheets = {name: ReadOnlyWorksheet(name, sheet)
                                for name, sheet in snapshot["sheets"].items()}
@@ -139,6 +146,8 @@ def main():
             stack.enter_context(patch.object(application, "get_spreadsheet", return_value=spreadsheet))
             stack.enter_context(patch.object(requests.sessions.Session, "request", side_effect=network_blocked))
             now = application.stockholm_now()
+            if args.progress:
+                print("Building full backend snapshot", file=sys.stderr, flush=True)
             global_snapshot = application.get_authoritative_priority_snapshot(
                 spreadsheet, today=application.stockholm_today())
             pre_workflow = global_snapshot["priorities"]
@@ -168,7 +177,12 @@ def main():
             attention_by_user = {}
             has_attention = any(rule.rule == "/planning/attention" for rule in application.app.url_map.iter_rules())
             if not args.skip_user_endpoints:
-                for user in public_users:
+                selected_users = [u for u in public_users if not args.user_name or u.get("user_name") == args.user_name]
+                if not selected_users:
+                    raise ValueError("Requested replay user was not found")
+                for user_number, user in enumerate(selected_users, start=1):
+                    if args.progress:
+                        print(f"Checking user endpoint {user_number}/{len(public_users)}", file=sys.stderr, flush=True)
                     with client.session_transaction() as session:
                         session["user"] = user
                     result = client.get("/customer-insights", headers={"X-PB-Value-Model": args.model_header})
@@ -201,6 +215,8 @@ def main():
                             assert batch or offset >= total, "Attention pagination stopped before its stated total"
                             items.extend(batch)
                             offset += len(batch)
+                            if args.progress:
+                                print(f"  Attention verified {offset}/{total}", file=sys.stderr, flush=True)
                         assert len(items) == total
                         assert len({row["obligation_id"] for row in items}) == len(items), "Duplicate obligation in attention"
                         for row in items:
@@ -223,6 +239,7 @@ def main():
                     "snapshot_path": str(snapshot_path),
                     "snapshot_file_sha256": hashlib.sha256(raw).hexdigest(),
                     "scenario": args.scenario,
+                    "user_verification_scope": args.user_name or ("skipped" if args.skip_user_endpoints else "all"),
                     "policy_overrides": policy_overrides,
                     "model": getattr(priority, "VALUE_MODEL_VERSION", None),
                     "legacy_score_policy": priority.SCORE_VERSION,
@@ -258,6 +275,9 @@ def main():
                 "attention_by_user": attention_by_user,
                 "customer_state": global_snapshot.get("customer_state"),
             }
+            if args.verification_only:
+                for field in ("priorities", "pre_workflow_priorities", "admin_endpoint", "customer_state", "workflow_suppressions"):
+                    output.pop(field, None)
             path = Path(args.output)
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(output, ensure_ascii=False, indent=2, default=str))

@@ -132,6 +132,14 @@ def _canonicalize_rows(rows, customers, *, name_field, number_field):
     return result
 
 
+def ranking_mode():
+    """Safe ranking rollback; never disables contact/obligation safeguards."""
+    mode = os.environ.get("PRIORITY_RANKING_MODE", "v3").strip()
+    if mode not in {"v3", "v2.2"}:
+        raise ValueError("PRIORITY_RANKING_MODE must be v3 or v2.2")
+    return mode
+
+
 def normalize_customer_key(value: str) -> str:
     text = str(value or "").replace("\xa0", " ").strip().casefold()
     return " ".join(text.split())
@@ -791,6 +799,8 @@ def build_contact_features(sales_activities: list[dict], order_features: dict, *
                 and latest_order_date >= latest_activity["datetime"].date()
             ),
             "self_ordering_signal": _has_self_ordering_signal(comment),
+            "reached_self_ordering_signal": bool(last_reached and normalize_contact_result(last_reached["row"].get("result")) in {"Positiv", "Neutral"}
+                                                 and _has_self_ordering_signal(str(last_reached["row"].get("comment") or ""))),
             "days_since_contact": None,
             "follow_up_due": False,
         }
@@ -1758,6 +1768,7 @@ def build_priority_customers(
     obligation_states: dict | None = None,
     contact_permissions: dict | None = None,
     as_of: datetime | None = None,
+    allow_commercial_fallback: bool = True,
 ) -> list[dict]:
     """Build the authoritative current score for every active, in-scope customer."""
     snapshot = _snapshot_time(as_of or now, today=today)
@@ -1784,6 +1795,16 @@ def build_priority_customers(
             limit=limit,
             email_features=email_features,
         )
+    # All feature-backed callers use the same history interpretation as Flask.
+    # An explicit empty obligation map is authoritative and is never rebuilt.
+    if obligation_states is None and isinstance(contact_features, FeatureSnapshot):
+        from customer_obligations import build_customer_state
+        derived_state = build_customer_state(customers, contact_features.source_rows,
+            planned_activities, as_of=snapshot, owner_user_names=planning_owner_user_names,
+            order_rows=order_features.source_rows if isinstance(order_features, FeatureSnapshot) else ())
+        obligation_states = derived_state["obligations"]
+        if contact_permissions is None:
+            contact_permissions = derived_state["contact_permissions"]
     email_features = email_features or {}
     workflow_suppressions = workflow_suppressions or {}
     number_index = {
@@ -1813,6 +1834,12 @@ def build_priority_customers(
         identity_indices=order_indices,
         ambiguous_master_names=ambiguous_master_names,
     )
+    if obligation_states is not None:
+        closed_activities = {str(item.get("planned_activity_id") or item.get("original_planned_activity_id") or "")
+            for items in obligation_states.values() for item in items
+            if item.get("status") in {"resolved", "cancelled"} and item.get("resolution_basis")}
+        planned_activities = [row for row in (planned_activities or ())
+                              if str(row.get("planned_activity_id") or "") not in closed_activities]
     activity_index = _planned_activity_index(planned_activities)
     value_priors = _value_v31_priors(customers, order_indices, ambiguous_master_names, today)
     guidance_now = snapshot
@@ -2321,6 +2348,7 @@ def build_priority_customers(
             positive_prospect_signal=positive_prospect_signal, positive_buyer_signal=positive_buyer_signal,
             pending_unconfirmed_order_date=pending_unconfirmed_order_date,
             reported_order_date=contact.get("latest_reported_order_date"),
+            latest_verified_delivery_date=business_last_delivery,
             future_delivery=future_delivery,
             qualified_email_trigger=business_email_intent.get("trigger", "") if business_email_intent.get("ready") else "",
             qualified_email_reason=business_email_intent.get("reason", ""),
@@ -2329,7 +2357,9 @@ def build_priority_customers(
             reached_by_purpose=contact.get("latest_reached_by_purpose"),
             completed_by_purpose=contact.get("completed_by_purpose"),
             obligations=obligations, planned_activity=final_plan, workflow_suppression=workflow_reason,
+            allow_commercial_fallback=allow_commercial_fallback,
             planned_activity_options=activity_state.get("future_all", []) + activity_state.get("overdue_all", []),
+            self_ordering_signal=bool(contact.get("reached_self_ordering_signal", contact.get("self_ordering_signal"))),
             invalid_identity=not customer_id or not sales_person or (
                 planning_owner_user_names is not None and not planning_owner_user_names.get(customer_id))
                 or master_id_counts[normalize_customer_key(customer_id)] != 1,
@@ -2412,6 +2442,8 @@ def build_priority_customers(
             "business_days_since_delivery": business_days_since_delivery,
             "business_overdue_days": business_overdue_days,
             "latest_unconfirmed_order_date": _iso_date(pending_unconfirmed_order_date),
+            "latest_reported_order_date": _iso_date(contact.get("latest_reported_order_date")),
+            "data_warnings": list_guidance.get("data_warnings", []),
             "latest_reached_date": _iso_date(latest_reached_date),
             "days_since_reached": days_since_reached,
             "row": customer.get("row"),
@@ -2506,6 +2538,17 @@ def build_priority_customers(
             ),
         })
 
+    mode = ranking_mode()
+    for item in result:
+        item["ranking_mode"] = mode
+        if mode == "v2.2":
+            allowed = item.get("can_start_unscheduled_contact") is True
+            planned = (item.get("list_guidance") or {}).get("status_key") == "planned"
+            legacy_raw = float(item.get("priority_score") or 0)
+            item.update(work_priority_raw=legacy_raw if allowed or planned else 0.0,
+                        work_priority_score=int(legacy_raw) if allowed or planned else 0,
+                        contact_priority_raw=legacy_raw if allowed else 0.0,
+                        contact_priority_score=int(legacy_raw) if allowed else 0)
     result.sort(key=lambda item: (
         -int(item.get("priority_score") or 0),
         -float(item.get("expected_order_dfp") or 0),

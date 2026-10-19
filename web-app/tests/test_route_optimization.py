@@ -147,7 +147,7 @@ class RouteOptimizationModelTests(TestCase):
                 self.assertIsNone(_diagnostic_duration_seconds(value))
 
     def test_t1_penalty_proof_and_clamping(self):
-        self.assertEqual(ROUTE_ENGINE_VERSION, "ro-v4")
+        self.assertEqual(ROUTE_ENGINE_VERSION, "ro-v5")
         self.assertEqual(MAX_PROVIDER_ATTEMPTS_PER_OPERATION, 3)
         self.assertEqual(QUADRATIC_SOFT_DURATION_BUFFER_SECONDS, 300)
         self.assertEqual(FALLBACK_SAFER_SOFT_DURATION_BUFFER_SECONDS, 900)
@@ -1299,8 +1299,8 @@ class RouteOptimizationIntegrationTests(TestCase):
         persisted = json.loads(str(rows[0]["result_payload_json"]))
         self.assertRegex(rows[0]["input_fingerprint"], r"^[0-9a-f]{64}$")
         self.assertEqual(persisted["model_diagnostics"], {
-            "route_engine_version": "ro-v4",
-            "primary_model_version": "ro-v2",
+            "route_engine_version": "ro-v5",
+            "primary_model_version": "ro-v3",
             "fallback_policy_version": "route-fallback-v1",
             "attempt_number": 1,
             "fallback_strategy": "primary",
@@ -1499,7 +1499,7 @@ class RouteOptimizationIntegrationTests(TestCase):
                 "client_request_id": "completed-ro-v2",
                 "request_fingerprint": "old-ro-v2-policy-fingerprint",
                 "input_fingerprint": inputs["input_fingerprint"],
-                "engine_version": "ro-v2",
+                "engine_version": "ro-v3",
                 "status": "completed",
                 "counted_attempt": "Y",
                 "started_at": NOW.isoformat(),

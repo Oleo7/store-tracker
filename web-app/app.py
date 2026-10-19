@@ -47,6 +47,7 @@ from requests.exceptions import ConnectionError as RequestsConnectionError
 load_dotenv()
 
 from priority import (
+    ranking_mode,
     SCORE_VERSION,
     apply_workflow_suppressions,
     build_contact_features,
@@ -597,7 +598,7 @@ CONTACT_COLUMNS = ["date_time", "sales_person", "customer", "customer_id", "cont
                    "comment", "customer_contact_person", "follow_up_date",
                    *FREEZER_COLUMNS, "email_id", "contact_id", "planned_activity_id",
                    *CONTACT_ANALYTICS_COLUMNS, "obligation_id", "obligation_outcome", "purpose",
-                   "contact_request_fingerprint", "recorded_at"]
+                   "contact_request_fingerprint", "recorded_at", "follow_up_purpose", "follow_up_agreement_confirmed", "onboarding_completed"]
 CONTACT_REQUIRED_COLUMNS = ["date_time", "sales_person", "customer", "contact_channel",
                             "result", "comment", "customer_contact_person", "follow_up_date"]
 
@@ -686,7 +687,7 @@ PLANNED_ACTIVITY_COLUMNS = [
     "recommended_contact_type",
     "appointment_confirmed",
     "picking_help",
-    "obligation_id",
+    "obligation_id", "customer_agreement_confirmed", "agreed_at",
 ]
 PLANNING_CONTACT_TYPES = {"visit", "phone", "email"}
 PLANNING_CONTACT_TYPE_LABELS = {
@@ -2300,9 +2301,10 @@ def planning_revision(row):
 def planning_create_fingerprint(*, actor, owner, customer_id, contact_type,
                                 scheduled_at, duration_minutes, note, source,
                                 source_contact_id, appointment_confirmed=False,
-                                picking_help=False):
+                                picking_help=False, customer_agreement_confirmed=False):
     return canonical_payload_fingerprint({
         "operation": "planned_activity.create.v1",
+        **({"customer_agreement_confirmed": True} if is_yes(customer_agreement_confirmed) else {}),
         "actor": normalize_key((actor or {}).get("user_name")),
         "owner": normalize_key((owner or {}).get("user_name")),
         "customer_id": str(customer_id or "").strip(),
@@ -2611,6 +2613,8 @@ def public_planned_activity(row, *, now=None):
         ),
         "note": str(row.get("note") or "").strip(),
         "status": status,
+        "customer_agreement_confirmed": is_yes(row.get("customer_agreement_confirmed")),
+        "agreed_at": str(row.get("agreed_at") or ""),
         "display_status": "overdue" if overdue else status,
         "overdue": overdue,
         "source": str(row.get("source") or "").strip().casefold(),
@@ -2635,7 +2639,7 @@ def public_planned_activity(row, *, now=None):
     }
 
 
-def active_planned_activity_queue_state(activity_rows, owner, *, contact_rows=(), now=None):
+def active_planned_activity_queue_state(activity_rows, owner, *, contact_rows=(), now=None, state=None):
     """Preserve exact-time calendar status without customer-wide resolution."""
     current = now or stockholm_now()
     if current.tzinfo is None:
@@ -2646,11 +2650,14 @@ def active_planned_activity_queue_state(activity_rows, owner, *, contact_rows=()
         "customer_id": row.get("customer_id"), "customer": row.get("customer"),
         "sales_person": owner.get("user_name"),
     } for row in activities if row.get("customer_id")}
-    state = build_customer_state(list(masters.values()), contact_rows, activities, as_of=current)
+    state = state if state is not None else build_customer_state(list(masters.values()), contact_rows, activities, as_of=current)
     active_ids, overdue = set(), []
+    scope_ids = {str(row.get("planned_activity_id") or "") for row in activities}
     for obligations in state["obligations"].values():
         for item in obligations:
             if item.get("status") != "scheduled" or not item.get("planned_activity_id"):
+                continue
+            if str(item.get("planned_activity_id") or "") not in scope_ids:
                 continue
             active_ids.add(item["customer_id"])
             scheduled = parse_planning_datetime(item.get("due_at"))
@@ -2695,18 +2702,65 @@ def route_contact_customer_ids(activity_rows, owner, route_date, customers):
     )}
 
 
-def route_blocked_customer_ids(activity_rows, owner, route_date, customers, contact_rows=()):
+def route_blocked_customer_ids(activity_rows, owner, route_date, customers, contact_rows=(), state=None):
     # Preserve the existing queue restriction for visits. Phone/email use only
     # their route date, even when the generic queue marks another date unresolved.
     visits = [row for row in activity_rows if normalize_planning_contact_type(
         row.get("contact_type")
     ) not in {"phone", "email"}]
     blocked, _overdue = active_planned_activity_queue_state(
-        visits, owner, contact_rows=contact_rows,
+        visits, owner, contact_rows=contact_rows, state=state,
     )
     blocked.update(route_contact_customer_ids(activity_rows, owner, route_date, customers))
     return blocked
 
+
+
+def route_priority_values(priority, *, required=False, use_work=False):
+    """One commercial ranking adapter for both route engines and rollback.
+
+    Missing v3 values fail closed. The legacy fallback is only for callers
+    with an explicitly old snapshot, never for a malformed v3 customer.
+    """
+    priority = priority or {}
+    mode = priority.get("ranking_mode") or ranking_mode()
+    modern = bool(priority.get("value_model_version"))
+    if modern:
+        raw = priority.get("work_priority_raw" if required or use_work else "contact_priority_raw")
+        display = priority.get("work_priority_score" if required or use_work else "contact_priority_score")
+    else:
+        raw = display = priority.get("priority_score", 0)
+    try:
+        if isinstance(raw, bool) or raw is None:
+            raise ValueError("Missing route value")
+        value = float(raw)
+        score = int(round(float(display)))
+        if not math.isfinite(value) or value < 0 or not 0 <= score <= 100:
+            raise ValueError("Invalid route value")
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return {"priority_score": score, "commercial_value": value, "ranking_mode": mode}
+
+
+def route_optional_priority_values(priority, activities, route_date):
+    """Preserve the existing other-day phone/email exception, with new value.
+
+    Caller still applies route_priority_suppressed and same-day exclusions.
+    Only a different-day communication booking can expose the already-checked
+    work alternative. No safety rule or real contact pause is removed here.
+    """
+    priority = priority or {}
+    source_id = str(priority.get("recommendation_suppression_source_id") or "")
+    activity = next((row for row in activities if source_id and str(row.get("planned_activity_id") or "") == source_id), None)
+    booking_alternative = bool(activity and priority.get("recommendation_suppression_reason") == "future_planned_activity"
+        and priority.get("work_can_start_unscheduled_contact") is True
+        and normalize_planning_contact_type(activity.get("contact_type")) in {"phone", "email"}
+        and parse_date_value(activity.get("scheduled_at")) != route_date)
+    return route_priority_values(priority, use_work=booking_alternative)
+
+
+def route_candidate_value(candidate):
+    return float(candidate.get("commercial_value", candidate.get("priority_score", 0)) or 0)
 
 def priority_has_contact_ban(priority):
     priority = priority or {}
@@ -2764,7 +2818,7 @@ def _scoped_contact_decision_inputs(snapshot, current, prepared):
         state = snapshot.get("customer_state")
         if state is None or parse_planning_instant(state.get("as_of")) != current:
             state = build_customer_state(masters, snapshot["contact_rows"], snapshot.get("planned_activity_rows", ()),
-                                         snapshot.get("customer_state_events", ()), as_of=current, owner_user_names=owner_names)
+                                         snapshot.get("customer_state_events", ()), as_of=current, owner_user_names=owner_names, order_rows=snapshot["order_rows"])
         prepared[cache_key] = (order_features, contact_features, state, owner_names)
     return prepared[cache_key]
 
@@ -2832,7 +2886,7 @@ def _scoped_contact_decision(priority, *, customer_id, obligation_id="", activit
     scoped = build_priority_customers(customers, order_features, contact_features, None, current.date(), limit=1,
         email_features=snapshot.get("email_engagement"), planned_activities=[activity] if activity else [], as_of=current,
         obligation_states={customer_id: [selected_item]}, contact_permissions=state["contact_permissions"],
-        planning_owner_user_names=owner_names)
+        planning_owner_user_names=owner_names, allow_commercial_fallback=False)
     enrich_customer_state_priorities(scoped, state, snapshot.get("customer_state_events", ()),
                                     owner_names or {}, now=current)
     workflow = (scoped[0].get("customer_workflow") or {}) if scoped else {}
@@ -3984,6 +4038,7 @@ def build_planned_activity_row(
     recommended_contact_type="",
     appointment_confirmed=False,
     picking_help=False,
+    customer_agreement_confirmed=False, agreed_at="",
 ):
     contact_type = normalize_planning_contact_type(contact_type)
     source = str(source or "manual").strip().casefold()
@@ -4009,6 +4064,8 @@ def build_planned_activity_row(
         "time_is_estimated": "Y" if time_is_estimated else "N",
         "note": text_to_sheet_value(note, max_length=300),
         "status": status,
+        "customer_agreement_confirmed": "Y" if is_yes(customer_agreement_confirmed) else "N",
+        "agreed_at": str(agreed_at or (created_at or now_value) if is_yes(customer_agreement_confirmed) else ""),
         "source": source,
         "source_contact_id": str(source_contact_id or "").strip(),
         "completed_contact_id": str(completed_contact_id or "").strip(),
@@ -4238,6 +4295,7 @@ def ensure_followup_source_contact_id(
         customer_lookup=customer_lookup,
     )
     candidate = None
+    exact_candidates = []
     for row_index, row in worksheet_snapshot(
         sheet,
         expected_columns=CONTACT_COLUMNS,
@@ -4250,8 +4308,8 @@ def ensure_followup_source_contact_id(
             continue
         contact_id = str(row.get("contact_id") or "").strip()
         if requested and (contact_id == requested or stable_contact_source_id({**row, "customer_id": str((target_customer or {}).get("customer_id") or "")}) == requested):
-            candidate = (row_index, row)
-            break
+            exact_candidates.append((row_index, row))
+            continue
         if not requested and str(row.get("follow_up_date") or "").strip():
             if candidate is None:
                 candidate = (row_index, row)
@@ -4261,12 +4319,27 @@ def ensure_followup_source_contact_id(
             if (current_dt, row_index) > (previous_dt, candidate[0]):
                 candidate = (row_index, row)
 
+    if requested and not exact_candidates and requested.startswith("legacy:") and target_customer is not None:
+        state = customer_state_snapshot(spreadsheet, customers=customers)
+        aliases = [item for item in state["obligations"].get(str(target_customer.get("customer_id") or ""), ())
+                   if item.get("source_contact_id") == requested and not item.get("identity_ambiguous")]
+        source_times = {parse_planning_instant(item.get("source_created_at")) for item in aliases}
+        source_times.discard(None)
+        if len(source_times) == 1:
+            source_time = next(iter(source_times))
+            exact_candidates = [(index, row) for index, row in worksheet_snapshot(sheet, expected_columns=CONTACT_COLUMNS)[1]
+                if related_row_customer(row, customers, customer_lookup=customer_lookup) is target_customer
+                and parse_planning_instant(row.get("date_time")) == source_time]
+    if requested:
+        if len(exact_candidates) != 1:
+            return ""
+        candidate = exact_candidates[0]
     if candidate is None:
         return ""
     row_index, row = candidate
     contact_id = str(row.get("contact_id") or "").strip()
     if not contact_id:
-        contact_id = stable_contact_source_id({**row, "customer_id": str((target_customer or {}).get("customer_id") or "")})
+        contact_id = requested or stable_contact_source_id({**row, "customer_id": str((target_customer or {}).get("customer_id") or "")})
         update_sheet_row(
             sheet,
             row_index,
@@ -4419,17 +4492,19 @@ def legacy_followup_identity(row):
 
 
 def build_unscheduled_followup_groups(*, indexed_contacts, activities, customers,
-                                      selected_start, selected_end, today, state_events=()):
+                                      selected_start, selected_end, today, state_events=(), prepared_state=None, owner_user_name=None):
     """The same source-scoped promises as attention, including review history."""
     current = stockholm_now()
     if current.date() != today:
         current = datetime.combine(today, datetime_time.max, tzinfo=STOCKHOLM_ZONE)
-    state = build_customer_state(customers, [row for _index, row in indexed_contacts], activities,
-                                 state_events, as_of=current)
+    state = prepared_state if prepared_state is not None else build_customer_state(
+        customers, [row for _index, row in indexed_contacts], activities, state_events, as_of=current)
     source_rows = {stable_contact_source_id(row): index for index, row in indexed_contacts}
     overdue, upcoming = [], []
     for obligations in state["obligations"].values():
         for obligation in obligations:
+            if owner_user_name is not None and normalize_key(obligation.get("owner_user_name")) != normalize_key(owner_user_name):
+                continue
             if obligation.get("purpose") != "explicit_followup" or obligation.get("status") not in OPEN_OBLIGATION_STATUSES:
                 continue
             if obligation.get("planned_activity_id") and obligation.get("status") == "scheduled":
@@ -6675,10 +6750,11 @@ def build_customer_timeline(
 
 
 def select_next_customer_follow_up(customer, customers, contact_rows, activity_rows, *,
-                                   now=None, customer_lookup=None, state_events=()):
+                                   now=None, customer_lookup=None, state_events=(), order_rows=(), prepared_state=None):
     """Nearest future open commitment; an unrelated attempt cannot erase it."""
     current = now or stockholm_now()
-    state = build_customer_state(customers, contact_rows, activity_rows, state_events, as_of=current)
+    state = prepared_state if prepared_state is not None else build_customer_state(
+        customers, contact_rows, activity_rows, state_events, as_of=current, order_rows=order_rows)
     candidates = []
     for item in state["obligations"].get(str(customer.get("customer_id") or ""), []):
         if item.get("status") not in OPEN_OBLIGATION_STATUSES:
@@ -6782,6 +6858,7 @@ def get_customer_stats(customer_name):
         activity_rows,
         customer_lookup=customer_lookup,
         state_events=read_customer_state_events(spreadsheet),
+        order_rows=order_rows,
     )
 
     sheets = read_email_worksheets(spreadsheet)
@@ -6820,6 +6897,7 @@ def build_current_priority_snapshot(
     users=None,
     state_events=(),
     as_of=None,
+    prepared_state=None,
 ):
     """Calculate the authoritative priority snapshot used by all endpoints."""
     if as_of is None:
@@ -6840,8 +6918,9 @@ def build_current_priority_snapshot(
             planning_owner_user_names[customer_id] = str(
                 (owner or {}).get("user_name") or ""
             ).strip()
-    state = build_customer_state(customers, contact_rows, planned_activity_rows, state_events,
-                                 as_of=as_of, owner_user_names=planning_owner_user_names)
+    state = prepared_state if prepared_state is not None else build_customer_state(
+        customers, contact_rows, planned_activity_rows, state_events,
+        as_of=as_of, owner_user_names=planning_owner_user_names, order_rows=order_rows)
     order_features = build_order_features(order_rows, customers=customers, as_of=as_of)
     contact_features = build_contact_features(contact_rows, order_features, customers=customers, as_of=as_of)
     email_engagement_by_customer = build_email_engagement_snapshot(
@@ -6964,7 +7043,7 @@ def get_authoritative_priority_snapshot(
         planned_activity_rows
     )
     key = (
-        id(spreadsheet), date_key, dependency_signature, planning_signature,
+        id(spreadsheet), date_key, dependency_signature, planning_signature, ranking_mode(),
         planning_time_signature, canonical_payload_fingerprint(state_events),
         as_of.isoformat(timespec="microseconds" if explicit_as_of else "minutes"),
     )
@@ -6991,6 +7070,11 @@ def get_authoritative_priority_snapshot(
             users = get_user_rows(spreadsheet)
         except (WorksheetNotFound, AttributeError):
             pass
+        owner_names = {str(customer.get("customer_id") or "").strip(): str(
+            (canonical_owner_for_customer(None, customer, users=users or []) or {}).get("user_name") or ""
+        ).strip() for customer in customers} if users is not None else None
+        state = build_customer_state(customers, contact_rows, planned_activity_rows, state_events,
+                                     as_of=as_of, owner_user_names=owner_names, order_rows=order_rows)
         priorities, email_snapshot = build_current_priority_snapshot(
             customers=customers,
             order_rows=order_rows,
@@ -7002,12 +7086,8 @@ def get_authoritative_priority_snapshot(
             users=users,
             state_events=state_events,
             as_of=as_of,
+            prepared_state=state,
         )
-        owner_names = {str(customer.get("customer_id") or "").strip(): str(
-            (canonical_owner_for_customer(None, customer, users=users or []) or {}).get("user_name") or ""
-        ).strip() for customer in customers}
-        state = build_customer_state(customers, contact_rows, planned_activity_rows, state_events,
-                                     as_of=as_of, owner_user_names=owner_names)
         payload = {
             "priorities": priorities,
             "snapshot_created_at": as_of.isoformat(timespec="seconds"),
@@ -7291,7 +7371,7 @@ def read_customer_state_events(spreadsheet, *, use_cache=True):
 
 
 def customer_state_snapshot(spreadsheet, *, customers=None, contacts=None,
-                            activities=None, events=None, now=None, users=None):
+                            activities=None, events=None, now=None, users=None, orders=None):
     customers = get_customer_rows(spreadsheet) if customers is None else customers
     contacts = get_contact_rows(spreadsheet) if contacts is None else contacts
     if activities is None:
@@ -7301,8 +7381,9 @@ def customer_state_snapshot(spreadsheet, *, customers=None, contacts=None,
     owner_names = {str(customer.get("customer_id") or "").strip(): str(
         (canonical_owner_for_customer(None, customer, users=users) or {}).get("user_name") or ""
     ).strip() for customer in customers}
+    orders = get_order_rows(spreadsheet) if orders is None else orders
     return build_customer_state(customers, contacts, activities, events,
-                                as_of=now or stockholm_now(), owner_user_names=owner_names)
+                                as_of=now or stockholm_now(), owner_user_names=owner_names, order_rows=orders)
 
 
 class CustomerStateConflict(ValueError):
@@ -7357,6 +7438,8 @@ def existing_customer_state_mutation(events, *, kind, customer_id, request_id, f
 
 
 def validate_customer_state_revision(data, current):
+    if current.get("identity_ambiguous"):
+        raise CustomerStateConflict("legacy_identity_ambiguous", "Historiska källor delar identitet. Sätt stabila kontakt-ID:n innan de ändras.", 409)
     try:
         expected = int(data["expected_revision"])
     except (KeyError, ValueError, TypeError):
@@ -7436,11 +7519,14 @@ def enrich_customer_state_priorities(priorities, state, events, owner_names, *, 
         if selected is None:
             selected = next((item for item in obligations if aid and item.get("planned_activity_id") == aid), None)
         priority["open_obligations"] = [item for item in obligations if item.get("status") in OPEN_OBLIGATION_STATUSES]
+        resolved_reminders = [item for item in obligations if item.get("resolution_basis")]
+        priority["historical_reminders_resolved"] = len(resolved_reminders)
+        priority["history_note"] = (f"{len(resolved_reminders)} äldre interna påminnelser har ersatts av senare kundarbete. Historiken finns kvar." if resolved_reminders else "")
         if selected:
             priority["planning_seed"] = {name: selected.get(name) for name in (
                 "customer_id", "owner_user_name", "obligation_id", "source_contact_id", "source_contact_row",
                 "planned_activity_id", "original_due_date", "due_date", "due_at", "note", "contact_type",
-                "appointment_confirmed", "picking_help")}
+                "appointment_confirmed", "picking_help", "customer_agreement_confirmed")}
             priority["planning_seed"].update(expected_revision=selected.get("revision", 0),
                                              recommended_contact_type=normalize_planning_contact_type(selected.get("contact_type")))
         else:
@@ -7565,7 +7651,9 @@ def mutate_customer_obligation():
                         activity_id=activity_id, owner=owner, customer=customer, contact_type=contact_type,
                         scheduled_at=scheduled, note=data.get("note", item.get("note", "")),
                         source="follow_up" if item.get("source_contact_id") else "manual",
-                        source_contact_id=item.get("source_contact_id", ""),
+                        source_contact_id=source_id if item.get("source_contact_id") else "",
+                        customer_agreement_confirmed=data.get("customer_agreement_confirmed", item.get("customer_agreement_confirmed", False)),
+                        agreed_at=item.get("agreed_at", ""),
                         appointment_confirmed=data.get("appointment_confirmed", item.get("appointment_confirmed", False)),
                         picking_help=data.get("picking_help", item.get("picking_help", False)),
                         client_request_id=planning_request_scope(current_user(), "obligation-reschedule", oid, request_id),
@@ -7959,7 +8047,7 @@ def get_customer_insights():
             "reminder_email_latest_sent_at": email_proposal["latest_sent_at"],
         }
 
-    if request.headers.get("X-PB-Value-Model") in {"v3.1", "v3.2", "v3.3"}:
+    if request.headers.get("X-PB-Value-Model") in {"v3.1", "v3.2", "v3.3", "v3.4"}:
         # Identity-safe read model for the new store list. Name-only legacy data
         # are copied only when the master-name mapping is unambiguous.
         by_customer_id = {}
@@ -7972,6 +8060,8 @@ def get_customer_insights():
             "contact_relevance_factor", "latest_reached_date",
             "days_since_reached", "latest_human_contact_date",
             "work_priority_raw", "work_priority_score", "work_can_start_unscheduled_contact",
+            "ranking_mode", "history_note", "historical_reminders_resolved", "data_warnings",
+            "latest_reported_order_date", "latest_unconfirmed_order_date",
             "can_contact_now", "can_start_unscheduled_contact",
             "can_execute_planned_contact", "requires_handling", "review_only", "contact_not_before",
             "customer_workflow", "contact_permission", "planning_seed", "open_obligations",
@@ -8830,6 +8920,7 @@ def planning_activities():
                 note=note,
                 source=source,
                 source_contact_id=source_contact_id_for_fingerprint,
+                customer_agreement_confirmed=is_yes(data.get("customer_agreement_confirmed")),
                 appointment_confirmed=appointment_confirmed,
                 picking_help=picking_help,
             )
@@ -8909,9 +9000,11 @@ def planning_activities():
                     note=note,
                     source=source,
                     source_contact_id=source_contact_id,
-                    appointment_confirmed=appointment_confirmed,
+                    customer_agreement_confirmed=is_yes(data.get("customer_agreement_confirmed")),
+                appointment_confirmed=appointment_confirmed,
                     picking_help=picking_help,
                 ),
+                customer_agreement_confirmed=is_yes(data.get("customer_agreement_confirmed")),
                 appointment_confirmed=appointment_confirmed,
                 picking_help=picking_help,
                 revision=1,
@@ -9078,6 +9171,10 @@ def planning_activities():
         if obligation:
             activity.update(obligation_id=obligation["obligation_id"], obligation_revision=obligation["revision"],
                             obligation_status=obligation["status"], source_contact_id=obligation.get("source_contact_id", ""))
+            if activity.get("status") == "planned" and obligation.get("resolution_basis") and obligation["status"] in {"resolved", "cancelled"}:
+                activity.update(source_status="planned", status="superseded", is_overdue=False, overdue=False,
+                                resolution_basis=obligation["resolution_basis"],
+                                status_label="Ersatt av senare kundarbete")
         priority = activity_priorities.get(str(activity.get("customer_id") or ""))
         decision = {"allowed": False, "reason_code": "contact_permission_unavailable"}
         if activity.get("status") == "planned" and activity_snapshot is not None and priority is not None:
@@ -9230,6 +9327,7 @@ def planning_activities():
             selected_end=end_date,
             today=stockholm_today(),
             state_events=read_customer_state_events(spreadsheet),
+            prepared_state=activity_state, owner_user_name=owner.get("user_name"),
         ) if include_followups else ([], [])
     )
     unscheduled_followups = (
@@ -9476,6 +9574,8 @@ def update_planning_activity(activity_id):
                 data.get("picking_help"),
                 data.get("contact_type", current.get("contact_type")),
             )
+        if "customer_agreement_confirmed" in data:
+            mutation_changes["customer_agreement_confirmed"] = is_yes(data.get("customer_agreement_confirmed"))
         mutation_fingerprint = planning_update_fingerprint(
             actor=caller,
             activity_id=activity_id,
@@ -9631,6 +9731,10 @@ def update_planning_activity(activity_id):
             updates["appointment_confirmed"] = "N"
         if effective_contact_type != "visit":
             updates["picking_help"] = "N"
+        if "customer_agreement_confirmed" in data:
+            agreed = is_yes(data.get("customer_agreement_confirmed"))
+            updates["customer_agreement_confirmed"] = "Y" if agreed else "N"
+            updates["agreed_at"] = str(current.get("agreed_at") or planning_timestamp()) if agreed else ""
         if "scheduled_at" in data:
             scheduled_at = parse_planning_datetime(data.get("scheduled_at"))
             if scheduled_at is None:
@@ -9840,6 +9944,8 @@ def build_route_proposal_payload(
             "longitude": candidate.coordinate.longitude,
             "sequence": stop.sequence,
             "priority_score": candidate.priority_score,
+                "commercial_value": candidate.objective_value,
+                "ranking_mode": ranking_mode(),
             "required": bool(getattr(candidate, "required", False)),
             "leg_drive_minutes": seconds_to_minutes(stop.leg_drive_seconds),
             "cumulative_drive_minutes": seconds_to_minutes(
@@ -9871,6 +9977,8 @@ def build_route_proposal_payload(
             "candidate_count": len(candidates),
             "stop_count": len(stops),
             "total_priority_score": proposal.route.total_priority_score,
+            "total_commercial_value": round(sum(stop.candidate.objective_value for stop in proposal.route.stops), 6),
+            "ranking_mode": ranking_mode(),
             "drive_minutes": seconds_to_minutes(proposal.route.drive_seconds),
             "return_drive_minutes": seconds_to_minutes(
                 proposal.route.return_drive_seconds
@@ -9955,7 +10063,7 @@ def calculate_route_proposal_for_user(
     ))
     active_route_customer_ids = route_blocked_customer_ids(
         route_activity_rows, owner or user, route_date, customers,
-        contact_rows=snapshot.get("contact_rows") or [],
+        contact_rows=snapshot.get("contact_rows") or [], state=snapshot.get("customer_state"),
     )
     coordinate_quality = route_coordinate_quality(customers)
     required_rows = tuple(sorted(set(required_rows or ())))
@@ -10060,7 +10168,13 @@ def calculate_route_proposal_for_user(
             customer.get("longitude_google") or customer.get("longitude"),
             "longitude",
         )
-        score = (priority or {}).get("priority_score", 0)
+        ranking = (route_priority_values(priority, required=True) if row in required_set
+                   else route_optional_priority_values(priority, route_activity_rows, route_date))
+        if ranking is None:
+            if row in required_set:
+                return None, route_proposal_error("invalid_route_priority", "Prioriteten för ett bokat stopp kunde inte verifieras.", 409)
+            continue
+        score = ranking["priority_score"]
         if latitude is None or longitude is None:
             if row in required_set:
                 invalid_required.append({
@@ -10080,7 +10194,7 @@ def calculate_route_proposal_for_user(
             score = 0 if row in required_set else None
         if score is None:
             continue
-        if score <= 0 and row not in required_set:
+        if ranking["commercial_value"] <= 0 and row not in required_set:
             continue
         candidates.append(
             RouteCandidate(
@@ -10091,6 +10205,7 @@ def calculate_route_proposal_for_user(
                     longitude=longitude,
                 ),
                 priority_score=score,
+                commercial_value=ranking["commercial_value"],
                 required=row in required_set,
             )
         )
@@ -10140,6 +10255,8 @@ def calculate_route_proposal_for_user(
             "latitude": candidate.coordinate.latitude,
             "longitude": candidate.coordinate.longitude,
             "priority_score": candidate.priority_score,
+                "commercial_value": candidate.objective_value,
+                "ranking_mode": ranking_mode(),
             "required": candidate.required,
             "sequence": 0,
             "leg_drive_minutes": 0,
@@ -10198,7 +10315,7 @@ def calculate_route_proposal_for_user(
             if not candidate.required
         ),
         key=lambda candidate: (
-            -candidate.priority_score,
+            -candidate.objective_value,
             candidate.row,
         ),
     )
@@ -10246,6 +10363,8 @@ def calculate_route_proposal_for_user(
         max_total_seconds=max_total_seconds,
     )
     payload["workday_policy"] = WORKDAY_POLICY_VERSION
+    payload["ranking_mode"] = ranking_mode()
+    payload["ranking_contract"] = "v34-raw"
     payload["route_start_at"] = route_start_at.isoformat(timespec="minutes")
     payload["plan_fingerprint"] = planning_state_fingerprint(planning_rows_for_date(
         list(enumerate(route_activity_rows, start=2)), owner or user, route_date,
@@ -10901,13 +11020,13 @@ def schedule_planning_route_with_anchors(
                     + anchor_timing["drive_minutes"]
                     - direct_to_anchor
                 ))
-                value_rate = float(candidate.get("priority_score") or 0) / max(
+                value_rate = route_candidate_value(candidate) / max(
                     1, marginal_minutes
                 )
                 score = (
                     bool(candidate.get("required")),
                     value_rate,
-                    float(candidate.get("priority_score") or 0),
+                    route_candidate_value(candidate),
                     -marginal_minutes,
                     -int(candidate.get("customer_row") or candidate.get("row") or 0),
                 )
@@ -10963,13 +11082,13 @@ def schedule_planning_route_with_anchors(
                     + return_minutes
                     - direct_return
                 ))
-                value_rate = float(candidate.get("priority_score") or 0) / max(
+                value_rate = route_candidate_value(candidate) / max(
                     1, marginal_minutes
                 )
                 score = (
                     bool(candidate.get("required")),
                     value_rate,
-                    float(candidate.get("priority_score") or 0),
+                    route_candidate_value(candidate),
                     -marginal_minutes,
                     -int(candidate.get("customer_row") or candidate.get("row") or 0),
                 )
@@ -10979,8 +11098,8 @@ def schedule_planning_route_with_anchors(
                     + timing["service_minutes"]
                     + return_minutes
                 )
-                value_rate = float(candidate.get("priority_score") or 0) / max(1, extra)
-                score = (bool(candidate.get("required")), value_rate, float(candidate.get("priority_score") or 0))
+                value_rate = route_candidate_value(candidate) / max(1, extra)
+                score = (bool(candidate.get("required")), value_rate, route_candidate_value(candidate))
             if best is None or score > best[0]:
                 best = (score, candidate, timing)
         if best is None:
@@ -11339,7 +11458,7 @@ def build_route_optimization_inputs(
         priority = priorities_by_id.get(customer_id, {})
         shipments.append({
             "customer_id": customer_id,
-            "priority_score": priority.get("priority_score") or 1,
+            **(route_priority_values(priority, required=True) or {"priority_score": 0, "commercial_value": 0.0, "ranking_mode": ranking_mode()}),
             "coordinate": coordinate_entry["coordinate"],
             "required": True,
             "fixed_at": fixed_at,
@@ -11374,7 +11493,7 @@ def build_route_optimization_inputs(
     ]
     blocked_customer_ids = route_blocked_customer_ids(
         effective_planning, owner, route_date, customers,
-        contact_rows=snapshot.get("contact_rows") or [],
+        contact_rows=snapshot.get("contact_rows") or [], state=snapshot.get("customer_state"),
     )
     # Eligibility here means a contact restriction, never an action-queue trigger
     # or a channel preference. Mandatory appointments retain their own validation.
@@ -11388,11 +11507,8 @@ def build_route_optimization_inputs(
         if customer_id in mandatory_ids or customer_id in blocked_customer_ids:
             continue
         priority = priorities_by_id.get(customer_id, {})
-        try:
-            score = int(round(float(priority.get("priority_score") or 0)))
-        except (TypeError, ValueError, OverflowError):
-            score = 0
-        if not 1 <= score <= 100:
+        ranking = route_optional_priority_values(priority, planned_rows, route_date)
+        if ranking is None or ranking["commercial_value"] <= 0:
             continue
         coordinate_entry = quality.get(customer_id, {})
         if not coordinate_entry.get("trusted"):
@@ -11400,7 +11516,7 @@ def build_route_optimization_inputs(
             continue
         shipments.append({
             "customer_id": customer_id,
-            "priority_score": score,
+            **ranking,
             "coordinate": coordinate_entry["coordinate"],
             "required": False,
             "fixed_at": None,
@@ -13101,6 +13217,8 @@ def build_planning_route_preview(
         ),
     })
     route_payload["workday_policy"] = WORKDAY_POLICY_VERSION
+    route_payload["ranking_mode"] = ranking_mode()
+    route_payload["ranking_contract"] = "v34-raw"
     route_payload["plan_fingerprint"] = planning_state_fingerprint(date_rows)
     gps_notice = (
         "Start och retur: din position nu"
@@ -13619,6 +13737,8 @@ def route_payload_accessible(
 
 
 def legacy_route_cache_current(payload, spreadsheet, owner, route_date):
+    if payload.get("ranking_contract") != "v34-raw" or payload.get("ranking_mode") != ranking_mode():
+        return False
     if payload.get("workday_policy") != WORKDAY_POLICY_VERSION:
         return False
     rows = planning_rows_for_date(read_planned_activity_snapshot(spreadsheet)[2], owner, route_date)
@@ -15609,6 +15729,9 @@ def add_contact(customer_name):
                 "obligation_id": obligation_id,
                 "obligation_outcome": obligation_outcome if obligation_id else "",
                 "purpose": str(data.get("purpose") or (obligation_before or {}).get("purpose") or ""),
+                "follow_up_purpose": ("customer_followup" if is_yes(follow_up.get("customer_agreement_confirmed")) or follow_up_appointment_confirmed else "internal_followup") if follow_up_enabled else "",
+                "follow_up_agreement_confirmed": "Y" if follow_up_enabled and (is_yes(follow_up.get("customer_agreement_confirmed")) or follow_up_appointment_confirmed) else "N",
+                "onboarding_completed": "Y" if is_yes(data.get("onboarding_completed")) and result_class in {"positive", "neutral"} and data.get("purpose") == "first_order_onboarding" else "N",
                 "contact_request_fingerprint": contact_request_fingerprint,
                 "recorded_at": stockholm_now().isoformat(),
                 **analytics_enrichment,
@@ -15776,6 +15899,8 @@ def add_contact(customer_name):
                         note=follow_up_note,
                         source="follow_up",
                         source_contact_id=follow_source_contact_id,
+                        customer_agreement_confirmed=is_yes(follow_up.get("customer_agreement_confirmed")) or follow_up_appointment_confirmed,
+                        agreed_at=data.get("date_time") or stockholm_now().isoformat(),
                         appointment_confirmed=(
                             follow_up_appointment_confirmed
                         ),

@@ -27,9 +27,9 @@ class SkippedObligationTests(TestCase):
         self.assertEqual(items["followup:old"]["status"], "needs_review")
         self.assertEqual([item["obligation_id"] for item in attention_items(state, as_of=NOW)], ["followup:old"])
         row = self.model(*inputs, state)
-        self.assertEqual(row["obligation_id"], "followup:old")
-        self.assertEqual(row["work_priority_raw"], 0)
-        self.assertFalse(row["can_start_unscheduled_contact"])
+        self.assertNotEqual(row["obligation_id"], "followup:old")
+        self.assertGreater(row["work_priority_raw"], 0)
+        self.assertTrue(row["can_start_unscheduled_contact"])
         self.assertFalse(row["can_execute_planned_contact"])
         self.assertEqual(inputs, ([source], [skipped]))
 
@@ -57,7 +57,7 @@ class SkippedObligationTests(TestCase):
         self.assertEqual(len(attention), 1)
         self.assertTrue(attention[0]["review_only"])
         row = self.model([source], [skipped], state)
-        self.assertEqual(row["work_priority_raw"], 0)
+        self.assertGreater(row["work_priority_raw"], 0)
         self.assertTrue(row["requires_handling"])
         self.assertIn("followup:promise", row["review_obligation_ids"])
 
@@ -88,7 +88,7 @@ class SkippedObligationTests(TestCase):
                 self.assertNotEqual(row["list_guidance"]["reason_code"], "overdue_planned_activity")
                 self.assertFalse(row["can_execute_planned_contact"])
                 if explicit:
-                    self.assertFalse(row["can_start_unscheduled_contact"])
+                    self.assertTrue(row["can_start_unscheduled_contact"])
                 restored = dict(skipped, status="planned", updated_at=(NOW - timedelta(days=1)).isoformat())
                 restored_state = self.state(contacts, [restored], [event])
                 self.assertEqual(restored_state["obligations"]["a"][0]["status"], "scheduled")

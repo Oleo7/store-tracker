@@ -154,7 +154,8 @@ class RouteContactPolicyTests(TestCase):
                                     for row in rows))
 
     def test_newer_agreement_cannot_grant_permission_to_an_unrelated_visit(self):
-        source = contact(30, "Negativ", contact_id="new-agreement", follow_up_date=NOW.date().isoformat())
+        source = contact(30, "Negativ", contact_id="new-agreement", follow_up_date=NOW.date().isoformat(),
+                         follow_up_purpose="customer_followup", follow_up_agreement_confirmed="Y")
         phone = appointment(contact_type="phone", planned_activity_id="phone-a", source_contact_id="new-agreement",
                             scheduled_at=NOW.replace(hour=11).isoformat())
         visit = appointment()

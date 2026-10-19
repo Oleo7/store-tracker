@@ -289,12 +289,12 @@ class PlanningSuggestionV2IntegrationTests(PlanningApiTestCase):
 
     def test_overdue_activity_survives_a_later_unlinked_contact(self):
         self.append_repeat_orders()
-        activity = self.append_planning_row(
+        activity = self.append_planning_row(customer_agreement_confirmed=True,
             planned_activity_id="overdue-resolved-by-contact",
             scheduled_at="2026-08-03T09:00:00+02:00",
             source="manual",
         )
-        self.append_contact_row(
+        self.append_contact_row(follow_up_purpose="customer_followup", follow_up_agreement_confirmed="Y",
             contact_id="later-contact",
             customer_id=activity["customer_id"],
             date_time="2026-08-06 13:30",

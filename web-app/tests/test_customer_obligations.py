@@ -13,7 +13,8 @@ CID = "11111111-1111-4111-8111-111111111111"
 class CustomerObligationApiTests(PlanningApiTestCase):
     def source(self, contact_id="promise", due="2026-07-25", **extra):
         return self.append_contact_row(contact_id=contact_id, customer_id=CID,
-                                       date_time="2026-07-20 09:00", follow_up_date=due, **extra)
+                                       date_time="2026-07-20 09:00", follow_up_date=due,
+                                       follow_up_purpose="customer_followup", follow_up_agreement_confirmed="Y", **extra)
 
     def attention(self):
         response = self.client.get("/planning/attention?user_name=olle")

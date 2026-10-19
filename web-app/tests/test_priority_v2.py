@@ -258,6 +258,7 @@ class ScoringV2Tests(TestCase):
         ]
         planned = [{
             "customer_id": "higher",
+            "planned_activity_id": "higher-plan",
             "customer": "Higher potential",
             "status": "planned",
             "scheduled_at": "2026-07-30T10:00:00+02:00",

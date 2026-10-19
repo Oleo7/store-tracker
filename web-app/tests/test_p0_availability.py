@@ -959,7 +959,7 @@ class LegacyEmailIdentityTests(TestCase):
             date(2026, 8, 8), limit=1,
         )[0]
         self.assertNotIn("legacy_missed_followup", item["covered_trigger_keys"])
-        self.assertEqual(item["primary_trigger_type"], "overdue_explicit_follow_up")
+        self.assertEqual(item["primary_trigger_type"], "internal_followup_due")
         self.assertGreater(item["business_overdue_days"], 0)
         self.assertGreater(item["business_value_score"], 0)
 

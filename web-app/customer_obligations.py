@@ -1,8 +1,8 @@
 """Pure, source-scoped customer commitments and explicit state events.
 
-Reading this module never writes or infers fulfillment from another contact,
-an order, or an unrelated booking. Legacy completion with insufficient evidence
-is reviewable history; it is never an automatic instruction to call a customer.
+Reading never writes. Customer promises need source-scoped completion. Legacy
+internal reminders are scheduling cues, not proof of a customer promise: later
+work can supersede them without claiming that an unrelated promise was fulfilled.
 """
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from collections import defaultdict
 from datetime import date, datetime, time, timedelta
 import hashlib
 import json
+import re
 from zoneinfo import ZoneInfo
 
 STOCKHOLM = ZoneInfo("Europe/Stockholm")
@@ -78,8 +79,53 @@ def source_fingerprint(row):
     )})
 
 
+def contact_anchor(row):
+    """Immutable-enough legacy anchor; editable notes/owner/result are not IDs.
+
+    A collision is quarantined by build_customer_state, never disambiguated by
+    spreadsheet position. Correcting an event timestamp still needs an explicit
+    source mapping; only persisted IDs can survive arbitrary identity edits.
+    """
+    when = instant(row.get("date_time") or row.get("source_created_at"))
+    channel = key(row.get("contact_channel") or row.get("contact_type"))
+    channel = {"telefon": "phone", "mejl": "email", "bes\u00f6k": "visit", "besok": "visit"}.get(channel, channel)
+    return fingerprint([text(row.get("customer_id")), when.isoformat() if when else "", channel])
+
+
 def stable_contact_source_id(row):
-    return text(row.get("contact_id")) or "legacy:" + source_fingerprint(row)[:32]
+    return (text(row.get("_stable_source_id")) or text(row.get("contact_id"))
+            or "legacy2:" + contact_anchor(row)[:32])
+
+
+def confirmed(value):
+    return key(value) in {"true", "y", "yes", "1", "ja"}
+
+
+def commitment_evidence(source, activity):
+    """A date is a reminder. Confirmation/purpose is independent evidence.
+
+    Text clues only preserve a possible separate service task for handling.
+    They never authorize contact, prove agreement, or auto-resolve a promise.
+    """
+    agreed = any(confirmed(row.get(field)) for row, field in (
+        (source, "follow_up_agreement_confirmed"),
+        (activity, "customer_agreement_confirmed"), (activity, "appointment_confirmed")))
+    purpose = key(source.get("follow_up_purpose") or activity.get("purpose"))
+    explicit = purpose in {"customer_followup", "explicit_followup", "service_followup", "service"}
+    # Old persisted source-scoped promises remain promises, but do not gain an
+    # exception to a negative dialogue merely from the word 'explicit'.
+    explicit = explicit or not source.get("follow_up_purpose") and key(source.get("purpose")) in {"customer_followup", "service_followup", "explicit_followup"}
+    note = key(activity.get("note") or source.get("comment"))
+    service_hint = bool(re.search(r"reklamation|krediter|ers\u00e4ttningsleverans|leveransproblem|utlovad|lovat kunden", note)
+        or re.search(r"(?:bokad|bokat|bekr\u00e4ftad|bekr\u00e4ftat|kommit \u00f6verens|vi ska|vi kommer|ska k\u00f6ra).{0,90}(?:demo|provsmakning)", note)
+        or re.search(r"(?:demo|provsmakning).{0,45}(?:bokad|bokat|bekr\u00e4ftad|bekr\u00e4ftat)", note))
+    if agreed or explicit:
+        return "customer_promise", agreed
+    if service_hint:
+        return "uncertain_service", False
+    if source or text(activity.get("source_contact_id")) or key(activity.get("source")) == "follow_up":
+        return "internal_reminder", False
+    return "planned_task", False
 
 
 def obligation_id_for_contact(row):
@@ -196,7 +242,7 @@ def classify_legacy_completed_followups(contact_rows, planned_activity_rows, *, 
 
 
 def build_customer_state(customers, contact_rows, planned_activity_rows, state_events=(), *,
-                         as_of, owner_user_names=None):
+                         as_of, owner_user_names=None, order_rows=()):
     # Share the actual model's quarantine and exact unique ID/number/name rules.
     from priority import _canonicalize_rows, _known_at
     current = instant(as_of)
@@ -216,8 +262,26 @@ def build_customer_state(customers, contact_rows, planned_activity_rows, state_e
 
     contacts = []
     by_contact = {}
+    saved_events = latest_state_events(state_events, as_of=current)
+    # A previous v3.3 event may refer to the former note-based legacy key. Its
+    # saved immutable source time bridges that key to the unique current row.
+    saved_anchors = defaultdict(set)
+    for (kind, cid, entity_id), event in saved_events.items():
+        if kind == "obligation" and entity_id.startswith("followup:legacy"):
+            payload = event_payload(event)
+            source_time = instant(payload.get("source_created_at") or payload.get("agreed_at") or payload.get("created_at"))
+            if source_time:
+                saved_anchors[(cid, source_time.isoformat())].add(entity_id[len("followup:"):])
     canonical_contacts = _canonicalize_rows(_rows(contact_rows), customers,
                                             name_field="customer", number_field="customer_number")
+    anchor_counts = defaultdict(int)
+    event_counts = defaultdict(int)
+    for row in canonical_contacts:
+        when = instant(row.get("date_time"))
+        if when and when <= current and _known_at(row, current):
+            event_counts[(customer_id(row), when.isoformat())] += 1
+            if not text(row.get("contact_id")):
+                anchor_counts[contact_anchor(row)] += 1
     for index, row in enumerate(canonical_contacts, start=2):
         when = instant(row.get("date_time"))
         cid = customer_id(row)
@@ -225,8 +289,14 @@ def build_customer_state(customers, contact_rows, planned_activity_rows, state_e
                 or not _known_at(row, current)):
             continue
         row = {**row, "customer_id": cid, "_source_row": index}
+        aliases = saved_anchors.get((cid, when.isoformat()), set())
+        if len(aliases) == 1 and event_counts[(cid, when.isoformat())] == 1:
+            row["_stable_source_id"] = next(iter(aliases))
+        row["_identity_ambiguous"] = bool(not text(row.get("contact_id")) and anchor_counts[contact_anchor(row)] > 1)
         contacts.append(row)
-        by_contact[stable_contact_source_id(row)] = row
+        for alias in {stable_contact_source_id(row), text(row.get("contact_id")),
+                      "legacy:" + source_fingerprint(row)[:32], "legacy2:" + contact_anchor(row)[:32]} - {""}:
+            by_contact[alias] = row
 
     plans = []
     canonical_plans = _canonicalize_rows(_rows(planned_activity_rows), customers,
@@ -247,8 +317,8 @@ def build_customer_state(customers, contact_rows, planned_activity_rows, state_e
     def make(cid, oid, *, source=None, activity=None):
         source, activity = source or {}, activity or {}
         due = day(source.get("follow_up_date")) or day(activity.get("scheduled_at"))
-        explicit = bool(source or text(activity.get("source_contact_id"))
-                        or key(activity.get("source")) == "follow_up")
+        kind, agreed = commitment_evidence(source, activity)
+        explicit = kind in {"customer_promise", "uncertain_service"}
         master = masters[cid]
         owner = ((owner_user_names or {}).get(cid) if owner_user_names is not None
                  else text(master.get("sales_person")))
@@ -256,18 +326,21 @@ def build_customer_state(customers, contact_rows, planned_activity_rows, state_e
             "obligation_id": oid, "customer_id": cid,
             "customer": text(master.get("customer")), "customer_row": master.get("row"),
             "customer_number": text(master.get("customer_number")),
-            "owner_user_name": text(owner), "purpose": "explicit_followup" if explicit else "calendar_activity",
+            "owner_user_name": text(owner),
+            "purpose": "explicit_followup" if explicit else "internal_followup" if kind == "internal_reminder" else "calendar_activity",
+            "commitment_kind": kind, "identity_ambiguous": bool(source.get("_identity_ambiguous")),
             "source_scope": "obligation:" + oid, "status": "open",
             "source_contact_id": stable_contact_source_id(source) if source else text(activity.get("source_contact_id")),
             "source_contact_row": source.get("_source_row"),
             "source_created_at": text(source.get("date_time")) or text(activity.get("created_at")),
-            "agreed_at": text(source.get("date_time")) or text(activity.get("agreed_at")),
-            "customer_agreement_confirmed": key(activity.get("appointment_confirmed")) in {"y", "true", "1"},
+            "agreed_at": text(activity.get("agreed_at")) or (text(source.get("date_time")) if agreed else ""),
+            "customer_agreement_confirmed": agreed,
             "created_at": text(source.get("date_time")) or text(activity.get("created_at")),
             "source_fingerprint": source_fingerprint(source) if source else fingerprint(activity),
             "source_state_fingerprint": fingerprint({name: source.get(name, "") for name in (
                 "customer_id", "date_time", "follow_up_date", "contact_id", "result", "comment",
-                "contact_channel", "obligation_id", "obligation_outcome", "purpose")}) if source else fingerprint(activity),
+                "contact_channel", "obligation_id", "obligation_outcome", "purpose",
+                "follow_up_purpose", "follow_up_agreement_confirmed")}) if source else fingerprint(activity),
             "original_due_date": due.isoformat() if due else "",
             "due_date": due.isoformat() if due else "", "due_at": "",
             "planned_activity_id": "", "original_planned_activity_id": text(activity.get("planned_activity_id")),
@@ -282,13 +355,42 @@ def build_customer_state(customers, contact_rows, planned_activity_rows, state_e
         if explicit and due and (current.date() - due).days > 90:
             result.update(status="needs_review", evidence_quality="stale_explicit_followup")
             result["review_reasons"].append("stale_explicit_followup")
+        if kind == "uncertain_service":
+            result.update(status="needs_review", evidence_quality="possible_separate_service_task")
+            result["review_reasons"].append("service_scope_not_documented")
+        if result["identity_ambiguous"]:
+            result.update(evidence_quality="ambiguous_legacy_identity")
+            result["review_reasons"].append("duplicate_legacy_source_anchor")
+            if explicit:
+                result["status"] = "needs_review"
         return result
 
     for row in contacts:
         if day(row.get("follow_up_date")):
             oid = obligation_id_for_contact(row)
-            commitments[oid] = make(row["customer_id"], oid, source=row)
+            candidate = make(row["customer_id"], oid, source=row)
+            variant = {field: row.get(field, "") for field in (
+                "date_time", "contact_channel", "comment", "follow_up_date", "result", "contact_id")}
+            if oid in commitments:
+                # Preserve every ambiguous source variant; no note/position-based
+                # suffix may become a fake persistent identity. Mutations refuse
+                # the group until an explicit source ID is assigned.
+                previous = commitments[oid]
+                previous["source_variants"].append(variant)
+                previous["source_variants"].sort(key=fingerprint)
+                previous["source_count"] = len(previous["source_variants"])
+                previous["identity_ambiguous"] = True
+                previous["source_state_fingerprint"] = fingerprint(previous["source_variants"])
+                previous["evidence_quality"] = "ambiguous_legacy_identity"
+                previous["review_reasons"] = ["duplicate_legacy_source_anchor"]
+                if candidate["purpose"] == "explicit_followup" or previous["purpose"] == "explicit_followup":
+                    previous.update(purpose="explicit_followup", status="needs_review", commitment_kind="uncertain_service")
+                previous["customer_agreement_confirmed"] = False
+            else:
+                candidate.update(source_variants=[variant], source_count=1)
+                commitments[oid] = candidate
 
+    plan_obligation_ids = {}
     for plan in plans:
         aid = text(plan.get("planned_activity_id"))
         if not aid:
@@ -307,7 +409,18 @@ def build_customer_state(customers, contact_rows, planned_activity_rows, state_e
                 oid = obligation_id_for_contact(source)
         if oid not in commitments:
             commitments[oid] = make(plan["customer_id"], oid, source=source, activity=plan)
-        commitments[oid]["_plans"].append(plan)
+        item = commitments[oid]
+        kind, agreed = commitment_evidence(source or {}, plan)
+        if kind == "customer_promise" and not item.get("identity_ambiguous"):
+            item.update(purpose="explicit_followup", commitment_kind=kind)
+        if agreed and not item.get("identity_ambiguous"):
+            item["customer_agreement_confirmed"] = True
+            # Moving an internal appointment is not a new customer agreement.
+            # Only the booking's own confirmation may advance agreed_at.
+            if confirmed(plan.get("customer_agreement_confirmed")) or confirmed(plan.get("appointment_confirmed")):
+                item["agreed_at"] = text(plan.get("agreed_at")) or text(plan.get("created_at")) or item.get("source_created_at", "")
+        item["_plans"].append(plan)
+        plan_obligation_ids[aid] = oid
         if not commitments[oid]["original_planned_activity_id"]:
             commitments[oid]["original_planned_activity_id"] = aid
 
@@ -315,32 +428,9 @@ def build_customer_state(customers, contact_rows, planned_activity_rows, state_e
         oid = text(contact.get("obligation_id"))
         if not oid:
             aid = text(contact.get("planned_activity_id"))
-            linked_plan = next((p for p in plans if text(p.get("planned_activity_id")) == aid), None) if aid else None
-            if linked_plan:
-                oid = next((identity for identity, item in commitments.items()
-                            if any(text(p.get("planned_activity_id")) == aid for p in item["_plans"])), "")
+            oid = plan_obligation_ids.get(aid, "") if aid else ""
         if oid in commitments and commitments[oid]["customer_id"] == contact["customer_id"]:
             commitments[oid]["_attempts"].append(contact)
-
-    # The former CRM stored next-contact dates without obligation identities.
-    # Earlier members of that sequence remain reviewable evidence, rather than
-    # each becoming a newly asserted sales promise. Never infer fulfillment.
-    latest_legacy_date = {}
-    for contact in contacts:
-        if not day(contact.get("follow_up_date")) or text(contact.get("contact_request_fingerprint")) or text(contact.get("purpose")):
-            continue
-        marker = (instant(contact.get("date_time")), contact.get("_source_row", 0), stable_contact_source_id(contact))
-        cid = contact["customer_id"]
-        if cid not in latest_legacy_date or marker > latest_legacy_date[cid]:
-            latest_legacy_date[cid] = marker
-    for contact in contacts:
-        oid = obligation_id_for_contact(contact)
-        if oid not in commitments or text(contact.get("contact_request_fingerprint")) or text(contact.get("purpose")):
-            continue
-        marker = (instant(contact.get("date_time")), contact.get("_source_row", 0), stable_contact_source_id(contact))
-        if marker < latest_legacy_date.get(contact["customer_id"], marker):
-            commitments[oid].update(status="needs_review", evidence_quality="legacy_sequence_uncertain")
-            commitments[oid]["review_reasons"].append("separate_historical_scope_not_verified")
 
     for item in commitments.values():
         linked_plans = sorted(item.pop("_plans"), key=lambda row: (
@@ -416,7 +506,7 @@ def build_customer_state(customers, contact_rows, planned_activity_rows, state_e
                 "reason": text(row.get("comment")), "actor_user_name": text(row.get("sales_user_name")) or text(row.get("sales_person")),
             }
     workflows = defaultdict(list)
-    for (kind, cid, entity_id), event in latest_state_events(state_events, as_of=current).items():
+    for (kind, cid, entity_id), event in saved_events.items():
         if cid not in masters:
             continue
         payload = event_payload(event)
@@ -469,6 +559,9 @@ def build_customer_state(customers, contact_rows, planned_activity_rows, state_e
         elif kind == "workflow":
             workflows[cid].append(payload)
 
+    reconcile_internal_reminders(commitments, contacts, plans, saved_events,
+                                 customers=customers, order_rows=order_rows, as_of=current)
+
     for permission in permissions.values():
         permission["revision"] = int(fingerprint({name: permission.get(name, "") for name in (
             "status", "event_id", "source_contact_id", "occurred_at", "reason", "actor_user_name")})[:12], 16)
@@ -480,7 +573,8 @@ def build_customer_state(customers, contact_rows, planned_activity_rows, state_e
             "customer_id", "owner_user_name", "source_state_fingerprint", "planning_state_fingerprint",
             "status", "due_date", "due_at", "original_due_date", "planned_activity_id", "source_contact_id",
             "note", "contact_type", "snooze_until", "latest_attempt_at", "latest_attempt_result",
-            "resolution_event_id", "event_id", "updated_at")})[:12], 16)
+            "resolution_event_id", "event_id", "updated_at", "commitment_kind",
+            "customer_agreement_confirmed", "identity_ambiguous", "resolution_basis")})[:12], 16)
         grouped[item["customer_id"]].append(item)
     for items in grouped.values():
         items.sort(key=lambda row: (row["due_date"], row["obligation_id"]))
@@ -512,4 +606,91 @@ def attention_items(state, *, as_of, owner_user_name=None):
                           "days_overdue": (current.date() - due).days,
                           "review_only": item.get("status") == "needs_review",
                           "actions": ["resolve", "cancel", "reschedule", "snooze", "restore"]})
-    return sorted(items, key=lambda row: (row["due_date"], key(row.get("customer")), row["obligation_id"]))
+    return sorted(items, key=lambda row: (bool(row.get("review_only")), row["due_date"],
+                                          key(row.get("customer")), row["obligation_id"]))
+
+
+def reconcile_internal_reminders(commitments, contacts, plans, saved_events, *, customers, order_rows, as_of):
+    """Read projection of superseded sales reminders; never a CRM mutation.
+
+    A linked active calendar task is retained. Separate customer promises and
+    uncertain service tasks never close from customer-wide evidence. Ordinary
+    historical dates can be replaced by a newer scheduling decision, reached
+    dialogue after their due date, or a later real commercial order. Every
+    decision keeps its source and the superseding evidence ID/date.
+    """
+    from priority import build_order_features, is_human_contact, normalize_contact_result
+    by_customer = defaultdict(list)
+    plans_by_customer = defaultdict(list)
+    for row in contacts:
+        by_customer[row["customer_id"]].append(row)
+    for row in plans:
+        plans_by_customer[row["customer_id"]].append(row)
+    last_orders = {}
+    if order_rows:
+        for feature in build_order_features(order_rows, customers=customers, as_of=as_of).values():
+            cid = text(feature.get("customer_id"))
+            when = feature.get("last_order_date")
+            if cid and when:
+                last_orders[cid] = (when, text(feature.get("latest_order_reference")))
+    for item in commitments.values():
+        kind = item.get("commitment_kind")
+        if kind not in {"internal_reminder", "planned_task"} or item.get("identity_ambiguous"):
+            continue
+        if item.get("customer_agreement_confirmed") or item.get("status") in CLOSED_STATUSES:
+            continue
+        # A saved source-scoped outcome/snooze is deliberate user work. It is
+        # not an old implicit date and must not be replaced by an inference.
+        if ("obligation", item["customer_id"], item["obligation_id"]) in saved_events:
+            continue
+        source_at = instant(item.get("source_created_at") or item.get("created_at"))
+        due = day(item.get("due_date"))
+        if source_at is None or due is None:
+            continue
+        cid = item["customer_id"]
+        linked = [p for p in plans_by_customer[cid] if
+                  text(p.get("planned_activity_id")) in {item.get("planned_activity_id"), item.get("original_planned_activity_id")}
+                  or text(p.get("source_contact_id")) == item.get("source_contact_id") and item.get("source_contact_id")]
+        # Active calendar rows retain their exact task/date. Only truly missed
+        # unconfirmed internal work can be superseded by reached later work.
+        active = [p for p in linked if key(p.get("status") or "planned") == "planned"]
+        if active:
+            if due >= as_of.date():
+                continue
+        elif linked:
+            latest = max(linked, key=lambda p: instant(p.get("updated_at") or p.get("created_at")) or source_at)
+            if key(latest.get("status")) in {"cancelled", "superseded", "skipped"}:
+                item.update(status="cancelled", resolution_basis="internal_activity_closed",
+                            resolution_event_id=text(latest.get("planned_activity_id")))
+                continue
+            if item.get("status") == "needs_review":
+                # An unsuccessful attempt leaves a retry cue, not a claim that
+                # a distinct promise remains unfulfilled.
+                item.update(status="open", evidence_quality="internal_retry_cue", review_reasons=[])
+        candidates = []
+        for c in by_customer[cid]:
+            when = instant(c.get("date_time"))
+            if when is None or when <= source_at or not is_human_contact(c):
+                continue
+            result = normalize_contact_result(c.get("result"))
+            if day(c.get("follow_up_date")) and kind == "internal_reminder":
+                candidates.append((when, "internal_schedule_replaced", stable_contact_source_id(c)))
+            elif result in {"Positiv", "Neutral", "Negativ"} and when.date() >= due:
+                candidates.append((when, "internal_followup_handled", stable_contact_source_id(c)))
+        for plan in plans_by_customer[cid]:
+            created = instant(plan.get("created_at"))
+            scheduled = instant(plan.get("scheduled_at"))
+            if (kind == "internal_reminder" and not active and created and created > source_at
+                    and scheduled and scheduled.date() >= due and key(plan.get("status") or "planned") == "planned"
+                    and text(plan.get("planned_activity_id")) != item.get("original_planned_activity_id")):
+                candidates.append((created, "internal_reminder_covered_by_plan", text(plan.get("planned_activity_id"))))
+        order = last_orders.get(cid)
+        if order and order[0] > source_at.date() and (kind == "internal_reminder" or order[0] >= due):
+            candidates.append((instant(order[0]), "internal_sales_goal_replaced_by_order", order[1]))
+        if candidates:
+            when, basis, event_id = max(candidates)
+            item.update(status="cancelled" if "replaced" in basis or "covered" in basis else "resolved",
+                        resolution_basis=basis, resolution_event_id=event_id,
+                        resolution_at=when.isoformat(), evidence_quality="historical_scheduling_evidence", review_reasons=[])
+        elif item.get("status") == "needs_review":
+            item.update(status="open", evidence_quality="legacy_internal_reminder", review_reasons=[])

@@ -169,7 +169,7 @@ class DialogueAndStrategicPhase3Tests(TestCase):
             contacts=[row], today=date(2026, 7, 20),
         )[0]
         self.assertFalse(item["recommendation_eligible"])
-        self.assertEqual(item["recommendation_suppression_reason"], "future_follow_up_date")
+        self.assertEqual(item["recommendation_suppression_reason"], "internal_followup_wait")
         self.assertNotIn("positive_dialogue_followup", item["covered_trigger_keys"])
 
         activity_contact = contact(
@@ -180,6 +180,7 @@ class DialogueAndStrategicPhase3Tests(TestCase):
             contacts=[activity_contact],
             planned=[{
                 "customer_id": "prospect",
+                "planned_activity_id": "prospect-plan",
                 "customer": "Prospect",
                 "status": "planned",
                 "scheduled_at": "2026-07-25T09:00:00+02:00",
@@ -237,6 +238,7 @@ class DialogueAndStrategicPhase3Tests(TestCase):
             [customer_row], today=today,
             planned=[{
                 "customer_id": "strategic",
+                "planned_activity_id": "strategic-plan",
                 "customer": "Strategic",
                 "status": "planned",
                 "scheduled_at": "2026-07-25T09:00:00+02:00",
@@ -262,10 +264,10 @@ class DialogueAndStrategicPhase3Tests(TestCase):
             [customer_row], contacts=[followup_contact], today=today
         )[0]
         self.assertEqual(followup["primary_trigger_type"], "")
-        self.assertEqual(followup["customer_guidance"]["status_key"], "planned")
+        self.assertEqual(followup["customer_guidance"]["status_key"], "wait")
         self.assertFalse(followup["recommendation_eligible"])
         self.assertEqual(
-            followup["recommendation_suppression_reason"], "future_follow_up_date"
+            followup["recommendation_suppression_reason"], "internal_followup_wait"
         )
 
     def test_routine_eligibility_has_no_score_floor_and_name_does_not_set_segment(self):

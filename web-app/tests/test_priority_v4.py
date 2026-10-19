@@ -32,6 +32,8 @@ def contact(when, result="Neutral", contact_id="contact-1", follow_up=""):
         "contact_id": contact_id, "customer_id": "cid-1", "customer": "Butik",
         "date_time": when, "sales_person": "Olle", "contact_channel": "Telefon",
         "result": result, "follow_up_date": follow_up,
+        "follow_up_purpose": "customer_followup" if follow_up else "",
+        "follow_up_agreement_confirmed": "Y" if follow_up else "N",
     }
 
 

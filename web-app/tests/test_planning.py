@@ -940,7 +940,7 @@ class PlanningActivityApiTests(PlanningApiTestCase):
         self.assertEqual(summary_by_date["2026-07-29"]["cancelled"], 1)
         self.assertEqual(len(body["days"]), 7)
 
-    def test_get_includes_unplanned_history_and_unscheduled_legacy_followups(self):
+    def test_get_retains_unplanned_history_without_promoting_internal_dates(self):
         legacy_headers = list(app_module.CONTACT_REQUIRED_COLUMNS)
         legacy = FakeWorksheet(
             "sales_activities",
@@ -979,11 +979,9 @@ class PlanningActivityApiTests(PlanningApiTestCase):
             body["unplanned_contacts"][0]["customer"],
             "Butik A",
         )
-        self.assertEqual(len(body["unscheduled_followups"]), 1)
-        self.assertEqual(
-            body["unscheduled_followups"][0]["follow_up_date"],
-            "2026-07-31",
-        )
+        # A plain old next-contact date is scheduling context on the customer,
+        # not evidence of an independently promised customer followup.
+        self.assertEqual(body["unscheduled_followups"], [])
         day_summary = next(
             item
             for item in body["day_summaries"]
@@ -1588,13 +1586,13 @@ class PlanningActivityApiTests(PlanningApiTestCase):
         )
 
     def test_later_same_customer_contact_preserves_separate_overdue_promise(self):
-        self.append_contact_row(
+        self.append_contact_row(follow_up_purpose="customer_followup", follow_up_agreement_confirmed="Y",
             contact_id="followup-overdue",
             customer_id="11111111-1111-4111-8111-111111111111",
             follow_up_date="2026-06-01",
             comment="Äldre separat uppföljning",
         )
-        self.append_contact_row(
+        self.append_contact_row(follow_up_purpose="customer_followup", follow_up_agreement_confirmed="Y",
             contact_id="followup-outside-week",
             customer_id="11111111-1111-4111-8111-111111111111",
             follow_up_date="2026-08-15",
@@ -1623,13 +1621,13 @@ class PlanningActivityApiTests(PlanningApiTestCase):
         )
 
     def test_overdue_followup_remains_after_unrelated_contact(self):
-        self.append_contact_row(
+        self.append_contact_row(follow_up_purpose="customer_followup", follow_up_agreement_confirmed="Y",
             contact_id="followup-resolved-by-contact",
             customer_id="11111111-1111-4111-8111-111111111111",
             date_time="2026-05-01 09:00",
             follow_up_date="2026-05-15",
         )
-        self.append_contact_row(
+        self.append_contact_row(follow_up_purpose="customer_followup", follow_up_agreement_confirmed="Y",
             contact_id="later-contact",
             customer_id="11111111-1111-4111-8111-111111111111",
             date_time="2026-06-01 09:00",
@@ -1650,7 +1648,7 @@ class PlanningActivityApiTests(PlanningApiTestCase):
         )
 
     def test_overdue_followup_remains_with_unrelated_future_plan(self):
-        self.append_contact_row(
+        self.append_contact_row(follow_up_purpose="customer_followup", follow_up_agreement_confirmed="Y",
             contact_id="followup-resolved-by-plan",
             customer_id="11111111-1111-4111-8111-111111111111",
             date_time="2026-05-01 09:00",

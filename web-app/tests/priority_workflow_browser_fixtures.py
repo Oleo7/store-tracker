@@ -55,6 +55,8 @@ def install_priority_workflow_fixtures(app_module, spreadsheet):
                 "contact_channel": "Telefon", "result": result,
                 "comment": f"Syntetisk uppföljning {label}{suffix}",
                 "follow_up_date": due.isoformat() if due else "",
+                "follow_up_purpose": "customer_followup" if due else "",
+                "follow_up_agreement_confirmed": "Y" if due else "",
             })
             return identifier
 

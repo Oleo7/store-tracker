@@ -80,6 +80,7 @@ class PlanningSuggestionV4IntegrationTests(PlanningApiTestCase):
             "customer_id": "11111111-1111-4111-8111-111111111111",
             "contact_channel": "Telefon", "result": "Neutral",
             "follow_up_date": "2026-07-10",
+            "follow_up_purpose": "customer_followup", "follow_up_agreement_confirmed": "Y",
         }
         self.spreadsheet.worksheet("sales_activities").append_row(
             [row.get(column, "") for column in app_module.CONTACT_COLUMNS]

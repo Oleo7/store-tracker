@@ -26,7 +26,7 @@ const showContactSaveError=()=>{},updateContactChannelFields=()=>{},updateFollow
 ${['planningDateFromKey','planningDateKeyFromIso','planningTimeFromIso','planningStockholmOffset','planningStockholmIso','planningAttentionItemIsEligible',
 'mergePlanningAttentionItems','loadPlanningAttention','customerHasContactBan','customerCanExecutePlanned',
 'customerCanStartContact','customerRequiresReview','sortedModelValue','getWorkPriorityValue',
-'stableCustomerTieBreak','compareDescendingMissingLast','contactPrioritySort','planningContactTypeKey','getCustomerPlanningSeed','applyConfirmedObligationUpdate','customerWorkflowCanDismiss','openContactFormForCustomer'].map(source).join('\n')}
+'stableCustomerTieBreak','compareDescendingMissingLast','contactPrioritySort','mapPriorityValue','mapPrioritySort','prioritySort','hasPriorityScore','segmentRank','planningContactTypeKey','getCustomerPlanningSeed','applyConfirmedObligationUpdate','customerWorkflowCanDismiss','openContactFormForCustomer'].map(source).join('\n')}
 `,context);
 vm.runInContext(`(async()=>{
  const item=(id,date='2026-10-17',extra={})=>({obligation_id:id,customer_id:'customer-1',item_type:'overdue_explicit_follow_up',due_date:date,status:'open',...extra});
@@ -74,6 +74,13 @@ vm.runInContext(`(async()=>{
  assert.equal(getWorkPriorityValue({work_priority_raw:0,contact_priority_raw:99},'raw'),0);
  assert.equal(getWorkPriorityValue({contact_priority_raw:7},'raw'),7);
  assert.equal(getWorkPriorityValue({work_priority_raw:null,contact_priority_raw:99},'raw'),null);
+ assert.equal(mapPriorityValue({value_model_version:'v3.4-preview',work_priority_raw:15,priority_score:99},'raw'),15);
+ assert.equal(mapPriorityValue({value_model_version:'v3.4-preview',work_priority_raw:null,priority_score:99},'raw'),null);
+ assert.equal(mapPriorityValue({priority_score:70},'raw'),70);
+ const mapRanked=[{customer:'Old high',customer_id:'a',value_model_version:'v3.4-preview',priority_score:99,work_priority_raw:5},
+                  {customer:'New high',customer_id:'b',value_model_version:'v3.4-preview',priority_score:5,work_priority_raw:99}].sort(mapPrioritySort);
+ assert.equal(mapRanked[0].customer,'New high');
+
  assert.equal(customerWorkflowCanDismiss({customer_workflow:{can_dismiss:false},delivery_count:4}),false,'explicit backend decision wins');
  assert.equal(customerWorkflowCanDismiss({customer_workflow:{can_dismiss:true},customer_segment:'A'}),true,'explicit backend decision wins over fallback');
  assert.equal(customerWorkflowCanDismiss({customer_segment:'A',business_verified_delivery_count:0}),false,'old A prospect responses stay snooze-only');

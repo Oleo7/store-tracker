@@ -31,7 +31,8 @@ class EmailContactAuthorityTests(PlanningApiTestCase):
 
     def seed_email_plan(self, *, rescheduled=False):
         self.append_contact_row(contact_id="email-promise", customer_id=CID, date_time="2026-07-20 09:00",
-                                follow_up_date="2026-07-25", result="Positiv")
+                                follow_up_date="2026-07-25", result="Positiv",
+                                follow_up_purpose="customer_followup", follow_up_agreement_confirmed="Y")
         if rescheduled:
             source = app_module.customer_state_snapshot(self.spreadsheet)["obligations"][CID][0]
             response = self.client.post("/customer-obligations/action", json={"customer_id": CID,

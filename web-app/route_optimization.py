@@ -28,11 +28,12 @@ from route_workday import (
 )
 
 
-ROUTE_ENGINE_VERSION = "ro-v4"
-PRIMARY_MODEL_VERSION = "ro-v2"
+ROUTE_ENGINE_VERSION = "ro-v5"
+PRIMARY_MODEL_VERSION = "ro-v3"
 FALLBACK_POLICY_VERSION = "route-fallback-v1"
 ROUTE_COST_PER_HOUR = 1.0
 PRIORITY_PENALTY_MULTIPLIER = 10.0
+COMMERCIAL_VALUE_PENALTY_MULTIPLIER = 10.0
 ROUTE_MAX_SECONDS = WORKDAY_SECONDS
 SERVICE_SECONDS = 1200
 MAX_VISITS = 15
@@ -151,6 +152,22 @@ def clamp_priority_score(value: Any) -> int:
 
 def priority_penalty(value: Any) -> float:
     return clamp_priority_score(value) * PRIORITY_PENALTY_MULTIPLIER
+
+
+def shipment_commercial_value(shipment: Mapping[str, Any]) -> float:
+    if "commercial_value" not in shipment:
+        return float(clamp_priority_score(shipment.get("priority_score")))
+    value = shipment["commercial_value"]
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+        raise RouteOptimizationError("invalid_commercial_value", "Ruttens affärsprioritet är ogiltig.", 422)
+    return float(value)
+
+
+def shipment_penalty(shipment: Mapping[str, Any]) -> float:
+    # Linear raw value preserves the difference between, for example, 10 and
+    # 40 opportunity units. The bounded 0-100 display is not a solver utility.
+    multiplier = COMMERCIAL_VALUE_PENALTY_MULTIPLIER if "commercial_value" in shipment else PRIORITY_PENALTY_MULTIPLIER
+    return shipment_commercial_value(shipment) * multiplier
 
 
 def quadratic_soft_duration_diagnostics(
@@ -420,9 +437,7 @@ def build_optimize_tours_request(
             "loadDemands": {"visit_slots": {"amount": "1"}},
         }
         if not shipment.get("required"):
-            item["penaltyCost"] = priority_penalty(
-                shipment.get("priority_score")
-            )
+            item["penaltyCost"] = shipment_penalty(shipment)
         rendered_shipments.append(item)
 
     return {
@@ -467,6 +482,9 @@ def _request_input_fingerprint_payload(
         shipment_values.append({
             "customer_id": str(item["customer_id"]),
             "priority_score": clamp_priority_score(item.get("priority_score")),
+            **({"commercial_value": shipment_commercial_value(item),
+                "ranking_mode": str(item.get("ranking_mode") or "v3")}
+               if "commercial_value" in item else {}),
             "latitude": round(coordinate.latitude, 5),
             "longitude": round(coordinate.longitude, 5),
             "required": bool(item.get("required")),
@@ -516,6 +534,7 @@ def _request_fingerprint_for_policy(
     constants = {
         "route_cost_per_hour": ROUTE_COST_PER_HOUR,
         "priority_penalty_multiplier": PRIORITY_PENALTY_MULTIPLIER,
+        "commercial_value_penalty_multiplier": COMMERCIAL_VALUE_PENALTY_MULTIPLIER,
         "route_max_seconds": ROUTE_MAX_SECONDS,
         "service_seconds": SERVICE_SECONDS,
         "max_visits": MAX_VISITS,
@@ -1094,6 +1113,9 @@ def parse_optimize_tours_response(
             "estimated_at": str(visit.get("startTime") or ""),
             "duration_minutes": SERVICE_SECONDS // 60,
             "priority_score": clamp_priority_score(shipment.get("priority_score")),
+            **({"commercial_value": shipment_commercial_value(shipment),
+                "ranking_mode": str(shipment.get("ranking_mode") or "v3")}
+               if "commercial_value" in shipment else {}),
         })
     skipped_value = response.get("skippedShipments")
     if skipped_value is not None and not isinstance(skipped_value, list):
@@ -1343,6 +1365,7 @@ def parse_optimize_tours_response(
         "summary": {
             "stop_count": len(stops),
             "total_priority_score": sum(item["priority_score"] for item in stops),
+            "total_commercial_value": round(sum(shipment_commercial_value(item) for item in stops), 6),
             "route_seconds": route_seconds,
             "route_minutes": round(route_seconds / 60, 1),
             "total_minutes": round(route_seconds / 60, 1),

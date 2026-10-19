@@ -14,11 +14,11 @@ NEWER = "followup:new-agreement"
 class ObligationContactScopeTests(PlanningApiTestCase):
     def sources(self):
         self.append_contact_row(customer_id=CID, contact_id="older-promise", date_time="2026-07-12 09:00",
-                                result="Positiv", follow_up_date="2026-07-26")
+                                result="Positiv", follow_up_date="2026-07-26", follow_up_purpose="customer_followup", follow_up_agreement_confirmed="Y")
         # Negative dialogue can include one explicit new agreement. It does not
         # grant permission for every earlier promise still in the CRM.
         self.append_contact_row(customer_id=CID, contact_id="new-agreement", date_time="2026-07-20 09:00",
-                                result="Negativ", follow_up_date="2026-07-25")
+                                result="Negativ", follow_up_date="2026-07-25", follow_up_purpose="customer_followup", follow_up_agreement_confirmed="Y")
 
     def snapshot(self):
         return app_module.get_authoritative_priority_snapshot(self.spreadsheet, today=NOW.date(), as_of=NOW)

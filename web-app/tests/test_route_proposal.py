@@ -828,7 +828,8 @@ class RouteEndpointTests(TestCase):
                 "row": row,
                 "customer_id": f"route-{row}",
                 "customer": f"Store {row}",
-                "priority_score": 1000 - row,
+                "priority_score": 90, "contact_priority_score": 90,
+                "contact_priority_raw": 1000 - row, "value_model_version": "v3.4-preview",
             }
             for row in range(2, 77)
         ]
@@ -1123,7 +1124,7 @@ class FrontendRouteProposalFlowTests(TestCase):
         self.assertNotIn("DAILY_FOCUS_LIMIT", self.html)
         self.assertIn("const LIST_BATCH_SIZE = 20;", self.html)
         self.assertIn(
-            "return getFilteredCustomers().slice().sort(prioritySort);",
+            "return getFilteredCustomers().slice().sort(mapPrioritySort);",
             self.html,
         )
 

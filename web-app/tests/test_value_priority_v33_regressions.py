@@ -24,6 +24,10 @@ def contact(days=30, result="Neutral", *, now=NOW, **extra):
     value = {"customer_id": "a", "customer": "Butik A", "customer_number": "A", "contact_id": "contact-" + str(days),
              "date_time": (now - timedelta(days=days)).isoformat(), "result": result,
              "contact_channel": "Telefon", "sales_person": "Olle"}
+    # This helper represents documented customer promises, unlike plain dates
+    # in test_history_priority_v34.py.
+    if extra.get("follow_up_date"):
+        value.update(follow_up_purpose="customer_followup", follow_up_agreement_confirmed="Y")
     value.update(extra)
     return value
 
@@ -38,7 +42,7 @@ def order(days=30, dfp=21, *, now=NOW, **extra):
 
 def obligation(due_days=3, **extra):
     value = {"obligation_id": "promise", "customer_id": "a", "owner_user_name": "olle",
-             "status": "open", "purpose": "explicit_followup", "source_scope": "obligation:promise",
+             "status": "open", "purpose": "explicit_followup", "customer_agreement_confirmed": True, "source_scope": "obligation:promise",
              "due_date": (NOW.date() - timedelta(days=due_days)).isoformat(),
              "source_contact_id": "source", "source_created_at": (NOW - timedelta(days=30)).isoformat(), "revision": 1}
     value.update(extra)
@@ -411,12 +415,12 @@ class ReviewedContactPolicyTests(TestCase):
             ([contact(10, "Återkom ej")], fresh, "do_not_contact"),
             ([contact(10, "Negativ")], fresh, "negative_contact_cooldown"),
             ([contact(1, "Ej anträffbar")], fresh, "unanswered_retry_wait"),
-            ([], dict(fresh, snooze_until=(NOW.date() + timedelta(days=2)).isoformat()), "stale_follow_up_review"),
+            ([], dict(fresh, snooze_until=(NOW.date() + timedelta(days=2)).isoformat()), "obligation_snoozed"),
         ]
         for contacts, candidate, reason in scenarios:
             with self.subTest(reason=reason):
                 row = replay(contacts=contacts, obligations={"a": [old, candidate]})["a"]
-                self.assertEqual(row["obligation_id"], "old")
+                self.assertEqual(row["obligation_id"], "fresh" if reason == "obligation_snoozed" else "old")
                 self.assertEqual(row["list_guidance"]["reason_code"], reason)
                 self.assertEqual(row["work_priority_raw"], 0)
                 self.assertFalse(row["can_start_unscheduled_contact"])
@@ -428,7 +432,8 @@ class ReviewedContactPolicyTests(TestCase):
         old = obligation(100, obligation_id="old", source_scope="obligation:old", status="needs_review")
         future = obligation(-2, obligation_id="future", source_scope="obligation:future")
         row = replay(obligations={"a": [old, future]})["a"]
-        self.assertEqual(row["obligation_id"], "old")
+        self.assertEqual(row["obligation_id"], "future")
+        self.assertEqual(row["list_guidance"]["status_key"], "wait")
         self.assertEqual(row["work_priority_raw"], 0)
         self.assertFalse(row["can_start_unscheduled_contact"])
         self.assertEqual(set(row["obligation_ids"]), {"old", "future"})
@@ -503,9 +508,11 @@ class ReviewedContactPolicyTests(TestCase):
 
     def test_stale_promise_is_reviewable_but_never_an_outbound_instruction(self):
         row = replay(obligations={"a": [obligation(100)]})["a"]
-        self.assertTrue(row["review_only"])
+        self.assertFalse(row["review_only"])
+        self.assertTrue(row["requires_review"])
         self.assertTrue(row["requires_handling"])
-        self.assertEqual(row["contact_priority_raw"], 0)
+        self.assertGreater(row["contact_priority_raw"], 0)
+        self.assertNotEqual(row["action_scope"], "obligation:promise")
         self.assertCoherent(row)
 
     def test_inactive_owner_is_a_real_guard(self):

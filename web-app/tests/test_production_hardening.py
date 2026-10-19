@@ -141,7 +141,7 @@ class CanonicalOwnershipHardeningTests(PlanningApiTestCase):
 
     def test_transferred_legacy_followup_is_visible_only_to_current_owner(self):
         canonical = app_module.get_customer_by_row(self.spreadsheet, 2)
-        self.append_contact_row(
+        self.append_contact_row(follow_up_purpose="customer_followup", follow_up_agreement_confirmed="Y",
             customer_id=canonical["customer_id"],
             sales_person="Olle",
             follow_up_date="2026-07-30",

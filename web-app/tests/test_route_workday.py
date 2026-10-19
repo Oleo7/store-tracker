@@ -147,6 +147,7 @@ class RouteWorkdayTests(TestCase):
                 app_module.read_planned_activity_snapshot(self.sheet)[2], OWNER, DAY,
             )
             return {"workday_policy": app_module.WORKDAY_POLICY_VERSION,
+                    "ranking_contract": "v34-raw", "ranking_mode": "v3",
                     "plan_fingerprint": app_module.planning_state_fingerprint(rows)}
 
         baseline = cached_payload()

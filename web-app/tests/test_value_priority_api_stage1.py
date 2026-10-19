@@ -34,14 +34,14 @@ class ValueContactApiStage1Tests(PlanningApiTestCase):
         archived = by_id["44444444-4444-4444-8444-444444444444"]
         self.assertIsNone(archived["contact_priority_raw"])
         active = [item for item in by_id.values()
-                  if item.get("value_model_version") == "v3.3-preview"]
+                  if item.get("value_model_version") == "v3.4-preview"]
         self.assertTrue(active, "Actual v3.3 payload must be checked; no vacuous version-filter loop")
         for item in active:
             self.assertIsNotNone(item["business_value_raw"])
             self.assertIsNotNone(item["contact_priority_raw"])
             self.assertIn(item["list_guidance"]["status_key"],
                           ("act_now", "planned", "wait", "idle", "overdue_followup", "data_missing"))
-            self.assertEqual(item["value_model_version"], "v3.3-preview")
+            self.assertEqual(item["value_model_version"], "v3.4-preview")
             self.assertIn("priority_score", item)  # Legacy routing/scoring preserved.
             self.assertIn("work_priority_raw", item)
             self.assertEqual(item["customer_guidance"], item["list_guidance"])

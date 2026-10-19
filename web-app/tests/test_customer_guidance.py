@@ -56,6 +56,8 @@ def contact(when, *, result="Neutral", follow_up="", contact_id="contact-1"):
         "contact_channel": "Telefon",
         "result": result,
         "follow_up_date": follow_up,
+        "follow_up_purpose": "customer_followup" if follow_up else "",
+        "follow_up_agreement_confirmed": "Y" if follow_up else "N",
     }
 
 
@@ -249,7 +251,7 @@ class CustomerGuidanceTests(TestCase):
         self.assertEqual(overdue["status_key"], "overdue_followup")
         self.assertEqual(overdue["overdue_activity_id"], "missed")
 
-    def test_date_only_followup_is_due_today_and_overdue_tomorrow(self):
+    def test_confirmed_date_only_followup_is_due_today_and_overdue_tomorrow(self):
         row = contact(NOW - timedelta(days=5), follow_up=TODAY.isoformat())
         today_guidance = self.guidance(contacts=[row])
         tomorrow_guidance = self.guidance(

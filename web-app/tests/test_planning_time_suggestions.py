@@ -128,7 +128,7 @@ const chooseType=async value=>{
 };
 const installContactForm=()=>{
   for(const id of ['form-header-customer','f-date','f-planned-activity-id','f-client-request-id',
-    'f-seller','f-contactPerson','f-channel','f-result','f-comment','f-followup-enabled','f-followup-owner',
+    'f-seller','f-contactPerson','f-channel','f-result','f-comment','f-followup-enabled','f-followup-agreement','f-onboarding-completed','f-onboarding-field','f-followup-owner',
     'f-followup-type','f-nextFollowUp','f-nextFollowUpTime','f-followup-note','f-followup-appointment',
     'f-followup-picking-help','f-followup-owner-field','f-followup-time-suggestion','followup-fields',
     'f-permission-fields','f-permission-source','f-permission-reason','f-obligation-outcome','f-obligation-field','f-obligation-help',

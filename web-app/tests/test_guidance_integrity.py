@@ -31,7 +31,8 @@ def contact(age=7, result='Neutral', follow_up='', contact_id='contact'):
     return dict(customer_id='c', customer='Butik', contact_id=contact_id,
                 date_time=(NOW - timedelta(days=age)).isoformat(),
                 sales_person='Olle', contact_channel='Telefon', result=result,
-                follow_up_date=follow_up)
+                follow_up_date=follow_up, follow_up_purpose="customer_followup" if follow_up else "",
+                follow_up_agreement_confirmed="Y" if follow_up else "N")
 
 
 def email(kind='stockfiller', age=7):
@@ -195,7 +196,7 @@ class GuidanceIntegrityTests(TestCase):
             g=scored(store=customer('A'),mail=email(),planned=planned)['customer_guidance']
             self.assertEqual(g['status_key'],status)
             self.assertIn('Telefon',g['reason_text'])
-        for days,status in [(1,'planned'),(-1,'overdue_followup')]:
+        for days,status in [(1,'wait'),(-1,'overdue_followup')]:
             g=scored(store=customer('A'),mail=email(),contacts=[contact(10,'Neutral',
                      (TODAY+timedelta(days=days)).isoformat())])['customer_guidance']
             self.assertEqual(g['status_key'],status)

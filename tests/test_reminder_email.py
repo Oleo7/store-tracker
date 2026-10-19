@@ -1150,7 +1150,8 @@ class EmailPriorityScoringTests(unittest.TestCase):
             },
         ]
 
-        features = app_module.build_contact_features(activities, {})
+        features = app_module.build_contact_features(activities, {},
+            as_of=datetime.combine(today, datetime.min.time()).replace(hour=23, minute=59))
 
         self.assertEqual(features["butiken"]["latest_contact_date"], today)
         self.assertEqual(features["butiken"]["latest_contact_class"], "Positiv")

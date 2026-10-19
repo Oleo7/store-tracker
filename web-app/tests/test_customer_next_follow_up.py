@@ -100,7 +100,7 @@ class CustomerNextFollowUpTests(PlanningApiTestCase):
             "planned_activity_id": "future-earliest",
         })
 
-    def test_earlier_legacy_date_beats_later_planned_activity(self):
+    def test_later_planned_activity_replaces_earlier_internal_date(self):
         self.append_contact_row(
             contact_id="legacy-earlier",
             customer_id="11111111-1111-4111-8111-111111111111",
@@ -114,8 +114,8 @@ class CustomerNextFollowUpTests(PlanningApiTestCase):
 
         payload = self.get_stats()
 
-        self.assertEqual(payload["next_follow_up"]["source"], "latest_contact")
-        self.assertEqual(payload["next_follow_up"]["date"], "2026-07-28")
+        self.assertEqual(payload["next_follow_up"]["source"], "planned_activity")
+        self.assertEqual(payload["next_follow_up"]["date"], "2026-07-29")
 
     def test_past_legacy_follow_up_is_not_selected(self):
         self.append_contact_row(

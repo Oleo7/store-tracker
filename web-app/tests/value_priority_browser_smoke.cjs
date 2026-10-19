@@ -77,7 +77,8 @@ async function assertNoOverflow(page) {
    await page.locator('[data-work-filter="act"]').click();
    assert.equal(await card(page,'QA Bokad').count(),0);
    await page.locator('[data-work-filter="planned"]').click();assert.equal(await card(page,'QA Bokad').count(),1);
-   await page.locator('[data-work-filter="review"]').click();assert.equal(await card(page,'QA Bokad').count(),1,'separate old promise stays reviewable under a green booking');
+   assert.equal(await page.locator('[data-work-filter="review"]').count(),0,'no separate review filter');
+   assert.equal(await card(page,'QA Bokad').locator('.customer-review-link').count(),1,'separate promise stays visible under a green booking');
    await page.locator('[data-work-filter="all"]').click();
    await page.locator('#list-sort-mode').selectOption('value');
    assert.match(await page.locator('.customer-card .score-pair').first().textContent(),/Affärsvärde/);
@@ -150,7 +151,11 @@ async function assertNoOverflow(page) {
        : {ok:true,is_test:false,duplicate:mailResponseMode==='repaired',planning_completion_saved:mailResponseMode==='repaired'})});
    });
    await searchCard(page,'QA Dagens aktivitet');await card(page,'QA Dagens aktivitet').locator('.planning-card-plan-btn').click();
+   // Opening from a list can load a different calendar week asynchronously.
+   // Wait for that activity's detail, not merely for the click event to dispatch.
+   await page.locator('[data-planning-detail-action="email"]').waitFor();
    const emailActivity=await page.evaluate(()=>({...getPlanningActivity('qa-plan-5')}));
+   assert.equal(emailActivity.planned_activity_id,'qa-plan-5','current booked email is loaded before scope assertions');
    await page.locator('[data-planning-detail-action="email"]').click();
    await page.locator('#email-send').waitFor();
    await page.locator('#email-send').click();

@@ -87,6 +87,16 @@ class RouteCandidate:
     coordinate: Coordinate
     priority_score: int
     required: bool = False
+    commercial_value: float | None = None
+
+    @property
+    def objective_value(self) -> float:
+        # None is the explicit legacy fixture/rollback adapter. Production v3
+        # always supplies raw commercial priority, separate from its display.
+        value = self.priority_score if self.commercial_value is None else self.commercial_value
+        if isinstance(value, bool) or not math.isfinite(float(value)) or float(value) < 0:
+            raise RouteVerificationError("Invalid commercial route value")
+        return float(value)
 
 
 def _haversine_km(origin: Coordinate, destination: Coordinate) -> float:
@@ -158,16 +168,16 @@ def anchor_aware_preselect_candidates(
 
     detours = {candidate.row: max(0.0, detour(candidate)) for candidate in optional}
     rankings = (
-        sorted(optional, key=lambda item: (-item.priority_score, stable(item))),
+        sorted(optional, key=lambda item: (-item.objective_value, stable(item))),
         sorted(optional, key=lambda item: (
-            anchor_distance(item), -item.priority_score, stable(item)
+            anchor_distance(item), -item.objective_value, stable(item)
         )),
         sorted(optional, key=lambda item: (
-            detours[item.row], -item.priority_score, stable(item)
+            detours[item.row], -item.objective_value, stable(item)
         )),
         sorted(optional, key=lambda item: (
-            -(item.priority_score / (1.0 + detours[item.row])),
-            -item.priority_score,
+            -(item.objective_value / (1.0 + detours[item.row])),
+            -item.objective_value,
             stable(item),
         )),
     )
@@ -769,7 +779,7 @@ def shortlist_candidates(
     by_score = sorted(
         ordered,
         key=lambda item: (
-            -item.priority_score,
+            -item.objective_value,
             _direct_or_default(direct_seconds, item.row),
             item.row,
         ),
@@ -778,13 +788,13 @@ def shortlist_candidates(
         ordered,
         key=lambda item: (
             -(
-                item.priority_score
+                item.objective_value
                 / (
                     service_seconds_per_stop
                     + max(1, _direct_or_default(direct_seconds, item.row))
                 )
             ),
-            -item.priority_score,
+            -item.objective_value,
             item.row,
         ),
     )
@@ -793,7 +803,7 @@ def shortlist_candidates(
         ordered,
         key=lambda item: (
             -cluster_values[item.row],
-            -item.priority_score,
+            -item.objective_value,
             _direct_or_default(direct_seconds, item.row),
             item.row,
         ),
@@ -1010,7 +1020,7 @@ def _solve_exact_dp(
         lowest = mask & -mask
         index = lowest.bit_length() - 1
         subset_scores[mask] = (
-            subset_scores[mask ^ lowest] + candidates[index].priority_score
+            subset_scores[mask ^ lowest] + candidates[index].objective_value
         )
 
     costs: list[dict[int, int]] = [dict() for _ in range(state_count)]
@@ -1140,7 +1150,7 @@ def _solve_beam(
         if candidate.required
     )
     ordered_scores = sorted(
-        ((candidate.priority_score, index) for index, candidate in enumerate(candidates)),
+        ((candidate.objective_value, index) for index, candidate in enumerate(candidates)),
         reverse=True,
     )
 
@@ -1189,7 +1199,7 @@ def _solve_beam(
                                 new_mask,
                                 next_index,
                                 new_drive,
-                                score + candidates[next_index].priority_score,
+                                score + candidates[next_index].objective_value,
                                 (*path, next_index),
                             )
                             state_key = (new_mask, next_index)
@@ -1398,7 +1408,7 @@ def _approximate_route_ranking(
             range(len(remaining)),
             key=lambda index: (
                 -(
-                    remaining[index].priority_score
+                    remaining[index].objective_value
                     / (
                         1.0
                         + _haversine_km(current, remaining[index].coordinate)
@@ -1465,7 +1475,7 @@ def _local_cluster_values(
             math.floor(y / LOCAL_CLUSTER_CELL_KM),
         )
         projected[candidate.row] = (x, y, cell)
-        score = float(candidate.priority_score)
+        score = float(candidate.objective_value)
         aggregate = cells.setdefault(cell, [0.0, 0.0, 0.0])
         aggregate[0] += score
         aggregate[1] += score * x
@@ -1474,7 +1484,7 @@ def _local_cluster_values(
     values: dict[int, float] = {}
     for candidate in candidates:
         x, y, own_cell = projected[candidate.row]
-        own_score = float(candidate.priority_score)
+        own_score = float(candidate.objective_value)
         value = own_score
         for delta_x in range(
             -LOCAL_CLUSTER_CELL_REACH,

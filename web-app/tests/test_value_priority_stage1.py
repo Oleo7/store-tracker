@@ -31,6 +31,9 @@ def contact(cid, name, day, result):
 
 def get(customers, orders=(), contacts=(), planned=()):
     orders = build_order_features(list(orders))
+    # Legacy test scenarios explicitly concern customer-promised callbacks.
+    contacts = [{**row, "follow_up_purpose": "customer_followup", "follow_up_agreement_confirmed": "Y"}
+                if row.get("follow_up_date") else row for row in contacts]
     contacts = build_contact_features(list(contacts), orders)
     return build_priority_customers(customers, orders, contacts,
                                     "Olle", TODAY, limit=len(customers),
@@ -78,7 +81,7 @@ class ValuePriorityStage1Tests(TestCase):
         self.assertEqual(row["contact_priority_score"], 0)
 
     def test_plan_keeps_value_and_removes_actionable_score(self):
-        planned = [{"customer_id": "a", "customer": "Butik", "status": "planned",
+        planned = [{"planned_activity_id": "actual-booking", "customer_id": "a", "customer": "Butik", "status": "planned",
                     "scheduled_at": "2026-10-20T11:00:00", "sales_person": "Olle", "contact_type": "phone"}]
         row = get([customer()], planned=planned)[0]
         self.assertGreater(row["business_value_score"], 0)
@@ -173,9 +176,9 @@ class ValuePriorityStage1Tests(TestCase):
         self.assertEqual(out["business_verified_delivery_count"],0)
         self.assertEqual(out["business_deliveries_used"],0)
         self.assertEqual(out["business_value_confidence"],"segmentbaserad")
-        self.assertEqual(out["list_guidance"]["status_key"],"idle")
-        self.assertEqual(out["list_guidance"]["action_label"],"Granska order-/leveransstatus")
-        self.assertEqual(out["contact_priority_score"],0)
+        self.assertEqual(out["list_guidance"]["status_key"],"act_now")
+        self.assertIn("historical_undated_order", {w["code"] for w in out["data_warnings"]})
+        self.assertGreater(out["contact_priority_score"],0)
 
     def test_stale_repeat_keeps_value_but_reduces_realization_assumption(self):
         active = business_opportunity(delivery_values=[30,30,30],
@@ -199,7 +202,7 @@ class ValuePriorityStage1Tests(TestCase):
         self.assertIn("priority_score", row)
         self.assertIn("business_value_raw", row)
         self.assertIn("contact_priority_raw", row)
-        self.assertEqual(row["value_model_version"], "v3.3-preview")
+        self.assertEqual(row["value_model_version"], "v3.4-preview")
 
 
     def test_contact_priority_follows_real_dialogue_age_not_value_score(self):
@@ -266,12 +269,12 @@ class ValuePriorityStage1Tests(TestCase):
         old["follow_up_date"] = "2026-03-10"
         row = get([customer()], contacts=[old])[0]
         guidance = row["list_guidance"]
-        self.assertEqual(guidance["reason_code"], "stale_follow_up_review")
-        self.assertEqual(guidance["status_key"], "overdue_followup")
-        self.assertFalse(guidance["can_contact_now"])
-        self.assertEqual(row["contact_priority_bucket"], 1)
-        self.assertEqual(row["contact_priority_score"], 0)
-        self.assertGreater(row["business_value_score"], 0)
+        self.assertTrue(row["requires_review"])
+        self.assertTrue(row["review_obligation_ids"])
+        self.assertTrue(row["requires_handling"])
+        self.assertNotEqual(row["list_guidance"]["reason_code"], "stale_follow_up_review")
+        self.assertNotIn(row["obligation_id"], row["review_obligation_ids"])
+        self.assertGreater(row["contact_priority_score"], 0)
 
     def test_recent_unresolved_followup_keeps_real_outbound_priority(self):
         plan = contact("a", "Butik", "2026-09-20", "Positiv")
@@ -288,10 +291,12 @@ class ValuePriorityStage1Tests(TestCase):
         row = get([customer()], orders=[
             delivery("a", "Butik", "2026-09-01", 22),
         ], contacts=[followup])[0]
-        self.assertEqual(row["list_guidance"]["reason_code"],
-                         "stale_follow_up_review")
-        self.assertEqual(row["list_guidance"]["status_key"],
-                         "overdue_followup")
+        self.assertTrue(row["requires_review"])
+        self.assertTrue(row["review_obligation_ids"])
+        self.assertTrue(row["requires_handling"])
+        self.assertNotEqual(row["list_guidance"]["reason_code"], "stale_follow_up_review")
+        self.assertNotIn(row["obligation_id"], row["review_obligation_ids"])
+        self.assertGreater(row["contact_priority_score"], 0)
 
     def test_business_cycle_uses_verified_deliveries_not_order_date_fallback(self):
         one = delivery("a", "Butik", "2026-04-01", 20, "one")
@@ -333,10 +338,12 @@ class ValuePriorityStage1Tests(TestCase):
         followup = contact("a", "Butik", "2026-06-01", "Positiv")
         followup["follow_up_date"] = "2026-07-09"
         row = get([customer()], contacts=[followup])[0]
-        self.assertEqual(row["list_guidance"]["status_key"], "overdue_followup")
-        self.assertEqual(row["list_guidance"]["reason_code"], "stale_follow_up_review")
-        self.assertEqual(row["contact_priority_bucket"], 1)
-        self.assertEqual(row["contact_priority_score"], 0)
+        self.assertTrue(row["requires_review"])
+        self.assertTrue(row["review_obligation_ids"])
+        self.assertTrue(row["requires_handling"])
+        self.assertNotEqual(row["list_guidance"]["reason_code"], "stale_follow_up_review")
+        self.assertNotIn(row["obligation_id"], row["review_obligation_ids"])
+        self.assertGreater(row["contact_priority_score"], 0)
 
 
 
@@ -403,7 +410,7 @@ class ValuePriorityStage1Tests(TestCase):
 
     def test_booking_or_opt_out_blocks_positive_follow_up(self):
         pos = contact("a", "Butik", "2026-09-17", "Positiv")
-        planned = [{"customer_id": "a", "customer": "Butik",
+        planned = [{"planned_activity_id": "actual-booking", "customer_id": "a", "customer": "Butik",
                     "status": "planned", "scheduled_at": "2026-10-20T10:00:00",
                     "sales_person": "Olle", "contact_type": "phone"}]
         booked = get([customer()], contacts=[pos], planned=planned)[0]
@@ -518,7 +525,7 @@ class ValuePriorityStage1Tests(TestCase):
         self.assertNotEqual(row["list_guidance"]["reason_code"], "established_reorder_due")
 
 
-    def test_very_old_missing_delivery_is_a_data_review_not_an_endless_urgent_call(self):
+    def test_very_old_missing_delivery_is_annotation_not_permanent_contact_prohibition(self):
         orders = [
             delivery("a", "Butik", "2026-01-01", 30, "a-1"),
             delivery("a", "Butik", "2026-02-01", 30, "a-2"),
@@ -526,10 +533,11 @@ class ValuePriorityStage1Tests(TestCase):
         uncertain = delivery("a", "Butik", "2026-03-01", 30, "missing")
         uncertain["Delivery date"] = ""
         result = get([customer()], orders=[*orders, uncertain])[0]
-        self.assertEqual(result["list_guidance"]["status_key"], "idle")
-        self.assertEqual(result["list_guidance"]["reason_code"],
-                         "stale_unconfirmed_order_review")
-        self.assertEqual(result["contact_priority_score"], 0)
+        self.assertEqual(result["list_guidance"]["status_key"], "act_now")
+        self.assertEqual(result["list_guidance"]["reason_code"], "repeat_reactivation_due")
+        self.assertEqual(result["business_verified_delivery_count"], 2)
+        self.assertIn("historical_undated_order", {w["code"] for w in result["data_warnings"]})
+        self.assertGreater(result["contact_priority_score"], 0)
         self.assertGreater(result["business_value_score"], 0)
 
     def test_confirmed_new_delivery_resets_reorder_alarm(self):
@@ -636,7 +644,7 @@ class ValuePriorityFrontendStage1Tests(TestCase):
                          'getPriorityWhyHtml(c)', 'id="planning-backlog"',
                          'data-work-filter="all"', 'data-work-filter="planned"',
                          '"/customer-obligations/action"', '"/customer-workflow/action"',
-                         '"/customer-contact-permission"', '"v3.3"']:
+                         '"/customer-contact-permission"', '"v3.4"']:
             self.assertTrue(expected in html, f"Missing frontend contract: {expected}")
         for forbidden in ['id="planning-recommendation"', 'Fler nästa åtgärder', '/planning/suggestions']:
             self.assertFalse(forbidden in html, f"Obsolete frontend contract: {forbidden}")

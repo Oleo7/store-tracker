@@ -3935,7 +3935,6 @@
       <button class="chip" type="button" data-work-filter="act" aria-pressed="false">Att agera</button>
       <button class="chip" type="button" data-work-filter="planned" aria-pressed="false">Planerade</button>
       <button class="chip" type="button" data-work-filter="wait" aria-pressed="false">Avvakta</button>
-      <button class="chip" type="button" data-work-filter="review" aria-pressed="false">Granska</button>
     </div>
     <p class="list-guidance-help">Prioritet hjälper dig hålla ordning på kundarbetet. Gröna kunder har redan en planerad kontakt. Öppna deras planering i stället för att kontakta dem en extra gång.</p>
   </div>
@@ -4402,6 +4401,12 @@
         </select>
         <p class="planning-field-help" id="f-obligation-help">Ett kontaktförsök avslutar inte automatiskt kundens uppföljning.</p>
       </div>
+      <div class="form-field" id="f-onboarding-field" hidden>
+        <label class="planning-followup-toggle" for="f-onboarding-completed">
+          <input type="checkbox" id="f-onboarding-completed" />
+          Placering och försäljningsstart efter första leveransen har följts upp
+        </label>
+      </div>
       <div class="detail-section" id="freezer-section" style="display:none;padding:12px 14px;margin-bottom:14px">
         <div class="detail-section-title" style="margin-bottom:8px">I frysdisken</div>
         <div class="competitor-grid">
@@ -4468,6 +4473,13 @@
             <label for="f-followup-note">Anteckning</label>
             <input type="text" id="f-followup-note" maxlength="300" placeholder="Vad ska följas upp?" />
           </div>
+        </div>
+        <div class="form-field">
+          <label class="planning-followup-toggle" for="f-followup-agreement">
+            <input type="checkbox" id="f-followup-agreement" />
+            Överenskommen uppföljning med kunden
+          </label>
+          <p class="planning-field-help">En kundöverenskommelse avslutas separat. En vanlig intern påminnelse kan ersättas av senare kundarbete.</p>
         </div>
         <div class="form-field" id="f-followup-appointment-field">
           <label class="planning-followup-toggle" for="f-followup-appointment">
@@ -4710,7 +4722,7 @@
     // An opt-in header adds the ID-keyed value read model without breaking
     // older consumers of the name-keyed /customer-insights response.
     const options = path.endsWith("/customer-insights")
-      ? { headers: { "X-PB-Value-Model": "v3.3" } }
+      ? { headers: { "X-PB-Value-Model": "v3.4" } }
       : undefined;
     const requestPromise = fetch(path, options)
       .then(async response => {
@@ -5181,7 +5193,7 @@
 
   function getCustomerWorkState(customer) {
     const guidance = getCustomerListGuidance(customer);
-    if (guidance.review_only || ["stale_follow_up_review", "unconfirmed_order_review", "reported_order_pending_review"].includes(guidance.reason_code)) return "review";
+    if (guidance.review_only || ["stale_follow_up_review", "unconfirmed_order_review", "reported_order_pending_review"].includes(guidance.reason_code)) return "wait";
     if (guidance.status_key === "planned") return "planned";
     if (guidance.can_start_unscheduled_contact === true || guidance.can_contact_now === true) return "act";
     return "wait";
@@ -5197,7 +5209,7 @@
 
   document.getElementById("work-filter-row").addEventListener("click", event => {
     const button = event.target.closest("[data-work-filter]");
-    if (!button || !["all", "act", "planned", "wait", "review"].includes(button.dataset.workFilter)) return;
+    if (!button || !["all", "act", "planned", "wait"].includes(button.dataset.workFilter)) return;
     listWorkFilter = button.dataset.workFilter;
     document.querySelectorAll("[data-work-filter]").forEach(item => item.setAttribute("aria-pressed", String(item.dataset.workFilter === listWorkFilter)));
     renderList();
@@ -5292,6 +5304,9 @@
       ${getPotentialHtml(c)}
       ${ins.business_value_confidence ? `<span>Underlag: ${esc(ins.business_value_confidence)}</span>` : ""}
       ${guidance.status_key === "planned" ? "<span>Kundens planerade arbete ingår i prioriteten. Extra obokad kontakt är inte rekommenderad.</span>" : ""}
+      ${ins.ranking_mode === "v2.2" ? "<span>Reservsortering enligt v2.2. Aktuella kontakt- och uppföljningsregler gäller fortfarande.</span>" : ""}
+      ${ins.history_note ? `<span>${esc(ins.history_note)}</span>` : ""}
+      ${(ins.data_warnings || guidance.data_warnings || []).map(warning => `<span class="customer-history-warning">${esc(warning.text || "")}</span>`).join("")}
       <span>Poängen är ett index, inte en köpchans eller en försäljningsprognos.</span>
     </div></details>`;
   }
@@ -5438,7 +5453,7 @@
 
   function getCustomerWorkflowButtonHtml(customer) {
     if (!currentUserCanPlan() || !customer?.customer_id || isCancelledCustomer(customer)) return "";
-    return `${customerRequiresReview(customer) ? `<button class="customer-workflow-menu-btn customer-review-link" type="button" data-customer-workflow="${escAttr(customer.customer_id)}">Äldre uppföljning att granska</button>` : ""}<button class="customer-workflow-menu-btn" type="button" data-customer-workflow="${escAttr(customer.customer_id)}" aria-label="Hantera prioritering och kontaktinställningar för ${escAttr(customer.customer)}">Hantera</button>`;
+    return `${customerRequiresReview(customer) ? `<button class="customer-workflow-menu-btn customer-review-link" type="button" data-customer-workflow="${escAttr(customer.customer_id)}">Separat kundärende att hantera</button>` : ""}<button class="customer-workflow-menu-btn" type="button" data-customer-workflow="${escAttr(customer.customer_id)}" aria-label="Hantera prioritering och kontaktinställningar för ${escAttr(customer.customer)}">Hantera</button>`;
   }
 
   function bindCustomerDecisionControls(container) {
@@ -5678,8 +5693,7 @@
 
     if (!modelUnavailable && listWorkFilter !== "all") filtered = filtered.filter(c => {
       const guidance = getCustomerListGuidance(c);
-      if (listWorkFilter === "planned") return guidance.has_planned_contact === true || getCustomerInsight(c).has_planned_contact === true || Boolean(guidance.planned_activity_id) || guidance.status_key === "planned";
-      if (listWorkFilter === "review") return customerRequiresReview(c) || getCustomerWorkState(c) === "review";
+      if (listWorkFilter === "planned") return guidance.has_planned_contact === true || getCustomerInsight(c).has_planned_contact === true || guidance.status_key === "planned";
       return getCustomerWorkState(c) === listWorkFilter;
     });
 
@@ -5737,8 +5751,23 @@
     return currentUserIsSeller() || userIsAdmin();
   }
 
+  function mapPriorityValue(insight, suffix = "score") {
+    if (Object.prototype.hasOwnProperty.call(insight || {}, "value_model_version")
+        || Object.prototype.hasOwnProperty.call(insight || {}, "work_priority_raw")) {
+      return getWorkPriorityValue(insight, suffix);
+    }
+    return sortedModelValue(insight, "priority_score");
+  }
+
+  function mapPrioritySort(a, b) {
+    const ia = getCustomerInsight(a), ib = getCustomerInsight(b);
+    if (Object.prototype.hasOwnProperty.call(ia, "value_model_version")
+        || Object.prototype.hasOwnProperty.call(ib, "value_model_version")) return contactPrioritySort(a, b);
+    return prioritySort(a, b);
+  }
+
   function getRouteProposalBaseCustomers() {
-    if (!currentUserIsSeller()) return getFilteredCustomers().slice().sort(prioritySort);
+    if (!currentUserIsSeller()) return getFilteredCustomers().slice().sort(mapPrioritySort);
     const sellerName = normalizeRouteIdentity(currentUser?.name || currentUser?.user_name);
     return customers.filter(customer =>
       normalizeRouteIdentity(customer?.sales_person) === sellerName
@@ -5748,7 +5777,7 @@
   function getRouteProposalCandidates(baseCustomers = getRouteProposalBaseCustomers()) {
     if (!insightsLoaded) return [];
     return baseCustomers.filter(customer => {
-      const score = Number(getCustomerInsight(customer)?.priority_score);
+      const score = mapPriorityValue(getCustomerInsight(customer), "raw");
       return !isCancelledCustomer(customer)
         && hasValidRouteCoordinates(customer)
         && Number.isFinite(score)
@@ -7727,6 +7756,9 @@
     document.getElementById("f-permission-source").value = "";
     document.getElementById("f-permission-reason").value = "";
     document.getElementById("f-obligation-outcome").value = "open";
+    document.getElementById("f-onboarding-completed").checked = false;
+    document.getElementById("f-onboarding-field").hidden = !["first_order_onboarding", "check_placement"].includes(
+      getCustomerListGuidance(customer).underlying_action_type || getCustomerListGuidance(customer).action_type);
     document.getElementById("f-obligation-field").hidden = !activeContactObligation;
     document.getElementById("f-obligation-help").textContent = activeContactObligation
       ? `Åtagande från ${activeContactObligation.due_date || "tidigare planering"}${activeContactObligation.note ? `: ${activeContactObligation.note}` : "."} Välj uttryckligen om uppgiften är utförd. Ett kontaktförsök avslutar inte löftet.`
@@ -7740,6 +7772,7 @@
     contactTimeSuggestion?.reset();
     document.getElementById("f-followup-note").value = "";
     document.getElementById("f-followup-appointment").checked = false;
+    if (document.getElementById("f-followup-agreement")) document.getElementById("f-followup-agreement").checked = false;
     document.getElementById("f-followup-picking-help").checked = false;
     syncVisitCompetitorButtons({});
     setFreezerSectionInvalid(false);
@@ -7812,9 +7845,12 @@
         contact_type: followupType,
         scheduled_at: followupScheduledAt,
         note: followupNote,
+        customer_agreement_confirmed: document.getElementById("f-followup-agreement").checked,
         appointment_confirmed: ["visit", "phone"].includes(followupType) && document.getElementById("f-followup-appointment").checked,
         picking_help: followupType === "visit" && document.getElementById("f-followup-picking-help").checked,
       } : { enabled: false },
+      onboarding_completed: !document.getElementById("f-onboarding-field").hidden && document.getElementById("f-onboarding-completed").checked,
+      purpose: !document.getElementById("f-onboarding-field").hidden && document.getElementById("f-onboarding-completed").checked ? "first_order_onboarding" : undefined,
       planned_activity_id: activePlannedActivityId || undefined,
       obligation_id: activeContactObligation?.obligation_id || undefined,
       expected_obligation_revision: activeContactObligation?.revision ?? activeContactObligation?.obligation_revision,
@@ -8132,6 +8168,7 @@
         : "planned",
       source: ["manual", "follow_up", "route"].includes(source.source) ? source.source : "manual",
       time_is_estimated: planningTruthy(source.time_is_estimated ?? source.is_estimated ?? source.approximate_time),
+      customer_agreement_confirmed: planningTruthy(source.customer_agreement_confirmed),
       appointment_confirmed: ["visit", "phone"].includes(contactType) && planningTruthy(source.appointment_confirmed),
       picking_help: contactType === "visit" && planningTruthy(source.picking_help),
     };
@@ -9748,6 +9785,13 @@
             </label>`
           ).join("")}
         </fieldset>
+        <div class="planning-appointment-field">
+          <label class="planning-followup-toggle" for="planning-editor-agreement">
+            <input id="planning-editor-agreement" type="checkbox" ${planningTruthy(activity?.customer_agreement_confirmed ?? seed?.customer_agreement_confirmed) ? "checked" : ""} />
+            Överenskommen uppföljning med kunden
+          </label>
+          <p class="planning-field-help">Behåll kundens överenskommelse separat tills den har utförts eller avskrivits.</p>
+        </div>
         <div class="planning-appointment-field" id="planning-editor-appointment-field" ${["visit", "phone"].includes(selectedType) ? "" : "hidden"}>
           <label class="planning-followup-toggle" for="planning-editor-appointment">
             <input id="planning-editor-appointment" type="checkbox" ${["visit", "phone"].includes(selectedType) && planningTruthy(activity?.appointment_confirmed ?? seed?.appointment_confirmed) ? "checked" : ""} />
@@ -9857,6 +9901,7 @@
     const obligationSeed = !editing && planningEditorSeed?.obligation_id ? { ...planningEditorSeed } : null;
     const payload = {
       customer_id: customer.customer_id, contact_type: contactType, scheduled_at: scheduledAt, note,
+      customer_agreement_confirmed: document.getElementById("planning-editor-agreement").checked,
       appointment_confirmed: ["visit", "phone"].includes(contactType) && document.getElementById("planning-editor-appointment").checked,
       picking_help: contactType === "visit" && document.getElementById("planning-editor-picking-help").checked,
       client_request_id: planningEditorRequestId,
@@ -11445,7 +11490,7 @@
     // Stage 1 only changes the Butiker list. Preserve the pre-existing
     // v2.2 route/map ordering regardless of its new sort selector.
     const customersWithCoordinates = getFilteredCustomers().slice()
-      .sort(prioritySort).filter(hasMapCoordinates);
+      .sort(mapPrioritySort).filter(hasMapCoordinates);
     mapStops = customersWithCoordinates.slice(0, MAP_LIMIT);
 
     if (mapStops.length < 1) {
@@ -11714,8 +11759,8 @@
       const actionLabel = ins.next_action?.label || "";
       const priorityLabel = routeStop
         ? `${formatRouteScore(routeStop.priority_score)} poäng`
-        : hasPriorityScore(ins)
-        ? `${ins.priority_score} poäng`
+        : mapPriorityValue(ins) !== null
+        ? `${formatRouteScore(mapPriorityValue(ins))} poäng`
         : "";
       const stopMeta = [c.city, actionLabel, priorityLabel].filter(Boolean).join(" · ");
       const badge = inRoute
