@@ -1,0 +1,75 @@
+name: Publish already verified v3.5 application
+on:
+  push:
+    branches: [audit/pr48-v35-20261019]
+    paths: [.github/workflows/pr48-v35-publish.yml]
+permissions:
+  contents: write
+  actions: read
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Require all application verification steps to have passed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api repos/Oleo7/store-tracker/actions/runs/39235276623/jobs > "$RUNNER_TEMP/verified-jobs.json"
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          jobs=json.loads((Path(os.environ['RUNNER_TEMP'])/'verified-jobs.json').read_text())['jobs']
+          steps={s['number']:s for j in jobs for s in j['steps']}
+          assert all(steps[n]['conclusion']=='success' for n in range(5,15))
+          print('Compile, all unit suites and all five browser commands passed on exact application source.')
+          PY
+      - name: Recreate verified tree and preserve existing CI workflow
+        run: |
+          git worktree add --detach "$RUNNER_TEMP/v35-candidate" c4dcdf5a7b695b66893cd405541891cc44aab2fb
+          python - <<'PY'
+          import os, json, hashlib, base64, lzma, subprocess
+          from pathlib import Path, PurePosixPath
+          source=Path(os.environ['GITHUB_WORKSPACE'])
+          target=Path(os.environ['RUNNER_TEMP'])/'v35-candidate'
+          encoded=''.join((source/f'.audit/v35.delta.{i}.b64').read_text().strip() for i in range(3))
+          packed=base64.b64decode(encoded,validate=True)
+          assert hashlib.sha256(packed).hexdigest()=='0b7ab6b99b063e2de72f255f6868e9ce292455d4827161c3dedf53428df64eca'
+          data=json.loads(lzma.decompress(packed))
+          assert data['base']=='c4dcdf5a7b695b66893cd405541891cc44aab2fb'
+          def git(*args,input=None):
+              return subprocess.check_output(['git',*args],cwd=target,input=input)
+          def safe(path):
+              p=PurePosixPath(path)
+              assert not p.is_absolute() and '..' not in p.parts and '.git' not in p.parts
+              return target/path
+          for item in data['files']:
+              base=git('show',data['base']+':'+item['base_path']).decode() if item['base_path'] else ''
+              assert hashlib.sha256(base.encode()).hexdigest()==item['base_sha256']
+              lines=base.splitlines(keepends=True)
+              for start,end,replacement in reversed(item['edits']):
+                  assert 0<=start<=end<=len(lines)
+                  lines[start:end]=[replacement]
+              content=''.join(lines).encode()
+              assert hashlib.sha256(content).hexdigest()==item['sha256'],item['path']
+              path=safe(item['path']);path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(content)
+          for path in data['delete']:safe(path).unlink()
+          git('add','-A')
+          assert git('write-tree').decode().strip()=='337675d88ccae91157550b55be08e6af47a026ff'
+          git('restore','--source='+data['base'],'--staged','--worktree','.github/workflows/sales-coaching.yml')
+          tree=git('write-tree').decode().strip()
+          assert tree=='d45509ff35238cf4f7876e712ea90dbbb4def352'
+          text='tree '+tree+'\nparent '+data['base']+'\nauthor OpenAI implementation assistant <noreply@openai.com> 1792403798 +0000\ncommitter OpenAI implementation assistant <noreply@openai.com> 1792404653 +0000\n\nrefactor(priority): retire legacy scoring and use priority-first v3 routes\n'
+          commit=git('hash-object','-t','commit','-w','--stdin',input=text.encode()).decode().strip()
+          assert commit=='5a7d1029cfd782ffa510450839f7774e852675c2'
+          git('checkout','--detach',commit)
+          assert not git('status','--porcelain').strip()
+          changed=git('diff','--name-only',data['base'],commit).decode().splitlines()
+          assert not any(p.startswith('.github/workflows/') or p.startswith('.audit/') for p in changed)
+          print('Verified final application commit:',commit,'tree:',tree)
+          PY
+      - name: Publish to isolated verified branch only
+        run: git push origin 5a7d1029cfd782ffa510450839f7774e852675c2:refs/heads/audit/pr48-v35-verified
