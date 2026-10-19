@@ -1,0 +1,10 @@
+diff --git a/web-app/tests/value_priority_browser_smoke.cjs b/web-app/tests/value_priority_browser_smoke.cjs
+index b292bd4..8acca87 100644
+--- a/web-app/tests/value_priority_browser_smoke.cjs
++++ b/web-app/tests/value_priority_browser_smoke.cjs
+@@ -153,0 +154,3 @@ async function assertNoOverflow(page) {
++   // Opening from a list can load a different calendar week asynchronously.
++   // Wait for that activity's detail, not merely for the click event to dispatch.
++   await page.locator('[data-planning-detail-action="email"]').waitFor();
+@@ -154,0 +158 @@ async function assertNoOverflow(page) {
++   assert.equal(emailActivity.planned_activity_id,'qa-plan-5','current booked email is loaded before scope assertions');
