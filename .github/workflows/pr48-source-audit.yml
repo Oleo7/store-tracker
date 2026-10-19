@@ -13,20 +13,22 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: 578c906a2a215c6aaec303128c241819428c413e
+          fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
-      - name: Download public dependency wheels for isolated verification
+      - name: Prepare isolated verification inputs
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/pr48-wheels"
           python -m pip download --only-binary=:all: --dest "$RUNNER_TEMP/pr48-wheels" -r web-app/requirements.txt freezegun
-          sha256sum "$RUNNER_TEMP/pr48-wheels/"*.whl
+          git bundle create "$RUNNER_TEMP/pr48-wheels/source.bundle" HEAD refs/remotes/origin/master
+          sha256sum "$RUNNER_TEMP/pr48-wheels/"*
       - uses: actions/upload-artifact@v4
         with:
-          name: pr48-dependency-wheels
+          name: pr48-offline-verification-inputs
           path: ${{ runner.temp }}/pr48-wheels/
           retention-days: 1
           if-no-files-found: error
