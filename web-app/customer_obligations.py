@@ -307,6 +307,9 @@ def build_customer_state(customers, contact_rows, planned_activity_rows, state_e
     canonical_plans = _canonicalize_rows(_rows(planned_activity_rows), customers,
                                          name_field="customer", number_field="customer_number")
     for row in canonical_plans:
+        if key(row.get("status")) == "route_pending":
+            # An unverified route write is evidence, not a scheduled commitment.
+            continue
         cid = customer_id(row)
         created = instant(row.get("created_at"))
         if not cid or (created and created > current) or row.get("_identity_unresolved") or not _known_at(row, current):

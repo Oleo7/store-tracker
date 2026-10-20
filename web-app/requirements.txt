@@ -6,3 +6,4 @@ google-auth==2.49.1
 python-dotenv==1.2.2
 requests==2.33.1
 tzdata==2025.3
+redis==6.4.0

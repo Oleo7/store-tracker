@@ -10,6 +10,8 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable
 
+from crm_write_coordination import coordinated_write, guard_client
+
 import gspread
 import requests
 from dotenv import load_dotenv
@@ -256,6 +258,7 @@ def build_sync_window(args: argparse.Namespace, state: dict[str, str], now: date
     )
 
 
+@coordinated_write
 def sync_orders(
     config: SyncConfig,
     window: SyncWindow,
@@ -427,7 +430,7 @@ def order_updated_at(order: dict[str, Any]) -> datetime:
 
 def open_spreadsheet(config: SyncConfig):
     credentials = Credentials.from_service_account_info(config.google_credentials, scopes=SCOPES)
-    return gspread.authorize(credentials).open_by_key(config.sheet_key)
+    return guard_client(gspread.authorize(credentials)).open_by_key(config.sheet_key)
 
 
 def get_or_create_worksheet(spreadsheet, title: str, rows: int, cols: int):

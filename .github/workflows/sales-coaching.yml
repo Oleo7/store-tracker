@@ -19,7 +19,7 @@ jobs:
         with:
           node-version: "22"
       - name: Install Python dependencies
-        run: pip install -r web-app/requirements.txt
+        run: pip install -r requirements-test.txt
       - name: Compile Python
         run: python -m compileall -q web-app
       - name: Run web-app Python test suite

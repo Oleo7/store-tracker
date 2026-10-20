@@ -4620,6 +4620,7 @@
     completed: "Genomförd",
     skipped: "Överhoppad",
     cancelled: "Avbokad",
+    route_pending: "Sparandet ej slutfört",
     superseded: "Ersatt av kontakt",
     overdue: "Försenad",
   });
@@ -10021,6 +10022,7 @@
       </div>
       <div class="planning-activity-actions">
         ${plannedActions}${skippedActions}
+        ${activity.status === "route_pending" ? '<div class="customer-permission-note">Rutten har inte sparats färdigt. Försök spara den igen eller avboka besöket.</div><button class="planning-compact-btn danger" type="button" data-planning-detail-action="cancel">Avboka</button>' : ''}
         ${boundCustomer?.row ? '<button class="planning-compact-btn" type="button" data-planning-detail-action="customer">Öppna kund</button>' : ""}
       </div>`
     );
