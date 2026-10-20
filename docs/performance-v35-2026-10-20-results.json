@@ -1,0 +1,1681 @@
+{
+  "baseline_commit": "99bb4312f8f2473c68c1a4a77278d774e3287ebf",
+  "optimized_code_commit": "fab2f9ce89411c3ffcc74e7f3431a81a7bf49921",
+  "snapshot_sha256": "3d531f4d75993e9f078c1377c4c3620bf914c12f07b79b83addd5f910e22cf2e",
+  "environment": {
+    "os": "Windows-11-10.0.26200-SP0",
+    "python": "3.12.14 (main, Aug 25 2026, 14:01:42) [MSC v.1944 64 bit (AMD64)]",
+    "as_of": "2026-10-20T10:00:00+02:00",
+    "rounds": 3,
+    "samples_per_concurrency": {
+      "1": 3,
+      "2": 6,
+      "4": 12
+    },
+    "source_cache_ttl_for_cpu_benchmark": 3600,
+    "derived_validation_seconds": 12,
+    "distinct_microseconds": true,
+    "parallel_identity": "One actual identity per role across concurrent clients"
+  },
+  "regression": {
+    "exact_equality": {
+      "priorities": true,
+      "pre_workflow_priorities": true,
+      "workflow_suppressions": true,
+      "admin_endpoint": true,
+      "customer_state": true,
+      "attention_by_user": true,
+      "calendars_by_user": true
+    },
+    "active_customers": 2098,
+    "customer_records": 2110,
+    "verified_users": 6,
+    "attention_items": 66,
+    "calendar_owners": 6,
+    "unchanged_formula_files": {
+      "priority.py": true,
+      "value_prioritization.py": true,
+      "routing_objective.py": true,
+      "contact_permissions.py": true,
+      "contact_channel.py": true
+    },
+    "web_app_tests": 1123,
+    "subtests": 759,
+    "root_tests": 106
+  },
+  "payload": {
+    "compact_verified": 2110,
+    "legacy_bytes": 28512333,
+    "compact_bytes": 8140838,
+    "gzip_bytes": 1122404
+  },
+  "comparisons": [
+    {
+      "role": "admin",
+      "endpoint": "/customers",
+      "compact": false,
+      "concurrency": 1,
+      "before": {
+        "role": "admin",
+        "endpoint": "/customers",
+        "compact": false,
+        "concurrency": 1,
+        "cold_seconds": 0.32313489995431155,
+        "median_seconds": 0.22325520002050325,
+        "p95_seconds": 0.2517400999786332,
+        "response_bytes": 1324318,
+        "cpu_seconds": 0.671875,
+        "rss_bytes": 84901888,
+        "sheet_loads": 0
+      },
+      "after": {
+        "role": "admin",
+        "endpoint": "/customers",
+        "compact": false,
+        "concurrency": 1,
+        "cold_seconds": 0.174480699992273,
+        "median_seconds": 0.16171949997078627,
+        "p95_seconds": 0.16419899999164045,
+        "response_bytes": 1324318,
+        "cpu_seconds": 0.453125,
+        "rss_bytes": 85848064,
+        "sheet_loads": 0
+      }
+    },
+    {
+      "role": "admin",
+      "endpoint": "/customers",
+      "compact": false,
+      "concurrency": 2,
+      "before": {
+        "role": "admin",
+        "endpoint": "/customers",
+        "compact": false,
+        "concurrency": 2,
+        "cold_seconds": 0.32313489995431155,
+        "median_seconds": 0.5772853499511257,
+        "p95_seconds": 0.7452977999928407,
+        "response_bytes": 1324318,
+        "cpu_seconds": 1.890625,
+        "rss_bytes": 86261760,
+        "sheet_loads": 0
+      },
+      "after": {
+        "role": "admin",
+        "endpoint": "/customers",
+        "compact": false,
+        "concurrency": 2,
+        "cold_seconds": 0.174480699992273,
+        "median_seconds": 0.4067516000068281,
+        "p95_seconds": 0.4653651000116952,
+        "response_bytes": 1324318,
+        "cpu_seconds": 1.15625,
+        "rss_bytes": 87293952,
+        "sheet_loads": 0
+      }
+    },
+    {
+      "role": "admin",
+      "endpoint": "/customers",
+      "compact": false,
+      "concurrency": 4,
+      "before": {
+        "role": "admin",
+        "endpoint": "/customers",
+        "compact": false,
+        "concurrency": 4,
+        "cold_seconds": 0.32313489995431155,
+        "median_seconds": 1.5080248999875039,
+        "p95_seconds": 1.783026599965524,
+        "response_bytes": 1324318,
+        "cpu_seconds": 4.796875,
+        "rss_bytes": 90501120,
+        "sheet_loads": 0
+      },
+      "after": {
+        "role": "admin",
+        "endpoint": "/customers",
+        "compact": false,
+        "concurrency": 4,
+        "cold_seconds": 0.174480699992273,
+        "median_seconds": 0.832340649998514,
+        "p95_seconds": 1.2663330999785103,
+        "response_bytes": 1324318,
+        "cpu_seconds": 2.671875,
+        "rss_bytes": 90345472,
+        "sheet_loads": 0
+      }
+    },
+    {
+      "role": "admin",
+      "endpoint": "/customer-insights",
+      "compact": false,
+      "concurrency": 1,
+      "before": {
+        "role": "admin",
+        "endpoint": "/customer-insights",
+        "compact": false,
+        "concurrency": 1,
+        "cold_seconds": 7.000176000001375,
+        "median_seconds": 2.264327599958051,
+        "p95_seconds": 2.352096499991603,
+        "response_bytes": 28571077,
+        "cpu_seconds": 6.109375,
+        "rss_bytes": 127475712,
+        "sheet_loads": 0
+      },
+      "after": {
+        "role": "admin",
+        "endpoint": "/customer-insights",
+        "compact": false,
+        "concurrency": 1,
+        "cold_seconds": 3.8400902999565005,
+        "median_seconds": 0.9174823999637738,
+        "p95_seconds": 1.2258076000143774,
+        "response_bytes": 28571077,
+        "cpu_seconds": 2.515625,
+        "rss_bytes": 130949120,
+        "sheet_loads": 0
+      }
+    },
+    {
+      "role": "admin",
+      "endpoint": "/customer-insights",
+      "compact": false,
+      "concurrency": 2,
+      "before": {
+        "role": "admin",
+        "endpoint": "/customer-insights",
+        "compact": false,
+        "concurrency": 2,
+        "cold_seconds": 7.000176000001375,
+        "median_seconds": 3.9252347000001464,
+        "p95_seconds": 4.785708400013391,
+        "response_bytes": 28571077,
+        "cpu_seconds": 12.609375,
+        "rss_bytes": 140050432,
+        "sheet_loads": 0
+      },
+      "after": {
+        "role": "admin",
+        "endpoint": "/customer-insights",
+        "compact": false,
+        "concurrency": 2,
+        "cold_seconds": 3.8400902999565005,
+        "median_seconds": 1.7840629999991506,
+        "p95_seconds": 2.122007299971301,
+        "response_bytes": 28571077,
+        "cpu_seconds": 5.234375,
+        "rss_bytes": 132657152,
+        "sheet_loads": 0
+      }
+    },
+    {
+      "role": "admin",
+      "endpoint": "/customer-insights",
+      "compact": false,
+      "concurrency": 4,
+      "before": {
+        "role": "admin",
+        "endpoint": "/customer-insights",
+        "compact": false,
+        "concurrency": 4,
+        "cold_seconds": 7.000176000001375,
+        "median_seconds": 6.138504100003047,
+        "p95_seconds": 9.160960100009106,
+        "response_bytes": 28571077,
+        "cpu_seconds": 23.234375,
+        "rss_bytes": 141918208,
+        "sheet_loads": 0
+      },
+      "after": {
+        "role": "admin",
+        "endpoint": "/customer-insights",
+        "compact": false,
+        "concurrency": 4,
+        "cold_seconds": 3.8400902999565005,
+        "median_seconds": 4.076240049995249,
+        "p95_seconds": 6.135598899971228,
+        "response_bytes": 28571077,
+        "cpu_seconds": 14.984375,
+        "rss_bytes": 141332480,
+        "sheet_loads": 0
+      }
+    },
+    {
+      "role": "admin",
+      "endpoint": "/customer-insights",
+      "compact": true,
+      "concurrency": 1,
+      "before": {
+        "role": "admin",
+        "endpoint": "/customer-insights",
+        "compact": true,
+        "concurrency": 1,
+        "cold_seconds": 3.989635600009933,
+        "median_seconds": 1.364622499968391,
+        "p95_seconds": 1.3777738999924622,
+        "response_bytes": 28571077,
+        "cpu_seconds": 3.65625,
+        "rss_bytes": 140959744,
+        "sheet_loads": 0
+      },
+      "after": {
+        "role": "admin",
+        "endpoint": "/customer-insights",
+        "compact": true,
+        "concurrency": 1,
+        "cold_seconds": 5.374610400001984,
+        "median_seconds": 1.3206496000057086,
+        "p95_seconds": 1.5582701999810524,
+        "response_bytes": 8155524,
+        "cpu_seconds": 3.4375,
+        "rss_bytes": 140599296,
+        "sheet_loads": 0
+      }
+    },
+    {
+      "role": "admin",
+      "endpoint": "/customer-insights",
+      "compact": true,
+      "concurrency": 2,
+      "before": {
+        "role": "admin",
+        "endpoint": "/customer-insights",
+        "compact": true,
+        "concurrency": 2,
+        "cold_seconds": 3.989635600009933,
+        "median_seconds": 2.3255733999831136,
+        "p95_seconds": 2.8377247999887913,
+        "response_bytes": 28571077,
+        "cpu_seconds": 7.71875,
+        "rss_bytes": 141836288,
+        "sheet_loads": 0
+      },
+      "after": {
+        "role": "admin",
+        "endpoint": "/customer-insights",
+        "compact": true,
+        "concurrency": 2,
+        "cold_seconds": 5.374610400001984,
+        "median_seconds": 1.30283369999961,
+        "p95_seconds": 1.353843200020492,
+        "response_bytes": 8155524,
+        "cpu_seconds": 3.734375,
+        "rss_bytes": 141090816,
+        "sheet_loads": 0
+      }
+    },
+    {
+      "role": "admin",
+      "endpoint": "/customer-insights",
+      "compact": true,
+      "concurrency": 4,
+      "before": {
+        "role": "admin",
+        "endpoint": "/customer-insights",
+        "compact": true,
+        "concurrency": 4,
+        "cold_seconds": 3.989635600009933,
+        "median_seconds": 3.791115450003417,
+        "p95_seconds": 5.691874600015581,
+        "response_bytes": 28571077,
+        "cpu_seconds": 15.21875,
+        "rss_bytes": 143548416,
+        "sheet_loads": 0
+      },
+      "after": {
+        "role": "admin",
+        "endpoint": "/customer-insights",
+        "compact": true,
+        "concurrency": 4,
+        "cold_seconds": 5.374610400001984,
+        "median_seconds": 1.4431580500095151,
+        "p95_seconds": 1.5954588999738917,
+        "response_bytes": 8155524,
+        "cpu_seconds": 4.046875,
+        "rss_bytes": 142327808,
+        "sheet_loads": 0
+      }
+    },
+    {
+      "role": "admin",
+      "endpoint": "/planning/activities?start=2026-10-19&end=2026-10-25",
+      "compact": false,
+      "concurrency": 1,
+      "before": {
+        "role": "admin",
+        "endpoint": "/planning/activities?start=2026-10-19&end=2026-10-25",
+        "compact": false,
+        "concurrency": 1,
+        "cold_seconds": 1.0484147999668494,
+        "median_seconds": 1.0087432999862358,
+        "p95_seconds": 1.0168868000037037,
+        "response_bytes": 9769,
+        "cpu_seconds": 2.65625,
+        "rss_bytes": 113713152,
+        "sheet_loads": 0
+      },
+      "after": {
+        "role": "admin",
+        "endpoint": "/planning/activities?start=2026-10-19&end=2026-10-25",
+        "compact": false,
+        "concurrency": 1,
+        "cold_seconds": 2.999315299966838,
+        "median_seconds": 0.6061997999786399,
+        "p95_seconds": 0.6821555999922566,
+        "response_bytes": 9769,
+        "cpu_seconds": 1.75,
+        "rss_bytes": 122011648,
+        "sheet_loads": 0
+      }
+    },
+    {
+      "role": "admin",
+      "endpoint": "/planning/activities?start=2026-10-19&end=2026-10-25",
+      "compact": false,
+      "concurrency": 2,
+      "before": {
+        "role": "admin",
+        "endpoint": "/planning/activities?start=2026-10-19&end=2026-10-25",
+        "compact": false,
+        "concurrency": 2,
+        "cold_seconds": 1.0484147999668494,
+        "median_seconds": 2.915037550003035,
+        "p95_seconds": 3.3890498999971896,
+        "response_bytes": 9769,
+        "cpu_seconds": 8.75,
+        "rss_bytes": 113233920,
+        "sheet_loads": 0
+      },
+      "after": {
+        "role": "admin",
+        "endpoint": "/planning/activities?start=2026-10-19&end=2026-10-25",
+        "compact": false,
+        "concurrency": 2,
+        "cold_seconds": 2.999315299966838,
+        "median_seconds": 1.1990138499822933,
+        "p95_seconds": 1.2379438999923877,
+        "response_bytes": 9769,
+        "cpu_seconds": 3.796875,
+        "rss_bytes": 122728448,
+        "sheet_loads": 0
+      }
+    },
+    {
+      "role": "admin",
+      "endpoint": "/planning/activities?start=2026-10-19&end=2026-10-25",
+      "compact": false,
+      "concurrency": 4,
+      "before": {
+        "role": "admin",
+        "endpoint": "/planning/activities?start=2026-10-19&end=2026-10-25",
+        "compact": false,
+        "concurrency": 4,
+        "cold_seconds": 1.0484147999668494,
+        "median_seconds": 5.895374950021505,
+        "p95_seconds": 6.191361400007736,
+        "response_bytes": 9769,
+        "cpu_seconds": 17.359375,
+        "rss_bytes": 117686272,
+        "sheet_loads": 0
+      },
+      "after": {
+        "role": "admin",
+        "endpoint": "/planning/activities?start=2026-10-19&end=2026-10-25",
+        "compact": false,
+        "concurrency": 4,
+        "cold_seconds": 2.999315299966838,
+        "median_seconds": 3.580790249980055,
+        "p95_seconds": 4.550653500016779,
+        "response_bytes": 9769,
+        "cpu_seconds": 10.359375,
+        "rss_bytes": 121798656,
+        "sheet_loads": 0
+      }
+    },
+    {
+      "role": "admin",
+      "endpoint": "/planning/activities?start=2026-10-19&end=2026-10-25&include_followups=0",
+      "compact": false,
+      "concurrency": 1,
+      "before": {
+        "role": "admin",
+        "endpoint": "/planning/activities?start=2026-10-19&end=2026-10-25&include_followups=0",
+        "compact": false,
+        "concurrency": 1,
+        "cold_seconds": 0.8349685000139289,
+        "median_seconds": 0.7221906000049785,
+        "p95_seconds": 0.7770891000400297,
+        "response_bytes": 6427,
+        "cpu_seconds": 2.046875,
+        "rss_bytes": 116809728,
+        "sheet_loads": 0
+      },
+      "after": {
+        "role": "admin",
+        "endpoint": "/planning/activities?start=2026-10-19&end=2026-10-25&include_followups=0",
+        "compact": false,
+        "concurrency": 1,
+        "cold_seconds": 2.350075200025458,
+        "median_seconds": 0.16769029997522011,
+        "p95_seconds": 0.19823719997657463,
+        "response_bytes": 6427,
+        "cpu_seconds": 0.515625,
+        "rss_bytes": 124600320,
+        "sheet_loads": 0
+      }
+    },
+    {
+      "role": "admin",
+      "endpoint": "/planning/activities?start=2026-10-19&end=2026-10-25&include_followups=0",
+      "compact": false,
+      "concurrency": 2,
+      "before": {
+        "role": "admin",
+        "endpoint": "/planning/activities?start=2026-10-19&end=2026-10-25&include_followups=0",
+        "compact": false,
+        "concurrency": 2,
+        "cold_seconds": 0.8349685000139289,
+        "median_seconds": 1.8943131499981973,
+        "p95_seconds": 1.942962399974931,
+        "response_bytes": 6427,
+        "cpu_seconds": 4.890625,
+        "rss_bytes": 116158464,
+        "sheet_loads": 0
+      },
+      "after": {
+        "role": "admin",
+        "endpoint": "/planning/activities?start=2026-10-19&end=2026-10-25&include_followups=0",
+        "compact": false,
+        "concurrency": 2,
+        "cold_seconds": 2.350075200025458,
+        "median_seconds": 0.31423084999551065,
+        "p95_seconds": 0.34982090000994503,
+        "response_bytes": 6427,
+        "cpu_seconds": 0.875,
+        "rss_bytes": 127180800,
+        "sheet_loads": 0
+      }
+    },
+    {
+      "role": "admin",
+      "endpoint": "/planning/activities?start=2026-10-19&end=2026-10-25&include_followups=0",
+      "compact": false,
+      "concurrency": 4,
+      "before": {
+        "role": "admin",
+        "endpoint": "/planning/activities?start=2026-10-19&end=2026-10-25&include_followups=0",
+        "compact": false,
+        "concurrency": 4,
+        "cold_seconds": 0.8349685000139289,
+        "median_seconds": 3.884811299998546,
+        "p95_seconds": 4.3656668000039645,
+        "response_bytes": 6427,
+        "cpu_seconds": 11.5,
+        "rss_bytes": 117100544,
+        "sheet_loads": 0
+      },
+      "after": {
+        "role": "admin",
+        "endpoint": "/planning/activities?start=2026-10-19&end=2026-10-25&include_followups=0",
+        "compact": false,
+        "concurrency": 4,
+        "cold_seconds": 2.350075200025458,
+        "median_seconds": 0.5626480499922764,
+        "p95_seconds": 0.7045184999587946,
+        "response_bytes": 6427,
+        "cpu_seconds": 1.96875,
+        "rss_bytes": 122679296,
+        "sheet_loads": 0
+      }
+    },
+    {
+      "role": "admin",
+      "endpoint": "/planning/attention",
+      "compact": false,
+      "concurrency": 1,
+      "before": {
+        "role": "admin",
+        "endpoint": "/planning/attention",
+        "compact": false,
+        "concurrency": 1,
+        "cold_seconds": 3.6986771000083536,
+        "median_seconds": 3.449768199992832,
+        "p95_seconds": 3.5054703999776393,
+        "response_bytes": 2056,
+        "cpu_seconds": 9.40625,
+        "rss_bytes": 175460352,
+        "sheet_loads": 0
+      },
+      "after": {
+        "role": "admin",
+        "endpoint": "/planning/attention",
+        "compact": false,
+        "concurrency": 1,
+        "cold_seconds": 4.366491799999494,
+        "median_seconds": 0.07987780001712963,
+        "p95_seconds": 0.0800003000185825,
+        "response_bytes": 2056,
+        "cpu_seconds": 0.21875,
+        "rss_bytes": 141398016,
+        "sheet_loads": 0
+      }
+    },
+    {
+      "role": "admin",
+      "endpoint": "/planning/attention",
+      "compact": false,
+      "concurrency": 2,
+      "before": {
+        "role": "admin",
+        "endpoint": "/planning/attention",
+        "compact": false,
+        "concurrency": 2,
+        "cold_seconds": 3.6986771000083536,
+        "median_seconds": 7.326542349997908,
+        "p95_seconds": 7.841223599971272,
+        "response_bytes": 2056,
+        "cpu_seconds": 21.515625,
+        "rss_bytes": 232833024,
+        "sheet_loads": 0
+      },
+      "after": {
+        "role": "admin",
+        "endpoint": "/planning/attention",
+        "compact": false,
+        "concurrency": 2,
+        "cold_seconds": 4.366491799999494,
+        "median_seconds": 0.14793465001275763,
+        "p95_seconds": 0.22511959995608777,
+        "response_bytes": 2056,
+        "cpu_seconds": 0.53125,
+        "rss_bytes": 142684160,
+        "sheet_loads": 0
+      }
+    },
+    {
+      "role": "admin",
+      "endpoint": "/planning/attention",
+      "compact": false,
+      "concurrency": 4,
+      "before": {
+        "role": "admin",
+        "endpoint": "/planning/attention",
+        "compact": false,
+        "concurrency": 4,
+        "cold_seconds": 3.6986771000083536,
+        "median_seconds": 20.274016400013352,
+        "p95_seconds": 24.544713599956594,
+        "response_bytes": 2056,
+        "cpu_seconds": 60.34375,
+        "rss_bytes": 263000064,
+        "sheet_loads": 0
+      },
+      "after": {
+        "role": "admin",
+        "endpoint": "/planning/attention",
+        "compact": false,
+        "concurrency": 4,
+        "cold_seconds": 4.366491799999494,
+        "median_seconds": 0.25166724997689016,
+        "p95_seconds": 0.3965817000134848,
+        "response_bytes": 2056,
+        "cpu_seconds": 0.96875,
+        "rss_bytes": 142827520,
+        "sheet_loads": 0
+      }
+    },
+    {
+      "role": "admin",
+      "endpoint": "/followup-insights",
+      "compact": false,
+      "concurrency": 1,
+      "before": {
+        "role": "admin",
+        "endpoint": "/followup-insights",
+        "compact": false,
+        "concurrency": 1,
+        "cold_seconds": 0.5355433999793604,
+        "median_seconds": 0.41213020001305267,
+        "p95_seconds": 0.4546000999980606,
+        "response_bytes": 4825,
+        "cpu_seconds": 1.203125,
+        "rss_bytes": 154624000,
+        "sheet_loads": 0
+      },
+      "after": {
+        "role": "admin",
+        "endpoint": "/followup-insights",
+        "compact": false,
+        "concurrency": 1,
+        "cold_seconds": 0.9402629000251181,
+        "median_seconds": 0.8020084999734536,
+        "p95_seconds": 0.9062409999896772,
+        "response_bytes": 4825,
+        "cpu_seconds": 2.109375,
+        "rss_bytes": 114401280,
+        "sheet_loads": 0
+      }
+    },
+    {
+      "role": "admin",
+      "endpoint": "/followup-insights",
+      "compact": false,
+      "concurrency": 2,
+      "before": {
+        "role": "admin",
+        "endpoint": "/followup-insights",
+        "compact": false,
+        "concurrency": 2,
+        "cold_seconds": 0.5355433999793604,
+        "median_seconds": 1.357934599975124,
+        "p95_seconds": 1.5133715000119992,
+        "response_bytes": 4825,
+        "cpu_seconds": 4.203125,
+        "rss_bytes": 160501760,
+        "sheet_loads": 0
+      },
+      "after": {
+        "role": "admin",
+        "endpoint": "/followup-insights",
+        "compact": false,
+        "concurrency": 2,
+        "cold_seconds": 0.9402629000251181,
+        "median_seconds": 1.3278145500225946,
+        "p95_seconds": 1.5762153000105172,
+        "response_bytes": 4825,
+        "cpu_seconds": 4.125,
+        "rss_bytes": 109760512,
+        "sheet_loads": 0
+      }
+    },
+    {
+      "role": "admin",
+      "endpoint": "/followup-insights",
+      "compact": false,
+      "concurrency": 4,
+      "before": {
+        "role": "admin",
+        "endpoint": "/followup-insights",
+        "compact": false,
+        "concurrency": 4,
+        "cold_seconds": 0.5355433999793604,
+        "median_seconds": 4.496937399962917,
+        "p95_seconds": 5.167437500029337,
+        "response_bytes": 4825,
+        "cpu_seconds": 13.859375,
+        "rss_bytes": 172978176,
+        "sheet_loads": 0
+      },
+      "after": {
+        "role": "admin",
+        "endpoint": "/followup-insights",
+        "compact": false,
+        "concurrency": 4,
+        "cold_seconds": 0.9402629000251181,
+        "median_seconds": 2.7225625999853946,
+        "p95_seconds": 5.957317300024442,
+        "response_bytes": 4825,
+        "cpu_seconds": 11.25,
+        "rss_bytes": 109199360,
+        "sheet_loads": 0
+      }
+    },
+    {
+      "role": "seller",
+      "endpoint": "/customers",
+      "compact": false,
+      "concurrency": 1,
+      "before": {
+        "role": "seller",
+        "endpoint": "/customers",
+        "compact": false,
+        "concurrency": 1,
+        "cold_seconds": 0.15912500000558794,
+        "median_seconds": 0.08826980000594631,
+        "p95_seconds": 0.09619569999631494,
+        "response_bytes": 193442,
+        "cpu_seconds": 0.25,
+        "rss_bytes": 172937216,
+        "sheet_loads": 0
+      },
+      "after": {
+        "role": "seller",
+        "endpoint": "/customers",
+        "compact": false,
+        "concurrency": 1,
+        "cold_seconds": 0.08750789996702224,
+        "median_seconds": 0.07626669999444857,
+        "p95_seconds": 0.07748279999941587,
+        "response_bytes": 193442,
+        "cpu_seconds": 0.234375,
+        "rss_bytes": 114995200,
+        "sheet_loads": 0
+      }
+    },
+    {
+      "role": "seller",
+      "endpoint": "/customers",
+      "compact": false,
+      "concurrency": 2,
+      "before": {
+        "role": "seller",
+        "endpoint": "/customers",
+        "compact": false,
+        "concurrency": 2,
+        "cold_seconds": 0.15912500000558794,
+        "median_seconds": 0.14676745000178926,
+        "p95_seconds": 0.16260460001649335,
+        "response_bytes": 193442,
+        "cpu_seconds": 0.46875,
+        "rss_bytes": 172929024,
+        "sheet_loads": 0
+      },
+      "after": {
+        "role": "seller",
+        "endpoint": "/customers",
+        "compact": false,
+        "concurrency": 2,
+        "cold_seconds": 0.08750789996702224,
+        "median_seconds": 0.16012360001332127,
+        "p95_seconds": 0.2571229999884963,
+        "response_bytes": 193442,
+        "cpu_seconds": 0.5625,
+        "rss_bytes": 111423488,
+        "sheet_loads": 0
+      }
+    },
+    {
+      "role": "seller",
+      "endpoint": "/customers",
+      "compact": false,
+      "concurrency": 4,
+      "before": {
+        "role": "seller",
+        "endpoint": "/customers",
+        "compact": false,
+        "concurrency": 4,
+        "cold_seconds": 0.15912500000558794,
+        "median_seconds": 0.3261511999880895,
+        "p95_seconds": 0.4183165999711491,
+        "response_bytes": 193442,
+        "cpu_seconds": 1.09375,
+        "rss_bytes": 172298240,
+        "sheet_loads": 0
+      },
+      "after": {
+        "role": "seller",
+        "endpoint": "/customers",
+        "compact": false,
+        "concurrency": 4,
+        "cold_seconds": 0.08750789996702224,
+        "median_seconds": 0.28597239998634905,
+        "p95_seconds": 0.7641368000186048,
+        "response_bytes": 193442,
+        "cpu_seconds": 1.328125,
+        "rss_bytes": 109850624,
+        "sheet_loads": 0
+      }
+    },
+    {
+      "role": "seller",
+      "endpoint": "/customer-insights",
+      "compact": false,
+      "concurrency": 1,
+      "before": {
+        "role": "seller",
+        "endpoint": "/customer-insights",
+        "compact": false,
+        "concurrency": 1,
+        "cold_seconds": 4.718191200052388,
+        "median_seconds": 1.056284099991899,
+        "p95_seconds": 1.195475600019563,
+        "response_bytes": 4363909,
+        "cpu_seconds": 2.828125,
+        "rss_bytes": 206200832,
+        "sheet_loads": 0
+      },
+      "after": {
+        "role": "seller",
+        "endpoint": "/customer-insights",
+        "compact": false,
+        "concurrency": 1,
+        "cold_seconds": 2.8251803999883123,
+        "median_seconds": 0.19690039998386055,
+        "p95_seconds": 0.4321106999996118,
+        "response_bytes": 4363909,
+        "cpu_seconds": 0.609375,
+        "rss_bytes": 150011904,
+        "sheet_loads": 0
+      }
+    },
+    {
+      "role": "seller",
+      "endpoint": "/customer-insights",
+      "compact": false,
+      "concurrency": 2,
+      "before": {
+        "role": "seller",
+        "endpoint": "/customer-insights",
+        "compact": false,
+        "concurrency": 2,
+        "cold_seconds": 4.718191200052388,
+        "median_seconds": 1.4132259999751113,
+        "p95_seconds": 2.050839800038375,
+        "response_bytes": 4363909,
+        "cpu_seconds": 4.84375,
+        "rss_bytes": 206503936,
+        "sheet_loads": 0
+      },
+      "after": {
+        "role": "seller",
+        "endpoint": "/customer-insights",
+        "compact": false,
+        "concurrency": 2,
+        "cold_seconds": 2.8251803999883123,
+        "median_seconds": 0.3291648000013083,
+        "p95_seconds": 0.39223160000983626,
+        "response_bytes": 4363909,
+        "cpu_seconds": 0.96875,
+        "rss_bytes": 150134784,
+        "sheet_loads": 0
+      }
+    },
+    {
+      "role": "seller",
+      "endpoint": "/customer-insights",
+      "compact": false,
+      "concurrency": 4,
+      "before": {
+        "role": "seller",
+        "endpoint": "/customer-insights",
+        "compact": false,
+        "concurrency": 4,
+        "cold_seconds": 4.718191200052388,
+        "median_seconds": 1.8944702500011772,
+        "p95_seconds": 2.9909686999744736,
+        "response_bytes": 4363909,
+        "cpu_seconds": 8.171875,
+        "rss_bytes": 206925824,
+        "sheet_loads": 0
+      },
+      "after": {
+        "role": "seller",
+        "endpoint": "/customer-insights",
+        "compact": false,
+        "concurrency": 4,
+        "cold_seconds": 2.8251803999883123,
+        "median_seconds": 0.4911310999887064,
+        "p95_seconds": 0.7026762000168674,
+        "response_bytes": 4363909,
+        "cpu_seconds": 2.03125,
+        "rss_bytes": 150212608,
+        "sheet_loads": 0
+      }
+    },
+    {
+      "role": "seller",
+      "endpoint": "/customer-insights",
+      "compact": true,
+      "concurrency": 1,
+      "before": {
+        "role": "seller",
+        "endpoint": "/customer-insights",
+        "compact": true,
+        "concurrency": 1,
+        "cold_seconds": 3.141861899988726,
+        "median_seconds": 0.7145915000000969,
+        "p95_seconds": 0.7404993999516591,
+        "response_bytes": 4363909,
+        "cpu_seconds": 1.984375,
+        "rss_bytes": 207208448,
+        "sheet_loads": 0
+      },
+      "after": {
+        "role": "seller",
+        "endpoint": "/customer-insights",
+        "compact": true,
+        "concurrency": 1,
+        "cold_seconds": 2.664428999996744,
+        "median_seconds": 0.154138799989596,
+        "p95_seconds": 0.19888099998934194,
+        "response_bytes": 1538776,
+        "cpu_seconds": 0.4375,
+        "rss_bytes": 151658496,
+        "sheet_loads": 0
+      }
+    },
+    {
+      "role": "seller",
+      "endpoint": "/customer-insights",
+      "compact": true,
+      "concurrency": 2,
+      "before": {
+        "role": "seller",
+        "endpoint": "/customer-insights",
+        "compact": true,
+        "concurrency": 2,
+        "cold_seconds": 3.141861899988726,
+        "median_seconds": 1.1034818500338588,
+        "p95_seconds": 1.4475545999594033,
+        "response_bytes": 4363909,
+        "cpu_seconds": 3.984375,
+        "rss_bytes": 207368192,
+        "sheet_loads": 0
+      },
+      "after": {
+        "role": "seller",
+        "endpoint": "/customer-insights",
+        "compact": true,
+        "concurrency": 2,
+        "cold_seconds": 2.664428999996744,
+        "median_seconds": 0.17225229999166913,
+        "p95_seconds": 0.18357369996374473,
+        "response_bytes": 1538776,
+        "cpu_seconds": 0.515625,
+        "rss_bytes": 151793664,
+        "sheet_loads": 0
+      }
+    },
+    {
+      "role": "seller",
+      "endpoint": "/customer-insights",
+      "compact": true,
+      "concurrency": 4,
+      "before": {
+        "role": "seller",
+        "endpoint": "/customer-insights",
+        "compact": true,
+        "concurrency": 4,
+        "cold_seconds": 3.141861899988726,
+        "median_seconds": 2.5205197499890346,
+        "p95_seconds": 4.649936899950262,
+        "response_bytes": 4363909,
+        "cpu_seconds": 11.171875,
+        "rss_bytes": 207376384,
+        "sheet_loads": 0
+      },
+      "after": {
+        "role": "seller",
+        "endpoint": "/customer-insights",
+        "compact": true,
+        "concurrency": 4,
+        "cold_seconds": 2.664428999996744,
+        "median_seconds": 0.20714819998829626,
+        "p95_seconds": 0.2376267000217922,
+        "response_bytes": 1538776,
+        "cpu_seconds": 0.640625,
+        "rss_bytes": 151928832,
+        "sheet_loads": 0
+      }
+    },
+    {
+      "role": "seller",
+      "endpoint": "/planning/activities?start=2026-10-19&end=2026-10-25",
+      "compact": false,
+      "concurrency": 1,
+      "before": {
+        "role": "seller",
+        "endpoint": "/planning/activities?start=2026-10-19&end=2026-10-25",
+        "compact": false,
+        "concurrency": 1,
+        "cold_seconds": 7.313219800009392,
+        "median_seconds": 7.302183600026183,
+        "p95_seconds": 7.527340599976014,
+        "response_bytes": 82511,
+        "cpu_seconds": 19.5,
+        "rss_bytes": 212885504,
+        "sheet_loads": 0
+      },
+      "after": {
+        "role": "seller",
+        "endpoint": "/planning/activities?start=2026-10-19&end=2026-10-25",
+        "compact": false,
+        "concurrency": 1,
+        "cold_seconds": 2.8481441999902017,
+        "median_seconds": 0.40196029999060556,
+        "p95_seconds": 0.44043780001811683,
+        "response_bytes": 82511,
+        "cpu_seconds": 1.109375,
+        "rss_bytes": 155586560,
+        "sheet_loads": 0
+      }
+    },
+    {
+      "role": "seller",
+      "endpoint": "/planning/activities?start=2026-10-19&end=2026-10-25",
+      "compact": false,
+      "concurrency": 2,
+      "before": {
+        "role": "seller",
+        "endpoint": "/planning/activities?start=2026-10-19&end=2026-10-25",
+        "compact": false,
+        "concurrency": 2,
+        "cold_seconds": 7.313219800009392,
+        "median_seconds": 16.288956100004725,
+        "p95_seconds": 17.001432800025214,
+        "response_bytes": 82511,
+        "cpu_seconds": 45.734375,
+        "rss_bytes": 261623808,
+        "sheet_loads": 0
+      },
+      "after": {
+        "role": "seller",
+        "endpoint": "/planning/activities?start=2026-10-19&end=2026-10-25",
+        "compact": false,
+        "concurrency": 2,
+        "cold_seconds": 2.8481441999902017,
+        "median_seconds": 0.9051831999968272,
+        "p95_seconds": 0.95613730000332,
+        "response_bytes": 82511,
+        "cpu_seconds": 2.734375,
+        "rss_bytes": 154742784,
+        "sheet_loads": 0
+      }
+    },
+    {
+      "role": "seller",
+      "endpoint": "/planning/activities?start=2026-10-19&end=2026-10-25",
+      "compact": false,
+      "concurrency": 4,
+      "before": {
+        "role": "seller",
+        "endpoint": "/planning/activities?start=2026-10-19&end=2026-10-25",
+        "compact": false,
+        "concurrency": 4,
+        "cold_seconds": 7.313219800009392,
+        "median_seconds": 42.12680830000318,
+        "p95_seconds": 43.44523359998129,
+        "response_bytes": 82511,
+        "cpu_seconds": 118.234375,
+        "rss_bytes": 278142976,
+        "sheet_loads": 0
+      },
+      "after": {
+        "role": "seller",
+        "endpoint": "/planning/activities?start=2026-10-19&end=2026-10-25",
+        "compact": false,
+        "concurrency": 4,
+        "cold_seconds": 2.8481441999902017,
+        "median_seconds": 2.0856271000229754,
+        "p95_seconds": 4.359648999990895,
+        "response_bytes": 82511,
+        "cpu_seconds": 8.640625,
+        "rss_bytes": 150274048,
+        "sheet_loads": 0
+      }
+    },
+    {
+      "role": "seller",
+      "endpoint": "/planning/activities?start=2026-10-19&end=2026-10-25&include_followups=0",
+      "compact": false,
+      "concurrency": 1,
+      "before": {
+        "role": "seller",
+        "endpoint": "/planning/activities?start=2026-10-19&end=2026-10-25&include_followups=0",
+        "compact": false,
+        "concurrency": 1,
+        "cold_seconds": 6.978762199985795,
+        "median_seconds": 6.803866599977482,
+        "p95_seconds": 6.833162299997639,
+        "response_bytes": 46811,
+        "cpu_seconds": 18.109375,
+        "rss_bytes": 225382400,
+        "sheet_loads": 0
+      },
+      "after": {
+        "role": "seller",
+        "endpoint": "/planning/activities?start=2026-10-19&end=2026-10-25&include_followups=0",
+        "compact": false,
+        "concurrency": 1,
+        "cold_seconds": 4.388775400002487,
+        "median_seconds": 0.1718855999642983,
+        "p95_seconds": 0.18295190000208095,
+        "response_bytes": 46811,
+        "cpu_seconds": 0.421875,
+        "rss_bytes": 160727040,
+        "sheet_loads": 0
+      }
+    },
+    {
+      "role": "seller",
+      "endpoint": "/planning/activities?start=2026-10-19&end=2026-10-25&include_followups=0",
+      "compact": false,
+      "concurrency": 2,
+      "before": {
+        "role": "seller",
+        "endpoint": "/planning/activities?start=2026-10-19&end=2026-10-25&include_followups=0",
+        "compact": false,
+        "concurrency": 2,
+        "cold_seconds": 6.978762199985795,
+        "median_seconds": 14.343154899979709,
+        "p95_seconds": 15.021496500005014,
+        "response_bytes": 46811,
+        "cpu_seconds": 40.578125,
+        "rss_bytes": 274628608,
+        "sheet_loads": 0
+      },
+      "after": {
+        "role": "seller",
+        "endpoint": "/planning/activities?start=2026-10-19&end=2026-10-25&include_followups=0",
+        "compact": false,
+        "concurrency": 2,
+        "cold_seconds": 4.388775400002487,
+        "median_seconds": 0.36651970000821166,
+        "p95_seconds": 0.44117710000136867,
+        "response_bytes": 46811,
+        "cpu_seconds": 1.15625,
+        "rss_bytes": 160862208,
+        "sheet_loads": 0
+      }
+    },
+    {
+      "role": "seller",
+      "endpoint": "/planning/activities?start=2026-10-19&end=2026-10-25&include_followups=0",
+      "compact": false,
+      "concurrency": 4,
+      "before": {
+        "role": "seller",
+        "endpoint": "/planning/activities?start=2026-10-19&end=2026-10-25&include_followups=0",
+        "compact": false,
+        "concurrency": 4,
+        "cold_seconds": 6.978762199985795,
+        "median_seconds": 36.64768130000448,
+        "p95_seconds": 38.48509580001701,
+        "response_bytes": 46811,
+        "cpu_seconds": 101.671875,
+        "rss_bytes": 277544960,
+        "sheet_loads": 0
+      },
+      "after": {
+        "role": "seller",
+        "endpoint": "/planning/activities?start=2026-10-19&end=2026-10-25&include_followups=0",
+        "compact": false,
+        "concurrency": 4,
+        "cold_seconds": 4.388775400002487,
+        "median_seconds": 0.6573658999986947,
+        "p95_seconds": 0.7765136999660172,
+        "response_bytes": 46811,
+        "cpu_seconds": 2.25,
+        "rss_bytes": 161107968,
+        "sheet_loads": 0
+      }
+    },
+    {
+      "role": "seller",
+      "endpoint": "/planning/attention",
+      "compact": false,
+      "concurrency": 1,
+      "before": {
+        "role": "seller",
+        "endpoint": "/planning/attention",
+        "compact": false,
+        "concurrency": 1,
+        "cold_seconds": 7.698548600019421,
+        "median_seconds": 5.258256300003268,
+        "p95_seconds": 5.307470200001262,
+        "response_bytes": 31919,
+        "cpu_seconds": 14.65625,
+        "rss_bytes": 219406336,
+        "sheet_loads": 0
+      },
+      "after": {
+        "role": "seller",
+        "endpoint": "/planning/attention",
+        "compact": false,
+        "concurrency": 1,
+        "cold_seconds": 4.406218999996781,
+        "median_seconds": 0.06168830004753545,
+        "p95_seconds": 0.064647099992726,
+        "response_bytes": 31919,
+        "cpu_seconds": 0.1875,
+        "rss_bytes": 157569024,
+        "sheet_loads": 0
+      }
+    },
+    {
+      "role": "seller",
+      "endpoint": "/planning/attention",
+      "compact": false,
+      "concurrency": 2,
+      "before": {
+        "role": "seller",
+        "endpoint": "/planning/attention",
+        "compact": false,
+        "concurrency": 2,
+        "cold_seconds": 7.698548600019421,
+        "median_seconds": 9.843255550018512,
+        "p95_seconds": 10.553685499995481,
+        "response_bytes": 31919,
+        "cpu_seconds": 28.734375,
+        "rss_bytes": 264617984,
+        "sheet_loads": 0
+      },
+      "after": {
+        "role": "seller",
+        "endpoint": "/planning/attention",
+        "compact": false,
+        "concurrency": 2,
+        "cold_seconds": 4.406218999996781,
+        "median_seconds": 0.13268954999512061,
+        "p95_seconds": 0.22634850000031292,
+        "response_bytes": 31919,
+        "cpu_seconds": 0.5,
+        "rss_bytes": 157618176,
+        "sheet_loads": 0
+      }
+    },
+    {
+      "role": "seller",
+      "endpoint": "/planning/attention",
+      "compact": false,
+      "concurrency": 4,
+      "before": {
+        "role": "seller",
+        "endpoint": "/planning/attention",
+        "compact": false,
+        "concurrency": 4,
+        "cold_seconds": 7.698548600019421,
+        "median_seconds": 20.965142999979435,
+        "p95_seconds": 26.57041709998157,
+        "response_bytes": 31919,
+        "cpu_seconds": 63.703125,
+        "rss_bytes": 286744576,
+        "sheet_loads": 0
+      },
+      "after": {
+        "role": "seller",
+        "endpoint": "/planning/attention",
+        "compact": false,
+        "concurrency": 4,
+        "cold_seconds": 4.406218999996781,
+        "median_seconds": 0.23606170000857674,
+        "p95_seconds": 0.3648898999672383,
+        "response_bytes": 31919,
+        "cpu_seconds": 0.84375,
+        "rss_bytes": 157650944,
+        "sheet_loads": 0
+      }
+    },
+    {
+      "role": "seller",
+      "endpoint": "/followup-insights",
+      "compact": false,
+      "concurrency": 1,
+      "before": {
+        "role": "seller",
+        "endpoint": "/followup-insights",
+        "compact": false,
+        "concurrency": 1,
+        "cold_seconds": 0.5982309999526478,
+        "median_seconds": 0.466808500001207,
+        "p95_seconds": 0.46990720002213493,
+        "response_bytes": 4825,
+        "cpu_seconds": 1.328125,
+        "rss_bytes": 249450496,
+        "sheet_loads": 0
+      },
+      "after": {
+        "role": "seller",
+        "endpoint": "/followup-insights",
+        "compact": false,
+        "concurrency": 1,
+        "cold_seconds": 0.9049375000176951,
+        "median_seconds": 0.8659916000324301,
+        "p95_seconds": 0.8764543000143021,
+        "response_bytes": 4825,
+        "cpu_seconds": 2.375,
+        "rss_bytes": 121470976,
+        "sheet_loads": 0
+      }
+    },
+    {
+      "role": "seller",
+      "endpoint": "/followup-insights",
+      "compact": false,
+      "concurrency": 2,
+      "before": {
+        "role": "seller",
+        "endpoint": "/followup-insights",
+        "compact": false,
+        "concurrency": 2,
+        "cold_seconds": 0.5982309999526478,
+        "median_seconds": 1.5720188499835785,
+        "p95_seconds": 1.5843949999543838,
+        "response_bytes": 4825,
+        "cpu_seconds": 4.484375,
+        "rss_bytes": 247869440,
+        "sheet_loads": 0
+      },
+      "after": {
+        "role": "seller",
+        "endpoint": "/followup-insights",
+        "compact": false,
+        "concurrency": 2,
+        "cold_seconds": 0.9049375000176951,
+        "median_seconds": 2.7066998000082094,
+        "p95_seconds": 2.8530749999918044,
+        "response_bytes": 4825,
+        "cpu_seconds": 7.53125,
+        "rss_bytes": 127619072,
+        "sheet_loads": 0
+      }
+    },
+    {
+      "role": "seller",
+      "endpoint": "/followup-insights",
+      "compact": false,
+      "concurrency": 4,
+      "before": {
+        "role": "seller",
+        "endpoint": "/followup-insights",
+        "compact": false,
+        "concurrency": 4,
+        "cold_seconds": 0.5982309999526478,
+        "median_seconds": 3.2619154500134755,
+        "p95_seconds": 4.523709899978712,
+        "response_bytes": 4825,
+        "cpu_seconds": 10.453125,
+        "rss_bytes": 247955456,
+        "sheet_loads": 0
+      },
+      "after": {
+        "role": "seller",
+        "endpoint": "/followup-insights",
+        "compact": false,
+        "concurrency": 4,
+        "cold_seconds": 0.9049375000176951,
+        "median_seconds": 6.665423449972877,
+        "p95_seconds": 6.780967800004873,
+        "response_bytes": 4825,
+        "cpu_seconds": 19.65625,
+        "rss_bytes": 139382784,
+        "sheet_loads": 0
+      }
+    }
+  ],
+  "followup_control": {
+    "before": [
+      {
+        "role": "admin",
+        "endpoint": "/followup-insights",
+        "compact": false,
+        "concurrency": 1,
+        "cold_seconds": 0.8743806999991648,
+        "median_seconds": 0.7490446000301745,
+        "p95_seconds": 0.7807113000308163,
+        "response_bytes": 4825,
+        "cpu_seconds": 1.375,
+        "rss_bytes": 86732800,
+        "sheet_loads": 0
+      },
+      {
+        "role": "admin",
+        "endpoint": "/followup-insights",
+        "compact": false,
+        "concurrency": 2,
+        "cold_seconds": 0.8743806999991648,
+        "median_seconds": 2.1919032500009052,
+        "p95_seconds": 2.2773282999987714,
+        "response_bytes": 4825,
+        "cpu_seconds": 4.234375,
+        "rss_bytes": 91017216,
+        "sheet_loads": 0
+      },
+      {
+        "role": "admin",
+        "endpoint": "/followup-insights",
+        "compact": false,
+        "concurrency": 4,
+        "cold_seconds": 0.8743806999991648,
+        "median_seconds": 5.035047049983405,
+        "p95_seconds": 5.942575699998997,
+        "response_bytes": 4825,
+        "cpu_seconds": 10.53125,
+        "rss_bytes": 96636928,
+        "sheet_loads": 0
+      },
+      {
+        "role": "seller",
+        "endpoint": "/followup-insights",
+        "compact": false,
+        "concurrency": 1,
+        "cold_seconds": 0.912011899985373,
+        "median_seconds": 0.8563502499891911,
+        "p95_seconds": 0.8699516999768093,
+        "response_bytes": 4825,
+        "cpu_seconds": 1.6875,
+        "rss_bytes": 97894400,
+        "sheet_loads": 0
+      },
+      {
+        "role": "seller",
+        "endpoint": "/followup-insights",
+        "compact": false,
+        "concurrency": 2,
+        "cold_seconds": 0.912011899985373,
+        "median_seconds": 2.187924149999162,
+        "p95_seconds": 2.3051570000243373,
+        "response_bytes": 4825,
+        "cpu_seconds": 4.125,
+        "rss_bytes": 96788480,
+        "sheet_loads": 0
+      },
+      {
+        "role": "seller",
+        "endpoint": "/followup-insights",
+        "compact": false,
+        "concurrency": 4,
+        "cold_seconds": 0.912011899985373,
+        "median_seconds": 5.98990859996411,
+        "p95_seconds": 6.52263269998366,
+        "response_bytes": 4825,
+        "cpu_seconds": 11.96875,
+        "rss_bytes": 98533376,
+        "sheet_loads": 0
+      }
+    ],
+    "after": [
+      {
+        "role": "admin",
+        "endpoint": "/followup-insights",
+        "compact": false,
+        "concurrency": 1,
+        "cold_seconds": 0.6379120000055991,
+        "median_seconds": 0.8370732499752194,
+        "p95_seconds": 0.9063454999704845,
+        "response_bytes": 4825,
+        "cpu_seconds": 1.578125,
+        "rss_bytes": 87646208,
+        "sheet_loads": 0
+      },
+      {
+        "role": "admin",
+        "endpoint": "/followup-insights",
+        "compact": false,
+        "concurrency": 2,
+        "cold_seconds": 0.6379120000055991,
+        "median_seconds": 2.183979699999327,
+        "p95_seconds": 2.241128299967386,
+        "response_bytes": 4825,
+        "cpu_seconds": 4.03125,
+        "rss_bytes": 91455488,
+        "sheet_loads": 0
+      },
+      {
+        "role": "admin",
+        "endpoint": "/followup-insights",
+        "compact": false,
+        "concurrency": 4,
+        "cold_seconds": 0.6379120000055991,
+        "median_seconds": 4.768400600005407,
+        "p95_seconds": 5.900075400015339,
+        "response_bytes": 4825,
+        "cpu_seconds": 10.890625,
+        "rss_bytes": 96722944,
+        "sheet_loads": 0
+      },
+      {
+        "role": "seller",
+        "endpoint": "/followup-insights",
+        "compact": false,
+        "concurrency": 1,
+        "cold_seconds": 0.8944056999753229,
+        "median_seconds": 0.7161561000102665,
+        "p95_seconds": 0.898953000025358,
+        "response_bytes": 4825,
+        "cpu_seconds": 1.296875,
+        "rss_bytes": 97038336,
+        "sheet_loads": 0
+      },
+      {
+        "role": "seller",
+        "endpoint": "/followup-insights",
+        "compact": false,
+        "concurrency": 2,
+        "cold_seconds": 0.8944056999753229,
+        "median_seconds": 2.227651449997211,
+        "p95_seconds": 2.343651500006672,
+        "response_bytes": 4825,
+        "cpu_seconds": 4.234375,
+        "rss_bytes": 97095680,
+        "sheet_loads": 0
+      },
+      {
+        "role": "seller",
+        "endpoint": "/followup-insights",
+        "compact": false,
+        "concurrency": 4,
+        "cold_seconds": 0.8944056999753229,
+        "median_seconds": 5.3796574999869335,
+        "p95_seconds": 5.4974987000459805,
+        "response_bytes": 4825,
+        "cpu_seconds": 10.71875,
+        "rss_bytes": 98529280,
+        "sheet_loads": 0
+      }
+    ],
+    "function_ast_unchanged": true
+  },
+  "allocations": {
+    "before": {
+      "read_only": false,
+      "tracemalloc_current_peak": [
+        55017189,
+        84604056
+      ],
+      "instrumented_seconds": 28.228157500037923
+    },
+    "after": {
+      "read_only": true,
+      "tracemalloc_current_peak": [
+        34703923,
+        74875172
+      ],
+      "instrumented_seconds": 30.20706019998761
+    }
+  },
+  "stability": {
+    "waves": 12,
+    "heavy_requests": 36,
+    "peak_rss_bytes": 191012864,
+    "rss_after_gc": [
+      143249408,
+      143646720,
+      144187392,
+      144465920,
+      148598784,
+      153972736,
+      154226688,
+      154918912,
+      154316800,
+      154533888,
+      154357760,
+      154828800
+    ],
+    "health_p95_seconds": 0.06746160000329837,
+    "health_max_seconds": 0.06746160000329837,
+    "heavy_median_seconds": 0.49045170002500527,
+    "scoring_builds": 1,
+    "max_simultaneous_scoring_builds": 1,
+    "cpu_seconds": 22.671875,
+    "limitations": "Flask test clients on Windows; includes GIL contention but excludes HTTP worker queueing and Render CPU/memory limits"
+  },
+  "browser": [
+    {
+      "version": "before",
+      "device": "desktop",
+      "cache": "cold",
+      "visible_ms": 812,
+      "ready_ms": 6840
+    },
+    {
+      "version": "before",
+      "device": "desktop",
+      "cache": "warm",
+      "visible_ms": 763,
+      "ready_ms": 2785
+    },
+    {
+      "version": "before",
+      "device": "mobile",
+      "cache": "cold",
+      "visible_ms": 700,
+      "ready_ms": 7134
+    },
+    {
+      "version": "before",
+      "device": "mobile",
+      "cache": "warm",
+      "visible_ms": 643,
+      "ready_ms": 2852
+    },
+    {
+      "version": "after",
+      "device": "desktop",
+      "cache": "cold",
+      "visible_ms": 1190,
+      "ready_ms": 6226,
+      "insights_body_ms": 49,
+      "json_parse_and_restore_ms": 80
+    },
+    {
+      "version": "after",
+      "device": "desktop",
+      "cache": "warm",
+      "visible_ms": 819,
+      "ready_ms": 2033,
+      "insights_body_ms": 47,
+      "json_parse_and_restore_ms": 55
+    },
+    {
+      "version": "after",
+      "device": "mobile",
+      "cache": "cold",
+      "visible_ms": 970,
+      "ready_ms": 6629,
+      "insights_body_ms": 48,
+      "json_parse_and_restore_ms": 80
+    },
+    {
+      "version": "after",
+      "device": "mobile",
+      "cache": "warm",
+      "visible_ms": 576,
+      "ready_ms": 1584,
+      "insights_body_ms": 39,
+      "json_parse_and_restore_ms": 67
+    }
+  ],
+  "limitations": [
+    "Native Windows Flask test clients; no Render CPU or RAM limit and no Gunicorn HTTP queue.",
+    "Browser tests use real IAB Chromium with 1366x900 and 390x844 viewports; no mobile hardware, network or CPU throttling.",
+    "Browser data are one navigation per case, not statistically established latency percentiles.",
+    "Small backend sample sizes and host variation; adjacent followup control separates unchanged-code variation from the target improvements."
+  ],
+  "decision": {
+    "merge": "GO after review, preserving [skip render] in the merge commit; no merge performed",
+    "production": "NO-GO until constrained staging and explicit user approval"
+  }
+}
