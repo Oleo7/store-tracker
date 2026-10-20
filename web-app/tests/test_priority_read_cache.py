@@ -63,7 +63,8 @@ class PriorityReadCacheTests(TestCase):
     def test_compact_response_is_lossless_including_missing_and_null_fields(self):
         records = {'a': {'score': 0, 'flag': False, 'list_guidance': {'x': ['a']}, 'customer_guidance': {'x': ['a']}},
                    'b': {'score': None, 'flag': False, 'list_guidance': {'x': ['b']}, 'customer_guidance': {'x': ['b']}},
-                   'c': {'score': 0, 'flag': True, 'other': 'unique'}}
+                   'c': {'score': 0, 'flag': True, 'other': 'unique', 'list_guidance': None},
+                   'd': {'score': 0, 'flag': False, 'list_guidance': None, 'customer_guidance': None}}
         wire = compact_records(records)
         restored = {}
         for cid, row in wire['__by_customer_id'].items():
@@ -80,7 +81,8 @@ class PriorityReadCacheTests(TestCase):
             first['customers'][0]['sales_person'] = 'Other seller'
         with self.assertRaises(TypeError):
             first['priorities'][0]['list_guidance']['can_contact_now'] = True
-        first['priorities'][0]['sales_person'] = 'Local projection'
+        with self.assertRaises(TypeError):
+            first['priorities'][0]['sales_person'] = 'Local projection'
         second = self.snapshot(read_only=True)
         self.assertNotEqual(second['priorities'][0]['sales_person'], 'Local projection')
         mutable = self.snapshot()
@@ -117,6 +119,15 @@ class PriorityReadCacheTests(TestCase):
             with patch.object(a._fresh_sheet_scope, 'entry', (self.book, {}), create=True):
                 self.snapshot(as_of=NOW, live=True)
             self.assertEqual(build.call_count, 2)
+
+    def test_fresh_mutation_scope_does_not_wait_for_a_shared_read_builder(self):
+        a._priority_snapshot_loading.add(('blocked-read',))
+        try:
+            with patch.object(a._fresh_sheet_scope, 'entry', (self.book, {}), create=True):
+                result = self.snapshot(as_of=NOW)
+            self.assertTrue(result['priorities'])
+        finally:
+            a._priority_snapshot_loading.discard(('blocked-read',))
 
     def test_snapshot_retention_is_bounded(self):
         for i in range(5):

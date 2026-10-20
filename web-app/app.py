@@ -7101,8 +7101,7 @@ def priority_planned_activity_time_signature(rows, *, now=None):
 
 def priority_snapshot_presentation(payload, *, read_only):
     if read_only:
-        return {**payload, "_read_as_of": payload["_calculated_as_of"],
-                "priorities": [dict(row) for row in payload["priorities"]]}
+        return {**payload, "_read_as_of": payload["_calculated_as_of"]}
     return copy.deepcopy({k: v for k, v in payload.items() if not k.startswith("_")})
 
 
@@ -7168,8 +7167,11 @@ def get_authoritative_priority_snapshot(
                     break
                 base_payload = entry[0]
             # Bound both retained snapshots and CPU-heavy concurrent builds.
-            if not _priority_snapshot_loading:
-                _priority_snapshot_loading.add(key)
+            if not cache_enabled or not _priority_snapshot_loading:
+                # Fresh mutation scopes must not queue behind a shared read:
+                # their transaction's source checks are deliberately current.
+                if cache_enabled:
+                    _priority_snapshot_loading.add(key)
                 payload = None
                 record_performance_step("priority.cache_miss_wait", cache_started)
                 break
@@ -7694,8 +7696,6 @@ def get_planning_attention():
         now = stockholm_now()
         snapshot = get_authoritative_priority_snapshot(spreadsheet, today=now.date(), as_of=now, live=True, read_only=True)
         state = snapshot["customer_state"]
-        priorities = apply_workflow_suppressions(snapshot["priorities"], priority_workflow_suppressions(spreadsheet, snapshot["priorities"]))
-        by_id = {str(item.get("customer_id") or ""): item for item in priorities}
         items = attention_items(state, as_of=now, owner_user_name=owner.get("user_name"))
         try:
             offset = max(0, int(request.args.get("offset", 0)))
@@ -7704,6 +7704,10 @@ def get_planning_attention():
             return planning_error("invalid_pagination", "Sidindelningen är ogiltig.", 400)
         total = len(items)
         items = items[offset:offset + limit]
+        page_customer_ids = {item["customer_id"] for item in items}
+        priorities = [dict(row) for row in snapshot["priorities"] if str(row.get("customer_id") or "") in page_customer_ids]
+        priorities = apply_workflow_suppressions(priorities, priority_workflow_suppressions(spreadsheet, priorities))
+        by_id = {str(item.get("customer_id") or ""): item for item in priorities}
         decision_inputs = {}
         for item in items:
             priority = by_id.get(item["customer_id"], {})
@@ -8031,7 +8035,7 @@ def get_customer_insights():
         for customer in customers
     }
     priority_customers = [
-        priority for priority in priority_customers
+        dict(priority) for priority in priority_customers
         if str(priority.get("customer_id") or "").strip()
         in accessible_customer_ids
     ]
@@ -9319,8 +9323,11 @@ def planning_activities():
         try:
             activity_snapshot = get_authoritative_priority_snapshot(spreadsheet, today=now.date(), as_of=now,
                                       planned_activity_rows=[row for _index, row in activity_rows], live=True, read_only=True)
-            visible_priorities = apply_workflow_suppressions(activity_snapshot["priorities"],
-                                  priority_workflow_suppressions(spreadsheet, activity_snapshot["priorities"]))
+            week_customer_ids = {str(activity.get("customer_id") or "") for activity in activities}
+            week_priorities = [dict(row) for row in activity_snapshot["priorities"]
+                               if str(row.get("customer_id") or "") in week_customer_ids]
+            visible_priorities = apply_workflow_suppressions(week_priorities,
+                                  priority_workflow_suppressions(spreadsheet, week_priorities))
             activity_priorities = {str(item.get("customer_id") or ""): item for item in visible_priorities}
         except Exception:
             # Keep the calendar readable during a model outage, but do not

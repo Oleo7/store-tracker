@@ -100,7 +100,7 @@ def compact_records(records):
     """
     rows = {cid: dict(row) for cid, row in records.items()}
     for row in rows.values():
-        if 'list_guidance' in row and row.get('customer_guidance') == row['list_guidance']:
+        if isinstance(row.get('list_guidance'), dict) and 'customer_guidance' in row and row['customer_guidance'] == row['list_guidance']:
             row.pop('customer_guidance', None)
             row['__guidance_alias'] = True
     defaults = {}
