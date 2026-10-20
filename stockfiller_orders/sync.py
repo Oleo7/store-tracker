@@ -258,7 +258,6 @@ def build_sync_window(args: argparse.Namespace, state: dict[str, str], now: date
     )
 
 
-@coordinated_write
 def sync_orders(
     config: SyncConfig,
     window: SyncWindow,
@@ -268,13 +267,26 @@ def sync_orders(
     update_state: bool = True,
     customer_sync_mode: str | None = None,
 ) -> SyncResult:
+    # Do not hold the distributed Google Sheets lease across Stockfiller HTTP.
+    client = StockfillerClient(config)
+    orders = dedupe_orders_by_reference(fetch_orders_for_window(client, window))
+    return _sync_fetched_orders(
+        config, window, orders, dry_run=dry_run, spreadsheet=spreadsheet,
+        target_worksheet=target_worksheet, update_state=update_state,
+        customer_sync_mode=customer_sync_mode,
+    )
+
+
+@coordinated_write
+def _sync_fetched_orders(
+    config: SyncConfig, window: SyncWindow, orders, *,
+    dry_run=False, spreadsheet=None, target_worksheet="order_rows",
+    update_state=True, customer_sync_mode=None,
+):
     spreadsheet = spreadsheet or open_spreadsheet(config)
     order_sheet = get_or_create_worksheet(spreadsheet, target_worksheet, rows=1000, cols=len(ORDER_COLUMNS))
     existing_values = order_sheet.get_all_values(value_render_option="UNFORMATTED_VALUE")
     headers, existing_rows = values_to_dicts(existing_values)
-
-    client = StockfillerClient(config)
-    orders = dedupe_orders_by_reference(fetch_orders_for_window(client, window))
     replace_references = {text(order.get("reference")) for order in orders if text(order.get("reference"))}
     output_rows = flatten_orders(orders)
 
