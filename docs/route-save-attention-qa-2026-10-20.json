@@ -1,0 +1,359 @@
+{
+  "base_commit": "0a23f541964c0b22e3bd7009d849d377b13b5073",
+  "snapshot_sha256": "d49cedc8b5367128f68a1884bd7d7911bcb82c222f8a67fd0fa1d390d6e60449",
+  "snapshot_as_of": "2026-10-20T14:25:23.967531+02:00",
+  "source_rows": {
+    "customers_enriched": 2110,
+    "users": 6,
+    "order_rows": 3351,
+    "sales_activities": 2027,
+    "customer_state_events": 14,
+    "planned_activities": 1034,
+    "planning_suggestions": 56,
+    "email_messages": 26,
+    "email_recipients": 38,
+    "email_events": 120,
+    "score_events": 136,
+    "route_proposals": 6,
+    "route_optimization_runs": 14
+  },
+  "v35_priority_sha256": "3a2e899f20e23623378785d56b634912b42eca5fd02627f166bd17dfd450b4a8",
+  "v35_scores_identical_to_master": true,
+  "attention": {
+    "before": 64,
+    "after": 57,
+    "hidden": 7,
+    "before_by_owner": {
+      "Sofia": 46,
+      "Johan": 16,
+      "Olle": 1,
+      "Daniel": 1
+    },
+    "after_by_owner": {
+      "Sofia": 39,
+      "Johan": 16,
+      "Daniel": 1,
+      "Olle": 1
+    },
+    "obligation_count_before": 1762,
+    "obligation_count_after": 1762,
+    "source_state_unchanged": true
+  },
+  "route_benchmark_as_of": "2026-10-20T10:00:00+02:00",
+  "route_before": [
+    {
+      "owner": "Olle",
+      "route_date": "2026-10-27",
+      "rounds": 3,
+      "median_save_seconds": 7.737127200001851,
+      "p95_save_seconds": 9.791102899995167,
+      "median_cpu_seconds": 7.421875,
+      "peak_rss_bytes": 195039232,
+      "customers_scored_per_save": [
+        2110,
+        2110,
+        2110
+      ],
+      "new_visit_counts": [
+        8,
+        8,
+        8
+      ],
+      "duplicate_retry_verified": true,
+      "source_contacts_orders_permissions_unchanged": true,
+      "original_activity_ids_retained": true
+    },
+    {
+      "owner": "Johan",
+      "route_date": "2026-10-27",
+      "rounds": 3,
+      "median_save_seconds": 8.177771500020754,
+      "p95_save_seconds": 10.260080199979711,
+      "median_cpu_seconds": 7.703125,
+      "peak_rss_bytes": 199491584,
+      "customers_scored_per_save": [
+        2110,
+        2110,
+        2110
+      ],
+      "new_visit_counts": [
+        8,
+        8,
+        8
+      ],
+      "duplicate_retry_verified": true,
+      "source_contacts_orders_permissions_unchanged": true,
+      "original_activity_ids_retained": true
+    },
+    {
+      "owner": "Daniel",
+      "route_date": "2026-10-28",
+      "rounds": 3,
+      "median_save_seconds": 8.259065499994904,
+      "p95_save_seconds": 8.875570599979255,
+      "median_cpu_seconds": 7.6875,
+      "peak_rss_bytes": 201072640,
+      "customers_scored_per_save": [
+        2110,
+        2110,
+        2110
+      ],
+      "new_visit_counts": [
+        7,
+        7,
+        7
+      ],
+      "duplicate_retry_verified": true,
+      "source_contacts_orders_permissions_unchanged": true,
+      "original_activity_ids_retained": true
+    },
+    {
+      "owner": "Sofia",
+      "route_date": "2026-10-27",
+      "rounds": 3,
+      "median_save_seconds": 7.506326300033834,
+      "p95_save_seconds": 7.8731028999900445,
+      "median_cpu_seconds": 7.3125,
+      "peak_rss_bytes": 204124160,
+      "customers_scored_per_save": [
+        2110,
+        2110,
+        2110
+      ],
+      "new_visit_counts": [
+        7,
+        7,
+        7
+      ],
+      "duplicate_retry_verified": true,
+      "source_contacts_orders_permissions_unchanged": true,
+      "original_activity_ids_retained": true
+    }
+  ],
+  "route_after": [
+    {
+      "owner": "Olle",
+      "route_date": "2026-10-27",
+      "rounds": 3,
+      "median_save_seconds": 2.43784929998219,
+      "p95_save_seconds": 2.507572299975436,
+      "median_cpu_seconds": 2.40625,
+      "peak_rss_bytes": 183480320,
+      "customers_scored_per_save": [
+        8,
+        8,
+        8
+      ],
+      "new_visit_counts": [
+        8,
+        8,
+        8
+      ],
+      "duplicate_retry_verified": true,
+      "source_contacts_orders_permissions_unchanged": true,
+      "original_activity_ids_retained": true
+    },
+    {
+      "owner": "Johan",
+      "route_date": "2026-10-27",
+      "rounds": 3,
+      "median_save_seconds": 2.562066499958746,
+      "p95_save_seconds": 2.5636353000300005,
+      "median_cpu_seconds": 2.4375,
+      "peak_rss_bytes": 190648320,
+      "customers_scored_per_save": [
+        8,
+        8,
+        8
+      ],
+      "new_visit_counts": [
+        8,
+        8,
+        8
+      ],
+      "duplicate_retry_verified": true,
+      "source_contacts_orders_permissions_unchanged": true,
+      "original_activity_ids_retained": true
+    },
+    {
+      "owner": "Daniel",
+      "route_date": "2026-10-28",
+      "rounds": 3,
+      "median_save_seconds": 2.9860602999688126,
+      "p95_save_seconds": 3.193243400019128,
+      "median_cpu_seconds": 2.796875,
+      "peak_rss_bytes": 196325376,
+      "customers_scored_per_save": [
+        7,
+        7,
+        7
+      ],
+      "new_visit_counts": [
+        7,
+        7,
+        7
+      ],
+      "duplicate_retry_verified": true,
+      "source_contacts_orders_permissions_unchanged": true,
+      "original_activity_ids_retained": true
+    },
+    {
+      "owner": "Sofia",
+      "route_date": "2026-10-27",
+      "rounds": 3,
+      "median_save_seconds": 2.523074100026861,
+      "p95_save_seconds": 2.647898399969563,
+      "median_cpu_seconds": 2.4375,
+      "peak_rss_bytes": 193277952,
+      "customers_scored_per_save": [
+        7,
+        7,
+        7
+      ],
+      "new_visit_counts": [
+        7,
+        7,
+        7
+      ],
+      "duplicate_retry_verified": true,
+      "source_contacts_orders_permissions_unchanged": true,
+      "original_activity_ids_retained": true
+    }
+  ],
+  "paired_attention": [
+    {
+      "role": "admin",
+      "concurrency": 1,
+      "rounds": 10,
+      "before_median_seconds": 0.12656765000429004,
+      "after_median_seconds": 0.13159505001385696,
+      "before_median_cpu_seconds_per_request": 0.125,
+      "after_median_cpu_seconds_per_request": 0.1328125,
+      "warm_priority_builds": 0,
+      "rss_bytes": 139522048
+    },
+    {
+      "role": "admin",
+      "concurrency": 4,
+      "rounds": 10,
+      "before_median_seconds": 0.379408050008351,
+      "after_median_seconds": 0.3873499500041362,
+      "before_median_cpu_seconds_per_request": 0.130859375,
+      "after_median_cpu_seconds_per_request": 0.1328125,
+      "warm_priority_builds": 0,
+      "rss_bytes": 143593472
+    },
+    {
+      "role": "seller",
+      "concurrency": 1,
+      "rounds": 10,
+      "before_median_seconds": 0.12674944999162108,
+      "after_median_seconds": 0.12222324998583645,
+      "before_median_cpu_seconds_per_request": 0.1328125,
+      "after_median_cpu_seconds_per_request": 0.125,
+      "warm_priority_builds": 0,
+      "rss_bytes": 142069760
+    },
+    {
+      "role": "seller",
+      "concurrency": 4,
+      "rounds": 10,
+      "before_median_seconds": 0.35651009998400696,
+      "after_median_seconds": 0.3620078999665566,
+      "before_median_cpu_seconds_per_request": 0.119140625,
+      "after_median_cpu_seconds_per_request": 0.126953125,
+      "warm_priority_builds": 0,
+      "rss_bytes": 144748544
+    }
+  ],
+  "local_web_tests": 1161,
+  "local_root_tests": 123,
+  "production_writes": 0,
+  "deployments": 0,
+  "new_render_resources": 0,
+  "limitations": [
+    "Offline Sheets adapters; actual Redis protocol tested against local emulator.",
+    "No live Google test-sheet/Render integration or production network latency measurement.",
+    "Render inventory completed: no Key Value instance; coordinated writer rollout and external-writer confirmation remain required before production.",
+    "Manual Sheets writes and in-flight writes after lease loss cannot be made serializable by a Redis lease."
+  ],
+  "final_snapshot_replay_as_of": "2026-10-20T14:25:23.967531+02:00",
+  "final_snapshot_replay": [
+    {
+      "owner": "Olle",
+      "route_date": "2026-10-27",
+      "new_visit_counts": [
+        8
+      ],
+      "duplicate_retry_verified": true,
+      "source_contacts_orders_permissions_unchanged": true,
+      "original_activity_ids_retained": true
+    },
+    {
+      "owner": "Johan",
+      "route_date": "2026-10-27",
+      "new_visit_counts": [
+        8
+      ],
+      "duplicate_retry_verified": true,
+      "source_contacts_orders_permissions_unchanged": true,
+      "original_activity_ids_retained": true
+    },
+    {
+      "owner": "Daniel",
+      "route_date": "2026-10-28",
+      "new_visit_counts": [
+        7
+      ],
+      "duplicate_retry_verified": true,
+      "source_contacts_orders_permissions_unchanged": true,
+      "original_activity_ids_retained": true
+    },
+    {
+      "owner": "Sofia",
+      "route_date": "2026-10-27",
+      "new_visit_counts": [
+        7
+      ],
+      "duplicate_retry_verified": true,
+      "source_contacts_orders_permissions_unchanged": true,
+      "original_activity_ids_retained": true
+    }
+  ],
+  "isolated_render_web_root_import_verified": true,
+  "render_inventory": {
+    "workspace": "CRM Polarbär",
+    "workspace_id": "tea-d7c9rs3bc2fs73eqm9lg",
+    "region": "oregon",
+    "key_value_instances": 0,
+    "production_changes": 0,
+    "web_live_commit": "0a23f541964c0b22e3bd7009d849d377b13b5073",
+    "cron_live_commit": "6b97c4d77b19010ae955cb84f3dbf741fe4a0060",
+    "services": [
+      {
+        "id": "srv-d7d0rppkh4rs739glhj0",
+        "role": "web",
+        "root_dir": "web-app"
+      },
+      {
+        "id": "crn-d8c2qkurnols739gdr20",
+        "role": "stockfiller",
+        "root_dir": ""
+      },
+      {
+        "id": "crn-d7cfhqho3t8c73dp9heg",
+        "role": "geotagging",
+        "root_dir": ""
+      },
+      {
+        "id": "crn-d8lclet8nd3s73bkpu20",
+        "role": "storepoint",
+        "root_dir": ""
+      }
+    ],
+    "existing_build_roots_compatible": true,
+    "paid_resource_created": false,
+    "proposed_key_value_mb": 256,
+    "proposed_key_value_usd_per_month": 10
+  }
+}

@@ -53,7 +53,7 @@ class PlanningLockReleaseTests(TestCase):
         self.assertIsNone(production["worker_count"])
         self.assertEqual(production["reason"], "worker_count_unknown")
 
-    def test_distributed_lock_url_never_simulates_a_lock(self):
+    def test_distributed_lock_url_requires_sheet_identity(self):
         state = app_module.planning_lock_health({
             "APP_ENV": "development",
             "WEB_CONCURRENCY": "1",
@@ -61,10 +61,10 @@ class PlanningLockReleaseTests(TestCase):
         })
 
         self.assertFalse(state["safe"])
-        self.assertEqual(state["mode"], "process_local")
+        self.assertEqual(state["mode"], "redis_lease")
         self.assertEqual(
             state["reason"],
-            "distributed_lock_not_implemented",
+            "distributed_lock_sheet_identity_missing",
         )
 
     def test_pilot_startup_requires_one_worker_and_instance(self):

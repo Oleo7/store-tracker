@@ -1,0 +1,79 @@
+const {chromium}=require('playwright');
+const assert=require('node:assert/strict');
+const base=process.env.ROUTE_ATTENTION_HARNESS_URL||'http://127.0.0.1:5088';
+assert.ok(['127.0.0.1','localhost'].includes(new URL(base).hostname),'Only isolated local CRM');
+(async()=>{
+ const browser=await chromium.launch({headless:true,...(process.env.CHROMIUM_EXECUTABLE?{executablePath:process.env.CHROMIUM_EXECUTABLE}:{})});
+ try {
+  for(const width of [390,1440]){
+   const context=await browser.newContext({viewport:{width,height:900},timezoneId:'Europe/Stockholm',geolocation:{latitude:57.7,longitude:11.9},permissions:['geolocation']});
+   const page=await context.newPage();const errors=[];page.on('pageerror',e=>errors.push(String(e)));
+   const login=await page.request.post(base+'/login',{data:{user_name:'sofia',password:'secret'}});
+   assert.equal(login.status(),200,await login.text());
+   await page.goto(base+'/__test__/login');
+   await page.waitForFunction(()=>typeof insightsLoaded!=='undefined'&&insightsLoaded);
+   await page.locator('#planning-mode-btn').click();
+   await page.waitForFunction(()=>planningAttention.loaded&&!planningAttentionLoading);
+   assert.equal(await page.locator('#planning-backlog .planning-attention-item').count(),1);
+   assert.match(await page.locator('#planning-backlog').innerText(),/2 äldre missade aktiviteter finns i historiken/);
+   await page.locator('#planning-attention-search').fill('hittas-inte');
+   await page.waitForFunction(()=>planningAttention.total===0&&!planningAttentionLoading);
+   await page.locator('#planning-attention-search').fill('Sydport');
+   await page.waitForFunction(()=>planningAttention.total===1&&!planningAttentionLoading);
+   await page.locator('#planning-attention-search').fill('');
+   await page.request.post(base+'/__test__/service');
+   await page.evaluate(()=>loadPlanningAttention());
+   await page.waitForFunction(()=>planningAttention.total===2&&!planningAttentionLoading);
+   assert.match(await page.locator('#planning-backlog').innerText(),/Separat reklamation/);
+   await page.request.post(base+'/__test__/reset-route-attention');
+   await page.evaluate(()=>loadPlanningWeek());
+   await page.waitForFunction(()=>!planningLoading);
+   const date=await page.evaluate(()=>planningAddDays(planningTodayKey(),1));
+   await page.locator('#planning-date-jump').fill(date);
+   await page.locator('#planning-date-jump').dispatchEvent('change');
+   await page.waitForFunction(()=>!planningLoading);
+   await page.locator('#planning-route-preview-btn').click();
+   await page.locator('#planning-route-apply-btn').waitFor({timeout:30000});
+   let applyBody;const applyRequests=[];
+   page.on('request',r=>{if(new URL(r.url()).pathname==='/planning/route-apply'){applyBody=r.postDataJSON();applyRequests.push(applyBody);}});
+   await page.request.post(base+'/__test__/fail-activation');
+   await page.locator('#planning-route-apply-btn').click();
+   await page.waitForFunction(()=>document.getElementById('planning-route-apply-error').textContent.length>0);
+   const stagedResponse=await page.request.get(base+`/planning/activities?start=${date}&end=${date}&include_followups=0`);
+   const stagedPayload=await stagedResponse.json();
+   assert.equal((stagedPayload.activities||stagedPayload.data?.activities||[]).filter(a=>a.source==='route'&&a.status==='planned').length,0);
+   await page.locator('#planning-route-apply-btn').click();
+   await page.waitForFunction(()=>!document.getElementById('planning-modal-backdrop').classList.contains('open')&&!planningLoading);
+   const response=await page.request.get(base+`/planning/activities?start=${date}&end=${date}&include_followups=0`);
+   assert.equal(response.status(),200);const payload=await response.json();
+   const activities=payload.activities||payload.data?.activities||[];
+   assert.equal(activities.filter(a=>a.source==='route'&&a.status==='planned').length,1);
+   assert.equal(applyRequests[0].client_request_id,applyRequests[1].client_request_id);
+   const retry=await page.request.post(base+'/planning/route-apply',{data:applyBody});
+   assert.equal(retry.status(),200,await retry.text());assert.equal((await retry.json()).duplicate,true);
+   await page.request.post(base+'/__test__/reset-route-attention');
+   await page.evaluate(()=>loadPlanningWeek());await page.waitForFunction(()=>!planningLoading);
+   await page.locator('#planning-route-preview-btn').click();
+   await page.locator('#planning-route-apply-btn').waitFor();
+   await page.request.post(base+'/__test__/ban');
+   await page.locator('#planning-route-apply-btn').click();
+   await page.waitForFunction(()=>document.getElementById('planning-route-apply-error').textContent.length>0);
+   assert.match(await page.locator('#planning-route-apply-error').innerText(),/ändrades|Kontakt|kontakt/);
+   const blocked=await page.request.get(base+`/planning/activities?start=${date}&end=${date}&include_followups=0`);
+   const blockedPayload=await blocked.json();
+   assert.equal((blockedPayload.activities||blockedPayload.data?.activities||[]).filter(a=>a.source==='route'&&a.status==='planned').length,0);
+   await page.evaluate(()=>closePlanningModal());
+   await page.request.post(base+'/__test__/reset-route-attention');
+   await page.evaluate(()=>loadPlanningAttention());
+   const item=await page.evaluate(()=>planningAttention.items[0]);
+   const cancel=await page.request.post(base+'/customer-obligations/action',{data:{
+    client_request_id:`browser-cancel-${width}`,customer_id:item.customer_id,obligation_id:item.obligation_id,
+    expected_revision:item.revision,action:'cancel',reason:'Uppföljningen avbokad i isolerat test'}});
+   assert.equal(cancel.status(),200,await cancel.text());
+   await page.evaluate(()=>loadPlanningAttention());assert.equal(await page.locator('#planning-backlog .planning-attention-item').count(),0);
+   assert.deepEqual(errors,[]);
+   console.log(`${width}px: grouping, history count, search, separate service, route preview/save/retry, new ban and no older resurrection PASS`);
+   await context.close();
+  }
+ }finally{await browser.close();}
+})().catch(e=>{console.error(e);process.exit(1);});

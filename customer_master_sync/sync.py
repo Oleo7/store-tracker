@@ -13,6 +13,8 @@ import unicodedata
 import uuid
 from typing import Any, Iterable
 
+from crm_write_coordination import coordinated_write, guard_client
+
 import gspread
 from dotenv import load_dotenv
 from google.oauth2.service_account import Credentials
@@ -1199,6 +1201,7 @@ def _write_review_sheet(
     worksheet.update(values=values, range_name="A1", raw=True)
 
 
+@coordinated_write
 def run_customer_sync(
     spreadsheet,
     *,
@@ -1250,7 +1253,7 @@ def open_spreadsheet(config: CustomerSyncConfig):
         config.google_credentials,
         scopes=SCOPES,
     )
-    return gspread.authorize(credentials).open_by_key(config.sheet_key)
+    return guard_client(gspread.authorize(credentials)).open_by_key(config.sheet_key)
 
 
 def _read_state(spreadsheet) -> dict[str, str]:
@@ -1266,6 +1269,7 @@ def _read_state(spreadsheet) -> dict[str, str]:
     }
 
 
+@coordinated_write
 def _write_state(spreadsheet, state: dict[str, str]) -> None:
     try:
         worksheet = spreadsheet.worksheet(STATE_SHEET_NAME)

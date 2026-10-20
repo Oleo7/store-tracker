@@ -48,9 +48,12 @@ class CustomerObligationApiTests(PlanningApiTestCase):
     def test_read_only_attention_strict_dates_and_separate_scopes(self):
         self.source()
         self.source("today-promise", "2026-07-27")
-        self.append_planning_row(planned_activity_id="today", scheduled_at="2026-07-27T08:00:00+02:00")
+        self.append_planning_row(planned_activity_id="today", scheduled_at="2026-07-27T08:00:00+02:00",
+                                 customer_agreement_confirmed="Y")
         self.append_planning_row(planned_activity_id="missed", scheduled_at="2026-07-24T08:00:00+02:00")
-        self.append_planning_row(planned_activity_id="unrelated-future", scheduled_at="2026-07-29T08:00:00+02:00")
+        # This future booking is a distinct customer promise, not another routine follow-up.
+        self.append_planning_row(planned_activity_id="unrelated-future", scheduled_at="2026-07-29T08:00:00+02:00",
+                                 customer_agreement_confirmed="Y")
         before = {name: copy.deepcopy(sheet.values) for name, sheet in self.spreadsheet.sheets.items()}
         payload = self.attention()
         self.insight()

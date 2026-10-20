@@ -2,6 +2,10 @@ import os
 import logging
 import json
 import math
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from crm_write_coordination import guard_client
 import googlemaps
 from dotenv import load_dotenv
 
@@ -9,7 +13,6 @@ load_dotenv()
 import pandas as pd
 import gspread
 from google.oauth2.service_account import Credentials
-from gspread_dataframe import set_with_dataframe
 
 logging.basicConfig(
     level=logging.INFO,
@@ -92,57 +95,30 @@ def get_location_info(store_name: str, gmaps: googlemaps.Client) -> tuple:
     return city, street, number, postal, region, lat, lng
 
 
+from crm_geocoding import apply_geocoding_results
+
+
 def main():
-    # Auth
     creds_dict = json.loads(os.environ["GOOGLE_CREDENTIALS"])
     creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
-    client = gspread.authorize(creds)
+    client = guard_client(gspread.authorize(creds))
     spreadsheet = client.open_by_key(SHEET_KEY)
-
-    # Read customers_enriched directly
-    log.info("Reading customers_enriched sheet...")
-    enriched_sheet = spreadsheet.worksheet("customers_enriched")
-    df = pd.DataFrame(enriched_sheet.get_all_records())
-    for col in ["city_google", "address_google", "address_number_google",
-                "postal_code_google", "region_google", "enriched", "modified"]:
-        df[col] = df[col].astype(object)
-    df["latitude_google"] = parse_coordinate_column(df["latitude_google"], "latitude")
-    df["longitude_google"] = parse_coordinate_column(df["longitude_google"], "longitude")
-    log.info(f"Loaded {len(df)} rows")
-
-    # Rows where enriched column is not True need processing
-    needs_enrichment = df[df["enriched"].astype(str).str.lower() != "true"].copy()
-    log.info(f"{len(needs_enrichment)} rows to enrich")
-
-    if needs_enrichment.empty:
-        log.info("Nothing to do — all rows already enriched")
-        return
-
-    # Geocode
+    sheet = spreadsheet.worksheet("customers_enriched")
+    values = sheet.get_all_values()
+    headers = values[0]
+    source = [dict(zip(headers, row + [''] * (len(headers)-len(row)))) for row in values[1:]]
+    pending = [row for row in source if str(row.get('enriched')).lower() != 'true']
+    log.info('Geocoding %s customer rows', len(pending))
     gmaps = googlemaps.Client(key=GOOGLE_MAPS_API_KEY)
-    enriched_cols = ["city_google", "address_google", "address_number_google",
-                     "postal_code_google", "region_google", "latitude_google", "longitude_google"]
-    total = len(needs_enrichment)
-    results = []
-    for i, (_, row) in enumerate(needs_enrichment.iterrows()):
-        results.append(get_location_info(row["customer"], gmaps))
-        if (i + 1) % 10 == 0 or (i + 1) == total:
-            log.info(f"Progress: {i + 1}/{total}")
-
-    needs_enrichment[enriched_cols] = pd.DataFrame(results, index=needs_enrichment.index)
-    needs_enrichment["enriched"] = True
-    needs_enrichment["modified"] = ""
-
-    # Merge back and write the full sheet
-    df.update(needs_enrichment)
-
-    # Write coordinates as numeric values so Sheets cannot treat decimal commas as thousands separators.
-    for col in ["latitude_google", "longitude_google"]:
-        df[col] = pd.to_numeric(df[col], errors="coerce").round(7)
-        df[col] = df[col].where(df[col].notna(), "")
-
-    set_with_dataframe(enriched_sheet, df)
-    log.info(f"Done — wrote {len(df)} total rows to 'customers_enriched'")
+    results = {}
+    for row in pending:
+        cid = str(row.get('customer_id') or '').strip()
+        if cid:
+            geo = get_location_info(row['customer'], gmaps)
+            if geo[-2] is not None and geo[-1] is not None:
+                results[cid] = geo
+    count = apply_geocoding_results(sheet, source, results, sheet_id=SHEET_KEY)
+    log.info('Updated geography for %s unchanged customers; conflicts wait for next run', count)
 
 
 if __name__ == "__main__":

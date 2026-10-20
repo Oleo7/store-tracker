@@ -20,7 +20,7 @@ from test_planning import FakeWorksheet, default_spreadsheet
 
 
 class RejectingLock:
-    def acquire(self):
+    def acquire(self, *args, **kwargs):
         raise AssertionError("read path acquired planning write lock")
 
     def release(self):
@@ -33,8 +33,8 @@ class TrackingRLock:
         self.acquire_count = 0
         self.release_count = 0
 
-    def acquire(self):
-        acquired = self.lock.acquire()
+    def acquire(self, *args, **kwargs):
+        acquired = self.lock.acquire(*args, **kwargs)
         self.acquire_count += 1
         return acquired
 

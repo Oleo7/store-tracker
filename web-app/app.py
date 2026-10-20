@@ -40,6 +40,10 @@ import threading
 import time
 import unicodedata
 import uuid
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from crm_write_coordination import (crm_write_lock, coordinated_write, guard_client,
+                                    lock_url, lock_key, assert_write_owned, CoordinationError)
 from zoneinfo import ZoneInfo
 from zipfile import ZIP_DEFLATED, ZipFile
 from xml.sax.saxutils import escape as xml_escape
@@ -79,6 +83,7 @@ from customer_obligations import (
     build_customer_state, attention_items, stable_contact_source_id,
     obligation_id_for_activity, obligation_id_for_contact,
     latest_state_events, event_payload, event_revision,
+    commitment_evidence,
 )
 from contact_channel import recommend_contact_channel
 from geocoding import geocode_address
@@ -237,11 +242,6 @@ def planning_lock_health(environ=None):
         )
         if value is not None
     }
-    distributed_lock_configured = bool(
-        str(
-            environment.get("PLANNING_DISTRIBUTED_LOCK_URL") or ""
-        ).strip()
-    )
     instance_count = _positive_int(
         environment.get("APP_INSTANCE_COUNT")
         or environment.get("REPLICA_COUNT")
@@ -260,8 +260,13 @@ def planning_lock_health(environ=None):
         worker_count = 1
         reason = ""
 
+    distributed_lock_configured = bool(lock_url(environment))
     if distributed_lock_configured:
-        reason = "distributed_lock_not_implemented"
+        try:
+            lock_key(environment=environment)
+            reason = ""
+        except CoordinationError:
+            reason = "distributed_lock_sheet_identity_missing"
     elif reason == "conflicting_worker_configuration":
         pass
     elif worker_count is not None and worker_count > 1:
@@ -273,7 +278,9 @@ def planning_lock_health(environ=None):
 
     safe = not reason
     return {
-        "mode": "process_local",
+        "mode": "redis_lease" if distributed_lock_configured else "process_local",
+        "manual_edits_exclusive": False,
+        "automated_writers_confirmed": environment.get("CRM_AUTOMATED_WRITERS_COORDINATED", "").lower() == "true",
         "worker_count": worker_count,
         "instance_count": instance_count,
         "safe": safe,
@@ -809,13 +816,32 @@ def fresh_decision_reads(spreadsheet):
     """Uncached request-local source reads under the caller's write lock.
 
     This freezes each sheet on first read, not an atomic cross-sheet snapshot.
-    Production requires the exclusive-writer operating protocol: external
-    imports/edits happen only while this service is stopped and drained.
+    Automated writers share a Redis lease. Manual edits bypass it; route saves
+    additionally compare source versions before and after the write.
     """
     previous = getattr(_fresh_sheet_scope, "entry", None)
     invalidate_sheet_cache(spreadsheet, worksheets=True)
     _fresh_sheet_scope.entry = (spreadsheet, {})
     try:
+        if isinstance(spreadsheet, gspread.Spreadsheet):
+            # One fresh metadata request and one values batch per verification
+            # round, not one metadata+values RPC per dependent worksheet.
+            sheets = {sheet.title: sheet for sheet in read_with_retry(spreadsheet.worksheets)}
+            titles = [title for title in (*ROUTE_DECISION_SHEETS, PLANNED_ACTIVITIES_SHEET, ROUTE_PROPOSALS_SHEET)
+                      if title in sheets]
+            ranges = ["'" + title.replace("'", "''") + "'" for title in titles]
+            payload = read_with_retry(lambda: spreadsheet.values_batch_get(ranges,
+                params={"valueRenderOption": "FORMATTED_VALUE"}))
+            values = payload.get("valueRanges", [])
+            if len(values) != len(titles):
+                raise ValueError("CRM-säkerhetsläsningen gav ett ofullständigt svar")
+            loaded = {}
+            for title, result in zip(titles, values):
+                rows = result.get("values", [])
+                width = max(map(len, rows), default=0)
+                loaded[title] = [list(row) + [""] * (width-len(row)) for row in rows]
+            _fresh_sheet_scope.entry = (spreadsheet, loaded, sheets)
+            record_google_sheet_read(True)
         yield
     finally:
         _fresh_sheet_scope.entry = previous
@@ -827,7 +853,8 @@ def planning_write_lock():
     """Acquire the existing planning RLock and time only the outer section."""
     depth = getattr(_planning_write_lock_state, "depth", 0)
     wait_started_at = time.perf_counter()
-    _planning_write_lock.acquire()
+    if not _planning_write_lock.acquire(timeout=30):
+        raise CoordinationError("CRM uppdateras redan. Försök igen med samma request-ID.")
     outermost = depth == 0
     hold_started_at = time.perf_counter()
     try:
@@ -836,7 +863,8 @@ def planning_write_lock():
                 "lock.wait.planning_write", wait_started_at
             )
         _planning_write_lock_state.depth = depth + 1
-        yield
+        with crm_write_lock(SHEET_ID):
+            yield
     finally:
         try:
             if outermost:
@@ -986,6 +1014,7 @@ def ensure_customer_name_column(sheet, headers):
     return original_headers[:insert_at - 1] + ["name"] + original_headers[insert_at - 1:]
 
 
+@serialized_crm_write
 def ensure_worksheet_columns(sheet, headers, columns):
     normalized_headers = [str(header).strip() for header in headers]
     for column in columns:
@@ -1088,7 +1117,7 @@ def get_spreadsheet(force_reconnect=False):
             invalidate_priority_snapshot()
             _email_sheets_cache = None
         creds = Credentials.from_service_account_info(json.loads(os.environ["GOOGLE_CREDENTIALS"]), scopes=SCOPES)
-        _spreadsheet_cache = gspread.authorize(creds).open_by_key(SHEET_ID)
+        _spreadsheet_cache = guard_client(gspread.authorize(creds)).open_by_key(SHEET_ID)
     return _spreadsheet_cache
 
 
@@ -1117,11 +1146,17 @@ def _log_sheet_read_retry(label):
 
 
 def get_worksheet(spreadsheet, title):
-    sheet = _sheet_read_cache.worksheet(
-        spreadsheet,
-        title,
-        loader=lambda: spreadsheet.worksheet(title),
-    )
+    scope = getattr(_fresh_sheet_scope, "entry", None)
+    if scope is not None and scope[0] is spreadsheet and len(scope) > 2:
+        if title not in scope[2]:
+            raise WorksheetNotFound(title)
+        sheet = scope[2][title]
+    else:
+        sheet = _sheet_read_cache.worksheet(
+            spreadsheet,
+            title,
+            loader=lambda: spreadsheet.worksheet(title),
+        )
     try:
         sheet._store_tracker_spreadsheet = spreadsheet
     except Exception:
@@ -1309,11 +1344,15 @@ def worksheet_to_dicts(worksheet, expected_columns=None, required_columns=None):
     return result
 
 
+@serialized_crm_write
 def get_or_create_worksheet(spreadsheet, title, columns, rows=1000):
     try:
         sheet = get_worksheet(spreadsheet, title)
     except WorksheetNotFound:
         sheet = spreadsheet.add_worksheet(title=title, rows=rows, cols=max(len(columns), 10))
+        scope = getattr(_fresh_sheet_scope, "entry", None)
+        if scope is not None and scope[0] is spreadsheet and len(scope) > 2:
+            scope[2][title] = sheet
         try:
             sheet._store_tracker_spreadsheet = spreadsheet
         except Exception:
@@ -1622,6 +1661,7 @@ def get_email_proposal_template_config(settings, proposal_type, product_catalog)
     return result
 
 
+@serialized_crm_write
 def save_email_proposal_template_config(spreadsheet, proposal_type, config):
     sheet = get_worksheet(spreadsheet, SETTINGS_SHEET)
     descriptions = {
@@ -1707,6 +1747,7 @@ def append_dict_row(sheet, columns, values, value_input_option="RAW", single_val
     )[0]
 
 
+@serialized_crm_write
 def append_dict_rows(sheet, columns, values, value_input_option="RAW", single_value_columns=None):
     """Append rows to an explicit A-based range instead of relying on Sheets table detection.
 
@@ -1779,6 +1820,7 @@ def find_sheet_row(sheet, column, value, normalizer=lambda item: str(item or "")
     return None, headers, {}
 
 
+@serialized_crm_write
 def update_sheet_row(sheet, row_index, headers, updates):
     data = []
     for key, value in updates.items():
@@ -1852,6 +1894,7 @@ def worksheet_snapshot(
     return headers, rows
 
 
+@serialized_crm_write
 def batch_update_sheet_rows(sheet, headers, row_updates):
     data = []
     for row_index, row in row_updates:
@@ -1865,6 +1908,7 @@ def batch_update_sheet_rows(sheet, headers, row_updates):
         invalidate_sheet_for_write(sheet)
 
 
+@serialized_crm_write
 def batch_update_sheet_changes(sheet, headers, row_changes, new_rows=()):
     """Commit sparse mutations and contiguous appended rows in one API call."""
     data = []
@@ -2669,7 +2713,7 @@ def public_planned_activity(row, *, now=None):
     now = now or stockholm_now()
     scheduled_at = parse_planning_datetime(row.get("scheduled_at"))
     status = str(row.get("status") or "planned").strip().casefold()
-    if status not in PLANNING_STATUSES:
+    if status not in PLANNING_STATUSES | {"route_pending"}:
         status = "planned"
     overdue = bool(
         status == "planned"
@@ -6990,6 +7034,7 @@ def build_current_priority_snapshot(
     prepared_state=None,
     prepared_order_features=None,
     prepared_features=None,
+    customer_ids=None,
 ):
     """Calculate the authoritative priority snapshot used by all endpoints."""
     if as_of is None:
@@ -7023,8 +7068,16 @@ def build_current_priority_snapshot(
     email_engagement_by_customer = build_email_engagement_snapshot(
         message_rows, recipient_rows, order_rows, today=today, customers=customers, as_of=as_of
     )
+    # All source features and global V3.5 benchmark inputs stay portfolio-wide.
+    # Only the final per-store scoring loop is restricted for route validation.
+    scoring_customers = customers if customer_ids is None else [
+        customer for customer in customers
+        if str(customer.get("customer_id") or "").strip() in {
+            str(cid).strip() for cid in customer_ids
+        }
+    ]
     priority_customers = build_priority_customers(
-        customers,
+        scoring_customers,
         order_features,
         contact_features,
         None,
@@ -7037,6 +7090,7 @@ def build_current_priority_snapshot(
         obligation_states=state["obligations"],
         contact_permissions=state["contact_permissions"],
         planning_owner_user_names=planning_owner_user_names,
+        portfolio_customers=customers if customer_ids is not None else None,
     )
     enrich_customer_state_priorities(priority_customers, state, state_events,
                                      planning_owner_user_names or {}, now=as_of)
@@ -7107,7 +7161,7 @@ def priority_snapshot_presentation(payload, *, read_only):
 
 
 def get_authoritative_priority_snapshot(
-    spreadsheet, *, today, planned_activity_rows=None, as_of=None, live=False, read_only=False, state_only=False
+    spreadsheet, *, today, planned_activity_rows=None, as_of=None, live=False, read_only=False, state_only=False, customer_ids=None
 ):
     """Share bounded live read models; explicit replay times remain exact.
 
@@ -7126,7 +7180,7 @@ def get_authoritative_priority_snapshot(
     today = as_of.date()
     state_events = read_customer_state_events(spreadsheet)
     date_key = today.isoformat() if isinstance(today, date) else str(today)
-    cache_enabled = sheet_cache_enabled(spreadsheet) and getattr(_fresh_sheet_scope, "entry", None) is None
+    cache_enabled = customer_ids is None and sheet_cache_enabled(spreadsheet) and getattr(_fresh_sheet_scope, "entry", None) is None
     dependency_signature = (
         _sheet_read_cache.generation_signature(
             spreadsheet,
@@ -7202,6 +7256,9 @@ def get_authoritative_priority_snapshot(
             users = get_user_rows(spreadsheet)
         except (WorksheetNotFound, AttributeError):
             pass
+        # Always derive order/contact/obligation/email features and name
+        # identity from the full portfolio before scoring the route subset.
+        # A filtered raw-input universe changes V3.5 population priors.
         with performance_step("priority.source_version"):
             source_inputs = [
                 customers, order_rows, contact_rows, message_rows, recipient_rows,
@@ -7253,6 +7310,7 @@ def get_authoritative_priority_snapshot(
             prepared_state=state,
             prepared_order_features=order_features,
             prepared_features=prepared_features,
+            customer_ids=customer_ids,
         )
         record_performance_step("priority.scoring", scoring_started, len(priorities))
         payload = {
@@ -7732,7 +7790,8 @@ def get_planning_attention():
         now = stockholm_now()
         snapshot = get_authoritative_priority_snapshot(spreadsheet, today=now.date(), as_of=now, live=True, read_only=True)
         state = snapshot["customer_state"]
-        items = attention_items(state, as_of=now, owner_user_name=owner.get("user_name"))
+        items = attention_items(state, as_of=now, owner_user_name=owner.get("user_name"),
+                                query=request.args.get("q", request.args.get("search", "")))
         try:
             offset = max(0, int(request.args.get("offset", 0)))
             limit = max(1, min(200, int(request.args.get("limit", 50))))
@@ -9748,6 +9807,9 @@ def update_planning_activity(activity_id):
         current_status = str(
             current.get("status") or "planned"
         ).strip().casefold()
+        if current_status == "route_pending" and str(data.get("status") or "").casefold() != "cancelled":
+            return planning_error("route_save_incomplete",
+                "Rutten har inte sparats färdigt. Försök spara rutten igen eller avboka besöket.", 409)
         current_revision = planning_revision(current)
         pre_same_mutation_request = (
             str(current.get("last_mutation_request_id") or "").strip()
@@ -12999,6 +13061,7 @@ def build_route_optimization_preview(
         "route_mode": "automatic",
         "route_payload": route_payload,
     }
+    preview["decision_source_version"] = route_decision_source_version(spreadsheet, stops)
     token_payload = {key: value for key, value in preview.items() if key not in {"ok", "owner"}}
     token_payload["user_name"] = owner.get("user_name")
     preview["preview_token"] = planning_preview_serializer().dumps(token_payload)
@@ -13426,6 +13489,7 @@ def build_planning_route_preview(
             "timeline": route_timeline,
         },
     }
+    preview["decision_source_version"] = route_decision_source_version(spreadsheet, stops)
     token_payload = {
         key: value
         for key, value in preview.items()
@@ -13492,6 +13556,74 @@ def saved_route_request_conflicts(
     return False
 
 
+ROUTE_DECISION_SHEETS = ("customers_enriched", "users", "sales_activities", "order_rows",
+                         CUSTOMER_STATE_EVENTS_SHEET, "planning_suggestions", "email_messages", "email_recipients")
+
+
+def replaceable_route_activity(row):
+    return (str(row.get("source") or "").casefold() == "route"
+            and normalize_planning_contact_type(row.get("contact_type")) == "visit"
+            and str(row.get("status") or "").casefold() == "planned"
+            and not row.get("obligation_id") and not row.get("source_contact_id")
+            and commitment_evidence({}, row)[0] == "planned_task")
+
+
+def route_decision_source_version(spreadsheet, stops):
+    ids = {str(stop.get("customer_id") or "") for stop in stops}
+    customers = get_customer_rows(spreadsheet)
+    names = {normalize_key(c.get("customer")) for c in customers if c.get("customer_id") in ids}
+    numbers = {str(c.get("customer_number") or "") for c in customers if c.get("customer_id") in ids} - {""}
+    result = {}
+    # Recipient events are tied to email message IDs, not customer IDs.
+    # Ignore unrelated customers while retaining changes to selected mailings.
+    selected_message_ids = set()
+    try:
+        messages = worksheet_to_dicts(get_worksheet(spreadsheet, "email_messages"))
+        selected_message_ids = {
+            str(row.get("email_id") or "").strip()
+            for row in messages
+            if str(row.get("customer_id") or "") in ids
+            or normalize_key(row.get("customer")) in names
+            or str(row.get("customer_number") or "") in numbers
+        } - {""}
+    except WorksheetNotFound:
+        pass
+    for title in ROUTE_DECISION_SHEETS:
+        try:
+            sheet = get_worksheet(spreadsheet, title)
+        except WorksheetNotFound:
+            result[title] = None
+            continue
+        rows = worksheet_to_dicts(sheet)
+        if title == "email_recipients":
+            rows = [row for row in rows if str(row.get("email_id") or "").strip()
+                    in selected_message_ids]
+        elif title != "users":
+            rows = [r for r in rows if str(r.get("customer_id") or "") in ids
+                    or normalize_key(r.get("customer") or r.get("Customer")) in names
+                    or str(r.get("customer_number") or r.get("Customer number") or "") in numbers]
+        # Spreadsheet row positions and order are not customer identities.
+        result[title] = sorted((json.dumps(r, sort_keys=True, ensure_ascii=False) for r in rows))
+    return canonical_payload_fingerprint(result)
+
+
+def route_write_guard_version(spreadsheet):
+    # Include positional rows: a manual sort between read and write must abort
+    # before sparse updates can address a different activity.
+    sheet = get_worksheet(spreadsheet, PLANNED_ACTIVITIES_SHEET)
+    values, _ = cached_worksheet_values(sheet, spreadsheet)
+    return canonical_payload_fingerprint(values)
+
+
+def verify_route_write_sources(spreadsheet, stops, source_version, planning_version):
+    assert_write_owned()
+    with fresh_decision_reads(spreadsheet):
+        if (route_decision_source_version(spreadsheet, stops) != source_version
+                or route_write_guard_version(spreadsheet) != planning_version):
+            raise CustomerStateConflict("route_sources_changed",
+                "CRM ändrades medan rutten sparades. Inga nya besök har aktiverats. Beräkna rutten igen.", 409)
+
+
 def apply_planning_route(
     *, spreadsheet, owner, preview, client_request_id, preview_token=None,
 ):
@@ -13501,10 +13633,12 @@ def apply_planning_route(
     if str(os.environ.get("CRM_RISKY_OPERATIONS_STOPPED", "false")).casefold() != "false":
         return None, planning_error("crm_operations_stopped", "Ruttsparande är tillfälligt stoppat.", 503)
     if (not app.testing and application_environment() != "test"
-            and os.environ.get("CRM_EXCLUSIVE_WRITER_CONFIRMED", "").casefold() != "true"):
+            and not (lock_url() and os.environ.get("CRM_AUTOMATED_WRITERS_COORDINATED", "").lower() == "true")):
         return None, planning_error("exclusive_writer_required",
-            "Ruttsparande kräver verifierat skydd mot samtidiga externa CRM-skrivningar.", 503)
+            "Ruttsparande kräver ett gemensamt CRM-lås och bekräftad samordning av automatiska skrivare.", 503)
     with planning_write_lock(), fresh_decision_reads(spreadsheet):
+        if not preview.get("decision_source_version") and not app.testing:
+            return None, planning_error("route_preview_expired_or_legacy", "Beräkna rutten igen för nya säkerhetskontroller.", 409)
         fresh_owner, error = resolve_planning_owner(spreadsheet, owner.get("user_name"))
         if error is not None:
             return None, error
@@ -13599,7 +13733,10 @@ def _apply_planning_route_current(
                 )
             return {**saved_group["route_apply_result"], "duplicate": True,
                     "imported_count": 0, "cancelled_route_activity_count": 0}, None
-        if preview.get("route_engine_version") == ROUTE_ENGINE_VERSION:
+        source_version = route_decision_source_version(spreadsheet, preview_stops)
+        if preview.get("decision_source_version") and preview["decision_source_version"] != source_version:
+            return None, planning_error("planning_changed", "Kundunderlaget ändrades efter förhandsgranskningen. Beräkna rutten igen.", 409)
+        if preview.get("route_engine_version") == ROUTE_ENGINE_VERSION and not preview.get("decision_source_version"):
             start_data = preview.get("start") or {}
             try:
                 preview_start = Coordinate(latitude=float(start_data.get("latitude")),
@@ -13662,45 +13799,79 @@ def _apply_planning_route_current(
         # Even a signed, unexpired local-engine preview cannot authorize an
         # obsolete contact. Re-evaluate current source data immediately before
         # writes, excluding only replaceable route-generated activities.
-        if preview.get("route_engine_version") != ROUTE_ENGINE_VERSION:
-            route_rows = [row for _index, row in all_rows if not (
-                row.get("source") == "route" and planning_owner_matches(row, owner)
-                and parse_date_value(row.get("scheduled_at")) == route_date
-                and str(row.get("status") or "planned") == "planned")]
-            live = get_authoritative_priority_snapshot(spreadsheet, today=route_date,
-                planned_activity_rows=route_rows)
-            live_priorities = apply_workflow_suppressions(live["priorities"],
-                priority_workflow_suppressions(spreadsheet, live["priorities"]))
-            by_customer = {str(p.get("customer_id") or ""): p for p in live_priorities}
-            phone_email_ids = route_contact_customer_ids(route_rows, owner, route_date, live["customers"])
-            prepared = {}
-            for stop in preview_stops:
-                cid = str(stop.get("customer_id") or "")
-                current_priority = by_customer.get(cid)
-                required = bool(stop.get("required"))
-                ranking = (route_priority_values(current_priority, required=True) if required
-                           else route_optional_priority_values(current_priority, route_rows, route_date))
-                if cid in phone_email_ids:
-                    return None, planning_error("same_day_contact_conflict",
-                        "Kunden har redan telefon eller mejl planerat denna dag. Beräkna rutten igen.", 409)
-                if ranking is None or (not required and (ranking["commercial_value"] <= 0
-                        or route_priority_suppressed(current_priority, route_rows))):
-                    return None, planning_error("route_contact_changed",
-                        "Kontaktläget har ändrats efter förhandsgranskningen. Beräkna rutten igen.", 409)
-                if required:
-                    ids = stop.get("required_activity_ids") or [stop.get("planned_activity_id")]
-                    for aid in ids:
-                        row = next((p for p in route_rows if p.get("planned_activity_id") == aid), None)
-                        if row is None or not route_planned_contact_decision(current_priority, row,
-                                snapshot=live, route_date=route_date, prepared=prepared)["allowed"]:
-                            return None, planning_error("route_required_contact_blocked",
-                                "Ett bokat besök är inte längre tillåtet. Hantera bokningen innan rutten sparas.", 409)
+        route_rows = [row for _index, row in all_rows if not (
+            replaceable_route_activity(row) and planning_owner_matches(row, owner)
+            and parse_date_value(row.get("scheduled_at")) == route_date
+        )]
+        required_ids_in_preview = {str(aid) for stop in preview_stops if stop.get("required")
+            for aid in (stop.get("required_activity_ids") or [stop.get("planned_activity_id")]) if aid}
+        if any(str(row.get("source") or "").casefold() == "route"
+               and normalize_planning_contact_type(row.get("contact_type")) == "visit"
+               and str(row.get("status") or "").casefold() == "planned"
+               and not replaceable_route_activity(row)
+               and str(row.get("planned_activity_id") or "") not in required_ids_in_preview
+               for _index, row in date_rows):
+            return None, planning_error("route_commitment_requires_review",
+                "Ett tidigare ruttbesök innehåller ett separat kundåtagande. Öppna och spara bokningen i kalendern och beräkna rutten igen.", 409)
+        live = get_authoritative_priority_snapshot(spreadsheet, today=route_date,
+            planned_activity_rows=route_rows, customer_ids=set(signed_customer_ids))
+        live_priorities = apply_workflow_suppressions(live["priorities"],
+            priority_workflow_suppressions(spreadsheet, live["priorities"]))
+        by_customer = {str(p.get("customer_id") or ""): p for p in live_priorities}
+        phone_email_ids = route_contact_customer_ids(route_rows, owner, route_date, live["customers"])
+        future_visit_ids, existing_visit_ids = set(), defaultdict(set)
+        lookup = CustomerLookup(current_customers)
+        for row in route_rows:
+            if str(row.get("status") or "planned").casefold() != "planned":
+                continue
+            cid = str(row.get("customer_id") or "") or str(related_row_customer(
+                row, current_customers, customer_lookup=lookup).get("customer_id") or "")
+            if cid not in signed_customer_ids:
+                continue
+            when = parse_planning_datetime(row.get("scheduled_at"))
+            if when is None:
+                raise ValueError("En kalenderaktivitet saknar verifierbart datum")
+            kind = normalize_planning_contact_type(row.get("contact_type"))
+            # Actual bookings count even if a direct Sheets edit left an old
+            # owner on the row. Such a row cannot authorize a second contact.
+            if when.date() == route_date and kind in {"phone", "email"}:
+                phone_email_ids.add(cid)
+            if kind == "visit" and when.date() > route_date:
+                future_visit_ids.add(cid)
+            if kind == "visit" and when.date() == route_date:
+                existing_visit_ids[cid].add(str(row.get("planned_activity_id") or ""))
+        prepared = {}
+        for stop in preview_stops:
+            cid = str(stop.get("customer_id") or "")
+            current_priority = by_customer.get(cid)
+            required = bool(stop.get("required"))
+            ranking = (route_priority_values(current_priority, required=True) if required
+                       else route_optional_priority_values(current_priority, route_rows, route_date))
+            if cid in phone_email_ids:
+                return None, planning_error("same_day_contact_conflict",
+                    "Kunden har redan telefon eller mejl planerat denna dag. Beräkna rutten igen.", 409)
+            if not required and (cid in future_visit_ids or existing_visit_ids.get(cid)):
+                return None, planning_error("route_booking_conflict",
+                    "Kunden har redan ett bokat besök. Hantera bokningen innan rutten sparas.", 409)
+            if ranking is None or (not required and (ranking["commercial_value"] <= 0
+                    or route_priority_suppressed(current_priority, route_rows))):
+                return None, planning_error("route_contact_changed",
+                    "Kontaktläget har ändrats efter förhandsgranskningen. Beräkna rutten igen.", 409)
+            if required:
+                ids = stop.get("required_activity_ids") or [stop.get("planned_activity_id")]
+                for aid in ids:
+                    row = next((p for p in route_rows if p.get("planned_activity_id") == aid), None)
+                    if row is None or not route_planned_contact_decision(current_priority, row,
+                            snapshot=live, route_date=route_date, prepared=prepared)["allowed"]:
+                        return None, planning_error("route_required_contact_blocked",
+                            "Ett bokat besök är inte längre tillåtet. Hantera bokningen innan rutten sparas.", 409)
 
         existing_by_id = {
             str(row.get("planned_activity_id") or "").strip(): (row_index, row)
             for row_index, row in all_rows
             if str(row.get("planned_activity_id") or "").strip()
         }
+        planning_version = route_write_guard_version(spreadsheet)
         applied_rows = []
         new_rows = []
         row_changes = []
@@ -13812,7 +13983,13 @@ def _apply_planning_route_current(
             )
             existing = existing_by_id.get(activity_id)
             if existing:
-                applied_rows.append(existing[1])
+                existing_row = existing[1]
+                if existing_row.get("status") == "route_pending":
+                    row_changes.append((existing[0], {"status": "planned"}))
+                    existing_row = {**existing_row, "status": "planned"}
+                elif existing_row.get("status") != "planned":
+                    return None, planning_error("route_recovery_conflict", "Ett tidigare ruttförsök behöver granskas. Beräkna rutten igen.", 409)
+                applied_rows.append(existing_row)
                 continue
             customer = resolved_customers_by_id[signed_customer_id]
             if not customer or customer_is_cancelled(customer):
@@ -13856,9 +14033,7 @@ def _apply_planning_route_current(
         cancelled_count = 0
         for row_index, row in date_rows:
             if (
-                str(row.get("source") or "").strip().casefold() != "route"
-                or normalize_planning_contact_type(row.get("contact_type")) != "visit"
-                or str(row.get("status") or "").strip().casefold() != "planned"
+                not replaceable_route_activity(row)
                 or str(row.get("route_group_id") or "").strip() == route_group_id
             ):
                 continue
@@ -13871,12 +14046,45 @@ def _apply_planning_route_current(
             }))
             cancelled_count += 1
 
-        batch_update_sheet_changes(
-            sheet,
-            headers,
-            row_changes,
-            new_rows,
-        )
+        verify_route_write_sources(spreadsheet, preview_stops, source_version, planning_version)
+        # Stage optional visits inactive. A failed read/lease/request cannot
+        # expose an unverified booking, and deterministic IDs make retry safe.
+        pending_rows = [{**row, "status": "route_pending"} for row in new_rows]
+        if pending_rows:
+            pending_indexes = append_dict_rows(sheet, headers, pending_rows)
+            row_changes.extend((index, {"status": "planned"}) for index in pending_indexes)
+        # Re-read and verify every pre-existing positional row and staged ID.
+        original_values = sheet.get_all_values()
+        _, staged = worksheet_snapshot(sheet, expected_columns=PLANNED_ACTIVITY_COLUMNS, use_cache=False)
+        staged_ids = [str(r.get("planned_activity_id") or "") for _i, r in staged]
+        if len(staged_ids) != len(set(staged_ids)):
+            raise CustomerStateConflict("route_recovery_conflict", "Kalendern innehåller dubbla aktivitets-ID:n. Inga nya besök aktiverades.", 409)
+        expected_indexed = [(i, r) for i, r in staged if r.get("status") != "route_pending" or r.get("route_group_id") != route_group_id]
+        original_nonpending = [(i, r) for i, r in all_rows if r.get("status") != "route_pending" or r.get("route_group_id") != route_group_id]
+        if canonical_payload_fingerprint(expected_indexed) != canonical_payload_fingerprint(original_nonpending):
+            raise CustomerStateConflict("route_sources_changed", "Kalendern ändrades medan rutten sparades. Inga nya besök aktiverades.", 409)
+        verify_route_write_sources(spreadsheet, preview_stops, source_version, canonical_payload_fingerprint(original_values))
+        batch_update_sheet_changes(sheet, headers, row_changes)
+        # Read-back is mandatory, including when a previous HTTP response was lost.
+        with fresh_decision_reads(spreadsheet):
+            current_source_version = route_decision_source_version(spreadsheet, preview_stops)
+            _, _, verified = read_planned_activity_snapshot(spreadsheet, use_cache=False)
+        verified_by_id = {str(r.get("planned_activity_id") or ""): r for _i, r in verified}
+        expected_applied = {str(r.get("planned_activity_id") or ""): r for r in applied_rows}
+        fields = ("customer_id", "status", "scheduled_at", "route_group_id", "route_sequence")
+        if current_source_version != source_version or any(
+                any(str(verified_by_id.get(aid, {}).get(f) or "") != str(row.get(f) or "") for f in fields)
+                for aid, row in expected_applied.items()):
+            # Preserve evidence and existing promises. Only newly generated,
+            # still-unmodified optional visits may be returned to inactive state.
+            quarantine = [(i, {"status": "route_pending"}) for i, r in verified
+                          if r.get("source") == "route" and r.get("route_group_id") == route_group_id
+                          and r.get("status") == "planned"
+                          and any(r.get("planned_activity_id") == n.get("planned_activity_id") for n in new_rows)]
+            if quarantine:
+                batch_update_sheet_changes(sheet, headers, quarantine)
+            raise CustomerStateConflict("route_postwrite_conflict", "CRM ändrades under skrivningen. Rutten behöver granskas; nya besök är inaktiva. Beräkna rutten igen.", 409)
+        assert_write_owned()
 
         route_payload = dict(preview.get("route_payload") or {})
         applied_changes = dict(row_changes)
@@ -14463,6 +14671,7 @@ def planning_route_import():
             "route_start_at": start_at.isoformat(timespec="minutes"),
         },
     }
+    preview["decision_source_version"] = route_decision_source_version(spreadsheet, stops)
     try:
         result, import_error = apply_planning_route(
             spreadsheet=spreadsheet,
@@ -14584,6 +14793,10 @@ def planning_route_apply():
             client_request_id=client_request_id,
             preview_token=token,
         )
+    except CustomerStateConflict as exc:
+        return planning_error(exc.code, str(exc), exc.status)
+    except CoordinationError as exc:
+        return planning_error("crm_write_coordination_unavailable", str(exc), 503)
     except Exception:
         app.logger.exception("Could not apply planning route")
         return planning_error(
@@ -15522,6 +15735,7 @@ def add_contact(customer_name):
             "cancelled",
             "skipped",
             "superseded",
+            "route_pending",
         }:
             return planning_error(
                 "activity_not_active",
@@ -15744,7 +15958,7 @@ def add_contact(customer_name):
             live_completed_id = str(
                 planned_row.get("completed_contact_id") or ""
             ).strip()
-            if live_status in {"cancelled", "skipped", "superseded"}:
+            if live_status in {"cancelled", "skipped", "superseded", "route_pending"}:
                 return planning_error(
                     "activity_not_active",
                     "Aktiviteten är inte längre aktiv.",
