@@ -53,3 +53,14 @@ jobs:
         env:
           PLANNING_DRAG_HARNESS_URL: http://127.0.0.1:5065
         run: node web-app/tests/planning_drag_browser_smoke.cjs
+      - name: Start isolated route and attention harness
+        run: |
+          python web-app/tests/route_attention_browser_harness.py > route-attention-harness.log 2>&1 &
+          for attempt in $(seq 1 30); do
+            curl --fail --silent http://127.0.0.1:5088/health >/dev/null && exit 0
+            sleep 1
+          done
+          cat route-attention-harness.log
+          exit 1
+      - name: Route save and grouped attention browser regressions
+        run: node web-app/tests/route_attention_browser_smoke.cjs

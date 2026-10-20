@@ -47,4 +47,3 @@ def apply_geocoding_results(sheet, source_rows, results, *, sheet_id):
             assert_write_owned()
             sheet.batch_update(changes, value_input_option='RAW')
         return len(changes) // len(GEO_COLUMNS)
-

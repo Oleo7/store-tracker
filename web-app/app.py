@@ -7793,7 +7793,8 @@ def get_planning_attention():
         now = stockholm_now()
         snapshot = get_authoritative_priority_snapshot(spreadsheet, today=now.date(), as_of=now, live=True, read_only=True)
         state = snapshot["customer_state"]
-        items = attention_items(state, as_of=now, owner_user_name=owner.get("user_name"))
+        items = attention_items(state, as_of=now, owner_user_name=owner.get("user_name"),
+                                query=request.args.get("q", request.args.get("search", "")))
         try:
             offset = max(0, int(request.args.get("offset", 0)))
             limit = max(1, min(200, int(request.args.get("limit", 50))))

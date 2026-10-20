@@ -34,6 +34,7 @@ def main():
     parser.add_argument('--stability-only', action='store_true')
     parser.add_argument('--output', required=True)
     parser.add_argument('--rounds', type=int, default=3)
+    parser.add_argument('--attention-baseline', help='Pair old/new attention projections in the same warmed app/process')
     parser.add_argument('--as-of', default='2026-10-20T10:00:00+02:00')
     args = parser.parse_args()
     root = Path(args.repo).resolve() if args.repo else Path(__file__).resolve().parents[1]
@@ -102,6 +103,49 @@ def main():
                 if response.status_code != 200:
                     raise RuntimeError(f'{endpoint}: HTTP {response.status_code}')
                 return elapsed, len(response.data)
+
+        if args.attention_baseline:
+            import importlib.util
+            spec = importlib.util.spec_from_file_location('baseline_attention', Path(args.attention_baseline) / 'web-app' / 'customer_obligations.py')
+            old = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(old)
+            current_attention = a.attention_items
+            def old_attention(state, *, as_of, owner_user_name=None, query=None):
+                return old.attention_items(state, as_of=as_of, owner_user_name=owner_user_name)
+            paired = []
+            for role, user in [('admin', admin), ('seller', seller)]:
+                call(user, '/planning/attention')
+                # Both projections use exactly the same immutable source model.
+                # Hold its TTL clock for this offline CPU comparison only.
+                fixed_clock = a._sheet_read_cache.monotonic()
+                with patch.object(a._sheet_read_cache, 'monotonic', return_value=fixed_clock):
+                    for concurrency in (1, 4):
+                        samples = {'before': [], 'after': []}
+                        cpus = {'before': [], 'after': []}
+                        builds = []
+                        original_build = a.build_current_priority_snapshot
+                        def track_build(**kwargs):
+                            builds.append(1)
+                            return original_build(**kwargs)
+                        with patch.object(a, 'build_current_priority_snapshot', side_effect=track_build):
+                            for index in range(args.rounds):
+                                for label in (['before', 'after'] if index % 2 else ['after', 'before']):
+                                    with patch.object(a, 'attention_items', old_attention if label == 'before' else current_attention):
+                                        cpu = time.process_time()
+                                        with ThreadPoolExecutor(max_workers=concurrency) as pool:
+                                            runs = list(pool.map(lambda _: call(user, '/planning/attention'), range(concurrency)))
+                                        cpus[label].append((time.process_time() - cpu) / concurrency)
+                                        samples[label].extend(run[0] for run in runs)
+                        paired.append({'role': role, 'concurrency': concurrency, 'rounds': args.rounds,
+                            'before_median_seconds': statistics.median(samples['before']),
+                            'after_median_seconds': statistics.median(samples['after']),
+                            'before_median_cpu_seconds_per_request': statistics.median(cpus['before']),
+                            'after_median_cpu_seconds_per_request': statistics.median(cpus['after']),
+                            'warm_priority_builds': len(builds), 'rss_bytes': psutil.Process().memory_info().rss})
+            results['paired_attention'] = paired
+            Path(args.output).write_text(json.dumps(results, indent=2), encoding='utf-8')
+            print(json.dumps(paired, indent=2))
+            return
 
         for role, user in ([] if args.profile_only or args.stability_only else [('admin', admin), ('seller', seller)]):
             for endpoint in endpoints:

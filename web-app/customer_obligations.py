@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import date, datetime, time, timedelta
+from functools import lru_cache
 import hashlib
 import json
 import re
@@ -465,6 +466,10 @@ def build_customer_state(customers, contact_rows, planned_activity_rows, state_e
         active = [p for p in linked_plans if key(p.get("status") or "planned") == "planned"]
         attempts = sorted(item.pop("_attempts"), key=lambda row: (
             instant(row.get("date_time")), row.get("_source_row", 0), stable_contact_source_id(row)))
+        item["attention_scheduled_at"] = max(
+            [instant(row.get("scheduled_at")) for row in linked_plans if instant(row.get("scheduled_at"))]
+            or [instant(item.get("due_at") or item.get("due_date")) or datetime(1900, 1, 1, tzinfo=STOCKHOLM)]
+        ).isoformat()
         item["source_revision"] = max([event_revision(row) for row in linked_plans] or [0])
         item["planning_state_fingerprint"] = fingerprint([{name: row.get(name, "") for name in (
             "planned_activity_id", "customer_id", "source_contact_id", "obligation_id", "scheduled_at", "status",
@@ -618,31 +623,91 @@ def build_customer_state(customers, contact_rows, planned_activity_rows, state_e
             "workflows": dict(workflows), "as_of": current.isoformat()}
 
 
-def attention_items(state, *, as_of, owner_user_name=None):
-    """Only previous calendar dates and previous explicit promise dates."""
+def ordinary_attention_followup(item):
+    """Only ordinary work; evidence of a separate promise/service stays scoped."""
+    return (item.get("commitment_kind") in {"internal_reminder", "planned_task"}
+            and item.get("purpose") != "explicit_followup"
+            and not item.get("customer_agreement_confirmed")
+            and not item.get("identity_ambiguous") and not item.get("identity_conflict")
+            and item.get("evidence_status") != "uncertain")
+
+
+def attention_schedule_marker(item):
+    return _attention_schedule_marker_cached(
+        text(item.get("attention_scheduled_at")), text(item.get("due_at")),
+        text(item.get("due_date") or item.get("original_due_date")))
+
+
+@lru_cache(maxsize=2048)
+def _attention_schedule_marker_cached(scheduled_text, due_text, fallback_text):
+    # Pure instant conversion, bounded independently of the portfolio cache.
+    # Repeated pages reuse it; any date edit changes the complete cache key.
+    # Most obligations already have the exact ISO instant from the reducer.
+    # Parse it once; only an explicit later event can supply a different due_at.
+    scheduled = instant(scheduled_text) if scheduled_text else None
+    due = instant(due_text) if due_text and due_text != scheduled_text else None
+    if scheduled and due:
+        return max(scheduled, due)
+    return scheduled or due or instant(fallback_text) or datetime(1900, 1, 1, tzinfo=STOCKHOLM)
+
+
+def attention_items(state, *, as_of, owner_user_name=None, query=None):
+    """Read projection: latest ordinary follow-up per stable customer and owner.
+
+    Choose the representative BEFORE testing status/date/search. Completed,
+    cancelled, future-rescheduled and snoozed representatives keep older generic
+    work out of the queue without changing a single source obligation or plan.
+    Distinct documented/uncertain promises remain independent.
+    """
     current = instant(as_of)
-    items = []
+    ordinary = defaultdict(list)
+    candidates = []
     for obligations in state.get("obligations", {}).values():
         for item in obligations:
-            if item.get("status") not in OPEN_STATUSES:
-                continue
             if owner_user_name is not None and key(item.get("owner_user_name")) != key(owner_user_name):
                 continue
-            due = day(item.get("due_date"))
-            snooze = instant(item.get("snooze_until"))
-            if due is None or due >= current.date() or (snooze and snooze > current):
-                continue
-            if item.get("planned_activity_id") and item.get("status") == "scheduled":
-                item_type = "missed_calendar_activity"
-            elif item.get("purpose") == "explicit_followup":
-                item_type = "overdue_explicit_follow_up"
+            cid = text(item.get("customer_id"))
+            owner = key(item.get("owner_user_name"))
+            if cid and owner and ordinary_attention_followup(item):
+                ordinary[(cid, owner)].append(item)
             else:
-                continue
-            items.append({**item, "item_type": item_type,
-                          "days_overdue": (current.date() - due).days,
-                          "review_only": item.get("status") == "needs_review",
-                          "actions": ["resolve", "cancel", "reschedule", "snooze", "restore"]})
-    return sorted(items, key=lambda row: (bool(row.get("review_only")), row["due_date"],
+                candidates.append(item)
+    hidden_counts = {}
+    for group in ordinary.values():
+        representative = group[0] if len(group) == 1 else max(group, key=lambda item: (
+            attention_schedule_marker(item), text(item.get("obligation_id"))))
+        candidates.append(representative)
+        # Only count older work that would otherwise be a missed calendar item.
+        hidden_counts[id(representative)] = sum(1 for item in group if item is not representative
+            and item.get("status") in OPEN_STATUSES and item.get("planned_activity_id")
+            and item.get("status") == "scheduled" and day(item.get("due_date"))
+            and day(item.get("due_date")) < current.date())
+    items = []
+    search = key(query)
+    for item in candidates:
+        if item.get("status") not in OPEN_STATUSES:
+            continue
+        due = day(item.get("due_date"))
+        snooze = instant(item.get("snooze_until"))
+        if due is None or due >= current.date() or (snooze and snooze > current):
+            continue
+        if item.get("planned_activity_id") and item.get("status") == "scheduled":
+            item_type = "missed_calendar_activity"
+        elif item.get("purpose") == "explicit_followup":
+            item_type = "overdue_explicit_follow_up"
+        else:
+            continue
+        if search and search not in key(" ".join(text(item.get(field)) for field in (
+                "customer", "customer_id", "customer_number", "note", "contact_type"))):
+            continue
+        hidden = hidden_counts.get(id(item), 0)
+        items.append({**item, "item_type": item_type,
+                      "older_missed_count": hidden,
+                      "older_missed_note": f"{hidden} äldre missade aktiviteter finns i historiken." if hidden else "",
+                      "days_overdue": (current.date() - due).days,
+                      "review_only": item.get("status") == "needs_review",
+                      "actions": ["resolve", "cancel", "reschedule", "snooze", "restore"]})
+    return sorted(items, key=lambda row: (bool(row.get("review_only")), -attention_schedule_marker(row).timestamp(),
                                           key(row.get("customer")), row["obligation_id"]))
 
 

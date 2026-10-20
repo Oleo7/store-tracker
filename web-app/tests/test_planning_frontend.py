@@ -276,6 +276,7 @@ const context = vm.createContext({assert, URLSearchParams, setImmediate});
 vm.runInContext(`
 const API = '/api', sharedJsonRequests = new Map(), requests = [], toasts = [];
 let planningLoadSerial = 0, planningAttentionRequestSerial = 0, insightsRequestSerial = 0;
+let planningAttentionSearch = "";
 let planningDragMutationSerial = 0;
 const planningDragOperations = new Map();
 const planningDragActivityVersions = new Map();

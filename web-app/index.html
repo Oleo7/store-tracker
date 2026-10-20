@@ -4172,6 +4172,8 @@
             <div class="planning-attention-count" id="planning-attention-count"></div>
           </div>
         </div>
+        <label class="planning-attention-count" for="planning-attention-search">Sök ärenden</label>
+        <input id="planning-attention-search" type="search" placeholder="Butik, kundnummer eller anteckning" style="width:100%;margin:6px 0 12px" />
         <div id="planning-backlog" aria-live="polite">
           <div class="planning-state">Laddar…</div>
         </div>
@@ -8273,6 +8275,16 @@
     return Array.from(byId.values());
   }
 
+  let planningAttentionSearch = "";
+  let planningAttentionSearchTimer = 0;
+  document.getElementById("planning-attention-search")?.addEventListener("input", event => {
+    planningAttentionSearch = event.target.value;
+    // Invalidate an in-flight page immediately, before the debounce expires.
+    planningAttentionRequestSerial += 1;
+    window.clearTimeout(planningAttentionSearchTimer);
+    planningAttentionSearchTimer = window.setTimeout(() => loadPlanningAttention(), 200);
+  });
+
   async function loadPlanningAttention({ append = false } = {}) {
     if (append && planningAttentionLoading) return false;
     const owner = planningAttentionOwnerKey();
@@ -8285,6 +8297,7 @@
     renderPlanningAttention();
     try {
       const params = planningOwnerQuery(new URLSearchParams({ offset: String(offset), limit: "50" }));
+      if (planningAttentionSearch.trim()) params.set("q", planningAttentionSearch.trim());
       const payload = await planningFetchJson(`/planning/attention?${params.toString()}`);
       if (requestSerial !== planningAttentionRequestSerial || owner !== planningAttentionOwnerKey()) return false;
       const responseOwner = normalizePlanningUser(payload.owner || {}).user_name;
@@ -8367,6 +8380,7 @@
         <button class="planning-backlog-customer" type="button" data-attention-action="customer" data-attention-index="${index}" ${customer ? "" : "disabled"}>${esc(item.customer || customer?.customer || "Kund saknas")}</button>
         <div class="planning-backlog-meta">${esc(date)}${time ? ` kl. ${esc(time)}` : ""} · ${esc(type)}</div>
         ${item.note ? `<div class="planning-attention-note">${esc(item.note)}</div>` : ""}
+        ${Number(item.older_missed_count) > 0 ? `<div class="planning-backlog-meta">${esc(item.older_missed_note)}</div>` : ""}
         ${planningAttentionBlockText(item) ? `<div class="customer-permission-note">${esc(planningAttentionBlockText(item))}</div>` : ""}
         <div class="planning-attention-actions">
           ${canLog ? `<button class="planning-compact-btn primary" type="button" data-attention-action="log" data-attention-index="${index}">Logga kontakt</button>` : ""}
