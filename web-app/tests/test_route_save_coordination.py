@@ -127,6 +127,24 @@ class CoordinatedRouteSaveTests(PlanningApiTestCase):
         # include all stores (segment priors and portfolio benchmarks).
         customers = self.spreadsheet.worksheet("customers_enriched").dict_rows()
         selected_id = customers[0]["customer_id"]
+        # Deliberately different buying volumes and delivery cycles. If the
+        # route accidentally recalculates the portfolio p90 from a single
+        # store, this fixture changes its V3.5 value_index and fails.
+        orders = self.spreadsheet.worksheet("order_rows")
+        order_rows = [
+            ("Butik A", customers[0]["customer_id"], "C-1", "A-1", "2026-05-04", "10"),
+            ("Butik A", customers[0]["customer_id"], "C-1", "A-2", "2026-06-04", "12"),
+            ("Butik B", customers[1]["customer_id"], "C-2", "B-1", "2026-05-04", "130"),
+            ("Butik B", customers[1]["customer_id"], "C-2", "B-2", "2026-06-04", "160"),
+            ("Butik C", customers[2]["customer_id"], "C-3", "C-1", "2026-05-04", "550"),
+        ]
+        for name, cid, number, reference, delivery, dfp in order_rows:
+            source = {"Customer": name, "customer_id": cid,
+                      "Customer number": number, "Reference": reference,
+                      "Order date": delivery, "Delivery date": delivery,
+                      "Total weight": dfp, "Total": "500"}
+            orders.append_row([source.get(column, "")
+                               for column in a.ORDER_COLUMNS])
         with patch.object(a, "stockholm_now", return_value=fixture.NOW):
             full = a.get_authoritative_priority_snapshot(
                 self.spreadsheet, today=fixture.NOW.date(), as_of=fixture.NOW)
@@ -138,6 +156,17 @@ class CoordinatedRouteSaveTests(PlanningApiTestCase):
         self.assertEqual(len(expected), 1)
         self.assertEqual(selected["priorities"], expected)
         self.assertEqual(len(selected["customers"]), len(customers))
+        # This must not be a vacuous equality: an incorrectly isolated
+        # V3.5 population would yield different priors and value index.
+        isolated_orders = [row for row in a.get_order_rows(self.spreadsheet)
+                           if row.get("customer_id") == selected_id]
+        isolated, _ = a.build_current_priority_snapshot(
+            customers=customers[:1], order_rows=isolated_orders,
+            contact_rows=[], message_rows=[], recipient_rows=[],
+            planned_activity_rows=[], state_events=[], today=fixture.NOW.date(),
+            as_of=fixture.NOW, users=a.get_user_rows(self.spreadsheet))
+        self.assertEqual(len(isolated), 1)
+        self.assertNotEqual(isolated[0]["value_index"], expected[0]["value_index"])
 
     def test_route_save_uses_full_portfolio_v35_inputs(self):
         token = self.preview()
