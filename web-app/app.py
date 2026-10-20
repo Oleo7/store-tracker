@@ -13568,6 +13568,20 @@ def route_decision_source_version(spreadsheet, stops):
     names = {normalize_key(c.get("customer")) for c in customers if c.get("customer_id") in ids}
     numbers = {str(c.get("customer_number") or "") for c in customers if c.get("customer_id") in ids} - {""}
     result = {}
+    # Recipient events are tied to email message IDs, not customer IDs.
+    # Ignore unrelated customers while retaining changes to selected mailings.
+    selected_message_ids = set()
+    try:
+        messages = worksheet_to_dicts(get_worksheet(spreadsheet, "email_messages"))
+        selected_message_ids = {
+            str(row.get("email_id") or "").strip()
+            for row in messages
+            if str(row.get("customer_id") or "") in ids
+            or normalize_key(row.get("customer")) in names
+            or str(row.get("customer_number") or "") in numbers
+        } - {""}
+    except WorksheetNotFound:
+        pass
     for title in ROUTE_DECISION_SHEETS:
         try:
             sheet = get_worksheet(spreadsheet, title)
@@ -13575,7 +13589,10 @@ def route_decision_source_version(spreadsheet, stops):
             result[title] = None
             continue
         rows = worksheet_to_dicts(sheet)
-        if title not in {"users", "email_recipients"}:
+        if title == "email_recipients":
+            rows = [row for row in rows if str(row.get("email_id") or "").strip()
+                    in selected_message_ids]
+        elif title != "users":
             rows = [r for r in rows if str(r.get("customer_id") or "") in ids
                     or normalize_key(r.get("customer") or r.get("Customer")) in names
                     or str(r.get("customer_number") or r.get("Customer number") or "") in numbers]
