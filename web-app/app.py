@@ -22,6 +22,9 @@ from google.oauth2.service_account import Credentials
 from datetime import datetime, date, time as datetime_time, timedelta, timezone
 from collections import defaultdict
 import copy
+import gc
+import gzip
+from priority_read_cache import freeze, next_time_transition, compact_records, ReadSingleFlight
 from io import BytesIO
 from queue import Empty, Full, Queue
 import os
@@ -383,6 +386,8 @@ def configure_performance_logger():
 
 
 performance_logger = configure_performance_logger()
+_performance_active_requests = 0
+_performance_active_lock = threading.Lock()
 
 
 PERFORMANCE_ENDPOINTS = {
@@ -397,6 +402,7 @@ PERFORMANCE_ENDPOINTS = {
     "/customers/<int:row>/email-proposal/send",
     "/customers/<int:row>/reminder-email/send",
     "/customers/<path:customer_name>/contacts",
+    "/planning/attention",
     "/planning/activities",
     "/planning/activities/<activity_id>",
     "/planning/suggestions",
@@ -499,13 +505,29 @@ def enforce_crm_emergency_stop():
 
 @app.before_request
 def start_performance_measurement():
+    global _performance_active_requests
     if not performance_logging_enabled() or not _performance_endpoint():
         return None
     g.performance_request_id = uuid.uuid4().hex
     g.performance_started_at = time.perf_counter()
+    g.performance_cpu_started = time.process_time()
+    g.performance_gc_started = sum(item["collections"] for item in gc.get_stats())
+    with _performance_active_lock:
+        _performance_active_requests += 1
+        g.performance_concurrency = _performance_active_requests
+        g.performance_counted = True
     g.performance_steps = []
     g.google_sheets_read_count = 0
     return None
+
+
+@app.teardown_request
+def finish_performance_request(error=None):
+    global _performance_active_requests
+    if getattr(g, "performance_counted", False):
+        with _performance_active_lock:
+            _performance_active_requests -= 1
+            g.performance_counted = False
 
 
 @app.after_request
@@ -517,6 +539,14 @@ def finalize_response(response):
     elif request.endpoint == "get_session" or response.is_json:
         response.headers["Cache-Control"] = "no-store"
 
+    if (request.endpoint == "get_customer_insights"
+            and request.headers.get("X-PB-Insights-Format") == "compact" and response.is_json):
+        response.vary.add("X-PB-Insights-Format")
+        response.vary.add("Accept-Encoding")
+        if request.accept_encodings["gzip"] > 0:
+            with performance_step("response.gzip"):
+                response.set_data(gzip.compress(response.get_data(), compresslevel=1, mtime=0))
+                response.headers["Content-Encoding"] = "gzip"
     request_id = getattr(g, "performance_request_id", "")
     if not request_id:
         return response
@@ -534,6 +564,9 @@ def finalize_response(response):
         "status_code": response.status_code,
         "total_ms": total_ms,
         "response_size_bytes": response_size,
+        "process_cpu_ms": round((time.process_time() - g.performance_cpu_started) * 1000, 1),
+        "concurrent_requests_at_start": g.performance_concurrency,
+        "gc_cycles": sum(item["collections"] for item in gc.get_stats()) - g.performance_gc_started,
         "google_sheets_read_count": getattr(
             g, "google_sheets_read_count", 0
         ),
@@ -910,7 +943,10 @@ def sheets_read_cache_ttl(environ=None):
 _sheet_read_cache = SheetReadCache(ttl_seconds=sheets_read_cache_ttl())
 _priority_snapshot_condition = threading.Condition(threading.RLock())
 _priority_snapshot_entry = None
+_priority_snapshot_entries = {}
+_priority_snapshot_epoch = 0
 _priority_snapshot_loading = set()
+_insights_read_flights = ReadSingleFlight()
 
 
 _spreadsheet_cache = None
@@ -1151,9 +1187,11 @@ def cached_worksheet_values(sheet, spreadsheet=None):
 
 
 def invalidate_priority_snapshot():
-    global _priority_snapshot_entry
+    global _priority_snapshot_entry, _priority_snapshot_epoch
     with _priority_snapshot_condition:
         _priority_snapshot_entry = None
+        _priority_snapshot_entries.clear()
+        _priority_snapshot_epoch += 1
         _priority_snapshot_condition.notify_all()
 
 
@@ -2874,8 +2912,13 @@ def _scoped_contact_decision_inputs(snapshot, current, prepared):
         owners = {str(row.get("customer_id") or ""): str(row.get("owner_user_name") or "")
                   for row in snapshot.get("priorities", ())}
         owner_names = owners if any(owners.values()) else None
-        order_features = build_order_features(snapshot["order_rows"], customers=masters, as_of=current)
-        contact_features = build_contact_features(snapshot["contact_rows"], order_features, customers=masters, as_of=current)
+        shared = snapshot.get("_prepared_features", {}) if snapshot.get("_read_as_of") else {}
+        order_features = shared.get("order_features")
+        if order_features is None:
+            order_features = build_order_features(snapshot["order_rows"], customers=masters, as_of=current)
+        contact_features = shared.get("contact_features")
+        if contact_features is None:
+            contact_features = build_contact_features(snapshot["contact_rows"], order_features, customers=masters, as_of=current)
         state = snapshot.get("customer_state")
         if state is None or parse_planning_instant(state.get("as_of")) != current:
             state = build_customer_state(masters, snapshot["contact_rows"], snapshot.get("planned_activity_rows", ()),
@@ -2893,6 +2936,8 @@ def _scoped_contact_decision(priority, *, customer_id, obligation_id="", activit
     negative/retry pause. No source rows or shared customer decisions change.
     """
     priority = priority or {}
+    if snapshot.get("_read_as_of"):
+        current = parse_planning_instant(snapshot["_read_as_of"])
     guidance = priority.get("list_guidance") or priority.get("customer_guidance") or {}
 
     def blocked(reason, *, review=False):
@@ -6943,6 +6988,8 @@ def build_current_priority_snapshot(
     state_events=(),
     as_of=None,
     prepared_state=None,
+    prepared_order_features=None,
+    prepared_features=None,
 ):
     """Calculate the authoritative priority snapshot used by all endpoints."""
     if as_of is None:
@@ -6963,11 +7010,16 @@ def build_current_priority_snapshot(
             planning_owner_user_names[customer_id] = str(
                 (owner or {}).get("user_name") or ""
             ).strip()
+    with performance_step("priority.order_features"):
+        order_features = prepared_order_features if prepared_order_features is not None else build_order_features(order_rows, customers=customers, as_of=as_of)
     state = prepared_state if prepared_state is not None else build_customer_state(
         customers, contact_rows, planned_activity_rows, state_events,
-        as_of=as_of, owner_user_names=planning_owner_user_names, order_rows=order_rows)
-    order_features = build_order_features(order_rows, customers=customers, as_of=as_of)
-    contact_features = build_contact_features(contact_rows, order_features, customers=customers, as_of=as_of)
+        as_of=as_of, owner_user_names=planning_owner_user_names, order_rows=order_rows,
+        order_features=order_features)
+    with performance_step("priority.contact_features"):
+        contact_features = build_contact_features(contact_rows, order_features, customers=customers, as_of=as_of)
+    if prepared_features is not None:
+        prepared_features.update(order_features=order_features, contact_features=contact_features)
     email_engagement_by_customer = build_email_engagement_snapshot(
         message_rows, recipient_rows, order_rows, today=today, customers=customers, as_of=as_of
     )
@@ -7048,12 +7100,23 @@ def priority_planned_activity_time_signature(rows, *, now=None):
     return canonical_payload_fingerprint(states)
 
 
+def priority_snapshot_presentation(payload, *, read_only):
+    if read_only:
+        return {**payload, "_read_as_of": payload["_calculated_as_of"]}
+    return copy.deepcopy({k: v for k, v in payload.items() if not k.startswith("_")})
+
+
 def get_authoritative_priority_snapshot(
-    spreadsheet, *, today, planned_activity_rows=None, as_of=None
+    spreadsheet, *, today, planned_activity_rows=None, as_of=None, live=False, read_only=False, state_only=False
 ):
-    """Return one short-lived global v3 universe before owner filtering."""
+    """Share bounded live read models; explicit replay times remain exact.
+
+    Only audited GET views opt into immutable sharing. Fresh mutation scopes
+    bypass this cache, including its live time identity.
+    """
     global _priority_snapshot_entry
     explicit_as_of = as_of is not None
+    live = live or (not explicit_as_of and today == stockholm_today())
     if as_of is None:
         now = stockholm_now()
         as_of = now if now.date() == today else datetime.combine(today, datetime_time.max, tzinfo=STOCKHOLM_ZONE)
@@ -7087,26 +7150,50 @@ def get_authoritative_priority_snapshot(
     planning_time_signature = priority_planned_activity_time_signature(
         planned_activity_rows
     )
+    snapshot_epoch = _priority_snapshot_epoch
     key = (
-        id(spreadsheet), date_key, dependency_signature, planning_signature, "v3",
+        id(spreadsheet), date_key, dependency_signature, planning_signature, SCORE_VERSION, snapshot_epoch,
         planning_time_signature, canonical_payload_fingerprint(state_events),
-        as_of.isoformat(timespec="microseconds" if explicit_as_of else "minutes"),
+        "live" if live else as_of.isoformat(timespec="microseconds"),
     )
+    cache_started = time.perf_counter()
+    base_payload = None
+    candidate_entry = None
     with _priority_snapshot_condition:
         while True:
-            if _priority_snapshot_entry and _priority_snapshot_entry[0] == key:
-                return copy.deepcopy(_priority_snapshot_entry[1])
-            if key not in _priority_snapshot_loading:
-                _priority_snapshot_loading.add(key)
+            entry = _priority_snapshot_entries.get(key) if cache_enabled else None
+            if entry and (not live or entry[2].timestamp() <= as_of.timestamp() < entry[3].timestamp()):
+                candidate_entry = entry
+            else:
+                candidate_entry = None
+            if candidate_entry and _sheet_read_cache.monotonic() < entry[1]:
+                if state_only or entry[0].get("_has_priorities", True):
+                    record_performance_step("priority.cache_hit", cache_started)
+                    payload = entry[0]
+                    break
+                base_payload = entry[0]
+            # Bound both retained snapshots and CPU-heavy concurrent builds.
+            if not cache_enabled or not _priority_snapshot_loading:
+                # Fresh mutation scopes must not queue behind a shared read:
+                # their transaction's source checks are deliberately current.
+                if cache_enabled:
+                    _priority_snapshot_loading.add(key)
+                payload = None
+                record_performance_step("priority.cache_miss_wait", cache_started)
                 break
             _priority_snapshot_condition.wait()
+    if payload is not None:
+        with performance_step("priority.presentation_copy"):
+            return priority_snapshot_presentation(payload, read_only=read_only)
     try:
+        source_started = time.perf_counter()
         customers = get_customer_rows(spreadsheet)
         order_rows = get_order_rows(spreadsheet)
         contact_rows = get_contact_rows(spreadsheet)
         message_rows, recipient_rows, _events = get_email_rows(
             spreadsheet, include_events=False
         )
+        record_performance_step("priority.source_rows", source_started, len(customers))
         # Resolve calendar ownership from one cached users snapshot. Old
         # installations without a users sheet retain the exact-match fallback;
         # genuine read errors still surface rather than fabricating status.
@@ -7115,12 +7202,44 @@ def get_authoritative_priority_snapshot(
             users = get_user_rows(spreadsheet)
         except (WorksheetNotFound, AttributeError):
             pass
+        with performance_step("priority.source_version"):
+            source_inputs = [
+                customers, order_rows, contact_rows, message_rows, recipient_rows,
+                planned_activity_rows, state_events, users,
+            ]
+            source_version = canonical_payload_fingerprint(source_inputs) if cache_enabled else ""
+        # A TTL expiry requires fresh source validation, not blind renewal and
+        # not unconditional rescoring of an unchanged universe. The time bound
+        # remains anchored to the original calculation's next transition.
+        if candidate_entry and candidate_entry[0].get("_source_version") == source_version:
+            candidate = candidate_entry[0]
+            if state_only or candidate.get("_has_priorities", True):
+                with _priority_snapshot_condition:
+                    if (_priority_snapshot_epoch == snapshot_epoch and
+                            _sheet_read_cache.generation_signature(spreadsheet, PRIORITY_SNAPSHOT_CACHE_TITLES) == dependency_signature):
+                        deadline = min(_sheet_read_cache.monotonic() + 12.0,
+                            _sheet_read_cache.freshness_deadline(spreadsheet, PRIORITY_SNAPSHOT_CACHE_TITLES))
+                        _priority_snapshot_entries[key] = (candidate, deadline, candidate_entry[2], candidate_entry[3])
+                record_performance_step("priority.cache_revalidated", cache_started)
+                return priority_snapshot_presentation(candidate, read_only=read_only)
+            base_payload = candidate
+        else:
+            base_payload = None
         owner_names = {str(customer.get("customer_id") or "").strip(): str(
             (canonical_owner_for_customer(None, customer, users=users or []) or {}).get("user_name") or ""
         ).strip() for customer in customers} if users is not None else None
-        state = build_customer_state(customers, contact_rows, planned_activity_rows, state_events,
-                                     as_of=as_of, owner_user_names=owner_names, order_rows=order_rows)
-        priorities, email_snapshot = build_current_priority_snapshot(
+        if base_payload is not None:
+            as_of = parse_planning_instant(base_payload["_calculated_as_of"])
+        with performance_step("priority.order_features"):
+            order_features = (base_payload["_prepared_features"]["order_features"] if base_payload is not None else
+                              build_order_features(order_rows, customers=customers, as_of=as_of))
+        prepared_features = {"order_features": order_features}
+        with performance_step("priority.obligation_state"):
+            state = base_payload["customer_state"] if base_payload is not None else build_customer_state(
+                customers, contact_rows, planned_activity_rows, state_events,
+                as_of=as_of, owner_user_names=owner_names, order_rows=order_rows, order_features=order_features)
+        scoring_started = time.perf_counter()
+        priorities, email_snapshot = ([], {}) if state_only else build_current_priority_snapshot(
             customers=customers,
             order_rows=order_rows,
             contact_rows=contact_rows,
@@ -7132,9 +7251,16 @@ def get_authoritative_priority_snapshot(
             state_events=state_events,
             as_of=as_of,
             prepared_state=state,
+            prepared_order_features=order_features,
+            prepared_features=prepared_features,
         )
+        record_performance_step("priority.scoring", scoring_started, len(priorities))
         payload = {
             "priorities": priorities,
+            "_source_version": source_version,
+            "_has_priorities": not state_only,
+            "_calculated_as_of": as_of.isoformat(),
+            "_prepared_features": prepared_features,
             "snapshot_created_at": as_of.isoformat(timespec="seconds"),
             "customer_state": state,
             "customer_state_events": state_events,
@@ -7153,13 +7279,28 @@ def get_authoritative_priority_snapshot(
             )
             if cache_enabled else None
         )
+        with performance_step("priority.time_bounds"):
+            # Time rules use source instants, snoozes from the reduced events,
+            # and calendar dates (bounded by midnight). Scores and duplicate
+            # presentation guidance add no independent intraday transition.
+            valid_from, valid_until = next_time_transition(
+                (source_inputs, state), as_of, parse_planning_instant, include_start=True
+            ) if live else (as_of, None)
+        with performance_step("priority.freeze"):
+            payload = freeze(payload)
         with _priority_snapshot_condition:
-            if (
-                cache_enabled
-                and current_dependency_signature == dependency_signature
-            ):
-                _priority_snapshot_entry = (key, copy.deepcopy(payload))
-        return copy.deepcopy(payload)
+            if cache_enabled and current_dependency_signature == dependency_signature and snapshot_epoch == _priority_snapshot_epoch:
+                # Never renew a derived model beyond the oldest source read.
+                deadline = min(_sheet_read_cache.monotonic() + 12.0,
+                               _sheet_read_cache.freshness_deadline(spreadsheet, PRIORITY_SNAPSHOT_CACHE_TITLES))
+                for expired_key, entry in list(_priority_snapshot_entries.items()):
+                    if entry[1] <= _sheet_read_cache.monotonic():
+                        _priority_snapshot_entries.pop(expired_key, None)
+                while len(_priority_snapshot_entries) >= 2:
+                    _priority_snapshot_entries.pop(next(iter(_priority_snapshot_entries)))
+                _priority_snapshot_entries[key] = (payload, deadline, valid_from, valid_until)
+        with performance_step("priority.presentation_copy"):
+            return priority_snapshot_presentation(payload, read_only=read_only)
     finally:
         with _priority_snapshot_condition:
             _priority_snapshot_loading.discard(key)
@@ -7589,10 +7730,8 @@ def get_planning_attention():
         if error:
             return error
         now = stockholm_now()
-        snapshot = get_authoritative_priority_snapshot(spreadsheet, today=now.date(), as_of=now)
+        snapshot = get_authoritative_priority_snapshot(spreadsheet, today=now.date(), as_of=now, live=True, read_only=True)
         state = snapshot["customer_state"]
-        priorities = apply_workflow_suppressions(snapshot["priorities"], priority_workflow_suppressions(spreadsheet, snapshot["priorities"]))
-        by_id = {str(item.get("customer_id") or ""): item for item in priorities}
         items = attention_items(state, as_of=now, owner_user_name=owner.get("user_name"))
         try:
             offset = max(0, int(request.args.get("offset", 0)))
@@ -7601,6 +7740,10 @@ def get_planning_attention():
             return planning_error("invalid_pagination", "Sidindelningen är ogiltig.", 400)
         total = len(items)
         items = items[offset:offset + limit]
+        page_customer_ids = {item["customer_id"] for item in items}
+        priorities = [dict(row) for row in snapshot["priorities"] if str(row.get("customer_id") or "") in page_customer_ids]
+        priorities = apply_workflow_suppressions(priorities, priority_workflow_suppressions(spreadsheet, priorities))
+        by_id = {str(item.get("customer_id") or ""): item for item in priorities}
         decision_inputs = {}
         for item in items:
             priority = by_id.get(item["customer_id"], {})
@@ -7853,8 +7996,31 @@ def get_customer_insights():
     today = stockholm_today()
     user = current_user()
     global_snapshot = get_authoritative_priority_snapshot(
-        spreadsheet, today=today
+        spreadsheet, today=today, read_only=True
     )
+    if (request.headers.get("X-PB-Insights-Format") == "compact"
+            and global_snapshot.get("_source_version")):
+        workflow_deadline = _sheet_read_cache.freshness_deadline(spreadsheet, ("planning_suggestions",))
+        key = (id(spreadsheet), _priority_snapshot_epoch,
+               global_snapshot["_source_version"], global_snapshot["_calculated_as_of"],
+               canonical_payload_fingerprint(user), request.headers.get("X-PB-Value-Model"),
+               _sheet_read_cache.generation_signature(spreadsheet, ("planning_suggestions",)),
+               workflow_deadline, _sheet_read_cache.monotonic() < workflow_deadline)
+        def build_response():
+            response = build_customer_insights_response(spreadsheet, today, user, global_snapshot)
+            return response.get_data(), response.status_code, response.content_type
+        wait_started = time.perf_counter()
+        body, status, content_type = _insights_read_flights.get(
+            key, build_response, on_wait=lambda: record_performance_duration("insights.response_join", 0)
+        )
+        record_performance_step("insights.response_flight", wait_started)
+        # Response bytes are immutable. Cookies, compression and no-store
+        # headers are applied independently in each request's normal lifecycle.
+        return app.response_class(body, status=status, content_type=content_type)
+    return build_customer_insights_response(spreadsheet, today, user, global_snapshot)
+
+
+def build_customer_insights_response(spreadsheet, today, user, global_snapshot):
     all_customers = global_snapshot["customers"]
     customer_lookup = (
         None if user_is_admin(user) else CustomerLookup(all_customers)
@@ -7928,7 +8094,7 @@ def get_customer_insights():
         for customer in customers
     }
     priority_customers = [
-        priority for priority in priority_customers
+        dict(priority) for priority in priority_customers
         if str(priority.get("customer_id") or "").strip()
         in accessible_customer_ids
     ]
@@ -8158,14 +8324,18 @@ def get_customer_insights():
                     for field in action_fields if field in priority
                 })
             by_customer_id[cid] = record
-        insights["__by_customer_id"] = by_customer_id
+        if request.headers.get("X-PB-Insights-Format") == "compact":
+            insights = compact_records(by_customer_id)
+        else:
+            insights["__by_customer_id"] = by_customer_id
 
     record_performance_step(
         "calculation.customer_insights",
         calculation_started,
         len(insights),
     )
-    return jsonify(insights)
+    with performance_step("response.json_serialization"):
+        return jsonify(insights)
 
 
 def suggestion_error_response(exc):
@@ -9211,18 +9381,21 @@ def planning_activities():
     if any(activity.get("status") == "planned" for activity in activities):
         try:
             activity_snapshot = get_authoritative_priority_snapshot(spreadsheet, today=now.date(), as_of=now,
-                                      planned_activity_rows=[row for _index, row in activity_rows])
-            visible_priorities = apply_workflow_suppressions(activity_snapshot["priorities"],
-                                  priority_workflow_suppressions(spreadsheet, activity_snapshot["priorities"]))
+                                      planned_activity_rows=[row for _index, row in activity_rows], live=True, read_only=True)
+            week_customer_ids = {str(activity.get("customer_id") or "") for activity in activities}
+            week_priorities = [dict(row) for row in activity_snapshot["priorities"]
+                               if str(row.get("customer_id") or "") in week_customer_ids]
+            visible_priorities = apply_workflow_suppressions(week_priorities,
+                                  priority_workflow_suppressions(spreadsheet, week_priorities))
             activity_priorities = {str(item.get("customer_id") or ""): item for item in visible_priorities}
         except Exception:
             # Keep the calendar readable during a model outage, but do not
             # authorize an execution whose current contact policy is unknown.
             app.logger.exception("Could not verify calendar contact authority")
     activity_state = (activity_snapshot["customer_state"] if activity_snapshot is not None else
-                      customer_state_snapshot(spreadsheet, customers=planning_customers,
-                          contacts=[row for _index, row in indexed_contacts],
-                          activities=[row for _index, row in activity_rows], now=now))
+                      get_authoritative_priority_snapshot(spreadsheet, today=now.date(), as_of=now,
+                          planned_activity_rows=[row for _index, row in activity_rows],
+                          live=True, read_only=True, state_only=True)["customer_state"])
     obligations_by_activity = {aid: obligation for items in activity_state["obligations"].values() for obligation in items
                                for aid in (obligation.get("planned_activity_id"), obligation.get("original_planned_activity_id")) if aid}
     activity_sources = {str(row.get("planned_activity_id") or ""): row for _index, row in activity_rows}

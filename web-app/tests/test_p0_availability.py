@@ -152,7 +152,9 @@ class SheetAvailabilityUnitTests(TestCase):
                 clock_counts[name] = clock_counts.get(name, 0) + 1
                 if name in wait_events and clock_counts[name] == 2:
                     wait_events[name].set()
-            return time.monotonic()
+            # Windows' monotonic clock can have a 15ms tick. Keep this
+            # synchronization test deterministic even if the wait is shorter.
+            return time.monotonic() + clock_counts[name] * 0.000001
 
         cache = SheetReadCache(ttl_seconds=12, monotonic=monitored_clock)
         spreadsheet = object()
@@ -217,7 +219,9 @@ class SheetAvailabilityUnitTests(TestCase):
                 clock_counts[name] = clock_counts.get(name, 0) + 1
                 if name in wait_events and clock_counts[name] == 2:
                     wait_events[name].set()
-            return time.monotonic()
+            # Windows' monotonic clock can have a 15ms tick. Keep this
+            # synchronization test deterministic even if the wait is shorter.
+            return time.monotonic() + clock_counts[name] * 0.000001
 
         cache = SheetReadCache(ttl_seconds=12, monotonic=monitored_clock)
         spreadsheet = object()
@@ -467,7 +471,9 @@ class SheetAvailabilityUnitTests(TestCase):
                 clock_counts[name] = clock_counts.get(name, 0) + 1
                 if name == "exception-waiter" and clock_counts[name] == 2:
                     waiter_waiting.set()
-            return time.monotonic()
+            # Windows' monotonic clock can have a 15ms tick. Keep this
+            # synchronization test deterministic even if the wait is shorter.
+            return time.monotonic() + clock_counts[name] * 0.000001
 
         cache = SheetReadCache(ttl_seconds=12, monotonic=monitored_clock)
         spreadsheet = object()

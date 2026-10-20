@@ -247,7 +247,7 @@ def classify_legacy_completed_followups(contact_rows, planned_activity_rows, *, 
 
 
 def build_customer_state(customers, contact_rows, planned_activity_rows, state_events=(), *,
-                         as_of, owner_user_names=None, order_rows=()):
+                         as_of, owner_user_names=None, order_rows=(), order_features=None):
     # Share the actual model's quarantine and exact unique ID/number/name rules.
     from priority import _canonicalize_rows, _known_at
     current = instant(as_of)
@@ -585,7 +585,7 @@ def build_customer_state(customers, contact_rows, planned_activity_rows, state_e
             workflows[cid].append(payload)
 
     reconcile_internal_reminders(commitments, contacts, plans, saved_events,
-                                 customers=customers, order_rows=order_rows, as_of=current)
+                                 customers=customers, order_rows=order_rows, as_of=current, order_features=order_features)
 
     for permission in permissions.values():
         permission["revision"] = int(fingerprint({name: permission.get(name, "") for name in (
@@ -643,7 +643,7 @@ def attention_items(state, *, as_of, owner_user_name=None):
                                           key(row.get("customer")), row["obligation_id"]))
 
 
-def reconcile_internal_reminders(commitments, contacts, plans, saved_events, *, customers, order_rows, as_of):
+def reconcile_internal_reminders(commitments, contacts, plans, saved_events, *, customers, order_rows, as_of, order_features=None):
     """Read projection of superseded sales reminders; never a CRM mutation.
 
     A linked active calendar task is retained. Separate customer promises and
@@ -661,7 +661,8 @@ def reconcile_internal_reminders(commitments, contacts, plans, saved_events, *, 
         plans_by_customer[row["customer_id"]].append(row)
     last_orders = {}
     if order_rows:
-        for feature in build_order_features(order_rows, customers=customers, as_of=as_of).values():
+        features = order_features if order_features is not None else build_order_features(order_rows, customers=customers, as_of=as_of)
+        for feature in features.values():
             cid = text(feature.get("customer_id"))
             when = feature.get("last_order_date")
             if cid and when:

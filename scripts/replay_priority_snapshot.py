@@ -11,7 +11,8 @@ import argparse
 from collections import Counter
 from contextlib import ExitStack
 import copy
-from datetime import datetime
+from datetime import datetime, timedelta
+import gzip
 import hashlib
 import importlib.metadata
 import json
@@ -45,6 +46,7 @@ def main():
     parser.add_argument("--policy", default="{}")
     parser.add_argument("--scenario", default="baseline")
     parser.add_argument("--skip-user-endpoints", action="store_true")
+    parser.add_argument("--verify-views", action="store_true", help="Verify lossless compact/gzip transport and capture each user's calendar for exact comparison; outputs remain private")
     parser.add_argument("--verification-only", action="store_true", help="Omit repeated portfolio payloads from a user verification shard")
     parser.add_argument("--user-name", help="Verify one actual user for sharded replay; default verifies all")
     parser.add_argument("--progress", action="store_true", help="Log endpoint/count progress, never customer data")
@@ -165,6 +167,27 @@ def main():
             if response.status_code != 200:
                 raise RuntimeError(f"Admin endpoint failed: {response.status_code}")
             admin_payload = response.get_json()
+            transport_verification = {"compact_supported": False}
+            calendars_by_user = {}
+            if args.verify_views:
+                compact_headers = {"X-PB-Value-Model": args.model_header, "X-PB-Insights-Format": "compact"}
+                compact_response = client.get("/customer-insights", headers=compact_headers)
+                assert compact_response.status_code == 200, "Compact insights failed"
+                compact = compact_response.get_json()
+                if "__record_defaults" in compact:
+                    restored = {}
+                    for cid, row in compact["__by_customer_id"].items():
+                        record = {**compact["__record_defaults"], **row}
+                        if record.pop("__guidance_alias", False):
+                            record["customer_guidance"] = dict(record["list_guidance"])
+                        restored[cid] = record
+                    # Canonical JSON also distinguishes booleans from numbers.
+                    assert json.dumps(restored, sort_keys=True) == json.dumps(admin_payload["__by_customer_id"], sort_keys=True), "Compact transport changed customer records"
+                    compressed = client.get("/customer-insights", headers={**compact_headers, "Accept-Encoding": "gzip"})
+                    assert compressed.headers.get("Content-Encoding") == "gzip", "Gzip negotiation failed"
+                    assert json.loads(gzip.decompress(compressed.data)) == compact, "Gzip transport changed records"
+                    transport_verification = {"compact_supported": True, "verified_records": len(restored),
+                        "legacy_bytes": len(response.data), "compact_bytes": len(compact_response.data), "gzip_bytes": len(compressed.data)}
             model_version = getattr(priority, "VALUE_MODEL_VERSION", None)
             if model_version:
                 assert admin_payload.get("__by_customer_id"), "Value model returned no canonical customer records"
@@ -188,6 +211,12 @@ def main():
                     if result.status_code != 200:
                         raise RuntimeError(f"User endpoint failed: {result.status_code}")
                     payload = result.get_json()
+                    if args.verify_views:
+                        week_start = now.date() - timedelta(days=now.weekday())
+                        calendar = client.get("/planning/activities", query_string={
+                            "start": week_start.isoformat(), "end": (week_start + timedelta(days=6)).isoformat(), "include_followups": "0"})
+                        assert calendar.status_code == 200, "Calendar replay failed"
+                        calendars_by_user[user["name"]] = calendar.get_json()
                     expected = application.filter_accessible_customers(global_snapshot["customers"], user)
                     expected_ids = {c["customer_id"] for c in expected if c.get("customer_id")}
                     actual_ids = set(payload.get("__by_customer_id", {}))
@@ -277,9 +306,12 @@ def main():
             if args.verification_only:
                 for field in ("priorities", "pre_workflow_priorities", "admin_endpoint", "customer_state", "workflow_suppressions"):
                     output.pop(field, None)
+            if args.verify_views:
+                output["transport_verification"] = transport_verification
+                output["calendars_by_user"] = calendars_by_user
             path = Path(args.output)
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(output, ensure_ascii=False, indent=2, default=str))
+            path.write_text(json.dumps(output, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
             print(json.dumps({"output": str(path), "provenance": output["provenance"], "summary": output["summary"]}, ensure_ascii=False, indent=2))
 
 

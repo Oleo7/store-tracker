@@ -132,6 +132,17 @@ class SheetReadCache:
                 for title in normalized
             )
 
+    def freshness_deadline(self, spreadsheet, titles):
+        """Earliest loaded dependency expiry, in this cache's monotonic clock.
+
+        A derived model must never extend a source read's TTL. Missing optional
+        worksheets have no entry and are checked again by the caller.
+        """
+        with self._condition:
+            deadlines = [entry.expires_at for title in titles
+                         if (entry := self._entries.get(self._dataset_key(spreadsheet, title))) is not None]
+            return min(deadlines, default=self.monotonic())
+
     def worksheet(self, spreadsheet, title, *, loader=None):
         key = self._dataset_key(spreadsheet, title)
         with self._condition:
