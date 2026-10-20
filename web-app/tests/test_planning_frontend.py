@@ -340,7 +340,7 @@ function controlledRequest(path) {
   requests.push({path,resolve,reject});
   return promise;
 }
-const fetch = path => controlledRequest(path).then(payload => ({ok:true,json:async()=>payload}));
+const fetch = path => controlledRequest(path).then(payload => ({ok:true,json:async()=>payload,text:async()=>JSON.stringify(payload)}));
 const planningFetchJson = controlledRequest;
 const planningCancelDrag = () => {}, planningTodayKey = () => planningSelectedDate;
 const planningCalendarContextKey = () => 'test-calendar';

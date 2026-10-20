@@ -4722,7 +4722,7 @@
     // An opt-in header adds the ID-keyed value read model without breaking
     // older consumers of the name-keyed /customer-insights response.
     const options = path.endsWith("/customer-insights")
-      ? { headers: { "X-PB-Value-Model": "v3.5" } }
+      ? { headers: { "X-PB-Value-Model": "v3.5", "X-PB-Insights-Format": "compact" } }
       : undefined;
     const requestPromise = fetch(path, options)
       .then(async response => {
@@ -4733,7 +4733,26 @@
           error.status = response.status;
           throw error;
         }
-        return response.json();
+        const transferStarted = window.performance?.now?.() ?? Date.now();
+        const text = await response.text();
+        const parseStarted = window.performance?.now?.() ?? Date.now();
+        const payload = JSON.parse(text);
+        if (payload?.__record_defaults && payload?.__by_customer_id) {
+          for (const [id, record] of Object.entries(payload.__by_customer_id)) {
+            const restored = { ...payload.__record_defaults, ...record };
+            if (restored.__guidance_alias) {
+              restored.customer_guidance = { ...restored.list_guidance };
+              delete restored.__guidance_alias;
+            }
+            payload.__by_customer_id[id] = restored;
+          }
+          delete payload.__record_defaults;
+        }
+        if (window.performance?.measure) {
+          performance.measure("store-tracker:response-body", { start: transferStarted, end: parseStarted });
+          performance.measure("store-tracker:json-parse", { start: parseStarted, end: performance.now() });
+        }
+        return payload;
       })
       .finally(() => {
         if (sharedJsonRequests.get(path) === requestPromise) {
