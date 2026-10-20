@@ -2,12 +2,13 @@ import copy
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 import json
+import threading
 from unittest import TestCase
 from unittest.mock import patch
 
 from test_planning import default_spreadsheet, NOW
 import app as a
-from priority_read_cache import freeze, next_time_transition, compact_records
+from priority_read_cache import freeze, next_time_transition, compact_records, ReadSingleFlight
 
 
 class PriorityReadCacheTests(TestCase):
@@ -198,3 +199,88 @@ class PriorityReadCacheTests(TestCase):
         lower, upper = next_time_transition({'recorded_at': event.isoformat()}, after, a.parse_planning_instant, include_start=True)
         self.assertGreater(lower.timestamp(), event.timestamp())
         self.assertLess(lower.timestamp(), after.timestamp())
+
+    def test_compact_concurrent_roles_preserve_exact_customer_visibility(self):
+        a.app.config.update(TESTING=True, SECRET_KEY='read-visibility-test')
+        users = [a.public_user(u) for u in a.get_user_rows(self.book)]
+        masters = a.get_customer_rows(self.book)
+        def call(user):
+            with a.app.test_client() as client:
+                with client.session_transaction() as session:
+                    session['user'] = user
+                result = client.get('/customer-insights', headers={'X-PB-Value-Model':'v3.5', 'X-PB-Insights-Format':'compact'})
+                self.assertEqual(result.status_code, 200)
+                return set(result.get_json()['__by_customer_id'])
+        with patch.object(a, 'get_spreadsheet_with_retry', return_value=self.book), ThreadPoolExecutor(max_workers=4) as pool:
+            visible = list(pool.map(call, users))
+        for user, actual in zip(users, visible):
+            self.assertEqual(actual, {c['customer_id'] for c in a.filter_accessible_customers(masters, user)})
+
+
+class ReadSingleFlightTests(TestCase):
+    def test_concurrent_results_are_shared_only_until_the_build_finishes(self):
+        flight = ReadSingleFlight()
+        started, release, joined = threading.Event(), threading.Event(), threading.Event()
+        calls = waiters = 0
+        lock = threading.Lock()
+        def build():
+            nonlocal calls
+            calls += 1
+            started.set()
+            self.assertTrue(release.wait(3))
+            return b'private immutable response'
+        def wait():
+            nonlocal waiters
+            with lock:
+                waiters += 1
+                if waiters == 3:
+                    joined.set()
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            owner = pool.submit(flight.get, ('user', 'version'), build)
+            self.assertTrue(started.wait(2))
+            peers = [pool.submit(flight.get, ('user', 'version'), build, on_wait=wait) for _ in range(3)]
+            try:
+                self.assertTrue(joined.wait(2))
+            finally:
+                release.set()
+            self.assertEqual([job.result(2) for job in [owner, *peers]], [b'private immutable response']*4)
+        self.assertEqual(calls, 1)
+        self.assertEqual(flight.get(('user', 'version'), lambda: b'new response'), b'new response')
+
+    def test_other_users_and_new_data_versions_never_join_a_blocked_read(self):
+        flight = ReadSingleFlight()
+        started, release = threading.Event(), threading.Event()
+        def build():
+            started.set()
+            self.assertTrue(release.wait(3))
+            return b'first user'
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            owner = pool.submit(flight.get, ('first', 'v1'), build)
+            self.assertTrue(started.wait(2))
+            try:
+                self.assertEqual(flight.get(('second', 'v1'), lambda: b'second user'), b'second user')
+                self.assertEqual(flight.get(('first', 'v2'), lambda: b'updated source'), b'updated source')
+            finally:
+                release.set()
+            self.assertEqual(owner.result(2), b'first user')
+
+    def test_failure_wakes_waiters_and_allows_a_fresh_retry(self):
+        flight = ReadSingleFlight()
+        started, release, joined = threading.Event(), threading.Event(), threading.Event()
+        def build():
+            started.set()
+            self.assertTrue(release.wait(3))
+            raise ValueError('failed source')
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            owner = pool.submit(flight.get, 'key', build)
+            self.assertTrue(started.wait(2))
+            peer = pool.submit(flight.get, 'key', build, on_wait=joined.set)
+            try:
+                self.assertTrue(joined.wait(2))
+            finally:
+                release.set()
+            with self.assertRaises(ValueError):
+                owner.result(2)
+            with self.assertRaises(RuntimeError):
+                peer.result(2)
+        self.assertEqual(flight.get('key', lambda: b'recovered'), b'recovered')

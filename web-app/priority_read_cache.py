@@ -7,9 +7,46 @@ import copy
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 import re
+import threading
 
 
 _DATE_TEXT = re.compile(r'^(?:\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[/.]\d{1,2}[/.]\d{4})(?:[ T]|$)')
+
+
+class ReadSingleFlight:
+    """Share only an in-progress immutable result; retain no completed cache.
+
+    The caller supplies a key containing authenticated visibility and current
+    source versions. Exceptions wake all waiters and never leave a stuck key.
+    """
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._loading = {}
+
+    def get(self, key, build, *, on_wait=None):
+        with self._lock:
+            entry = self._loading.get(key)
+            owner = entry is None
+            if owner:
+                entry = {'ready': threading.Event()}
+                self._loading[key] = entry
+        if owner:
+            try:
+                entry['value'] = build()
+            except BaseException as error:
+                entry['error'] = error
+                raise
+            finally:
+                with self._lock:
+                    self._loading.pop(key, None)
+                    entry['ready'].set()
+        else:
+            if on_wait:
+                on_wait()
+            entry['ready'].wait()
+            if 'error' in entry:
+                raise RuntimeError('Shared read failed') from entry['error']
+        return entry['value']
 
 
 def _immutable(*args, **kwargs):

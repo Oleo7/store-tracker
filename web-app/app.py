@@ -24,7 +24,7 @@ from collections import defaultdict
 import copy
 import gc
 import gzip
-from priority_read_cache import freeze, next_time_transition, compact_records
+from priority_read_cache import freeze, next_time_transition, compact_records, ReadSingleFlight
 from io import BytesIO
 from queue import Empty, Full, Queue
 import os
@@ -946,6 +946,7 @@ _priority_snapshot_entry = None
 _priority_snapshot_entries = {}
 _priority_snapshot_epoch = 0
 _priority_snapshot_loading = set()
+_insights_read_flights = ReadSingleFlight()
 
 
 _spreadsheet_cache = None
@@ -7997,6 +7998,29 @@ def get_customer_insights():
     global_snapshot = get_authoritative_priority_snapshot(
         spreadsheet, today=today, read_only=True
     )
+    if (request.headers.get("X-PB-Insights-Format") == "compact"
+            and global_snapshot.get("_source_version")):
+        workflow_deadline = _sheet_read_cache.freshness_deadline(spreadsheet, ("planning_suggestions",))
+        key = (id(spreadsheet), _priority_snapshot_epoch,
+               global_snapshot["_source_version"], global_snapshot["_calculated_as_of"],
+               canonical_payload_fingerprint(user), request.headers.get("X-PB-Value-Model"),
+               _sheet_read_cache.generation_signature(spreadsheet, ("planning_suggestions",)),
+               workflow_deadline, _sheet_read_cache.monotonic() < workflow_deadline)
+        def build_response():
+            response = build_customer_insights_response(spreadsheet, today, user, global_snapshot)
+            return response.get_data(), response.status_code, response.content_type
+        wait_started = time.perf_counter()
+        body, status, content_type = _insights_read_flights.get(
+            key, build_response, on_wait=lambda: record_performance_duration("insights.response_join", 0)
+        )
+        record_performance_step("insights.response_flight", wait_started)
+        # Response bytes are immutable. Cookies, compression and no-store
+        # headers are applied independently in each request's normal lifecycle.
+        return app.response_class(body, status=status, content_type=content_type)
+    return build_customer_insights_response(spreadsheet, today, user, global_snapshot)
+
+
+def build_customer_insights_response(spreadsheet, today, user, global_snapshot):
     all_customers = global_snapshot["customers"]
     customer_lookup = (
         None if user_is_admin(user) else CustomerLookup(all_customers)
