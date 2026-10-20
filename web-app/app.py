@@ -7034,6 +7034,7 @@ def build_current_priority_snapshot(
     prepared_state=None,
     prepared_order_features=None,
     prepared_features=None,
+    customer_ids=None,
 ):
     """Calculate the authoritative priority snapshot used by all endpoints."""
     if as_of is None:
@@ -7067,8 +7068,16 @@ def build_current_priority_snapshot(
     email_engagement_by_customer = build_email_engagement_snapshot(
         message_rows, recipient_rows, order_rows, today=today, customers=customers, as_of=as_of
     )
+    # All source features and global V3.5 benchmark inputs stay portfolio-wide.
+    # Only the final per-store scoring loop is restricted for route validation.
+    scoring_customers = customers if customer_ids is None else [
+        customer for customer in customers
+        if str(customer.get("customer_id") or "").strip() in {
+            str(cid).strip() for cid in customer_ids
+        }
+    ]
     priority_customers = build_priority_customers(
-        customers,
+        scoring_customers,
         order_features,
         contact_features,
         None,
@@ -7081,6 +7090,7 @@ def build_current_priority_snapshot(
         obligation_states=state["obligations"],
         contact_permissions=state["contact_permissions"],
         planning_owner_user_names=planning_owner_user_names,
+        portfolio_customers=customers if customer_ids is not None else None,
     )
     enrich_customer_state_priorities(priority_customers, state, state_events,
                                      planning_owner_user_names or {}, now=as_of)
@@ -7246,10 +7256,9 @@ def get_authoritative_priority_snapshot(
             users = get_user_rows(spreadsheet)
         except (WorksheetNotFound, AttributeError):
             pass
-        # Route commits must use the same complete V3.5 benchmark and order
-        # universe as the customer list. Restricting source rows before scoring
-        # changes portfolio priors and can authorize different route contacts.
-        # Filter the *result* only, preserving exact full-snapshot semantics.
+        # Always derive order/contact/obligation/email features and name
+        # identity from the full portfolio before scoring the route subset.
+        # A filtered raw-input universe changes V3.5 population priors.
         with performance_step("priority.source_version"):
             source_inputs = [
                 customers, order_rows, contact_rows, message_rows, recipient_rows,
@@ -7301,11 +7310,8 @@ def get_authoritative_priority_snapshot(
             prepared_state=state,
             prepared_order_features=order_features,
             prepared_features=prepared_features,
+            customer_ids=customer_ids,
         )
-        if customer_ids is not None:
-            scoped_ids = {str(value).strip() for value in customer_ids}
-            priorities = [row for row in priorities
-                          if str(row.get("customer_id") or "").strip() in scoped_ids]
         record_performance_step("priority.scoring", scoring_started, len(priorities))
         payload = {
             "priorities": priorities,
