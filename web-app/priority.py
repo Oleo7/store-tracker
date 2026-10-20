@@ -1075,6 +1075,7 @@ def build_priority_customers(
     contact_permissions: dict | None = None,
     as_of: datetime | None = None,
     allow_commercial_fallback: bool = True,
+    portfolio_customers: list[dict] | None = None,
 ) -> list[dict]:
     """Build the authoritative current score for every active, in-scope customer."""
     snapshot = _snapshot_time(as_of or now, today=today)
@@ -1113,9 +1114,13 @@ def build_priority_customers(
     order_indices = _feature_identity_indices(order_features)
     contact_indices = _feature_identity_indices(contact_features)
     email_indices = _feature_identity_indices(email_features)
+    # Route-save can score only selected stores, but segment/format priors,
+    # customer identity ambiguity and historical benchmarks MUST be computed
+    # against the complete portfolio, exactly as for the Butiker list.
+    benchmark_customers = portfolio_customers if portfolio_customers is not None else customers
     master_name_counts = defaultdict(int)
     master_id_counts = defaultdict(int)
-    for master_customer in customers:
+    for master_customer in benchmark_customers:
         master_name = normalize_customer_key(master_customer.get("customer"))
         if master_name:
             master_name_counts[master_name] += 1
@@ -1126,7 +1131,7 @@ def build_priority_customers(
         name for name, count in master_name_counts.items() if count > 1
     }
     benchmarks = _build_priority_benchmarks(
-        customers,
+        benchmark_customers,
         order_features,
         number_index,
         identity_indices=order_indices,
@@ -1139,7 +1144,7 @@ def build_priority_customers(
         planned_activities = [row for row in (planned_activities or ())
                               if str(row.get("planned_activity_id") or "") not in closed_activities]
     activity_index = _planned_activity_index(planned_activities)
-    value_priors = build_value_priors(customers, order_indices, ambiguous_master_names, today)
+    value_priors = build_value_priors(benchmark_customers, order_indices, ambiguous_master_names, today)
     guidance_now = snapshot
     represented_source_contact_ids = {
         str(row.get("source_contact_id") or "").strip()
