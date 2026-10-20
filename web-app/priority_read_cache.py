@@ -5,7 +5,7 @@ independent mutable deep copy. Nested containers cannot be changed by a view.
 """
 import copy
 from collections import Counter
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import re
 
 
@@ -57,7 +57,7 @@ def freeze(value, memo=None):
     return value
 
 
-def next_time_transition(payload, current, parse_instant):
+def next_time_transition(payload, current, parse_instant, *, include_start=False):
     """Conservative validity bound: midnight or any timestamp in source/state.
 
     No rounding of business time. Includes future recorded/created facts,
@@ -65,11 +65,13 @@ def next_time_transition(payload, current, parse_instant):
     are harmless; omitting a relevant one would allow a stale decision.
     """
     boundary = datetime.combine(current.date() + timedelta(days=1), datetime.min.time(), tzinfo=current.tzinfo)
+    start = datetime.combine(current.date(), datetime.min.time(), tzinfo=current.tzinfo)
+    current_ts = current.timestamp()
     seen = set()
     parsed = {}
 
     def visit(value, field=''):
-        nonlocal boundary
+        nonlocal boundary, start
         if isinstance(value, (dict, list, tuple)):
             if id(value) in seen:
                 return
@@ -98,11 +100,18 @@ def next_time_transition(payload, current, parse_instant):
                         instant = instant.replace(tzinfo=current.tzinfo)
                 parsed[value] = instant
             instant = parsed[value]
-            if instant and current <= instant < boundary:
-                # At equality strict '< now' transitions require the next tick.
-                boundary = instant if instant > current else instant + timedelta(microseconds=1)
+            if instant:
+                instant_ts = instant.timestamp()
+                next_tick = lambda: (instant.astimezone(timezone.utc) + timedelta(microseconds=1)).astimezone(current.tzinfo)
+                if instant_ts <= current_ts and instant_ts >= start.timestamp():
+                    # Earlier requests in the SAME interval can share a build
+                    # even if they arrived at the cache out of timestamp order.
+                    start = instant if instant_ts == current_ts else next_tick()
+                if current_ts <= instant_ts < boundary.timestamp():
+                    # At equality strict '< now' transitions require the next tick.
+                    boundary = instant if instant_ts > current_ts else next_tick()
     visit(payload)
-    return boundary
+    return (start, boundary) if include_start else boundary
 
 
 def compact_records(records):

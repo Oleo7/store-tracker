@@ -1,6 +1,6 @@
 import copy
 from concurrent.futures import ThreadPoolExecutor
-from datetime import timedelta
+from datetime import datetime, timedelta
 import json
 from unittest import TestCase
 from unittest.mock import patch
@@ -40,6 +40,12 @@ class PriorityReadCacheTests(TestCase):
                 results = list(pool.map(lambda _: self.snapshot(as_of=NOW, live=True, read_only=True), range(4)))
             self.assertEqual(build.call_count, 1)
             self.assertEqual(results[0], results[-1])
+
+    def test_live_requests_can_reach_cache_in_reverse_timestamp_order(self):
+        with patch.object(a, 'build_current_priority_snapshot', wraps=a.build_current_priority_snapshot) as build:
+            self.snapshot(as_of=NOW+timedelta(microseconds=17), live=True, read_only=True)
+            self.snapshot(as_of=NOW, live=True, read_only=True)
+            self.assertEqual(build.call_count, 1)
 
     def test_calendar_without_planned_contacts_does_not_score_portfolio(self):
         with patch.object(a, 'build_current_priority_snapshot', wraps=a.build_current_priority_snapshot) as scoring, patch.object(
@@ -181,3 +187,14 @@ class PriorityReadCacheTests(TestCase):
         equal = next_time_transition({'scheduled_at': NOW.isoformat()}, NOW, a.parse_planning_instant)
         self.assertEqual(equal, NOW+timedelta(microseconds=1))
         self.assertEqual(next_time_transition({}, NOW, a.parse_planning_instant).date(), NOW.date()+timedelta(days=1))
+
+    def test_time_interval_orders_both_dst_folds_by_instant(self):
+        before = a.parse_planning_instant('2026-10-25T02:45:00+02:00')
+        event = a.parse_planning_instant('2026-10-25T02:15:00+01:00')
+        after = a.parse_planning_instant('2026-10-25T02:30:00+01:00')
+        lower, upper = next_time_transition({'recorded_at': event.isoformat()}, before, a.parse_planning_instant, include_start=True)
+        self.assertEqual(upper.timestamp(), event.timestamp())
+        self.assertLess(before.timestamp(), upper.timestamp())
+        lower, upper = next_time_transition({'recorded_at': event.isoformat()}, after, a.parse_planning_instant, include_start=True)
+        self.assertGreater(lower.timestamp(), event.timestamp())
+        self.assertLess(lower.timestamp(), after.timestamp())

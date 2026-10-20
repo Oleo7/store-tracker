@@ -7161,7 +7161,7 @@ def get_authoritative_priority_snapshot(
     with _priority_snapshot_condition:
         while True:
             entry = _priority_snapshot_entries.get(key) if cache_enabled else None
-            if entry and (not live or entry[2] <= as_of < entry[3]):
+            if entry and (not live or entry[2].timestamp() <= as_of.timestamp() < entry[3].timestamp()):
                 candidate_entry = entry
             else:
                 candidate_entry = None
@@ -7282,7 +7282,9 @@ def get_authoritative_priority_snapshot(
             # Time rules use source instants, snoozes from the reduced events,
             # and calendar dates (bounded by midnight). Scores and duplicate
             # presentation guidance add no independent intraday transition.
-            valid_until = next_time_transition((source_inputs, state), as_of, parse_planning_instant) if live else None
+            valid_from, valid_until = next_time_transition(
+                (source_inputs, state), as_of, parse_planning_instant, include_start=True
+            ) if live else (as_of, None)
         with performance_step("priority.freeze"):
             payload = freeze(payload)
         with _priority_snapshot_condition:
@@ -7295,7 +7297,7 @@ def get_authoritative_priority_snapshot(
                         _priority_snapshot_entries.pop(expired_key, None)
                 while len(_priority_snapshot_entries) >= 2:
                     _priority_snapshot_entries.pop(next(iter(_priority_snapshot_entries)))
-                _priority_snapshot_entries[key] = (payload, deadline, as_of, valid_until)
+                _priority_snapshot_entries[key] = (payload, deadline, valid_from, valid_until)
         with performance_step("priority.presentation_copy"):
             return priority_snapshot_presentation(payload, read_only=read_only)
     finally:
