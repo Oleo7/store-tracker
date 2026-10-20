@@ -1089,8 +1089,12 @@ def build_priority_customers(
     if isinstance(contact_features, FeatureSnapshot) and (
             not contact_features.canonical or contact_features.as_of != snapshot.isoformat()):
         contact_features = build_contact_features(contact_features.source_rows, order_features, customers=customers, as_of=snapshot)
+    # Full-master identity resolution is essential even if only a route's
+    # customers will be scored. Shared names and ambiguous legacy rows must
+    # have the same interpretation as the ordinary portfolio snapshot.
+    benchmark_customers = portfolio_customers if portfolio_customers is not None else customers
     planned_activities = [row for row in _canonicalize_rows(
-        planned_activities, customers, name_field="customer", number_field="customer_number")
+        planned_activities, benchmark_customers, name_field="customer", number_field="customer_number")
         if _known_at(row, snapshot) and not row.get("_identity_unresolved")]
     if scoring_version != SCORE_VERSION:
         raise ValueError("Only the current v3 scoring model is supported")
@@ -1117,7 +1121,6 @@ def build_priority_customers(
     # Route-save can score only selected stores, but segment/format priors,
     # customer identity ambiguity and historical benchmarks MUST be computed
     # against the complete portfolio, exactly as for the Butiker list.
-    benchmark_customers = portfolio_customers if portfolio_customers is not None else customers
     master_name_counts = defaultdict(int)
     master_id_counts = defaultdict(int)
     for master_customer in benchmark_customers:
