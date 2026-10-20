@@ -6,6 +6,10 @@ independent mutable deep copy. Nested containers cannot be changed by a view.
 import copy
 from collections import Counter
 from datetime import datetime, timedelta
+import re
+
+
+_DATE_TEXT = re.compile(r'^(?:\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[/.]\d{1,2}[/.]\d{4})(?:[ T]|$)')
 
 
 def _immutable(*args, **kwargs):
@@ -64,18 +68,27 @@ def next_time_transition(payload, current, parse_instant):
     seen = set()
     parsed = {}
 
-    def visit(value):
+    def visit(value, field=''):
         nonlocal boundary
         if isinstance(value, (dict, list, tuple)):
             if id(value) in seen:
                 return
             seen.add(id(value))
-            children = (v for k, v in value.items() if k not in {'as_of', '_calculated_as_of', 'snapshot_created_at'}) if isinstance(value, dict) else value
-            for child in children:
-                visit(child)
+            if isinstance(value, dict):
+                for key, child in value.items():
+                    if key not in {'as_of', '_calculated_as_of', 'snapshot_created_at'}:
+                        visit(child, str(key).casefold().replace(' ', '_'))
+            else:
+                for child in value:
+                    visit(child, field)
         elif isinstance(value, (str, datetime)):
-            if isinstance(value, str) and (len(value) < 8 or not value[:2].isdigit()):
-                return
+            if isinstance(value, str):
+                # Phone numbers, UUIDs, prices and SKU codes are not dates.
+                # Excel serials and compact dates remain supported on actual
+                # temporal fields through the same parser as the model.
+                temporal = field in {'date', 'time', 'date_time'} or field.endswith(('_at', '_date', '_until', '_time'))
+                if not value or not temporal and not _DATE_TEXT.match(value):
+                    return
             if value not in parsed:
                 instant = parse_instant(value)
                 if instant is None:

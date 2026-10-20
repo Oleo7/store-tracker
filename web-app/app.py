@@ -7157,10 +7157,15 @@ def get_authoritative_priority_snapshot(
     )
     cache_started = time.perf_counter()
     base_payload = None
+    candidate_entry = None
     with _priority_snapshot_condition:
         while True:
             entry = _priority_snapshot_entries.get(key) if cache_enabled else None
-            if entry and _sheet_read_cache.monotonic() < entry[1] and (not live or entry[2] <= as_of < entry[3]):
+            if entry and (not live or entry[2] <= as_of < entry[3]):
+                candidate_entry = entry
+            else:
+                candidate_entry = None
+            if candidate_entry and _sheet_read_cache.monotonic() < entry[1]:
                 if state_only or entry[0].get("_has_priorities", True):
                     record_performance_step("priority.cache_hit", cache_started)
                     payload = entry[0]
@@ -7196,6 +7201,29 @@ def get_authoritative_priority_snapshot(
             users = get_user_rows(spreadsheet)
         except (WorksheetNotFound, AttributeError):
             pass
+        with performance_step("priority.source_version"):
+            source_inputs = [
+                customers, order_rows, contact_rows, message_rows, recipient_rows,
+                planned_activity_rows, state_events, users,
+            ]
+            source_version = canonical_payload_fingerprint(source_inputs) if cache_enabled else ""
+        # A TTL expiry requires fresh source validation, not blind renewal and
+        # not unconditional rescoring of an unchanged universe. The time bound
+        # remains anchored to the original calculation's next transition.
+        if candidate_entry and candidate_entry[0].get("_source_version") == source_version:
+            candidate = candidate_entry[0]
+            if state_only or candidate.get("_has_priorities", True):
+                with _priority_snapshot_condition:
+                    if (_priority_snapshot_epoch == snapshot_epoch and
+                            _sheet_read_cache.generation_signature(spreadsheet, PRIORITY_SNAPSHOT_CACHE_TITLES) == dependency_signature):
+                        deadline = min(_sheet_read_cache.monotonic() + 12.0,
+                            _sheet_read_cache.freshness_deadline(spreadsheet, PRIORITY_SNAPSHOT_CACHE_TITLES))
+                        _priority_snapshot_entries[key] = (candidate, deadline, candidate_entry[2], candidate_entry[3])
+                record_performance_step("priority.cache_revalidated", cache_started)
+                return priority_snapshot_presentation(candidate, read_only=read_only)
+            base_payload = candidate
+        else:
+            base_payload = None
         owner_names = {str(customer.get("customer_id") or "").strip(): str(
             (canonical_owner_for_customer(None, customer, users=users or []) or {}).get("user_name") or ""
         ).strip() for customer in customers} if users is not None else None
@@ -7228,6 +7256,7 @@ def get_authoritative_priority_snapshot(
         record_performance_step("priority.scoring", scoring_started, len(priorities))
         payload = {
             "priorities": priorities,
+            "_source_version": source_version,
             "_has_priorities": not state_only,
             "_calculated_as_of": as_of.isoformat(),
             "_prepared_features": prepared_features,
@@ -7249,8 +7278,12 @@ def get_authoritative_priority_snapshot(
             )
             if cache_enabled else None
         )
+        with performance_step("priority.time_bounds"):
+            # Time rules use source instants, snoozes from the reduced events,
+            # and calendar dates (bounded by midnight). Scores and duplicate
+            # presentation guidance add no independent intraday transition.
+            valid_until = next_time_transition((source_inputs, state), as_of, parse_planning_instant) if live else None
         with performance_step("priority.freeze"):
-            valid_until = next_time_transition(payload, as_of, parse_planning_instant) if live else None
             payload = freeze(payload)
         with _priority_snapshot_condition:
             if cache_enabled and current_dependency_signature == dependency_signature and snapshot_epoch == _priority_snapshot_epoch:

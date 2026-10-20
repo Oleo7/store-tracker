@@ -102,6 +102,34 @@ class PriorityReadCacheTests(TestCase):
         self.assertEqual(first['customers'][0]['sales_person'], 'Olle')
         self.assertEqual(second['customers'][0]['sales_person'], 'Sofia')
 
+    def test_ttl_refresh_reuses_scores_only_after_verifying_unchanged_sources(self):
+        with patch.object(a, 'build_current_priority_snapshot', wraps=a.build_current_priority_snapshot) as build:
+            with patch.object(a._sheet_read_cache, 'monotonic', return_value=100.0):
+                first = self.snapshot(read_only=True)
+            sheet = self.book.worksheet('customers_enriched')
+            with patch.object(sheet, 'get_all_values', wraps=sheet.get_all_values) as read:
+                with patch.object(a._sheet_read_cache, 'monotonic', return_value=113.0):
+                    second = self.snapshot(read_only=True)
+                self.assertGreater(read.call_count, 0)
+            self.assertEqual(build.call_count, 1)
+            self.assertEqual(first, second)
+
+    def test_future_refusal_becomes_effective_even_when_sources_are_identical(self):
+        sheet = self.book.worksheet('sales_activities')
+        due = NOW+timedelta(seconds=1)
+        row = dict(contact_id='future-refusal', customer_id='11111111-1111-4111-8111-111111111111',
+                   customer='Butik A', sales_person='Olle', contact_channel='Telefon',
+                   date_time=due.isoformat(), created_at=due.isoformat(), result='Återkom ej')
+        sheet.values.append([row.get(h, '') for h in sheet.values[0]])
+        with patch.object(a, 'build_current_priority_snapshot', wraps=a.build_current_priority_snapshot) as build:
+            first = self.snapshot(as_of=NOW, live=True)
+            second = self.snapshot(as_of=due+timedelta(microseconds=1), live=True)
+            self.assertEqual(build.call_count, 2)
+        before = next(r for r in first['priorities'] if r['customer_id'] == row['customer_id'])
+        after = next(r for r in second['priorities'] if r['customer_id'] == row['customer_id'])
+        self.assertNotEqual(before.get('contact_permission_status'), 'do_not_contact')
+        self.assertEqual(after['contact_permission_status'], 'do_not_contact')
+
     def test_planning_due_boundary_invalidates_live_result(self):
         sheet = self.book.worksheet(a.PLANNED_ACTIVITIES_SHEET)
         due = NOW+timedelta(seconds=1)
