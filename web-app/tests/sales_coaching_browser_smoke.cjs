@@ -41,7 +41,8 @@ async function assertTabs(section, group, expectedLabels) {
 (async () => {
   let browser;
   try {
-    browser = await chromium.launch({ headless: true });
+    browser = await chromium.launch({ headless: true,
+      ...(process.env.CHROMIUM_EXECUTABLE ? { executablePath: process.env.CHROMIUM_EXECUTABLE } : {}) });
   } catch (error) {
     if (!String(error).includes("Executable doesn't exist")) throw error;
     browser = await chromium.launch({ headless: true, channel: "chrome" });

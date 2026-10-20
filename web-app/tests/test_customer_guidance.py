@@ -56,11 +56,13 @@ def contact(when, *, result="Neutral", follow_up="", contact_id="contact-1"):
         "contact_channel": "Telefon",
         "result": result,
         "follow_up_date": follow_up,
+        "follow_up_purpose": "customer_followup" if follow_up else "",
+        "follow_up_agreement_confirmed": "Y" if follow_up else "N",
     }
 
 
 def scored(*, customers=None, orders=(), contacts=(), planned=(), today=TODAY,
-           now=NOW, scoring_version="v2.2"):
+           now=NOW, scoring_version="v3.5"):
     customers = customers or [customer()]
     order_features = build_order_features(list(orders))
     return build_priority_customers(
@@ -89,20 +91,20 @@ class CustomerGuidanceTests(TestCase):
             contacts=[contact(NOW - timedelta(days=14))],
         )[0]
 
-        self.assertEqual(item["priority_score"], 82)
+        self.assertEqual(item["priority_score"], 91)
         self.assertEqual(item["customer_guidance"]["focus_key"], "second_purchase")
         self.assertEqual(item["customer_guidance"]["status_key"], "act_now")
         self.assertEqual(
-            item["customer_guidance"]["action_label"], "Säkra återköpet"
+            item["customer_guidance"]["action_label"], "Säkra andra köpet"
         )
-        self.assertEqual(item["primary_trigger_type"], "first_order_reorder")
+        self.assertEqual(item["primary_trigger_type"], "second_purchase_due")
         self.assertEqual(
             scored(
                 customers=[torp], orders=[torp_order],
                 contacts=[contact(NOW - timedelta(days=14))],
-                scoring_version="v2.1",
+                scoring_version="v3.5",
             )[0]["customer_guidance"]["action_label"],
-            "Säkra återköpet",
+            "Säkra andra köpet",
         )
 
     def test_repeat_purchase_focus_survives_planning_and_statistical_overdue(self):
@@ -151,21 +153,25 @@ class CustomerGuidanceTests(TestCase):
             after_boundary["customer_guidance"]["focus_key"], "reactivation"
         )
 
-    def test_a_prospect_is_persistent_without_score_or_45_day_gate(self):
+    def test_a_prospect_focus_persists_while_contact_pause_and_positive_window_are_respected(self):
         strategic = customer(segment="A")
         neutral = contact(NOW - timedelta(days=12))
         item = scored(customers=[strategic], contacts=[neutral])[0]
         self.assertLess(item["priority_score"], 70)
-        self.assertEqual(item["primary_trigger_type"], "a_prospect_due")
+        self.assertEqual(item["primary_trigger_type"], "")
         self.assertEqual(item["customer_guidance"]["focus_key"], "a_prospect")
-        self.assertEqual(item["customer_guidance"]["status_key"], "act_now")
+        self.assertEqual(item["customer_guidance"]["status_key"], "wait")
+        self.assertEqual(item["primary_reason_code"], "recent_reached_routine_wait")
+        self.assertGreater(item["business_value_raw"], 0)
+        self.assertEqual(item["contact_priority_raw"], 0)
 
         positive = scored(
             customers=[strategic],
             contacts=[contact(NOW - timedelta(days=12), result="Positiv")],
         )[0]
         self.assertEqual(positive["customer_guidance"]["focus_key"], "a_prospect")
-        self.assertEqual(positive["primary_trigger_type"], "a_prospect_due")
+        self.assertEqual(positive["primary_trigger_type"], "positive_dialogue_followup")
+        self.assertTrue(positive["can_start_unscheduled_contact"])
 
     def test_a_prospect_context_ignores_contact_churn_but_not_order(self):
         base = scored(customers=[customer(segment="A")])[0]
@@ -245,7 +251,7 @@ class CustomerGuidanceTests(TestCase):
         self.assertEqual(overdue["status_key"], "overdue_followup")
         self.assertEqual(overdue["overdue_activity_id"], "missed")
 
-    def test_date_only_followup_is_due_today_and_overdue_tomorrow(self):
+    def test_confirmed_date_only_followup_is_due_today_and_overdue_tomorrow(self):
         row = contact(NOW - timedelta(days=5), follow_up=TODAY.isoformat())
         today_guidance = self.guidance(contacts=[row])
         tomorrow_guidance = self.guidance(
@@ -310,7 +316,7 @@ class CustomerGuidanceTests(TestCase):
             customers=[customer(segment="A")],
             contacts=[contact(NOW - timedelta(days=1))],
         )
-        idle = self.guidance(customers=[customer(segment="C")])
+        idle = self.guidance(customers=[customer(segment="C")], orders=[order("new", TODAY)])
         self.assertEqual(waiting["status_key"], "wait")
         self.assertEqual(waiting["recommended_contact_type"], "")
         self.assertEqual(idle["status_key"], "idle")
@@ -332,11 +338,12 @@ class CustomerGuidanceTests(TestCase):
     def test_workflow_pause_changes_guidance_without_changing_score(self):
         base = scored(customers=[customer(segment="A")])[0]
         for reason, expected_text in (
-            ("snoozed", "snoozad"),
+            ("snoozed", "snoozat"),
             ("dismissed", "Tidigare förslag dolt"),
         ):
             updated = apply_workflow_suppressions([base], {"store-1": reason})[0]
-            self.assertEqual(updated["priority_score"], base["priority_score"])
+            self.assertEqual(updated["priority_score"], 0)
+            self.assertEqual(updated["business_value_raw"], base["business_value_raw"])
             self.assertEqual(updated["customer_guidance"]["status_key"], "wait")
             self.assertIn(expected_text, updated["customer_guidance"]["reason_text"])
 
@@ -352,13 +359,17 @@ class CustomerGuidanceTests(TestCase):
         baseline = scored(customers=[customer(segment="A")])[0]
         planned = scored(customers=[customer(segment="A")], planned=[future])[0]
         self.assertEqual(planned["priority_score"], baseline["priority_score"])
-        self.assertEqual(
-            set(planned["customer_guidance"]),
+        self.assertTrue(
             {
                 "focus_key", "focus_label", "status_key", "status_label",
                 "action_key", "action_label", "reason_code", "reason_text",
                 "recommended_contact_type", "next_contact_at", "waiting_until",
                 "overdue_activity_id", "planned_activity_id", "can_contact_now",
-                "guidance_version",
-            },
+                "guidance_version", "can_start_unscheduled_contact",
+                "can_execute_planned_contact", "action_type", "action_scope",
+                "requires_handling", "review_only", "obligation_ids", "as_of",
+            }.issubset(planned["customer_guidance"]),
         )
+        self.assertEqual(planned["customer_guidance"], planned["list_guidance"])
+        self.assertEqual(planned["contact_priority_raw"], 0)
+        self.assertEqual(planned["work_priority_raw"], baseline["contact_priority_raw"])

@@ -6,6 +6,7 @@ from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from v3_fixtures import current_rank
 import app as app_module
 from route_optimization import (
     RouteOptimizationError, TrustedCoordinate, build_optimize_tours_request,
@@ -22,6 +23,8 @@ GPS = app_module.Coordinate(56.55555, 12.44444)
 A = "11111111-1111-4111-8111-111111111111"
 C = "33333333-3333-4333-8333-333333333333"
 
+
+from v3_fixtures import current_snapshot, current_rank
 
 def at(hour, minute=0):
     return datetime(2026, 10, 2, hour, minute, tzinfo=ZONE)
@@ -52,12 +55,9 @@ class RouteWorkdayTests(TestCase):
 
     def snapshot(self):
         customers = app_module.get_customer_rows(self.sheet)
-        return {
-            "customers": customers,
-            "priorities": [{"row": item["row"], "customer_id": item["customer_id"], "priority_score": 80}
-                           for item in customers],
-            "planned_activity_rows": self.planned.dict_rows(), "contact_rows": [],
-        }
+        return current_snapshot(customers,
+            [current_rank({"row": c["row"], "customer_id":c["customer_id"], "priority_score":80}) for c in customers],
+            self.planned.dict_rows(), as_of=at(8))
 
     def inputs(self, snapshot=None):
         with patch.object(app_module, "get_authoritative_priority_snapshot", return_value=snapshot or self.snapshot()):
@@ -147,6 +147,7 @@ class RouteWorkdayTests(TestCase):
                 app_module.read_planned_activity_snapshot(self.sheet)[2], OWNER, DAY,
             )
             return {"workday_policy": app_module.WORKDAY_POLICY_VERSION,
+                    "ranking_contract": "v35-priority-lexicographic-2", "ranking_mode": "v3",
                     "plan_fingerprint": app_module.planning_state_fingerprint(rows)}
 
         baseline = cached_payload()
@@ -184,24 +185,19 @@ class RouteWorkdayTests(TestCase):
             snapshot["priorities"][0]["recommendation_suppression_reason"] = reason
             self.assertEqual([item["customer_id"] for item in self.inputs(snapshot)["shipments"]], [C])
 
-    def test_existing_visits_survive_phone_email_and_keep_confirmation_semantics(self):
+    def test_same_day_phone_email_blocks_even_existing_visits(self):
         for confirmed in ("N", "Y"):
             with self.subTest(confirmed=confirmed):
                 self.planned.values = self.planned.values[:1]
                 self.activity()
                 self.activity(planned_activity_id="email-a", contact_type="email")
                 self.activity(planned_activity_id="visit-a", contact_type="visit", appointment_confirmed=confirmed)
-                inputs = self.inputs()
-                visit = next(item for item in inputs["shipments"] if item["customer_id"] == A)
-                self.assertIs(visit["required"], True)
-                self.assertEqual(visit["fixed_at"], at(10, 30) if confirmed == "Y" else None)
-                legacy = next(item for item in self.legacy()["stops"] if item["customer_id"] == A)
-                self.assertIs(legacy["required"], True)
-                self.assertEqual(legacy["time_is_estimated"], confirmed == "N")
-                if confirmed == "N":
-                    self.assertNotEqual(app_module.parse_planning_datetime(legacy["estimated_at"]), at(10, 30))
-                else:
-                    self.assertEqual(app_module.parse_planning_datetime(legacy["estimated_at"]), at(10, 30))
+                with app_module.app.test_request_context(), patch.object(app_module,"get_authoritative_priority_snapshot",return_value=self.snapshot()):
+                    inputs, error = app_module.build_route_optimization_inputs(spreadsheet=self.sheet,
+                        owner=OWNER,route_date=DAY,start=app_module.Coordinate(57.7,11.9))
+                    self.assertIsNone(inputs)
+                    self.assertEqual(error[1],409)
+                    self.assertEqual(error[0].get_json()["code"],"same_day_contact_conflict")
 
     def test_input_fingerprint_tracks_contact_candidate_changes_deterministically(self):
         baseline = self.inputs()["input_fingerprint"]
@@ -380,7 +376,7 @@ class LunchSelectionTests(TestCase):
                 self.assertEqual(app_module.parse_planning_datetime(stops[0]["estimated_at"]), at(12, 55))
 
     def test_legacy_anchor_scheduler_rejects_even_one_minute_late(self):
-        stop = {"required": True, "appointment_confirmed": True, "contact_type": "visit",
+        stop = {"required": True, "appointment_confirmed": True, "contact_type": "visit", "commercial_value": 0.0,
                 "scheduled_at": at(12, 15).isoformat(), "duration_minutes": 20,
                 "latitude": GPS.latitude + 0.01, "longitude": GPS.longitude}
         with app_module.app.app_context(), patch.object(
@@ -412,8 +408,8 @@ class LunchSelectionTests(TestCase):
 
 class LunchValidationTests(TestCase):
     def setUp(self):
-        self.items = [{"customer_id": A, "coordinate": TrustedCoordinate(57.7, 11.9),
-                       "required": False, "priority_score": 80, "fixed_at": None}]
+        self.items = [current_rank({"customer_id": A, "coordinate": TrustedCoordinate(57.7, 11.9),
+                       "required": False, "priority_score": 80, "fixed_at": None})]
 
     def response(self, visit_start, end=None):
         def utc(value):

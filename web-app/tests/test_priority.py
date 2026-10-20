@@ -13,8 +13,6 @@ sys.path.insert(0, str(WEB_APP_DIR))
 
 import app as app_module
 from priority import (
-    _negative_contact_score_cap,
-    _recommended_channel,
     build_contact_features,
     build_order_features,
     build_priority_customers,
@@ -23,12 +21,14 @@ from priority import (
 )
 
 
-_build_priority_customers = build_priority_customers
+from historical_priority_reference import (_build_priority_customers_legacy, _negative_contact_score_cap, _recommended_channel)
+
+_build_priority_customers = _build_priority_customers_legacy
 
 
 def build_priority_customers(*args, **kwargs):
-    """Keep legacy expectations isolated while v2 has dedicated contract tests."""
-    kwargs["scoring_version"] = "legacy"
+    """Historical formula tests only; endpoint tests still use the real v3 app."""
+    kwargs.pop("scoring_version", None)
     return _build_priority_customers(*args, **kwargs)
 
 
@@ -1342,13 +1342,18 @@ class PriorityTests(TestCase):
                 "Västra Götalands län",
             ],
         ]
+        customers[0].append("customer_id")
+        customers[1].append("11111111-1111-4111-8111-111111111111")
+        customers[2].append("22222222-2222-4222-8222-222222222222")
         fake_spreadsheet = FakeSpreadsheet(
             {
                 "customers_enriched": customers,
                 "order_rows": [app_module.ORDER_COLUMNS],
                 "sales_activities": [app_module.CONTACT_COLUMNS],
+                "users": _users({"user_name": "Daniel", "name": "Daniel", "active": "Y", "role": "Säljare"}),
             }
         )
+        app_module.invalidate_priority_snapshot()
 
         with patch.object(
             app_module,
@@ -1368,6 +1373,8 @@ class PriorityTests(TestCase):
                 self.assertEqual(insight["next_action"]["action_type"], action_type)
                 self.assertTrue(insight["email_proposal_due"])
                 self.assertEqual(insight["recommended_channel"], "besök")
+                self.assertEqual(insight["next_action"]["contact_type"], "visit")
+                self.assertTrue(insight["next_action"]["can_contact_now"])
 
     def test_customer_insights_later_contact_clears_old_missed_followup(self):
         customers = [

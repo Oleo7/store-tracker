@@ -21,6 +21,8 @@ PRIVATE_TOWN = "Testhemorten"
 DAY = (NOW + timedelta(days=1)).date().isoformat()
 
 
+from v3_fixtures import current_snapshot
+
 class PlanningRouteOriginTests(TestCase):
     def setUp(self):
         app_module.app.config.update(TESTING=True, SECRET_KEY="route-origin-test")
@@ -82,9 +84,9 @@ class PlanningRouteOriginTests(TestCase):
 
     def snapshot(self, *_args, **_kwargs):
         customers = app_module.get_customer_rows(self.sheet)
-        return {"customers": customers, "contact_rows": [],
-                "priorities": [{"row": item["row"], "customer_id": item["customer_id"], "priority_score": 80}
-                               for item in customers]}
+        return current_snapshot(customers, {c['customer_id']:80 for c in customers},
+            plans=self.sheet.worksheet(app_module.PLANNED_ACTIVITIES_SHEET).dict_rows(),
+            as_of=NOW)
 
     def preview(self, **changes):
         payload = {"route_date": DAY, "route_mode": "automatic", "client_request_id": "home-preview"}

@@ -50,16 +50,6 @@ print(json.dumps([dict(name=k,item=scored(**v)) for k,v in cases.items()]))
           renderList();
           const card=document.querySelector('.customer-card');
           const guidance=item.customer_guidance;
-          let planningReason=null;
-          if (guidance.status_key==='act_now') {
-            planningRecommendationLoading=false;
-            planningRecommendationPendingCount=1;
-            planningRecommendation={queue_item_type:'suggestion',customer:c.customer,
-              customer_id:c.customer_id,customer_guidance:guidance,action_label:guidance.action_label,
-              reason_text:guidance.reason_text,status:'pending',contact_context:item};
-            renderPlanningRecommendation();
-            planningReason=document.querySelector('.planning-recommendation-reason')?.textContent;
-          }
           return {
             reason:card.querySelector('.card-reason').textContent,
             action:card.querySelector('.next-action-label').textContent,
@@ -67,15 +57,15 @@ print(json.dumps([dict(name=k,item=scored(**v)) for k,v in cases.items()]))
             primaryDelivery:card.querySelector('.card-date-primary').textContent,
             allDates:card.querySelector('.card-dates').textContent,
             fits:card.scrollWidth<=card.clientWidth && card.querySelector('.next-action').scrollWidth<=card.querySelector('.next-action').clientWidth,
-            planningReason,
           };
         },{item});
         const g=item.customer_guidance;
-        assert.equal(result.reason,g.reason_text,`${width}/${name}: reason`);
-        assert.ok(result.action.startsWith(g.action_label),`${width}/${name}: action`);
-        assert.equal(result.focus,g.focus_label,`${width}/${name}: focus`);
+        const storeGuidance=item.list_guidance || g;
+        // The canonical final guidance is shared by list and customer detail.
+        assert.equal(result.reason,storeGuidance.reason_text,`${width}/${name}: store reason`);
+        assert.ok(result.action.startsWith(storeGuidance.action_label),`${width}/${name}: store action`);
+        assert.equal(result.focus,storeGuidance.focus_label,`${width}/${name}: focus`);
         assert.equal(result.fits,true,`${width}/${name}: overflow`);
-        if (g.status_key==='act_now') assert.equal(result.planningReason,g.reason_text,`${width}/${name}: planning`);
         if (name==='past-and-future') {
           assert.match(result.primaryDelivery,/8 sep.*13 DFP/);
           assert.match(result.allDates,/22 sep.*15 DFP/);
@@ -104,7 +94,7 @@ print(json.dumps([dict(name=k,item=scored(**v)) for k,v in cases.items()]))
         }
       }
       assert.deepEqual(errors,[],`${width}: JavaScript errors`);
-      console.log(`${width}px: ${fixtures.length} guidance/delivery scenarios, focus checkbox, planning parity, no overflow PASS`);
+      console.log(`${width}px: ${fixtures.length} guidance/delivery scenarios, focus checkbox, canonical guidance, no overflow PASS`);
       await page.close();
     }
   } finally {await browser.close();}

@@ -9,6 +9,7 @@ from typing import Callable, Protocol, Sequence
 
 import requests
 from route_workday import WORKDAY_SECONDS
+from routing_objective import priority_value, priority_units
 
 
 MAX_TOTAL_SECONDS = WORKDAY_SECONDS
@@ -87,6 +88,18 @@ class RouteCandidate:
     coordinate: Coordinate
     priority_score: int
     required: bool = False
+    commercial_value: float | None = None
+
+    @property
+    def objective_value(self) -> float:
+        try:
+            return priority_value(self.commercial_value)
+        except ValueError as exc:
+            raise RouteVerificationError("Missing or invalid current v3 priority") from exc
+
+    @property
+    def objective_units(self) -> int:
+        return priority_units(self.objective_value)
 
 
 def _haversine_km(origin: Coordinate, destination: Coordinate) -> float:
@@ -158,16 +171,16 @@ def anchor_aware_preselect_candidates(
 
     detours = {candidate.row: max(0.0, detour(candidate)) for candidate in optional}
     rankings = (
-        sorted(optional, key=lambda item: (-item.priority_score, stable(item))),
+        sorted(optional, key=lambda item: (-item.objective_value, stable(item))),
         sorted(optional, key=lambda item: (
-            anchor_distance(item), -item.priority_score, stable(item)
+            anchor_distance(item), -item.objective_value, stable(item)
         )),
         sorted(optional, key=lambda item: (
-            detours[item.row], -item.priority_score, stable(item)
+            detours[item.row], -item.objective_value, stable(item)
         )),
         sorted(optional, key=lambda item: (
-            -(item.priority_score / (1.0 + detours[item.row])),
-            -item.priority_score,
+            -(item.objective_value / (1.0 + detours[item.row])),
+            -item.objective_value,
             stable(item),
         )),
     )
@@ -630,7 +643,7 @@ def calculate_route_proposal(
         for candidate in ordered_candidates
         if direct_seconds[candidate.row] is not None
         and direct_seconds[candidate.row] + service_seconds_per_stop
-        < max_total_seconds
+        <= max_total_seconds
     )
     road_reachable_rows = {candidate.row for candidate in road_reachable}
     if any(
@@ -732,7 +745,7 @@ def calculate_route_proposal(
         excluded_over_budget=sum(
             direct_seconds[candidate.row] is not None
             and direct_seconds[candidate.row] + service_seconds_per_stop
-            >= max_total_seconds
+            > max_total_seconds
             for candidate in ordered_candidates
         ),
         provider_request_count=(
@@ -769,7 +782,7 @@ def shortlist_candidates(
     by_score = sorted(
         ordered,
         key=lambda item: (
-            -item.priority_score,
+            -item.objective_value,
             _direct_or_default(direct_seconds, item.row),
             item.row,
         ),
@@ -778,13 +791,13 @@ def shortlist_candidates(
         ordered,
         key=lambda item: (
             -(
-                item.priority_score
+                item.objective_value
                 / (
                     service_seconds_per_stop
                     + max(1, _direct_or_default(direct_seconds, item.row))
                 )
             ),
-            -item.priority_score,
+            -item.objective_value,
             item.row,
         ),
     )
@@ -793,11 +806,15 @@ def shortlist_candidates(
         ordered,
         key=lambda item: (
             -cluster_values[item.row],
-            -item.priority_score,
+            -item.objective_value,
             _direct_or_default(direct_seconds, item.row),
             item.row,
         ),
     )
+    # Dense areas must not consume every cluster slot. Reuse the existing
+    # cluster ranking, but visit distinct cells in pairs before deepening one
+    # cell. Keeping neighbours together preserves multi-stop opportunities.
+    by_cluster_value = _diverse_cluster_ranking(by_cluster_value)
     approximate_route = _approximate_route_ranking(
         start,
         ordered,
@@ -844,6 +861,25 @@ def shortlist_candidates(
 
     # Stable solver node order makes complete ties reproducible.
     return tuple(sorted(selected, key=lambda item: item.row))
+
+
+def _diverse_cluster_ranking(ranked):
+    if not ranked:
+        return []
+    longitude_scale = 111.320 * max(0.05, math.cos(math.radians(
+        sum(c.coordinate.latitude for c in ranked) / len(ranked))))
+    cells = {}
+    for candidate in ranked:
+        cell = (math.floor(candidate.coordinate.longitude * longitude_scale / LOCAL_CLUSTER_RADIUS_KM),
+                math.floor(candidate.coordinate.latitude * 110.574 / LOCAL_CLUSTER_RADIUS_KM))
+        cells.setdefault(cell, []).append(candidate)
+    result = []
+    depth = 0
+    while len(result) < len(ranked):
+        for members in cells.values():
+            result.extend(members[depth:depth + 2])
+        depth += 2
+    return result
 
 
 def solve_route(
@@ -943,7 +979,7 @@ def verify_route(
         cumulative_total = (
             cumulative_drive + sequence * service_seconds_per_stop
         )
-        if cumulative_total >= max_total_seconds:
+        if cumulative_total > max_total_seconds:
             raise RouteVerificationError()
 
         candidate = candidates[candidate_index]
@@ -972,7 +1008,7 @@ def verify_route(
     service_seconds = len(stops) * service_seconds_per_stop
     drive_seconds_total = cumulative_drive + return_drive_seconds
     total_seconds = drive_seconds_total + service_seconds
-    if total_seconds >= max_total_seconds:
+    if total_seconds > max_total_seconds:
         raise RouteVerificationError()
     return VerifiedRoute(
         stops=tuple(stops),
@@ -1010,7 +1046,7 @@ def _solve_exact_dp(
         lowest = mask & -mask
         index = lowest.bit_length() - 1
         subset_scores[mask] = (
-            subset_scores[mask ^ lowest] + candidates[index].priority_score
+            subset_scores[mask ^ lowest] + candidates[index].objective_units
         )
 
     costs: list[dict[int, int]] = [dict() for _ in range(state_count)]
@@ -1025,7 +1061,7 @@ def _solve_exact_dp(
     path_code_base = count + 1
     for index in range(count):
         leg = drive_seconds[0][index]
-        if leg is None or leg + service_seconds_per_stop >= max_total_seconds:
+        if leg is None or leg + service_seconds_per_stop > max_total_seconds:
             continue
         mask = 1 << index
         costs[mask][index] = leg
@@ -1047,7 +1083,7 @@ def _solve_exact_dp(
             if return_leg is not None and mask & required_mask == required_mask:
                 round_trip_drive = drive + return_leg
                 total = round_trip_drive + service_seconds
-                if total < max_total_seconds:
+                if total <= max_total_seconds:
                     route_indices = _reconstruct_path(
                         mask,
                         last,
@@ -1080,7 +1116,7 @@ def _solve_exact_dp(
                             new_drive
                             + new_mask.bit_count() * service_seconds_per_stop
                         )
-                        if new_total < max_total_seconds:
+                        if new_total <= max_total_seconds:
                             current = costs[new_mask].get(next_index)
                             new_path_code = (
                                 path_codes[mask][last] * path_code_base
@@ -1140,7 +1176,7 @@ def _solve_beam(
         if candidate.required
     )
     ordered_scores = sorted(
-        ((candidate.priority_score, index) for index, candidate in enumerate(candidates)),
+        ((candidate.objective_units, index) for index, candidate in enumerate(candidates)),
         reverse=True,
     )
 
@@ -1184,12 +1220,12 @@ def _solve_beam(
                             new_drive
                             + new_stop_count * service_seconds_per_stop
                         )
-                        if new_total < max_total_seconds:
+                        if new_total <= max_total_seconds:
                             new_state = (
                                 new_mask,
                                 next_index,
                                 new_drive,
-                                score + candidates[next_index].priority_score,
+                                score + candidates[next_index].objective_units,
                                 (*path, next_index),
                             )
                             state_key = (new_mask, next_index)
@@ -1208,7 +1244,7 @@ def _solve_beam(
                                 next_by_state[state_key] = new_state
                             if (
                                 return_leg is not None
-                                and new_total + return_leg < max_total_seconds
+                                and new_total + return_leg <= max_total_seconds
                                 and new_mask & required_mask == required_mask
                                 and (
                                     best_state is None
@@ -1398,7 +1434,7 @@ def _approximate_route_ranking(
             range(len(remaining)),
             key=lambda index: (
                 -(
-                    remaining[index].priority_score
+                    remaining[index].objective_value
                     / (
                         1.0
                         + _haversine_km(current, remaining[index].coordinate)
@@ -1465,7 +1501,7 @@ def _local_cluster_values(
             math.floor(y / LOCAL_CLUSTER_CELL_KM),
         )
         projected[candidate.row] = (x, y, cell)
-        score = float(candidate.priority_score)
+        score = float(candidate.objective_value)
         aggregate = cells.setdefault(cell, [0.0, 0.0, 0.0])
         aggregate[0] += score
         aggregate[1] += score * x
@@ -1474,7 +1510,7 @@ def _local_cluster_values(
     values: dict[int, float] = {}
     for candidate in candidates:
         x, y, own_cell = projected[candidate.row]
-        own_score = float(candidate.priority_score)
+        own_score = float(candidate.objective_value)
         value = own_score
         for delta_x in range(
             -LOCAL_CLUSTER_CELL_REACH,

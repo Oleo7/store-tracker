@@ -917,7 +917,7 @@ class ConcurrentEndpointAvailabilityTests(PlanningApiTestCase):
 
 
 class LegacyEmailIdentityTests(TestCase):
-    def test_ornaset_email_resolves_old_followup_without_hiding_legitimate_reorder(self):
+    def test_ornaset_unlinked_email_preserves_promise_and_commercial_reorder_value(self):
         customer_id = "f43f7cee-1e62-4b70-9735-0000000002e8"
         customers = [{
             "row": 2, "customer_id": customer_id,
@@ -951,13 +951,17 @@ class LegacyEmailIdentityTests(TestCase):
         order_features = build_order_features(orders)
         contact_features = build_contact_features(contacts, order_features)
         feature = next(iter(contact_features.values()))
+        # This old compatibility flag is customer-wide. The canonical model
+        # must preserve the separately sourced commitment despite that flag.
         self.assertTrue(feature["follow_up_resolved"])
         item = build_priority_customers(
             customers, order_features, contact_features, "Olle",
             date(2026, 8, 8), limit=1,
         )[0]
         self.assertNotIn("legacy_missed_followup", item["covered_trigger_keys"])
-        self.assertEqual(item["primary_trigger_type"], "established_reorder_due")
+        self.assertEqual(item["primary_trigger_type"], "internal_followup_due")
+        self.assertGreater(item["business_overdue_days"], 0)
+        self.assertGreater(item["business_value_score"], 0)
 
     def test_backfill_prefers_unique_number_then_exact_unique_name(self):
         plan = plan_legacy_email_identity_backfill(

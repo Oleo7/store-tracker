@@ -11,19 +11,19 @@ function source(name) {
   assert.ok(end > start, name);
   return html.slice(start, end);
 }
-const functions = ['getFilterOptionValue', 'getCardDateHtml', 'getDeliveryVolumeText',
-  'getCardDatesHtml', 'getPlainDeliveryText', 'planningRecommendationContactContext',
+const functions = ['getCustomerListGuidance', 'getFilterOptionValue', 'getCardDateHtml', 'getDeliveryVolumeText',
+  'getCardDatesHtml','planningDateFromKey','planningDateKeyFromIso','planningTimeFromIso',
   'getFilteredCustomers', 'renderFilterOptions'];
 const constants = html.slice(html.indexOf('  const FOCUS_KEYS_BY_LABEL ='),
   html.indexOf('  function getFilterOptionValue('));
 const context = vm.createContext({assert, console});
 vm.runInContext(`
 const esc = s => String(s ?? '').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;');
-const escAttr = esc;
+const escAttr = esc; const PLANNING_TIME_ZONE='Europe/Stockholm';
 const getCustomerInsight = c => c;
 const getCustomerGuidance = c => c.customer_guidance || {};
 const filterState = Object.fromEntries(['segment','city','region','focus','risk','delivery','latestContact','emailProposal'].map(k=>[k,new Set()]));
-let customers = [], searchQuery = '', emailClickNoOrderActive = false;
+let customers = [], searchQuery = '', emailClickNoOrderActive = false, listWorkFilter='all';
 let _sheetKey = 'focus';
 const filterBody = {innerHTML:'',querySelectorAll:()=>[]};
 const document = {getElementById:()=>filterBody};
@@ -33,7 +33,7 @@ ${functions.map(source).join('\n')}
 `, context);
 vm.runInContext(String.raw`
 const g = {focus_key:'repeat_purchase',status_key:'wait'};
-const data = {delivery_count:2,latest_delivery_date:'2026-09-08',latest_delivery_dfp:13,
+const data = {value_model_version:'v3.5',delivery_count:2,latest_delivery_date:'2026-09-08',latest_delivery_dfp:13,
   next_delivery_date:'2026-09-22',next_delivery_dfp:15,latest_order_dfp:99,
   customer_guidance:g};
 const original = JSON.stringify(data);
@@ -60,11 +60,10 @@ assert.match(getDeliveryVolumeText('2026-09-08',13.5),/13,5 DFP/);
 assert.match(getCardDateHtml('2025-12-31',true),/31 dec 2025/);
 assert.match(getCardDateHtml('2026-09-08'),/>2026-09-08</);
 assert.match(getCardDatesHtml({...data,delivery_count:1}),/F\u00f6rsta leverans/);
-const planning = planningRecommendationContactContext(data);
-assert.match(planning,/Senaste leverans 8 sep.*13 DFP/);
-assert.match(planning,/N\u00e4sta leverans 22 sep.*15 DFP/);
-assert.doesNotMatch(planning,/99 DFP|Senaste order/);
-assert.doesNotMatch(planningRecommendationContactContext({latest_order_dfp:99}),/DFP/);
+// Canonical dated history must not fall back to an unconfirmed legacy date.
+const noVerified = getCardDatesHtml({...data,business_latest_verified_delivery_date:'',business_latest_verified_delivery_dfp:null,latest_unconfirmed_order_date:'2026-09-08'});
+assert.match(noVerified,/leveransdatum saknas/);
+assert.doesNotMatch(noVerified,/13 DFP/);
 // Focus filter values use stable keys even while the card label changes.
 assert.equal(getFilterOptionValue('focus','Andra k\u00f6pet'),'second_purchase');
 assert.equal(getFilterOptionValue('city','G\u00f6teborg'),'G\u00f6teborg');

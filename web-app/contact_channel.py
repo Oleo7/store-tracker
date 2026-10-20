@@ -7,6 +7,9 @@ import re
 
 PHONE_TRIGGERS = {
     "positive_dialogue_followup",
+    "positive_buyer_followup",
+    "unanswered_retry_due",
+    "unanswered_verify_contact_due",
     "stockfiller_click_followup",
     "product_sheet_click_followup",
     "email_open_followup",

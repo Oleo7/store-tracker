@@ -43,6 +43,7 @@ def synthetic_shipments():
             11.97520 + index / 10000,
         ),
         "priority_score": 40 + index,
+        "commercial_value": float(40 + index),
         "required": False,
     } for index in range(1, 21)]
 

@@ -15,12 +15,11 @@ from priority import (  # noqa: E402
     build_contact_features,
     build_order_features,
     build_priority_customers,
-    calculate_priority_score_v2,
-    established_intent_timing,
     expected_reorder_cycle,
-    prospect_reactivation_intent_timing,
 )
 
+
+from historical_priority_reference import calculate_priority_score_v2, established_intent_timing, prospect_reactivation_intent_timing
 
 def customer(name, customer_id, segment="A", row=2):
     return {
@@ -102,11 +101,12 @@ class ScoringV2Tests(TestCase):
         )[0]
 
         self.assertIsInstance(result["priority_score"], int)
-        self.assertEqual(result["intent_timing"], 15)
+        self.assertEqual(result["intent_timing"], 0)
+        self.assertGreater(result["business_value_raw"], 0)
         self.assertFalse(result["recommendation_eligible"])
         self.assertEqual(
             result["recommendation_suppression_reason"],
-            "recent_human_contact",
+            "recent_reached_routine_wait",
         )
 
     def test_established_timing_boundaries(self):
@@ -158,10 +158,10 @@ class ScoringV2Tests(TestCase):
             order("R3", "Repeat", "2026-02-10", 40, "repeat-1"),
         ]
         due = priorities(customers, orders, today=date(2026, 3, 2))[0]
-        late = priorities(customers, orders, today=date(2026, 3, 10))[0]
+        late = priorities(customers, orders, today=date(2026, 3, 17))[0]
 
         self.assertEqual(context_identity(due), context_identity(late))
-        self.assertNotEqual(due["priority_score"], late["priority_score"])
+        self.assertGreater(late["work_priority_precise"], due["work_priority_precise"])
         # The same predicted date stays factual while urgency/score ages.
         self.assertEqual(due["primary_reason_text"], "Beräknad nästa order 2 mar")
         self.assertEqual(due["primary_reason_text"], late["primary_reason_text"])
@@ -242,7 +242,7 @@ class ScoringV2Tests(TestCase):
             today=date(2026, 7, 27),
         )[0]
         self.assertEqual(result["lifecycle"], "reactivation")
-        self.assertEqual(result["intent_timing"], 60)
+        self.assertEqual(result["intent_timing"], 70)
         self.assertEqual(result["primary_trigger_type"], "repeat_reactivation_due")
 
     def test_suppressed_customers_remain_and_sort_score_dfp_stable_row(self):
@@ -258,6 +258,7 @@ class ScoringV2Tests(TestCase):
         ]
         planned = [{
             "customer_id": "higher",
+            "planned_activity_id": "higher-plan",
             "customer": "Higher potential",
             "status": "planned",
             "scheduled_at": "2026-07-30T10:00:00+02:00",
@@ -277,7 +278,7 @@ class ScoringV2Tests(TestCase):
             "future_planned_activity",
         )
         keys = [
-            (-item["priority_score"], -item["expected_order_dfp"], item["row"])
+            (-item["work_priority_precise"], -item["business_value_raw"], item["customer"].casefold(), item["customer_id"])
             for item in result
         ]
         self.assertEqual(keys, sorted(keys))

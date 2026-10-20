@@ -366,7 +366,7 @@ def public_suggestion(row, live_candidate=None):
         customer_row = None
     try:
         priority = int(round(float(
-            candidate.get("priority_score", row.get("priority_score_at_creation"))
+            candidate.get("priority_score")
             or 0
         )))
     except (TypeError, ValueError):
@@ -378,9 +378,8 @@ def public_suggestion(row, live_candidate=None):
         "customer_row": customer_row,
         "customer": _text(row.get("customer")),
         "priority_score": max(0, min(100, priority)),
-        "reason_text": _text(
-            candidate.get("reason_text") or row.get("reason_text_at_creation")
-        ),
+        "reason_text": _text(candidate.get("reason_text")),
+        "score_unavailable": not bool(live_candidate),
         "action_label": _text(candidate.get("action_label")),
         "customer_guidance": candidate.get("customer_guidance") or {},
         "recommended_contact_type": _text(
@@ -502,7 +501,7 @@ class PlanningSuggestionService:
                 candidate.get("lifecycle") or row.get("lifecycle_at_creation")
             ),
             "priority_score_at_creation": candidate.get(
-                "priority_score", row.get("priority_score_at_creation", "")
+                "priority_score", ""
             ),
             "expected_order_dfp_at_creation": candidate.get(
                 "expected_order_dfp",
@@ -527,7 +526,7 @@ class PlanningSuggestionService:
                 candidate.get("recommendation_suppression_reason")
             ),
             "score_version": _text(
-                candidate.get("score_version") or row.get("score_version")
+                candidate.get("score_version")
             ),
             "recommended_contact_type": _text(
                 candidate.get("recommended_contact_type")
@@ -626,6 +625,9 @@ class PlanningSuggestionService:
                     candidate.get("primary_trigger_key")
                     or candidate.get("primary_trigger_type")
                 )
+                compatible_triggers = {
+                    _key(value) for value in candidate.get("compatible_trigger_keys", [current_trigger])
+                }
                 for legacy_id in compatible_ids[1:]:
                     stored_entry = stored_by_id.get(legacy_id)
                     if not stored_entry:
@@ -634,7 +636,7 @@ class PlanningSuggestionService:
                         stored_entry[1].get("primary_trigger_key")
                         or stored_entry[1].get("primary_trigger_type")
                     )
-                    if stored_trigger == current_trigger:
+                    if stored_trigger in compatible_triggers:
                         accepted_ids.append(legacy_id)
                 for suggestion_id in accepted_ids:
                     candidate_by_id[suggestion_id] = candidate
@@ -898,6 +900,9 @@ class PlanningSuggestionService:
                 candidate.get("primary_trigger_key")
                 or candidate.get("primary_trigger_type")
             )
+            compatible_triggers = {
+                _key(value) for value in candidate.get("compatible_trigger_keys", [current_trigger])
+            }
             matches = []
             for _index, existing in stored:
                 existing_id = _text(existing.get("suggestion_id"))
@@ -912,7 +917,7 @@ class PlanningSuggestionService:
                         existing.get("primary_trigger_key")
                         or existing.get("primary_trigger_type")
                     )
-                    if stored_trigger != current_trigger:
+                    if stored_trigger not in compatible_triggers:
                         continue
                 matches.append(existing)
             if matches:
@@ -1116,67 +1121,3 @@ class PlanningSuggestionService:
                 )
                 changed.append(updated)
             return changed
-
-
-def build_phase1_stub_candidates(owner, customers, contacts=(), orders=()):
-    """Deterministic development/test-only candidates; caller owns the guard."""
-    owner_names = {_key(owner.get("user_name")), _key(owner.get("name"))}
-    owned = [
-        item for item in customers
-        if _key(item.get("sales_person")) in owner_names
-        and not _key(item.get("cancelled_flag")) in {
-            "1", "y", "yes", "ja", "true", "cancelled", "canceled", "avslutad"
-        }
-        and _text(item.get("customer_id"))
-    ]
-    results = []
-    for position, customer in enumerate(owned):
-        customer_id = _text(customer.get("customer_id"))
-        customer_name = _key(customer.get("customer"))
-        customer_orders = [
-            row for row in orders
-            if _text(row.get("customer_id")) == customer_id
-            or _key(row.get("Customer")) == customer_name
-        ]
-        customer_contacts = [
-            row for row in contacts
-            if _text(row.get("customer_id")) == customer_id
-            or _key(row.get("customer")) == customer_name
-        ]
-        latest_order = customer_orders[-1] if customer_orders else {}
-        latest_contact = customer_contacts[-1] if customer_contacts else {}
-        context_inputs = {
-            "owner": owner.get("user_name"),
-            "customer_id": customer_id,
-            "lifecycle": "phase1_test",
-            "order_count": len(customer_orders),
-            "latest_order_reference": latest_order.get("Reference"),
-            "latest_order_date": (
-                latest_order.get("Delivery date") or latest_order.get("Order date")
-            ),
-            "latest_contact_id": latest_contact.get("contact_id"),
-            "latest_contact_result": latest_contact.get("result"),
-            "latest_contact_date": latest_contact.get("date_time"),
-        }
-        context_hash = decision_context_hash(**context_inputs)
-        legacy_context_hash = legacy_decision_context_hash_v1(**context_inputs)
-        results.append({
-            "decision_context_hash": context_hash,
-            "compatible_decision_context_hashes": (
-                [legacy_context_hash]
-                if legacy_context_hash != context_hash else []
-            ),
-            "customer_id": customer_id,
-            "customer_key": _text(customer.get("customer_number")) or customer_name,
-            "customer_row": customer.get("row") or "",
-            "customer": _text(customer.get("customer")),
-            "priority_score": max(0, 90 - position * 5),
-            "reason_code": "phase1_test",
-            "reason_text": "Följ upp kunden",
-            "primary_trigger_type": "phase1_test",
-            "primary_trigger_key": "phase1_test",
-            "covered_trigger_keys": ["phase1_test"],
-            "lifecycle": "phase1_test",
-            "score_version": "phase1",
-        })
-    return results

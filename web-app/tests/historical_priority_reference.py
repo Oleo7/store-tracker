@@ -1,0 +1,1319 @@
+"""TEST-ONLY frozen pre-v3 scoring reference.
+
+Retained solely to test historical fixtures and compare archived outputs.
+It is never imported by the application. Operational tests use priority.py v3.
+"""
+from __future__ import annotations
+from collections import defaultdict
+from datetime import date, datetime, time, timedelta
+from zoneinfo import ZoneInfo
+import re
+import os
+from commercial_orders import order_volume, commercial_order
+from contact_channel import recommend_contact_channel
+from statistics import median
+import unicodedata
+import uuid
+FREEZER_FIELDS = ("Franui", "Schufrulade", "Boujee", "polarbar", "none")
+OTHER_COMPETITOR_FREEZER_FIELDS = {"Schufrulade", "Boujee"}
+SCORING_POLICIES = {
+    "v2.1": {"intent_timing": .65, "value_index": .30, "history_index": 0, "strategic_index": .05},
+    "v2.2": {"intent_timing": .62, "value_index": .26, "history_index": .07, "strategic_index": .05},
+}
+STOCKHOLM = ZoneInfo("Europe/Stockholm")
+SCORE_VERSION = "v2.2"
+
+def normalize_customer_key(value: str) -> str:
+    text = str(value or "").replace("\xa0", " ").strip().casefold()
+    return " ".join(text.split())
+
+def _identity_parts(row: dict, *, name_field: str, number_field: str) -> tuple[str, str, str]:
+    return (
+        normalize_customer_key(row.get("customer_id")),
+        normalize_customer_key(row.get(number_field)),
+        normalize_customer_key(row.get(name_field)),
+    )
+
+def _identity_feature(row: dict, indices: dict, *, name_field: str, number_field: str,
+                      ambiguous_master_names: set[str] | None = None,
+                      allow_name_after_strong_miss: bool = True) -> dict:
+    customer_id, customer_number, customer_name = _identity_parts(
+        row, name_field=name_field, number_field=number_field
+    )
+    if customer_id:
+        match = indices["id"].get(customer_id)
+        if match:
+            return match
+    if customer_number:
+        match = indices["number"].get(customer_number)
+        if match:
+            match_id = normalize_customer_key(match.get("customer_id"))
+            if customer_id and match_id and match_id != customer_id:
+                return {}
+            return match
+    if (customer_id or customer_number) and not allow_name_after_strong_miss:
+        return {}
+    if customer_name and customer_name not in (ambiguous_master_names or set()):
+        match = indices["name"].get(customer_name) or {}
+        if (customer_id or customer_number) and (
+            normalize_customer_key(match.get("customer_id"))
+            or normalize_customer_key(match.get("customer_number"))
+        ):
+            return {}
+        return match
+    return {}
+
+def parse_date(value) -> date | None:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+
+    text = str(value or "").replace("\xa0", " ").strip()
+    if not text:
+        return None
+
+    if _looks_like_excel_serial(text):
+        parsed = _parse_excel_serial(text)
+        if parsed:
+            return parsed.date()
+
+    normalized = text.replace("Z", "").replace("T", " ").strip()
+    for fmt in (
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%d",
+        "%Y/%m/%d %H:%M:%S",
+        "%Y/%m/%d %H:%M",
+        "%Y/%m/%d",
+        "%d/%m/%Y %H:%M:%S",
+        "%d/%m/%Y %H:%M",
+        "%d/%m/%Y",
+        "%d.%m.%Y %H:%M:%S",
+        "%d.%m.%Y %H:%M",
+        "%d.%m.%Y",
+    ):
+        try:
+            return datetime.strptime(normalized[: len(datetime.now().strftime(fmt))], fmt).date()
+        except ValueError:
+            pass
+
+    try:
+        return datetime.fromisoformat(normalized).date()
+    except ValueError:
+        return None
+
+def parse_datetime(value) -> datetime | None:
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, date):
+        return datetime.combine(value, time.min)
+
+    text = str(value or "").replace("\xa0", " ").strip()
+    if not text:
+        return None
+
+    if _looks_like_excel_serial(text):
+        return _parse_excel_serial(text)
+
+    normalized = text.replace("Z", "").replace("T", " ").strip()
+    for fmt in (
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%d",
+        "%Y/%m/%d %H:%M:%S",
+        "%Y/%m/%d %H:%M",
+        "%Y/%m/%d",
+        "%d/%m/%Y %H:%M:%S",
+        "%d/%m/%Y %H:%M",
+        "%d/%m/%Y",
+        "%d.%m.%Y %H:%M:%S",
+        "%d.%m.%Y %H:%M",
+        "%d.%m.%Y",
+    ):
+        try:
+            return datetime.strptime(normalized[: len(datetime.now().strftime(fmt))], fmt)
+        except ValueError:
+            pass
+
+    try:
+        return datetime.fromisoformat(normalized)
+    except ValueError:
+        parsed_date = parse_date(value)
+        return datetime.combine(parsed_date, time.min) if parsed_date else None
+
+def _build_priority_customers_legacy(
+    customers: list[dict],
+    order_features: dict,
+    contact_features: dict,
+    responsible: str | None,
+    today: date,
+    limit: int = 30,
+    email_features: dict | None = None,
+) -> list[dict]:
+    email_features = email_features or {}
+    number_index = {
+        normalize_customer_key(feature.get("customer_number")): feature
+        for feature in order_features.values()
+        if normalize_customer_key(feature.get("customer_number"))
+    }
+    benchmarks = _build_priority_benchmarks(customers, order_features, number_index)
+
+    result = []
+    for customer in customers:
+        if _is_truthy(customer.get("cancelled_flag")):
+            continue
+
+        sales_person = str(customer.get("sales_person") or "").strip()
+        if responsible and sales_person != responsible:
+            continue
+
+        name = str(customer.get("customer") or "").strip()
+        customer_key = normalize_customer_key(name)
+        if not customer_key:
+            continue
+
+        customer_number_key = normalize_customer_key(customer.get("customer_number"))
+        order_feature = number_index.get(customer_number_key) or order_features.get(customer_key) or {}
+        contact_feature = contact_features.get(customer_key) or {}
+        email_feature = email_features.get(customer_key) or {}
+        segment = _segment_value(customer)
+        segment_defaults = _segment_defaults(benchmarks, segment)
+        enriched_order = dict(order_feature)
+
+        last_delivery = enriched_order.get("last_delivery_date")
+        last_order = enriched_order.get("last_order_date")
+        order_count = enriched_order.get("order_count", 0)
+        total_dfp = enriched_order.get("total_dfp", 0)
+        expected_order_dfp = enriched_order.get("expected_order_dfp")
+        expected_order_value = enriched_order.get("expected_order_value")
+
+        if order_count:
+            expected_order_dfp = expected_order_dfp or enriched_order.get("avg_dfp_per_order") or segment_defaults["expected_order_dfp"]
+            expected_order_value = (
+                expected_order_value
+                or enriched_order.get("avg_sales_per_order")
+                or segment_defaults["expected_order_value"]
+            )
+        else:
+            expected_order_dfp = segment_defaults["expected_order_dfp"]
+            expected_order_value = segment_defaults["expected_order_value"]
+
+        expected_cycle = enriched_order.get("expected_cycle_days")
+        expected_cycle_source = "customer" if expected_cycle else ""
+        expected_next = enriched_order.get("expected_next_order_date")
+        if last_delivery and not expected_cycle:
+            expected_cycle = segment_defaults["expected_cycle_days"]
+            expected_cycle_source = "segment"
+            expected_next = last_delivery + timedelta(days=expected_cycle) if expected_cycle else None
+
+        overdue_days = (today - expected_next).days if expected_next else None
+        days_since_delivery = (today - last_delivery).days if last_delivery else None
+
+        latest_contact_date = contact_feature.get("latest_contact_date")
+        latest_human_contact_date = contact_feature.get("latest_human_contact_date")
+        contact_signal_date = latest_human_contact_date or latest_contact_date
+        days_since_contact = (
+            (today - contact_signal_date).days if contact_signal_date else None
+        )
+        has_order_after_latest_contact = bool(
+            latest_contact_date
+            and last_order
+            and last_order >= latest_contact_date
+        )
+        latest_follow_up_date = contact_feature.get("latest_follow_up_date")
+        follow_up_resolved = bool(contact_feature.get("follow_up_resolved"))
+        follow_up_due = bool(
+            latest_follow_up_date
+            and latest_follow_up_date <= today
+            and not follow_up_resolved
+        )
+        latest_contact_class = contact_feature.get("latest_contact_class")
+        future_follow_up_days = _future_follow_up_days(
+            latest_contact_date=latest_contact_date,
+            latest_follow_up_date=latest_follow_up_date,
+            follow_up_due=follow_up_due,
+            follow_up_resolved=follow_up_resolved,
+            today=today,
+        )
+        scheduled_followup = future_follow_up_days is not None
+        self_ordering_followup = _is_self_ordering_followup(
+            latest_contact_class=latest_contact_class,
+            latest_contact_date=latest_contact_date,
+            days_since_contact=days_since_contact,
+            latest_follow_up_date=latest_follow_up_date,
+            follow_up_due=follow_up_due,
+            follow_up_resolved=follow_up_resolved,
+            self_ordering_signal=contact_feature.get("self_ordering_signal"),
+            today=today,
+        )
+        email_signal = _email_priority_signal(
+            email_feature=email_feature,
+            latest_human_contact=(
+                contact_feature.get("latest_human_contact_datetime")
+                or contact_feature.get("latest_contact_datetime")
+            ),
+            today=today,
+        )
+
+        score = _priority_score(
+            segment=segment,
+            order_count=order_count,
+            expected_order_dfp=expected_order_dfp,
+            expected_order_value=expected_order_value,
+            benchmarks=benchmarks,
+            overdue_days=overdue_days,
+            latest_contact_class=latest_contact_class,
+            has_order_after_latest_contact=has_order_after_latest_contact,
+            days_since_contact=days_since_contact,
+            follow_up_due=follow_up_due,
+            latest_contact_date=latest_contact_date,
+            last_order_date=last_order,
+            last_delivery_date=last_delivery,
+            self_ordering_followup=self_ordering_followup,
+            future_follow_up_days=future_follow_up_days,
+            freezer_fields=contact_feature.get("latest_freezer_fields"),
+            email_signal=email_signal,
+            today=today,
+        )
+        priority_type = _priority_type(
+            follow_up_due=follow_up_due,
+            scheduled_followup=scheduled_followup,
+            has_order_after_latest_contact=has_order_after_latest_contact,
+            order_count=order_count,
+            overdue_days=overdue_days,
+            latest_contact_class=latest_contact_class,
+            days_since_contact=days_since_contact,
+            segment=segment,
+            self_ordering_followup=self_ordering_followup,
+        )
+        priority_level = _priority_level(score)
+        next_action = _next_action(
+            priority_type=priority_type,
+            follow_up_due=follow_up_due,
+            scheduled_followup=scheduled_followup,
+            future_follow_up_days=future_follow_up_days,
+            overdue_days=overdue_days,
+            total_dfp=total_dfp,
+            expected_order_dfp=expected_order_dfp,
+            order_count=order_count,
+            latest_contact_class=latest_contact_class,
+            has_order_after_latest_contact=has_order_after_latest_contact,
+            days_since_contact=days_since_contact,
+            latest_contact_date=latest_contact_date,
+            last_order_date=last_order,
+            segment=segment,
+            self_ordering_followup=self_ordering_followup,
+            email_signal=email_signal,
+            today=today,
+        )
+
+        result.append(
+            {
+                "row": customer.get("row"),
+                "customer": name,
+                "sales_person": sales_person,
+                "segment": segment,
+                "priority_score": score,
+                "priority_level": priority_level,
+                "priority_type": priority_type,
+                "recommended_action": _recommended_action(priority_type),
+                "order_count": order_count,
+                "total_dfp": _clean_number(total_dfp),
+                "expected_order_dfp": _clean_number(expected_order_dfp),
+                "_expected_order_value_sort": _clean_number(expected_order_value),
+                "latest_order_date": _iso_date(last_order),
+                "latest_delivery_date": _iso_date(last_delivery),
+                "days_since_delivery": days_since_delivery,
+                "expected_cycle_days": expected_cycle,
+                "expected_cycle_source": expected_cycle_source,
+                "expected_next_order_date": _iso_date(expected_next),
+                "overdue_days": overdue_days,
+                "latest_contact_date": _iso_date(latest_contact_date),
+                "latest_contact_result": contact_feature.get("latest_contact_result", ""),
+                "latest_contact_comment": contact_feature.get("latest_contact_comment", ""),
+                "latest_contact_class": latest_contact_class or "",
+                "latest_contact_channel": contact_feature.get("latest_contact_channel", ""),
+                "latest_contact_sales_person": contact_feature.get("latest_contact_sales_person", ""),
+                "latest_follow_up_date": _iso_date(latest_follow_up_date),
+                "future_follow_up_days": future_follow_up_days,
+                "latest_freezer_fields": list(contact_feature.get("latest_freezer_fields") or []),
+                "follow_up_due": follow_up_due,
+                "missad_uppfoljning": bool(
+                    follow_up_due
+                    and latest_follow_up_date
+                    and latest_follow_up_date < today
+                ),
+                "has_order_after_latest_contact": has_order_after_latest_contact,
+                "self_ordering_signal": bool(contact_feature.get("self_ordering_signal")),
+                "email_priority_status": email_signal.get("status", ""),
+                "email_priority_active": bool(email_signal.get("active")),
+                "email_priority_handled": bool(email_signal.get("handled")),
+                "next_action": next_action,
+                "recommended_channel": _recommended_channel(
+                    next_action.get("action_type")
+                ),
+                "reasons": _priority_reasons(
+                    follow_up_due=follow_up_due,
+                    future_follow_up_days=future_follow_up_days,
+                    has_order_after_latest_contact=has_order_after_latest_contact,
+                    overdue_days=overdue_days,
+                    latest_contact_class=latest_contact_class,
+                    days_since_contact=days_since_contact,
+                    total_dfp=enriched_order.get("total_dfp", 0),
+                    expected_order_dfp=expected_order_dfp,
+                    order_count=enriched_order.get("order_count", 0),
+                    segment=segment,
+                    latest_contact_date=latest_contact_date,
+                    self_ordering_followup=self_ordering_followup,
+                    freezer_fields=contact_feature.get("latest_freezer_fields"),
+                    email_signal=email_signal,
+                ),
+            }
+        )
+
+    result.sort(
+        key=lambda c: (
+            c["priority_score"],
+            c.get("_expected_order_value_sort") or 0,
+            c.get("expected_order_dfp") or 0,
+            _segment_rank(c.get("segment")),
+            c.get("overdue_days") if c.get("overdue_days") is not None else -999,
+            c.get("total_dfp") or 0,
+        ),
+        reverse=True,
+    )
+    for customer in result:
+        customer.pop("_expected_order_value_sort", None)
+    return result[:limit]
+
+def calculate_priority_score_v2(intent_timing, value_index, strategic_index,
+                                history_index=0, *, policy=SCORE_VERSION) -> int:
+    weights = SCORING_POLICIES[policy]
+    components = dict(intent_timing=intent_timing, value_index=value_index,
+                      strategic_index=strategic_index, history_index=history_index)
+    return int(_clamp(round(sum(
+        weights[key] * _clamp(float(value or 0), 0, 100)
+        for key, value in components.items()
+    )), 0, 100))
+
+def established_intent_timing(overdue_days: int) -> int:
+    if overdue_days < -14:
+        return 10
+    if overdue_days < 0:
+        return 25
+    if overdue_days <= 7:
+        return 65
+    if overdue_days <= 30:
+        return 90
+    if overdue_days <= 60:
+        return 75
+    if overdue_days <= 90:
+        return 50
+    return 60
+
+def prospect_reactivation_intent_timing(days_since_contact: int | None) -> int:
+    if days_since_contact is None:
+        return 60
+    if days_since_contact <= 7:
+        return 15
+    if days_since_contact <= 21:
+        return 25
+    if days_since_contact <= 45:
+        return 45
+    return 60
+
+def first_order_intent_timing(days_since_delivery: int | None) -> int:
+    if days_since_delivery is None or days_since_delivery <= 6:
+        return 10
+    if days_since_delivery <= 10:
+        return 35
+    if days_since_delivery <= 23:
+        return 20
+    if days_since_delivery <= 30:
+        return 75
+    if days_since_delivery <= 45:
+        return 90
+    if days_since_delivery <= 60:
+        return 80
+    if days_since_delivery <= 90:
+        return 60
+    return 60
+
+def _priority_score(
+    *,
+    segment,
+    order_count,
+    expected_order_dfp,
+    expected_order_value,
+    benchmarks,
+    overdue_days,
+    latest_contact_class,
+    has_order_after_latest_contact,
+    days_since_contact,
+    follow_up_due,
+    latest_contact_date,
+    last_order_date,
+    last_delivery_date,
+    self_ordering_followup,
+    future_follow_up_days,
+    freezer_fields,
+    email_signal,
+    today,
+) -> int:
+    value_index = _value_index(expected_order_value, expected_order_dfp, benchmarks)
+    score = 0.0
+    score += 50 * value_index
+    score += 25 * _timing_index(overdue_days, order_count)
+    score += 15 * _engagement_index(
+        latest_contact_class,
+        days_since_contact,
+        follow_up_due,
+        has_order_after_latest_contact,
+    )
+    score += 7 * _segment_index(segment)
+    score += 3 * _repeat_index(order_count)
+
+    if order_count == 0 and segment in ["A", "B"]:
+        score += 6
+
+    score += _freezer_opportunity_points(
+        freezer_fields=freezer_fields,
+        order_count=order_count,
+        overdue_days=overdue_days,
+        latest_contact_class=latest_contact_class,
+        days_since_contact=days_since_contact,
+    )
+
+    if follow_up_due and latest_contact_class != "Negativ" and score < 50:
+        score = 50 + (8 * value_index)
+
+    if (
+        latest_contact_class == "Negativ"
+        and not has_order_after_latest_contact
+        and days_since_contact is not None
+        and days_since_contact <= 30
+    ):
+        score -= 25
+
+    if latest_contact_class == "Order lagd" and last_order_date and (today - last_order_date).days <= 14:
+        score -= 20
+
+    if last_order_date and (today - last_order_date).days <= 10:
+        score -= 28
+
+    if last_delivery_date and (today - last_delivery_date).days < 0:
+        score -= 30
+
+    if latest_contact_date and days_since_contact is not None and days_since_contact <= 2 and not follow_up_due:
+        score -= 12
+
+    if self_ordering_followup:
+        score = min(score, 79)
+
+    single_order_cap = _single_order_confidence_cap(
+        order_count=order_count,
+        follow_up_due=follow_up_due,
+        overdue_days=overdue_days,
+        freezer_fields=freezer_fields,
+        latest_contact_class=latest_contact_class,
+    )
+    if single_order_cap is not None:
+        score = min(score, single_order_cap)
+
+    future_follow_up_cap = _future_follow_up_score_cap(future_follow_up_days)
+    if future_follow_up_cap is not None:
+        score = min(score, future_follow_up_cap)
+
+    negative_contact_cap = _negative_contact_score_cap(
+        latest_contact_class=latest_contact_class,
+        days_since_contact=days_since_contact,
+        has_order_after_latest_contact=has_order_after_latest_contact,
+    )
+    if negative_contact_cap is not None:
+        score = min(score, negative_contact_cap)
+
+    score = _apply_email_priority_score(score, email_signal)
+
+    return max(0, min(100, int(round(score))))
+
+def _priority_type(
+    *,
+    follow_up_due,
+    scheduled_followup,
+    has_order_after_latest_contact,
+    order_count,
+    overdue_days,
+    latest_contact_class,
+    days_since_contact,
+    segment,
+    self_ordering_followup,
+) -> str:
+    if latest_contact_class == "Negativ" and not has_order_after_latest_contact:
+        return "Återaktivera efter negativt besked"
+    if follow_up_due:
+        return "Försenad uppföljning"
+    if scheduled_followup or self_ordering_followup:
+        return "Planerad uppföljning"
+    if order_count > 0 and overdue_days is not None and overdue_days >= 0:
+        if order_count == 1:
+            return "Återaktivera provorder"
+        return "Rädda återorder"
+    if latest_contact_class == "Positiv" and not has_order_after_latest_contact:
+        return "Varm chans"
+    if order_count == 0 and segment in ["A", "B"]:
+        return "Ny A/B-chans"
+    if latest_contact_class == "Ej anträffbar" and days_since_contact is not None and days_since_contact >= 3:
+        return "Försök igen"
+    return "Låg prio"
+
+def _priority_level(score: int) -> str:
+    if score >= 80:
+        return "Hög prio"
+    if score >= 50:
+        return "Medel prio"
+    return "Låg prio"
+
+def _recommended_action(priority_type: str) -> str:
+    return {
+        "Återaktivera efter negativt besked": "Kontrollera om läget ändrats",
+        "Försenad uppföljning": "Följ upp",
+        "Planerad uppföljning": "Bevaka",
+        "Rädda återorder": "Driv återorder",
+        "Återaktivera provorder": "Följ upp första ordern",
+        "Varm chans": "Följ upp positiv dialog",
+        "Ny A/B-chans": "Bearbeta som prioriterad kund",
+        "Försök igen": "Gör nytt försök",
+        "Låg prio": "Bearbeta vid tid över",
+    }[priority_type]
+
+def _recommended_channel(action_type: str | None) -> str:
+    if action_type in {"new_ab", "trial_reorder", "reorder", "route_fill"}:
+        return "besök"
+    if action_type in {
+        "follow_up",
+        "warm_lead",
+        "retry",
+        "negative_reactivation",
+        "stockfiller_click_followup",
+        "product_sheet_click_followup",
+        "email_open_followup",
+    }:
+        return "telefon"
+    return "avvakta"
+
+def _next_action(
+    *,
+    priority_type,
+    follow_up_due,
+    scheduled_followup,
+    future_follow_up_days,
+    overdue_days,
+    total_dfp,
+    expected_order_dfp,
+    order_count,
+    latest_contact_class,
+    has_order_after_latest_contact,
+    days_since_contact,
+    latest_contact_date,
+    last_order_date,
+    segment,
+    self_ordering_followup,
+    email_signal,
+    today,
+) -> dict:
+    if latest_contact_class == "Negativ" and not has_order_after_latest_contact:
+        follow_up_reason = " · planerad uppföljning är försenad" if follow_up_due else ""
+        return {
+            "label": "Kontrollera om läget ändrats",
+            "action_type": "negative_reactivation",
+            "tone": "low",
+            "reason": f"Negativt besked senast{follow_up_reason}",
+            "primary_cta": "Öppna",
+        }
+
+    if follow_up_due:
+        return {
+            "label": "Följ upp idag",
+            "action_type": "follow_up",
+            "tone": "urgent",
+            "reason": "Uppföljning missad · ingen senare kontakt eller order",
+            "primary_cta": "Ring",
+        }
+
+    email_action = _email_next_action(email_signal)
+    if email_action:
+        return email_action
+
+    if scheduled_followup or self_ordering_followup:
+        reason = "Framtida uppföljning finns"
+        if future_follow_up_days is not None:
+            reason = f"Planerad uppföljning om {future_follow_up_days} dagar"
+        if self_ordering_followup:
+            reason = f"{reason} · kommentar tyder på att kunden lägger order själv"
+        return {
+            "label": "Bevaka planerad uppföljning",
+            "action_type": "scheduled_followup",
+            "tone": "warning" if future_follow_up_days is not None and future_follow_up_days <= 7 else "low",
+            "reason": reason,
+            "primary_cta": "Öppna",
+        }
+
+    if order_count == 1 and overdue_days is not None and overdue_days >= 0:
+        return {
+            "label": "Följ upp första ordern",
+            "action_type": "trial_reorder",
+            "tone": "urgent" if overdue_days >= 21 else "warning",
+            "reason": "Första ordern är redo för uppföljning",
+            "primary_cta": "Planera besök",
+        }
+
+    if order_count > 0 and overdue_days is not None and overdue_days >= 7:
+        return {
+            "label": "Driv återorder",
+            "action_type": "reorder",
+            "tone": "urgent" if overdue_days >= 21 else "warning",
+            "reason": f"Över normal återköpstid +{overdue_days} dagar",
+            "primary_cta": "Planera besök",
+        }
+
+    if latest_contact_class == "Positiv" and not has_order_after_latest_contact:
+        return {
+            "label": "Stäng positiv dialog",
+            "action_type": "warm_lead",
+            "tone": "positive",
+            "reason": "Positiv dialog utan order",
+            "primary_cta": "Följ upp",
+        }
+
+    if latest_contact_class == "Ej anträffbar" and days_since_contact is not None and days_since_contact >= 3:
+        return {
+            "label": "Försök igen",
+            "action_type": "retry",
+            "tone": "neutral",
+            "reason": "Ej anträffbar senast",
+            "primary_cta": "Ring",
+        }
+
+    segment_value = str(segment or "").strip().upper()[:1]
+    if order_count == 0 and segment_value in ["A", "B"]:
+        return {
+            "label": "Bearbeta ny A/B-kund",
+            "action_type": "new_ab",
+            "tone": "opportunity",
+            "reason": f"Segment {segment_value} · ingen order ännu",
+            "primary_cta": "Planera besök",
+        }
+
+    if last_order_date and 0 <= (today - last_order_date).days <= 10:
+        return {
+            "label": "Bevaka rotation",
+            "action_type": "monitor",
+            "tone": "low",
+            "reason": "Order nyligen lagd",
+            "primary_cta": "Bevaka",
+        }
+
+    if latest_contact_class == "Negativ" and days_since_contact is not None and days_since_contact <= 30:
+        return {
+            "label": "Pausa/bevaka",
+            "action_type": "pause",
+            "tone": "low",
+            "reason": "Negativ dialog nyligen",
+            "primary_cta": "Bevaka",
+        }
+
+    return {
+        "label": "Bearbeta vid besöksrutt",
+        "action_type": "route_fill",
+        "tone": "low",
+        "reason": "Lägre prioritet just nu",
+        "primary_cta": "Planera besök",
+    }
+
+def _priority_reasons(
+    *,
+    follow_up_due,
+    future_follow_up_days,
+    has_order_after_latest_contact,
+    overdue_days,
+    latest_contact_class,
+    days_since_contact,
+    total_dfp,
+    expected_order_dfp,
+    order_count,
+    segment,
+    latest_contact_date,
+    self_ordering_followup,
+    freezer_fields,
+    email_signal,
+) -> list[str]:
+    reasons = []
+    email_reason = _email_priority_reason(email_signal)
+    if email_reason:
+        reasons.append(email_reason)
+    if latest_contact_class == "Negativ" and not has_order_after_latest_contact:
+        if days_since_contact is None:
+            reasons.append("Negativ kontakt senast")
+        else:
+            reasons.append(f"Negativ kontakt för {days_since_contact} dagar sedan")
+    if expected_order_dfp:
+        reasons.append(f"Orderpotential ca {_format_dfp(expected_order_dfp)}")
+    if follow_up_due:
+        reasons.append("Försenad uppföljning")
+    if future_follow_up_days is not None:
+        reasons.append(f"Planerad uppföljning om {future_follow_up_days} dagar")
+    if self_ordering_followup:
+        reasons.append("Kommentar tyder på självbeställning")
+    freezer_reason = _freezer_reason(freezer_fields, order_count, overdue_days)
+    if freezer_reason:
+        reasons.append(freezer_reason)
+    if order_count == 1 and overdue_days is not None and overdue_days >= 0:
+        reasons.append("Första ordern redo för uppföljning")
+    if overdue_days is not None and overdue_days >= 0:
+        reasons.append(f"Över normal återköpstid: +{overdue_days} dagar")
+    if latest_contact_class == "Positiv" and not has_order_after_latest_contact:
+        reasons.append("Positiv dialog utan order")
+    if order_count > 0:
+        reasons.append(f"Tidigare kund: {_clean_number(total_dfp)} DFP")
+    if segment == "A":
+        reasons.append("Segment A")
+    if segment == "B":
+        reasons.append("Segment B")
+    if latest_contact_date is None:
+        reasons.append("Ej kontaktad tidigare")
+    if latest_contact_class == "Ej anträffbar":
+        reasons.append("Ej anträffbar senast")
+    return reasons[:3]
+
+def _email_priority_signal(*, email_feature, latest_human_contact, today) -> dict:
+    """Normalize the latest email outcome and mark it handled by later human work."""
+    status = str(email_feature.get("email_followup_status") or "").strip()
+    event_at = parse_datetime(
+        email_feature.get("email_followup_last_event_at")
+        or email_feature.get("email_followup_sent_at")
+    )
+    sent_at = parse_datetime(email_feature.get("email_followup_sent_at"))
+    wait_days = max(0, int(_parse_number(email_feature.get("email_followup_wait_days_remaining"))))
+    handled = bool(
+        status
+        and latest_human_contact
+        and event_at
+        and latest_human_contact > event_at
+    )
+    return {
+        "status": status,
+        "active": bool(status) and not handled,
+        "handled": handled,
+        "event_at": event_at,
+        "sent_at": sent_at,
+        "wait_days": wait_days,
+        "days_since_sent": (
+            max(0, (today - sent_at.date()).days)
+            if sent_at else None
+        ),
+        "days_since_event": (
+            max(0, (today - event_at.date()).days)
+            if event_at else None
+        ),
+    }
+
+def _apply_email_priority_score(score: float, email_signal: dict) -> float:
+    """Apply intent and cooldown without replacing the customer's business value."""
+    if not email_signal.get("active"):
+        return score
+
+    status = email_signal.get("status")
+    wait_days = email_signal.get("wait_days", 0)
+    days_since_sent = email_signal.get("days_since_sent")
+    days_since_event = email_signal.get("days_since_event")
+
+    if status == "ordered_within_10_days":
+        return (
+            max(0, min(score - 15, 20))
+            if days_since_event is not None and days_since_event <= 10
+            else score
+        )
+
+    if status in {"stockfiller_clicked_no_order", "product_sheet_clicked_no_order"}:
+        if wait_days > 0:
+            return max(0, min(score - 6, 49))
+        boost = 18 if status == "stockfiller_clicked_no_order" else 12
+        floor = 60 if status == "stockfiller_clicked_no_order" else 55
+        return max(score + boost, floor)
+
+    if days_since_sent is not None and days_since_sent <= 10:
+        if status == "opened_no_click":
+            return max(0, min(score - 8, 45))
+        if status == "delivered_no_activity":
+            return max(0, min(score - 12, 35))
+
+    return score
+
+def _email_next_action(email_signal: dict) -> dict | None:
+    if not email_signal.get("active"):
+        return None
+
+    status = email_signal.get("status")
+    wait_days = email_signal.get("wait_days", 0)
+    days_since_sent = email_signal.get("days_since_sent")
+    days_since_event = email_signal.get("days_since_event")
+
+    if (
+        status == "ordered_within_10_days"
+        and days_since_event is not None
+        and days_since_event <= 10
+    ):
+        return {
+            "label": "Bevaka ny order",
+            "action_type": "email_order_monitor",
+            "tone": "low",
+            "reason": "Order registrerad inom 10 dagar efter mejlet",
+            "primary_cta": "Bevaka",
+        }
+
+    if status in {"stockfiller_clicked_no_order", "product_sheet_clicked_no_order"}:
+        if wait_days > 0:
+            return {
+                "label": "Avvakta efter mejlklick",
+                "action_type": "email_click_wait",
+                "tone": "low",
+                "reason": f"Följ upp om {wait_days} dagar om order saknas",
+                "primary_cta": "Bevaka",
+            }
+        stockfiller = status == "stockfiller_clicked_no_order"
+        return {
+            "label": (
+                "Följ upp Stockfiller-klick"
+                if stockfiller else "Följ upp produktbladsintresse"
+            ),
+            "action_type": (
+                "stockfiller_click_followup"
+                if stockfiller else "product_sheet_click_followup"
+            ),
+            "tone": "urgent" if stockfiller else "warning",
+            "reason": "Tydlig köpintention men ingen order registrerad",
+            "primary_cta": "Ring",
+        }
+
+    if days_since_sent is not None and days_since_sent <= 10:
+        if status == "opened_no_click":
+            return {
+                "label": "Avvakta mejlutfall",
+                "action_type": "email_open_wait",
+                "tone": "low",
+                "reason": "Mejlet är öppnat men ingen stark köpsignal finns ännu",
+                "primary_cta": "Bevaka",
+            }
+        if status == "delivered_no_activity":
+            return {
+                "label": "Avvakta mejlutfall",
+                "action_type": "email_delivery_wait",
+                "tone": "low",
+                "reason": "Mejlet är nyligen levererat",
+                "primary_cta": "Bevaka",
+            }
+
+    return None
+
+def _email_priority_reason(email_signal: dict) -> str:
+    if not email_signal.get("active"):
+        return ""
+    status = email_signal.get("status")
+    wait_days = email_signal.get("wait_days", 0)
+    days_since_event = email_signal.get("days_since_event")
+    if (
+        status == "ordered_within_10_days"
+        and days_since_event is not None
+        and days_since_event <= 10
+    ):
+        return "Order efter mejl – ingen ny aktivitet behövs"
+    if status == "stockfiller_clicked_no_order":
+        return (
+            f"Stockfiller-klick – avvakta {wait_days} dagar"
+            if wait_days else "Stockfiller-klick utan order"
+        )
+    if status == "product_sheet_clicked_no_order":
+        return (
+            f"Produktbladsklick – avvakta {wait_days} dagar"
+            if wait_days else "Produktbladsklick utan order"
+        )
+    if status == "opened_no_click":
+        return "Mejl öppnat utan klick"
+    if status == "delivered_no_activity":
+        return "Mejl levererat utan aktivitet"
+    return ""
+
+def _is_self_ordering_followup(
+    *,
+    latest_contact_class,
+    latest_contact_date,
+    days_since_contact,
+    latest_follow_up_date,
+    follow_up_due,
+    follow_up_resolved,
+    self_ordering_signal,
+    today,
+) -> bool:
+    return bool(
+        self_ordering_signal
+        and latest_contact_date
+        and days_since_contact is not None
+        and latest_follow_up_date
+        and latest_follow_up_date > today
+        and not follow_up_due
+        and not follow_up_resolved
+        and latest_contact_class in {"Positiv", "Neutral"}
+    )
+
+def _future_follow_up_days(
+    *,
+    latest_contact_date,
+    latest_follow_up_date,
+    follow_up_due,
+    follow_up_resolved,
+    today,
+) -> int | None:
+    if not latest_contact_date or not latest_follow_up_date:
+        return None
+    if follow_up_due or follow_up_resolved:
+        return None
+    if latest_follow_up_date <= today:
+        return None
+    return (latest_follow_up_date - today).days
+
+def _future_follow_up_score_cap(future_follow_up_days) -> int | None:
+    if future_follow_up_days is None:
+        return None
+    if future_follow_up_days <= 7:
+        return 85
+    if future_follow_up_days <= 21:
+        return 75
+    if future_follow_up_days <= 45:
+        return 65
+    return 55
+
+def _negative_contact_score_cap(*, latest_contact_class, days_since_contact, has_order_after_latest_contact) -> int | None:
+    if latest_contact_class != "Negativ" or has_order_after_latest_contact or days_since_contact is None:
+        return None
+    if days_since_contact <= 30:
+        return 30
+    if days_since_contact <= 90:
+        return 50
+    if days_since_contact <= 180:
+        return 75
+    return 95
+
+def _single_order_confidence_cap(
+    *,
+    order_count,
+    follow_up_due,
+    overdue_days,
+    freezer_fields,
+    latest_contact_class,
+) -> int | None:
+    if order_count != 1:
+        return None
+    if follow_up_due and latest_contact_class != "Negativ":
+        return None
+
+    fields = set(freezer_fields or [])
+    if "polarbar" in fields and overdue_days is not None and overdue_days >= 0:
+        return 95
+    if overdue_days is not None and overdue_days >= 21:
+        return 90
+    return 85
+
+def _freezer_opportunity_points(
+    *,
+    freezer_fields,
+    order_count,
+    overdue_days,
+    latest_contact_class,
+    days_since_contact,
+) -> int:
+    fields = set(freezer_fields or [])
+    if not fields:
+        return 0
+    if latest_contact_class == "Negativ" and days_since_contact is not None and days_since_contact <= 30:
+        return 0
+
+    has_polarbar = "polarbar" in fields
+    has_franui = "Franui" in fields
+    has_other_competitor = bool(OTHER_COMPETITOR_FREEZER_FIELDS & fields)
+    has_none = "none" in fields
+    no_prior_order = order_count == 0
+    overdue_reorder = order_count > 0 and overdue_days is not None and overdue_days >= 0
+
+    if has_none:
+        if no_prior_order:
+            return 8
+        if overdue_reorder:
+            return 5
+        return 2
+
+    if has_polarbar and not has_franui and not has_other_competitor:
+        return 8 if overdue_reorder else 3
+
+    if has_polarbar:
+        return 6 if overdue_reorder else 2
+
+    if has_franui and not has_other_competitor:
+        return 10 if no_prior_order else 8
+
+    if has_franui and has_other_competitor:
+        return 6
+
+    if has_other_competitor:
+        return 4
+
+    return 0
+
+def _freezer_reason(freezer_fields, order_count, overdue_days) -> str:
+    fields = set(freezer_fields or [])
+    if not fields:
+        return ""
+
+    has_polarbar = "polarbar" in fields
+    has_franui = "Franui" in fields
+    has_other_competitor = bool(OTHER_COMPETITOR_FREEZER_FIELDS & fields)
+    has_none = "none" in fields
+    no_prior_order = order_count == 0
+    overdue_reorder = order_count > 0 and overdue_days is not None and overdue_days >= 0
+
+    if has_none:
+        return "Frysdisken: ingen loggad konkurrent"
+    if has_polarbar and not has_franui and not has_other_competitor:
+        return "Frysdisken: Polarbär"
+    if has_polarbar and overdue_reorder:
+        return "Frysdisken: Polarbär + konkurrent"
+    if has_franui and not has_other_competitor:
+        return "Frysdisken: Franui, bredda sortiment"
+    if has_franui and has_other_competitor:
+        return "Frysdisken: flera konkurrenter"
+    if has_other_competitor and no_prior_order:
+        return "Frysdisken: konkurrent finns"
+    if has_other_competitor:
+        return "Frysdisken: konkurrensläge"
+    return ""
+
+def _build_priority_benchmarks(
+    customers: list[dict],
+    order_features: dict,
+    number_index: dict,
+    *,
+    identity_indices: dict | None = None,
+    ambiguous_master_names: set[str] | None = None,
+) -> dict:
+    global_dfp = []
+    global_value = []
+    global_cycles = []
+    by_segment = defaultdict(lambda: {"dfp": [], "value": [], "cycle": []})
+
+    for customer in customers:
+        if _is_truthy(customer.get("cancelled_flag")):
+            continue
+
+        customer_key = normalize_customer_key(customer.get("customer"))
+        customer_number_key = normalize_customer_key(customer.get("customer_number"))
+        if identity_indices is not None:
+            feature = _identity_feature(
+                customer,
+                identity_indices,
+                name_field="customer",
+                number_field="customer_number",
+                ambiguous_master_names=ambiguous_master_names,
+            )
+        else:
+            feature = number_index.get(customer_number_key) or order_features.get(customer_key)
+        if not feature:
+            continue
+
+        segment = _segment_value(customer)
+        dfp = _positive_float(feature.get("expected_order_dfp"))
+        value = _positive_float(feature.get("expected_order_value"))
+        cycle = _positive_float(feature.get("median_reorder_gap_days"))
+
+        if dfp:
+            global_dfp.append(dfp)
+            by_segment[segment]["dfp"].append(dfp)
+        if value:
+            global_value.append(value)
+            by_segment[segment]["value"].append(value)
+        if cycle:
+            global_cycles.append(cycle)
+            by_segment[segment]["cycle"].append(cycle)
+
+    global_default = {
+        "expected_order_dfp": _median_or(global_dfp, 0),
+        "expected_order_value": _median_or(global_value, 0),
+        "expected_cycle_days": _cycle_default(global_cycles, 45),
+    }
+    segment_defaults = {"": global_default}
+    for segment, values in by_segment.items():
+        segment_defaults[segment] = {
+            "expected_order_dfp": _median_or(values["dfp"], global_default["expected_order_dfp"]),
+            "expected_order_value": _median_or(values["value"], global_default["expected_order_value"]),
+            "expected_cycle_days": _cycle_default(values["cycle"], global_default["expected_cycle_days"]),
+        }
+
+    return {
+        "expected_order_dfp_p90": _percentile(global_dfp, 0.9) or global_default["expected_order_dfp"] or 1,
+        "expected_order_value_p90": _percentile(global_value, 0.9) or global_default["expected_order_value"] or 1,
+        "segment_defaults": segment_defaults,
+    }
+
+def _segment_defaults(benchmarks: dict, segment: str) -> dict:
+    defaults = benchmarks.get("segment_defaults", {})
+    return defaults.get(str(segment or "").strip().upper()[:1]) or defaults.get("") or {
+        "expected_order_dfp": 0,
+        "expected_order_value": 0,
+        "expected_cycle_days": 45,
+    }
+
+def _value_index(expected_order_value, expected_order_dfp, benchmarks: dict) -> float:
+    value = _positive_float(expected_order_value)
+    value_p90 = _positive_float(benchmarks.get("expected_order_value_p90"))
+    if value and value_p90:
+        return _clamp(value / value_p90, 0, 1)
+
+    dfp = _positive_float(expected_order_dfp)
+    dfp_p90 = _positive_float(benchmarks.get("expected_order_dfp_p90"))
+    if dfp and dfp_p90:
+        return _clamp(dfp / dfp_p90, 0, 1)
+
+    return 0
+
+def _timing_index(overdue_days, order_count) -> float:
+    if overdue_days is None:
+        return 0.25 if order_count == 0 else 0
+    if overdue_days < -14:
+        return 0
+    if overdue_days < 0:
+        return 0.25
+    if overdue_days < 7:
+        return 0.45
+    if overdue_days < 21:
+        return 0.7
+    return 1
+
+def _engagement_index(
+    latest_contact_class,
+    days_since_contact,
+    follow_up_due,
+    has_order_after_latest_contact,
+) -> float:
+    index = 0
+    if follow_up_due and latest_contact_class != "Negativ":
+        index = max(index, 0.8)
+    if latest_contact_class == "Positiv" and not has_order_after_latest_contact:
+        index = max(index, 1 if days_since_contact is not None and days_since_contact >= 3 else 0.45)
+    if latest_contact_class == "Neutral" and follow_up_due:
+        index = max(index, 0.65)
+    if latest_contact_class == "Ej anträffbar" and days_since_contact is not None and days_since_contact >= 3:
+        index = max(index, 0.35)
+    return index
+
+def _segment_index(segment) -> float:
+    return {"A": 1, "B": 0.65, "C": 0.25}.get(str(segment or "").strip().upper()[:1], 0.15)
+
+def _repeat_index(order_count) -> float:
+    if order_count >= 3:
+        return 1
+    if order_count == 2:
+        return 0.65
+    if order_count == 1:
+        return 0.35
+    return 0
+
+def _format_dfp(value) -> str:
+    return f"{_clean_number(_positive_float(value))} DFP"
+
+def _positive_float(value) -> float:
+    try:
+        number = float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    return number if number > 0 else 0.0
+
+def _median_or(values: list[float], fallback: float) -> float:
+    cleaned = [_positive_float(value) for value in values if _positive_float(value)]
+    return median(cleaned) if cleaned else fallback
+
+def _percentile(values: list[float], fraction: float) -> float | None:
+    cleaned = sorted(_positive_float(value) for value in values if _positive_float(value))
+    if not cleaned:
+        return None
+    if len(cleaned) == 1:
+        return cleaned[0]
+
+    position = (len(cleaned) - 1) * fraction
+    lower = int(position)
+    upper = min(lower + 1, len(cleaned) - 1)
+    weight = position - lower
+    return (cleaned[lower] * (1 - weight)) + (cleaned[upper] * weight)
+
+def _cycle_default(cycles: list[float], fallback: int) -> int:
+    if not cycles:
+        return fallback
+    return _clamp(round(median(cycles)), 14, 75)
+
+def _segment_value(customer: dict) -> str:
+    segment = str(customer.get("customer_segment") or customer.get("segment") or "").strip().upper()
+    return segment[:1] if segment else ""
+
+def _segment_rank(segment) -> int:
+    return {"A": 4, "B": 3, "C": 2}.get(str(segment or "").strip().upper()[:1], 1)
+
+def _parse_number(value) -> float:
+    text = str(value or "").replace("\xa0", " ").strip()
+    if not text:
+        return 0.0
+    cleaned = "".join(ch for ch in text if ch.isdigit() or ch in ",.-")
+    if cleaned in {"", "-", ".", ","}:
+        return 0.0
+    if "," in cleaned and "." in cleaned:
+        if cleaned.rfind(",") > cleaned.rfind("."):
+            cleaned = cleaned.replace(".", "").replace(",", ".")
+        else:
+            cleaned = cleaned.replace(",", "")
+    else:
+        cleaned = cleaned.replace(",", ".")
+    try:
+        return float(cleaned)
+    except ValueError:
+        return 0.0
+
+def _clean_number(value):
+    if value is None:
+        return None
+    number = float(value)
+    return int(number) if number.is_integer() else round(number, 1)
+
+def _clamp(value, lower, upper):
+    return max(lower, min(upper, value))
+
+def _iso_date(value):
+    return value.isoformat() if isinstance(value, date) else ""
+
+def _is_truthy(value) -> bool:
+    text = str(value or "").replace("\xa0", " ").strip().casefold()
+    return bool(text and text not in {"0", "false", "no", "nej", "off"})
+
+def _looks_like_excel_serial(text: str) -> bool:
+    normalized = text.replace(",", ".")
+    if not normalized.replace(".", "", 1).isdigit():
+        return False
+    try:
+        number = float(normalized)
+    except ValueError:
+        return False
+    return 20000 <= number <= 80000
+
+def _parse_excel_serial(text: str) -> datetime | None:
+    try:
+        number = float(text.replace(",", "."))
+    except ValueError:
+        return None
+    base = datetime(1899, 12, 30)
+    return base + timedelta(days=number)

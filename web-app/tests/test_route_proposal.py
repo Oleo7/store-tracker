@@ -17,6 +17,8 @@ sys.path.insert(0, str(WEB_APP_DIR))
 
 import app as app_module
 import route_proposal as route_proposal_module
+from v3_fixtures import current_rank
+
 from route_proposal import (
     Coordinate,
     GoogleRoutesTravelTimeProvider,
@@ -54,7 +56,7 @@ def candidate(
         ),
         priority_score=score,
         required=required,
-    )
+     commercial_value=score)
 
 
 def complete_matrix(start_legs, between):
@@ -92,11 +94,11 @@ class SolverTests(TestCase):
         self.assertEqual(route.return_drive_seconds, 120)
         self.assertEqual(route.total_seconds, 1380)
 
-    def test_exact_solver_rejects_exactly_nine_hours(self):
+    def test_exact_solver_accepts_exactly_nine_hours(self):
         candidates = [candidate(2, 75)]
         matrix = [[31200], [0]]
         solution = solve_route(candidates, matrix)
-        self.assertEqual(solution.route_indices, ())
+        self.assertEqual(solution.route_indices, (0,))
 
     def test_exact_solver_accepts_one_second_under_nine_hours(self):
         candidates = [candidate(2, 75)]
@@ -164,12 +166,12 @@ class SolverTests(TestCase):
         self.assertEqual(route.total_priority_score, 0)
         self.assertTrue(route.stops[0].candidate.required)
 
-    def test_required_stop_over_strict_budget_has_stable_422_error(self):
+    def test_required_stop_one_second_over_budget_has_stable_422_error(self):
         candidates = [candidate(2, 0, required=True)]
         with self.assertRaises(RequiredStopsNotFeasible) as raised:
             solve_route(
                 candidates,
-                [[800], [0]],
+                [[801], [0]],
                 max_total_seconds=2000,
                 service_seconds_per_stop=1200,
             )
@@ -210,7 +212,7 @@ class SolverTests(TestCase):
     def test_geography_can_select_a_slightly_lower_scored_customer(self):
         candidates = [candidate(2, 60), candidate(3, 55)]
         matrix = complete_matrix(
-            [600, 60],
+            [601, 60],
             [
                 [0, 40000],
                 [40000, 0],
@@ -342,7 +344,7 @@ class SolverTests(TestCase):
         with self.assertRaises(RouteVerificationError):
             verify_route(
                 candidates=candidates,
-                drive_seconds=[[31200], [0]],
+                drive_seconds=[[31201], [0]],
                 route_indices=[0],
             )
 
@@ -519,8 +521,8 @@ class SolverTests(TestCase):
             service_seconds_per_stop=600,
         )
 
-        self.assertEqual(len(proposal.route.stops), 1)
-        self.assertLess(proposal.route.total_seconds, 1380)
+        self.assertEqual(len(proposal.route.stops), 2)
+        self.assertEqual(proposal.route.total_seconds, 1380)
 
     def test_required_stop_without_direct_road_has_stable_422_error(self):
         with self.assertRaises(RequiredStopsNotFeasible) as raised:
@@ -720,13 +722,14 @@ class RouteEndpointTests(TestCase):
             },
         ]
         self.priorities = [
-            {"row": 2, "customer": "Authoritative Store", "priority_score": 88},
-            {"row": 3, "customer": "Other Store", "priority_score": 42},
+            current_rank({"row": 2, "customer": "Authoritative Store", "priority_score": 88}),
+            current_rank({"row": 3, "customer": "Other Store", "priority_score": 42}),
         ]
         self.provider = FormulaProvider()
         self.patchers = [
             patch.object(app_module, "stockholm_now", return_value=datetime(2026, 7, 28, 8, tzinfo=ZoneInfo("Europe/Stockholm"))),
             patch.object(app_module, "read_planned_activity_snapshot", return_value=(None, [], [])),
+            patch.object(app_module, "read_customer_state_events", return_value=[]),
             patch.object(app_module, "get_spreadsheet_with_retry", return_value=object()),
             patch.object(app_module, "get_customer_rows", return_value=self.customers),
             patch.object(app_module, "get_contact_rows", return_value=[]),
@@ -823,12 +826,10 @@ class RouteEndpointTests(TestCase):
             for row in range(2, 77)
         ]
         self.priorities[:] = [
-            {
-                "row": row,
-                "customer_id": f"route-{row}",
-                "customer": f"Store {row}",
-                "priority_score": 1000 - row,
-            }
+            current_rank({
+                "row": row, "customer_id": f"route-{row}", "customer": f"Store {row}",
+                "priority_score": 90,
+            })
             for row in range(2, 77)
         ]
 
@@ -1122,7 +1123,7 @@ class FrontendRouteProposalFlowTests(TestCase):
         self.assertNotIn("DAILY_FOCUS_LIMIT", self.html)
         self.assertIn("const LIST_BATCH_SIZE = 20;", self.html)
         self.assertIn(
-            "return getFilteredCustomers().slice().sort(prioritySort);",
+            "return getFilteredCustomers().slice().sort(mapPrioritySort);",
             self.html,
         )
 

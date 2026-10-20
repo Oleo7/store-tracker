@@ -187,6 +187,7 @@ class Ownership1BTests(TestCase):
             ),
             patch.object(app_module, "get_contact_rows", return_value=[]),
             patch.object(app_module, "get_order_rows", return_value=[]),
+            patch.object(app_module, "read_customer_state_events", return_value=[]),
             patch.object(
                 app_module, "get_email_rows", return_value=([], [], [])
             ),
@@ -304,6 +305,7 @@ class Ownership1BTests(TestCase):
                 ),
                 patch.object(app_module, "get_contact_rows", return_value=[]),
                 patch.object(app_module, "get_order_rows", return_value=[]),
+                patch.object(app_module, "read_customer_state_events", return_value=[]),
                 patch.object(
                     app_module, "get_email_rows", return_value=([], [], [])
                 ),

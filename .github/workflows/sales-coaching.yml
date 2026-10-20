@@ -47,6 +47,8 @@ jobs:
         run: node web-app/tests/sales_coaching_browser_smoke.cjs mobile
       - name: Guidance and delivery browser regressions
         run: node web-app/tests/guidance_integrity_browser_smoke.cjs
+      - name: Priority, commitments and seller workflow browser regressions
+        run: node web-app/tests/value_priority_browser_smoke.cjs
       - name: Calendar drag desktop and touch regressions
         env:
           PLANNING_DRAG_HARNESS_URL: http://127.0.0.1:5065

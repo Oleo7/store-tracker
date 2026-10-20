@@ -1,0 +1,103 @@
+const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm'),assert=require('node:assert/strict');
+const html=fs.readFileSync(path.join(__dirname,'..','index.html'),'utf8');
+function source(name){const match=new RegExp(`  (?:async )?function ${name}\\(`).exec(html);assert.ok(match,name);return html.slice(match.index,html.indexOf('\n  }',match.index)+4);}
+const context=vm.createContext({assert,URLSearchParams,console});
+vm.runInContext(`
+const PLANNING_TIME_ZONE='Europe/Stockholm';
+let owner='olle',planningAttentionRequestSerial=0,planningAttentionLoading=false;
+let customers=[],insightsRequestSerial=0,insightsRevision=0;
+let planningAttention={items:[],total:0,nextOffset:0,owner:'olle',loaded:false,error:null,invalidCount:0};
+const planningTodayKey=()=> '2026-10-18',planningAttentionOwnerKey=()=>owner;
+const normalizePlanningUser=u=>u;
+const planningOwnerQuery=p=>{p.set('user_name',owner);return p};
+const requests=[],rendered=[];
+const planningFetchJson=path=>new Promise((resolve,reject)=>requests.push({path,resolve,reject}));
+const renderPlanningAttention=()=>rendered.push({owner:planningAttention.owner,total:planningAttention.total,error:planningAttention.error});
+const getCustomerInsight=c=>c||{}, getCustomerListGuidance=c=>c?.list_guidance||{};
+const planningActivityId=a=>a?.planned_activity_id||'';
+const customerInsightKey=v=>String(v||'').trim().toLowerCase();
+const formViews=[],formToasts=[],formControls=new Map();
+const document={getElementById:id=>{if(!formControls.has(id))formControls.set(id,{});return formControls.get(id)}};
+const showToast=message=>formToasts.push(message),showView=name=>formViews.push(name);
+const PLANNING_CONTACT_TYPES={},planningActiveUsersCache=[],contactTimeSuggestion=null;
+const planningClientRequestId=()=> 'fixture-contact-request',getPrefilledSellerName=()=> 'Olle';
+const syncVisitCompetitorButtons=()=>{},setFreezerSectionInvalid=()=>{},setContactFormRetryMode=()=>{};
+const showContactSaveError=()=>{},updateContactChannelFields=()=>{},updateFollowupFields=()=>{},updateContactResultFields=()=>{};
+${['planningDateFromKey','planningDateKeyFromIso','planningTimeFromIso','planningStockholmOffset','planningStockholmIso','planningAttentionItemIsEligible',
+'mergePlanningAttentionItems','loadPlanningAttention','customerHasContactBan','customerCanExecutePlanned',
+'customerCanStartContact','customerRequiresReview','sortedModelValue','getWorkPriorityValue',
+'stableCustomerTieBreak','compareDescendingMissingLast','contactPrioritySort','mapPriorityValue','mapPrioritySort','prioritySort','hasPriorityScore','segmentRank','planningContactTypeKey','getCustomerPlanningSeed','applyConfirmedObligationUpdate','customerWorkflowCanDismiss','openContactFormForCustomer'].map(source).join('\n')}
+`,context);
+vm.runInContext(`(async()=>{
+ const item=(id,date='2026-10-17',extra={})=>({obligation_id:id,customer_id:'customer-1',item_type:'overdue_explicit_follow_up',due_date:date,status:'open',...extra});
+ assert.equal(planningDateKeyFromIso('2026-10-17T22:30:00Z'),'2026-10-18');
+ assert.equal(planningDateKeyFromIso('2026-02-30'),'');
+ assert.equal(planningStockholmIso('2026-03-29','02:30'),'');
+ assert.equal(planningStockholmIso('2026-10-25','02:30'),'2026-10-25T02:30:00+01:00');
+ assert.equal(planningDateKeyFromIso('2026-10-18T09:00:00'),'2026-10-18');
+ assert.equal(planningTimeFromIso('2026-10-18T09:00:00'),'09:00');
+ assert.equal(planningTimeFromIso('2026-10-25T00:30:00Z'),'02:30');
+ assert.equal(planningTimeFromIso('2026-10-25T01:30:00Z'),'02:30');
+ assert.equal(planningAttentionItemIsEligible(item('old')),true);
+ assert.equal(planningAttentionItemIsEligible(item('today','2026-10-18')),false);
+ assert.equal(planningAttentionItemIsEligible(item('future','2026-10-19')),false);
+ assert.equal(planningAttentionItemIsEligible(item('today-calendar','2026-10-18',{item_type:'missed_calendar_activity',planned_activity_id:'a',due_at:'2026-10-18T01:00:00+02:00'})),false);
+ assert.equal(planningAttentionItemIsEligible(item('generic','2026-10-17',{item_type:'sales_suggestion'})),false);
+ assert.equal(planningAttentionItemIsEligible(item('resolved','2026-10-17',{status:'resolved'})),false);
+ const merged=mergePlanningAttentionItems([item('a')],[item('a','2026-10-17',{item_type:'missed_calendar_activity',planned_activity_id:'calendar-a'}),item('b')]);
+ assert.equal(merged.length,2);assert.equal(merged[0].item_type,'missed_calendar_activity');
+ const opaque=mergePlanningAttentionItems([item('opaque','2026-10-17',{revision:900})],[item('opaque','2026-10-17',{revision:12,note:'Current server state'})]);
+ assert.equal(opaque[0].revision,12,'CAS revisions cannot be numerically ordered');
+ const old=loadPlanningAttention();owner='sofia';const current=loadPlanningAttention();
+ requests[1].resolve({owner:{user_name:'sofia'},items:[item('sofia')],total:1,offset:0});assert.equal(await current,true);
+ requests[0].resolve({owner:{user_name:'olle'},items:[item('wrong-owner')],total:1,offset:0});assert.equal(await old,false);
+ assert.equal(planningAttention.owner,'sofia');assert.equal(planningAttention.items[0].obligation_id,'sofia');
+ owner='olle';const first=loadPlanningAttention();requests[2].resolve({owner:{user_name:'olle'},items:[item('a'),item('b')],total:3,offset:0});await first;
+ const second=loadPlanningAttention({append:true});assert.match(requests[3].path,/offset=2/);requests[3].resolve({owner:{user_name:'olle'},items:[item('c')],total:3,offset:2});await second;
+ assert.equal(planningAttention.items.length,3);assert.equal(planningAttention.nextOffset,3);
+ const failure=loadPlanningAttention();requests[4].reject(new Error('offline'));assert.equal(await failure,false);assert.equal(planningAttention.items.length,3);assert.equal(planningAttention.error.message,'offline');
+ const booked={contact_permission:{status:'allowed'},list_guidance:{can_start_unscheduled_contact:false,can_execute_planned_contact:false,status_key:'planned',requires_review:true,review_obligation_ids:['old']}};
+ assert.equal(customerCanStartContact(booked),false);assert.equal(customerCanExecutePlanned(booked,{planned_activity_id:'current',can_execute_planned_contact:true}),true);
+ assert.equal(customerRequiresReview(booked),true);
+ assert.equal(customerCanExecutePlanned({...booked,contact_permission:{status:'do_not_contact'}},{planned_activity_id:'current',can_execute_planned_contact:true}),false);
+ openContactFormForCustomer(booked,{activity:{planned_activity_id:'current',can_execute_planned_contact:false},obligation:{can_execute_planned_contact:true}});
+ assert.equal(formViews.length,0,'stale attention permission cannot override a freshly blocked calendar activity');
+ assert.match(formToasts.pop(),/spärrad/);
+ openContactFormForCustomer(booked,{activity:{planned_activity_id:'current',can_execute_planned_contact:true},obligation:{can_execute_planned_contact:false}});
+ assert.equal(formViews.length,0,'an explicitly blocked obligation cannot inherit the calendar permission');
+ assert.match(formToasts.pop(),/spärrad/);
+ openContactFormForCustomer(booked,{obligation:{can_contact_now:false}});
+ assert.equal(formViews.length,0,'blocked unbooked obligation stays administrative');
+ openContactFormForCustomer({...booked,customer:'Historical inbound',contact_permission:{status:'do_not_contact'}});
+ assert.deepEqual(formViews,['form'],'ordinary historical or inbound logging remains available without initiating a scoped contact');
+ assert.equal(activePlannedActivityId,'');assert.equal(activeContactObligation,null);
+ assert.equal(getWorkPriorityValue({value_model_version:'v3.5',work_priority_precise:0,contact_priority_raw:99},'raw'),0);
+ assert.equal(getWorkPriorityValue({contact_priority_raw:7,priority_score:99},'raw'),null);
+ assert.equal(getWorkPriorityValue({work_priority_raw:null,contact_priority_raw:99},'raw'),null);
+ assert.equal(mapPriorityValue({value_model_version:'v3.5',work_priority_precise:15,priority_score:99},'raw'),15);
+ assert.equal(mapPriorityValue({value_model_version:'v3.5',work_priority_raw:null,priority_score:99},'raw'),null);
+ assert.equal(mapPriorityValue({priority_score:70},'raw'),null);
+ const mapRanked=[{customer:'Old high',customer_id:'a',value_model_version:'v3.5',priority_score:99,work_priority_precise:5},
+                  {customer:'New high',customer_id:'b',value_model_version:'v3.5',priority_score:5,work_priority_precise:99}].sort(mapPrioritySort);
+ assert.equal(mapRanked[0].customer,'New high');
+
+ assert.equal(customerWorkflowCanDismiss({customer_workflow:{can_dismiss:false},delivery_count:4}),false,'explicit backend decision wins');
+ assert.equal(customerWorkflowCanDismiss({customer_workflow:{can_dismiss:true},customer_segment:'A'}),true,'explicit backend decision wins over fallback');
+ assert.equal(customerWorkflowCanDismiss({customer_segment:'A',business_verified_delivery_count:0}),false,'old A prospect responses stay snooze-only');
+ assert.equal(customerWorkflowCanDismiss({customer_segment:'B',business_verified_delivery_count:0}),true);
+ const ranked=[{customer:'Act',customer_id:'a',value_model_version:'v3.5',work_priority_precise:20,business_value_raw:40},{customer:'Booked',customer_id:'b',value_model_version:'v3.5',work_priority_precise:90,business_value_raw:100,contact_priority_raw:0,list_guidance:{status_key:'planned'}},{customer:'Wait',customer_id:'c',value_model_version:'v3.5',work_priority_precise:0,business_value_raw:200}].sort(contactPrioritySort);
+ assert.deepEqual(ranked.map(c=>c.customer),['Booked','Act','Wait']);
+ const seed=getCustomerPlanningSeed({planning_seed:{contact_type:'Telefon',source_contact_id:'source',obligation_id:'promise',expected_revision:4,owner_user_name:'olle',note:'Promised phone call',appointment_confirmed:true,picking_help:false},list_guidance:{recommended_contact_type:'phone'}});
+ assert.equal(seed.contact_type,'phone');assert.equal(seed.obligation_revision,4);assert.equal(seed.source_contact_id,'source');assert.equal(seed.note,'Promised phone call');assert.equal(seed.appointment_confirmed,true);
+ const local={customer_id:'customer-1',open_obligations:[item('keep'),item('saved','2026-10-17',{revision:500})],planning_seed:{obligation_id:'saved',source_contact_row:6,expected_revision:500}};
+ customers=[local];
+ const confirmed=item('saved','2026-10-17',{revision:12,snooze_until:'2026-10-25T08:00:00+01:00'});
+ applyConfirmedObligationUpdate(confirmed);
+ assert.equal(local.open_obligations.find(i=>i.obligation_id==='saved').snooze_until,confirmed.snooze_until,'menu uses server-confirmed pause before slow model refresh');
+ assert.equal(local.planning_seed.expected_revision,12,'exact server CAS token replaces the old token');
+ assert.equal(local.planning_seed.source_contact_row,6);
+ assert.equal(insightsRequestSerial,1,'pre-write insight requests are invalidated');
+ applyConfirmedObligationUpdate({...confirmed,status:'resolved'});
+ assert.deepEqual(local.open_obligations.map(i=>i.obligation_id),['keep']);
+ console.log('Priority workflow actual helpers: Stockholm dates, strict attention, owner races, pagination, scope gates, rank and seed PASS');
+})()`,context).catch(error=>{console.error(error);process.exitCode=1});

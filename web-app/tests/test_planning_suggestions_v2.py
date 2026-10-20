@@ -170,15 +170,15 @@ class PlanningSuggestionV2IntegrationTests(PlanningApiTestCase):
         payload = response.get_json()
 
         self.assertEqual(response.status_code, 200, payload)
-        self.assertEqual(payload["score_version"], "v2.2")
+        self.assertEqual(payload["score_version"], "v3.5")
         self.assertGreaterEqual(payload["pending_count"], 1)
         self.assertEqual(payload["suggestion"]["customer"], "Butik A")
         rows = self.spreadsheet.worksheet(SUGGESTIONS_SHEET).dict_rows()
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["primary_trigger_type"], "established_reorder_due")
-        self.assertEqual(rows[0]["score_version"], "v2.2")
+        self.assertEqual(rows[0]["score_version"], "v3.5")
         event = self.spreadsheet.worksheet(SCORE_EVENTS_SHEET).dict_rows()[0]
-        self.assertEqual(event["score_version"], "v2.2")
+        self.assertEqual(event["score_version"], "v3.5")
         self.assertEqual(event["lifecycle"], "established")
         self.assertEqual(event["recommendation_eligible"], "Y")
         for field in (
@@ -215,6 +215,8 @@ class PlanningSuggestionV2IntegrationTests(PlanningApiTestCase):
         customer = next(item for item in priorities if item["customer"] == "Butik A")
         self.assertFalse(customer["recommendation_eligible"])
         self.assertGreater(customer["priority_score"], 0)
+        self.assertEqual(customer["contact_priority_score"], 0)
+        self.assertGreater(customer["business_value_raw"], 0)
 
     def test_cached_snapshot_does_not_reuse_empty_planning_input_for_queue(self):
         self.spreadsheet._store_tracker_enable_read_cache = True
@@ -259,6 +261,7 @@ class PlanningSuggestionV2IntegrationTests(PlanningApiTestCase):
             planned_activity_id="manual-same-day-overdue",
             scheduled_at="2026-07-27T09:00:00+02:00",
             source="manual",
+            created_at="2026-07-26T12:00:00+02:00",
         )
         before = datetime(2026, 7, 27, 8, 59, tzinfo=app_module.STOCKHOLM_ZONE)
         after = datetime(2026, 7, 27, 9, 1, tzinfo=app_module.STOCKHOLM_ZONE)
@@ -286,14 +289,14 @@ class PlanningSuggestionV2IntegrationTests(PlanningApiTestCase):
         )
         self.assertEqual(self.planning_rows()[0]["status"], "planned")
 
-    def test_overdue_activity_is_hidden_after_a_later_logged_contact(self):
+    def test_overdue_activity_survives_a_later_unlinked_contact(self):
         self.append_repeat_orders()
-        activity = self.append_planning_row(
+        activity = self.append_planning_row(customer_agreement_confirmed=True,
             planned_activity_id="overdue-resolved-by-contact",
             scheduled_at="2026-08-03T09:00:00+02:00",
             source="manual",
         )
-        self.append_contact_row(
+        self.append_contact_row(follow_up_purpose="customer_followup", follow_up_agreement_confirmed="Y",
             contact_id="later-contact",
             customer_id=activity["customer_id"],
             date_time="2026-08-06 13:30",
@@ -308,7 +311,7 @@ class PlanningSuggestionV2IntegrationTests(PlanningApiTestCase):
                 payload = self.client.get("/planning/suggestions").get_json()
 
         queue_items = [payload.get("suggestion")] + payload["queue_preview"]
-        self.assertFalse(any(
+        self.assertTrue(any(
             item
             and item.get("customer_id") == activity["customer_id"]
             and item.get("queue_item_type") == "overdue_activity"
@@ -316,7 +319,7 @@ class PlanningSuggestionV2IntegrationTests(PlanningApiTestCase):
         ))
         self.assertEqual(self.planning_rows()[0]["status"], "planned")
 
-    def test_overdue_activity_is_hidden_by_a_future_planned_activity(self):
+    def test_overdue_activity_survives_an_unrelated_future_plan(self):
         self.append_repeat_orders()
         overdue = self.append_planning_row(
             planned_activity_id="overdue-resolved-by-plan",
@@ -338,8 +341,8 @@ class PlanningSuggestionV2IntegrationTests(PlanningApiTestCase):
                 payload = self.client.get("/planning/suggestions").get_json()
 
         queue_items = [payload.get("suggestion")] + payload["queue_preview"]
-        self.assertFalse(any(
-            item and item.get("customer_id") == overdue["customer_id"]
+        self.assertTrue(any(
+            item and item.get("planned_activity_id") == overdue["planned_activity_id"]
             for item in queue_items
         ))
         self.assertEqual(
@@ -350,7 +353,7 @@ class PlanningSuggestionV2IntegrationTests(PlanningApiTestCase):
             },
         )
 
-    def test_later_contact_only_resolves_older_overdue_activity(self):
+    def test_unlinked_contact_resolves_neither_separate_overdue_activity(self):
         owner = {"user_name": "olle", "name": "Olle"}
         customer_id = "11111111-1111-4111-8111-111111111111"
         activities = [
@@ -386,7 +389,7 @@ class PlanningSuggestionV2IntegrationTests(PlanningApiTestCase):
         self.assertEqual(active_ids, {customer_id})
         self.assertEqual(
             [item["planned_activity_id"] for item in overdue_items],
-            ["newer-overdue"],
+            ["older-overdue", "newer-overdue"],
         )
 
     def test_suggestion_planned_activity_uses_same_overdue_semantics(self):
@@ -438,6 +441,7 @@ class PlanningSuggestionV2IntegrationTests(PlanningApiTestCase):
             planned_activity_id="cached-same-day-overdue",
             scheduled_at="2026-07-27T09:00:00+02:00",
             source="manual",
+            created_at="2026-07-26T12:00:00+02:00",
         )
         before = datetime(2026, 7, 27, 8, 59, tzinfo=app_module.STOCKHOLM_ZONE)
         after = datetime(2026, 7, 27, 9, 1, tzinfo=app_module.STOCKHOLM_ZONE)
@@ -508,7 +512,8 @@ class PlanningSuggestionV2IntegrationTests(PlanningApiTestCase):
         customer = insights["butik a"]
         self.assertFalse(customer["recommendation_eligible"])
         self.assertEqual(customer["recommendation_suppression_reason"], "snoozed")
-        self.assertGreater(customer["priority_score"], 0)
+        self.assertEqual(customer["priority_score"], 0)
+        self.assertGreater(customer["business_value_raw"], 0)
 
     def test_pending_context_is_not_closed_when_only_time_crosses_day_90(self):
         self.append_boundary_repeat_orders()

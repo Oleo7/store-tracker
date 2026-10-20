@@ -47,17 +47,17 @@ class FirstOrderPhase3Tests(TestCase):
         expected = {
             7: ("first_order_onboarding", 43),
             10: ("first_order_onboarding", 43),
-            11: ("first_order_reorder", 28),
-            23: ("first_order_reorder", 28),
-            24: ("first_order_reorder", 83),
-            30: ("first_order_reorder", 83),
-            31: ("first_order_reorder", 98),
-            45: ("first_order_reorder", 98),
-            46: ("first_order_reorder", 88),
-            60: ("first_order_reorder", 88),
-            61: ("first_order_reorder", 60),
-            90: ("first_order_reorder", 60),
-            91: ("single_order_reactivation_due", 60),
+            11: ("second_purchase_due", 28),
+            23: ("second_purchase_due", 28),
+            24: ("second_purchase_due", 83),
+            30: ("second_purchase_due", 83),
+            31: ("second_purchase_due", 98),
+            45: ("second_purchase_due", 98),
+            46: ("second_purchase_due", 88),
+            60: ("second_purchase_due", 88),
+            61: ("second_purchase_due", 60),
+            90: ("second_purchase_due", 60),
+            91: ("single_order_reactivation_due", 70),
         }
         for days, (trigger, timing) in expected.items():
             with self.subTest(days=days):
@@ -129,7 +129,7 @@ class FirstOrderPhase3Tests(TestCase):
         onboarding = priorities(customers, orders, today=date(2026, 1, 9))[0]
         reorder = priorities(customers, orders, today=date(2026, 1, 25))[0]
         self.assertEqual(onboarding["primary_trigger_type"], "first_order_onboarding")
-        self.assertEqual(reorder["primary_trigger_type"], "first_order_reorder")
+        self.assertEqual(reorder["primary_trigger_type"], "second_purchase_due")
         self.assertEqual(context_identity(onboarding), context_identity(reorder))
 
 
@@ -138,9 +138,10 @@ class DialogueAndStrategicPhase3Tests(TestCase):
         today = date(2026, 7, 20)
         existing = customer("Existing", "existing", "C")
         existing_orders = [
-            sku_order("E1", "Existing", "2026-07-15", 20, "existing", "S1")
+            sku_order("E1", "Existing", "2026-06-10", 20, "existing", "S1"),
+            sku_order("E2", "Existing", "2026-06-30", 20, "existing", "S1"),
         ]
-        for days, expected in ((2, ""), (3, "positive_dialogue_followup")):
+        for days, expected in ((9, ""), (10, "positive_buyer_followup")):
             with self.subTest(kind="existing", days=days):
                 item = priorities(
                     [existing], existing_orders,
@@ -168,7 +169,7 @@ class DialogueAndStrategicPhase3Tests(TestCase):
             contacts=[row], today=date(2026, 7, 20),
         )[0]
         self.assertFalse(item["recommendation_eligible"])
-        self.assertEqual(item["recommendation_suppression_reason"], "explicit_follow_up")
+        self.assertEqual(item["recommendation_suppression_reason"], "internal_followup_wait")
         self.assertNotIn("positive_dialogue_followup", item["covered_trigger_keys"])
 
         activity_contact = contact(
@@ -179,6 +180,7 @@ class DialogueAndStrategicPhase3Tests(TestCase):
             contacts=[activity_contact],
             planned=[{
                 "customer_id": "prospect",
+                "planned_activity_id": "prospect-plan",
                 "customer": "Prospect",
                 "status": "planned",
                 "scheduled_at": "2026-07-25T09:00:00+02:00",
@@ -192,13 +194,13 @@ class DialogueAndStrategicPhase3Tests(TestCase):
             with_activity["recommendation_suppression_reason"],
             "future_planned_activity",
         )
-        self.assertEqual(with_activity["intent_timing"], 25)
+        self.assertEqual(with_activity["intent_timing"], round(100 * with_activity["work_contact_factor"]))
 
     def test_strategic_rules_and_suppressions(self):
         never = priorities(
             [customer("Strategic", "strategic", "A")], today=date(2026, 7, 20)
         )[0]
-        self.assertEqual(never["primary_trigger_type"], "a_prospect_due")
+        self.assertEqual(never["primary_trigger_type"], "value_based_contact_due")
         self.assertEqual(never["customer_guidance"]["focus_key"], "a_prospect")
         self.assertEqual(never["customer_guidance"]["status_key"], "act_now")
 
@@ -207,7 +209,7 @@ class DialogueAndStrategicPhase3Tests(TestCase):
             contacts=[contact("Strategic", "2026-06-20 09:00", "Neutral", "recent")],
             today=date(2026, 7, 20),
         )[0]
-        self.assertEqual(recent["primary_trigger_type"], "a_prospect_due")
+        self.assertEqual(recent["primary_trigger_type"], "value_based_contact_due")
         self.assertEqual(recent["customer_guidance"]["status_key"], "act_now")
 
         stale = priorities(
@@ -215,7 +217,7 @@ class DialogueAndStrategicPhase3Tests(TestCase):
             contacts=[contact("Strategic", "2026-06-01 09:00", "Neutral", "stale")],
             today=date(2026, 7, 20),
         )[0]
-        self.assertEqual(stale["primary_trigger_type"], "a_prospect_due")
+        self.assertEqual(stale["primary_trigger_type"], "value_based_contact_due")
         self.assertEqual(stale["customer_guidance"]["status_key"], "act_now")
 
         negative = priorities(
@@ -236,6 +238,7 @@ class DialogueAndStrategicPhase3Tests(TestCase):
             [customer_row], today=today,
             planned=[{
                 "customer_id": "strategic",
+                "planned_activity_id": "strategic-plan",
                 "customer": "Strategic",
                 "status": "planned",
                 "scheduled_at": "2026-07-25T09:00:00+02:00",
@@ -243,9 +246,11 @@ class DialogueAndStrategicPhase3Tests(TestCase):
                 "contact_type": "phone",
             }],
         )[0]
-        self.assertEqual(planned["primary_trigger_type"], "a_prospect_due")
+        self.assertEqual(planned["primary_trigger_type"], "")
         self.assertEqual(planned["customer_guidance"]["status_key"], "planned")
         self.assertFalse(planned["recommendation_eligible"])
+        self.assertEqual(planned["contact_priority_raw"], 0)
+        self.assertGreater(planned["work_priority_raw"], 0)
         self.assertEqual(
             planned["recommendation_suppression_reason"],
             "future_planned_activity",
@@ -258,14 +263,14 @@ class DialogueAndStrategicPhase3Tests(TestCase):
         followup = priorities(
             [customer_row], contacts=[followup_contact], today=today
         )[0]
-        self.assertEqual(followup["primary_trigger_type"], "a_prospect_due")
-        self.assertEqual(followup["customer_guidance"]["status_key"], "planned")
+        self.assertEqual(followup["primary_trigger_type"], "")
+        self.assertEqual(followup["customer_guidance"]["status_key"], "wait")
         self.assertFalse(followup["recommendation_eligible"])
         self.assertEqual(
-            followup["recommendation_suppression_reason"], "explicit_follow_up"
+            followup["recommendation_suppression_reason"], "internal_followup_wait"
         )
 
-    def test_priority_70_qualifies_without_segment_a_and_name_does_not(self):
+    def test_routine_eligibility_has_no_score_floor_and_name_does_not_set_segment(self):
         today = date(2026, 7, 20)
         high_customers = [
             customer("High B prospect", "high-b", "B", row=2),
@@ -275,10 +280,10 @@ class DialogueAndStrategicPhase3Tests(TestCase):
             sku_order("B1", "B seed", "2026-07-01", 100, "b-seed", "B")
         ]
         high = selected(
-            priorities(high_customers, high_orders, today=today, scoring_version="v2.1"), "high-b"
+            priorities(high_customers, high_orders, today=today, scoring_version="v3.5"), "high-b"
         )
         self.assertGreaterEqual(high["priority_score"], 70)
-        self.assertEqual(high["primary_trigger_type"], "strategic_contact_due")
+        self.assertEqual(high["primary_trigger_type"], "value_based_contact_due")
 
         low_customers = [
             customer("ICA Maxi only by name", "ica-name", "", row=2),
@@ -292,9 +297,11 @@ class DialogueAndStrategicPhase3Tests(TestCase):
         named = selected(
             priorities(low_customers, low_orders, today=today), "ica-name"
         )
-        self.assertLess(named["priority_score"], 70)
+        self.assertEqual(named["priority_score"], named["work_priority_score"])
         self.assertEqual(named["strategic_index"], 15)
-        self.assertEqual(named["primary_trigger_type"], "")
+        self.assertEqual(named["primary_trigger_type"], "value_based_contact_due")
+        self.assertGreater(named["contact_priority_raw"], 0)
+        self.assertLess(named["contact_priority_raw"], high["contact_priority_raw"])
 
     def test_trigger_precedence_and_covered_keys(self):
         today = date(2026, 7, 20)
@@ -308,11 +315,12 @@ class DialogueAndStrategicPhase3Tests(TestCase):
             contacts=[contact("Repeat", "2026-07-17 09:00", "Positiv", "warm")],
             today=today,
         )[0]
-        self.assertEqual(established["primary_trigger_type"], "established_reorder_due")
-        self.assertEqual(
-            established["covered_trigger_keys"],
-            ["established_reorder_due", "positive_dialogue_followup"],
-        )
+        # A recent dialogue is still inside both the buyer's ten-day warm
+        # follow-up window and the seven-day minimum for material reorder.
+        self.assertEqual(established["primary_trigger_type"], "")
+        self.assertEqual(established["covered_trigger_keys"], [])
+        self.assertEqual(established["primary_reason_code"], "positive_buyer_followup_wait")
+        self.assertFalse(established["can_start_unscheduled_contact"])
 
         reactivation = priorities(
             [customer("Warm strategic", "warm-strategic", "A")],
@@ -323,8 +331,8 @@ class DialogueAndStrategicPhase3Tests(TestCase):
         )[0]
         self.assertEqual(
             reactivation["covered_trigger_keys"],
-            ["a_prospect_due"],
+            ["value_based_contact_due"],
         )
         self.assertEqual(
-            reactivation["primary_trigger_type"], "a_prospect_due"
+            reactivation["primary_trigger_type"], "value_based_contact_due"
         )

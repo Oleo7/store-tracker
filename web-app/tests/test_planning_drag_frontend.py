@@ -42,7 +42,7 @@ const planningOwnerQuery=value=>value;
 const esc=value=>String(value), escAttr=value=>String(value);
 const showToast=message=>toasts.push(message);
 const loadInsights=async options=>{insightCalls.push(options);};
-const loadPlanningRecommendation=async()=>{recommendationLoads++;};
+const loadPlanningAttention=async()=>{recommendationLoads++;};
 const refreshWorkflowViews=async()=>{fullRefreshes++;throw new Error('Unexpected full workflow refresh');};
 const loadPlanningWeek=async()=>{fullWeekLoads++;throw new Error('Unexpected full week reload');};
 const renderPlanningWeekStrip=()=>{}, renderPlanningOwnerSelect=()=>{}, renderPlanning=()=>{}, renderPlanningLoadError=()=>{};
@@ -64,7 +64,7 @@ ${['planningDateFromKey','planningDateKey','planningAddDays','planningStartOfWee
    'planningActivityId','planningTruthy','normalizePlanningActivity','planningEffectiveStatus',
    'planningSelectedOwner','getPlanningActivity','planningActivitiesForDate','planningUnplannedForDate',
    'planningAgendaItemsForDate','planningStatusSummary'].map(source).join('\n')}
-${html.slice(html.indexOf('  function planningActivityMinutes('),html.indexOf('  function planningOwnerIdentityKeys('))}
+${html.slice(html.indexOf('  function planningActivityMinutes('),html.indexOf('  function renderPlanningCandidates('))}
 const realPlanningRenderDragUpdate=planningRenderDragUpdate;
 renderPlanningAgenda=()=>{agendaRenders++;throw new Error('Unexpected agenda replacement');};
 planningRenderDragUpdate=()=>{domUpdates.push(planningData);};
@@ -422,7 +422,7 @@ calendar.append(remote);calendar.append(visits);agenda.append(calendar);
 Object.defineProperty(agenda,'innerHTML',{set(){throw new Error('Agenda replaced');}});
 elements.set('planning-agenda',agenda);
 elements.set('planning-day-summary',new Node('summary'));
-elements.set('planning-recommendation',new Node('recommendation'));
+elements.set('planning-attention-card',new Node('attention'));
 const early=activity('early','04:00'), phone=activity('phone','09:00',{contact_type:'phone'});
 planningData=data([early,phone]);
 const initial=planningCalendarLayout(planningData.activities,240);
@@ -440,9 +440,9 @@ assert.equal(calendar.style.height,'1260px');
 assert.ok(shell.style.cssText.includes('top:'+((690-240)*PLANNING_CALENDAR_PX_PER_MINUTE)+'px'));
 assert.ok(card.getAttribute('aria-label').startsWith('11:30'));
 assert.ok(shell.classList.contains('is-saving'));assert.ok(shell.querySelector('[data-planning-drag-handle]'));
-assert.equal(elements.get('planning-recommendation').style.height,'70px');
 assert.equal(elements.get('planning-day-summary').style.height,'42px');
-assert.equal(elements.get('planning-recommendation').style.overflowY,'auto');
+assert.equal(elements.get('planning-day-summary').style.overflowY,'auto');
+assert.equal(elements.get('planning-attention-card').style.minHeight,'42px','attention loading cannot shrink the mobile document during drag');
 planningDragSavingIds.delete('early'); planningRenderDragUpdate();
 assert.equal(visits.children[0],shell);assert.equal(shell.querySelector('.planning-activity-card'),card);
 assert.equal(shell.classList.contains('is-saving'),false);
