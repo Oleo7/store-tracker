@@ -7246,23 +7246,10 @@ def get_authoritative_priority_snapshot(
             users = get_user_rows(spreadsheet)
         except (WorksheetNotFound, AttributeError):
             pass
-        if customer_ids is not None:
-            from priority import _canonicalize_rows
-            selected_ids = set(customer_ids)
-            def scoped(rows, name_field, number_field):
-                canonical = _canonicalize_rows(rows, customers, name_field=name_field, number_field=number_field)
-                selected_names = {normalize_key(c.get("customer")) for c in customers if c.get("customer_id") in selected_ids}
-                if any(r.get("_identity_unresolved") and normalize_key(r.get(name_field)) in selected_names for r in canonical):
-                    raise ValueError("En kundidentitet i ruttens säkerhetsunderlag är osäker")
-                return [r for r in canonical if str(r.get("customer_id") or "") in selected_ids]
-            order_rows = scoped(order_rows, "Customer", "Customer number")
-            contact_rows = scoped(contact_rows, "customer", "customer_number")
-            planned_activity_rows = scoped(planned_activity_rows, "customer", "customer_number")
-            message_rows = scoped(message_rows, "customer", "customer_number")
-            message_ids = {str(r.get("email_id") or "") for r in message_rows}
-            recipient_rows = [r for r in recipient_rows if str(r.get("email_id") or "") in message_ids]
-            customers = [c for c in customers if str(c.get("customer_id") or "") in selected_ids]
-            state_events = [e for e in state_events if str(e.get("customer_id") or "") in selected_ids]
+        # Route commits must use the same complete V3.5 benchmark and order
+        # universe as the customer list. Restricting source rows before scoring
+        # changes portfolio priors and can authorize different route contacts.
+        # Filter the *result* only, preserving exact full-snapshot semantics.
         with performance_step("priority.source_version"):
             source_inputs = [
                 customers, order_rows, contact_rows, message_rows, recipient_rows,
@@ -7315,6 +7302,10 @@ def get_authoritative_priority_snapshot(
             prepared_order_features=order_features,
             prepared_features=prepared_features,
         )
+        if customer_ids is not None:
+            scoped_ids = {str(value).strip() for value in customer_ids}
+            priorities = [row for row in priorities
+                          if str(row.get("customer_id") or "").strip() in scoped_ids]
         record_performance_step("priority.scoring", scoring_started, len(priorities))
         payload = {
             "priorities": priorities,
