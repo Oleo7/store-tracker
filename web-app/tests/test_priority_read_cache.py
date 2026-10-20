@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from test_planning import default_spreadsheet, NOW
 import app as a
-from priority_read_cache import freeze, next_time_transition
+from priority_read_cache import freeze, next_time_transition, compact_records
 
 
 class PriorityReadCacheTests(TestCase):
@@ -40,6 +40,39 @@ class PriorityReadCacheTests(TestCase):
                 results = list(pool.map(lambda _: self.snapshot(as_of=NOW, live=True, read_only=True), range(4)))
             self.assertEqual(build.call_count, 1)
             self.assertEqual(results[0], results[-1])
+
+    def test_calendar_without_planned_contacts_does_not_score_portfolio(self):
+        with patch.object(a, 'build_current_priority_snapshot', wraps=a.build_current_priority_snapshot) as scoring, patch.object(
+                a, 'build_customer_state', wraps=a.build_customer_state) as state:
+            self.snapshot(as_of=NOW, live=True, read_only=True, state_only=True)
+            self.assertEqual(scoring.call_count, 0)
+            self.snapshot(as_of=NOW+timedelta(microseconds=5), live=True, read_only=True)
+            self.assertEqual(scoring.call_count, 1)
+            self.assertEqual(state.call_count, 1)
+
+    def test_explicit_invalidation_during_build_prevents_publication(self):
+        original = a.build_current_priority_snapshot
+        def invalidating_build(**kwargs):
+            result = original(**kwargs)
+            a.invalidate_priority_snapshot()
+            return result
+        with patch.object(a, 'build_current_priority_snapshot', side_effect=invalidating_build):
+            self.snapshot()
+        self.assertEqual(a._priority_snapshot_entries, {})
+
+    def test_compact_response_is_lossless_including_missing_and_null_fields(self):
+        records = {'a': {'score': 0, 'flag': False, 'list_guidance': {'x': ['a']}, 'customer_guidance': {'x': ['a']}},
+                   'b': {'score': None, 'flag': False, 'list_guidance': {'x': ['b']}, 'customer_guidance': {'x': ['b']}},
+                   'c': {'score': 0, 'flag': True, 'other': 'unique'}}
+        wire = compact_records(records)
+        restored = {}
+        for cid, row in wire['__by_customer_id'].items():
+            row = {**wire['__record_defaults'], **row}
+            if row.pop('__guidance_alias', False):
+                row['customer_guidance'] = dict(row['list_guidance'])
+            restored[cid] = row
+        self.assertEqual(restored, records)
+        self.assertEqual(records['a']['score'], 0)
 
     def test_nested_raw_and_decision_data_cannot_leak_mutation(self):
         first = self.snapshot(read_only=True)

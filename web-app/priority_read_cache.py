@@ -4,6 +4,7 @@ Only audited read views opt in to sharing. Other callers receive a normal,
 independent mutable deep copy. Nested containers cannot be changed by a view.
 """
 import copy
+from collections import Counter
 from datetime import datetime, timedelta
 
 
@@ -32,6 +33,8 @@ class FrozenList(list):
 
 
 def freeze(value, memo=None):
+    if isinstance(value, (FrozenDict, FrozenList)):
+        return value
     memo = {} if memo is None else memo
     if id(value) in memo:
         return memo[id(value)]
@@ -67,17 +70,51 @@ def next_time_transition(payload, current, parse_instant):
             if id(value) in seen:
                 return
             seen.add(id(value))
-            children = (v for k, v in value.items() if k not in {'as_of', 'snapshot_created_at'}) if isinstance(value, dict) else value
+            children = (v for k, v in value.items() if k not in {'as_of', '_calculated_as_of', 'snapshot_created_at'}) if isinstance(value, dict) else value
             for child in children:
                 visit(child)
         elif isinstance(value, (str, datetime)):
-            if isinstance(value, str) and (len(value) < 10 or not value[:4].isdigit()):
+            if isinstance(value, str) and (len(value) < 8 or not value[:2].isdigit()):
                 return
             if value not in parsed:
-                parsed[value] = parse_instant(value)
+                instant = parse_instant(value)
+                if instant is None:
+                    from priority import parse_datetime
+                    instant = parse_datetime(value)
+                    if instant and instant.tzinfo is None:
+                        instant = instant.replace(tzinfo=current.tzinfo)
+                parsed[value] = instant
             instant = parsed[value]
             if instant and current <= instant < boundary:
                 # At equality strict '< now' transitions require the next tick.
                 boundary = instant if instant > current else instant + timedelta(microseconds=1)
     visit(payload)
     return boundary
+
+
+def compact_records(records):
+    """Losslessly omit repeated scalar defaults and duplicate guidance.
+
+    The browser restores exactly the same record fields before handing them to
+    the UI. Nothing is truncated, and older clients retain their existing API.
+    """
+    rows = {cid: dict(row) for cid, row in records.items()}
+    for row in rows.values():
+        if 'list_guidance' in row and row.get('customer_guidance') == row['list_guidance']:
+            row.pop('customer_guidance', None)
+            row['__guidance_alias'] = True
+    defaults = {}
+    common = set.intersection(*(set(row) for row in rows.values())) if rows else set()
+    for field in sorted(common):
+        counts = Counter((type(row[field]), row[field]) for row in rows.values()
+                         if row[field] is None or type(row[field]) in (str, int, float, bool))
+        if not counts:
+            continue
+        (value_type, value), count = counts.most_common(1)[0]
+        if count < len(rows) / 2:
+            continue
+        defaults[field] = value
+        for row in rows.values():
+            if type(row[field]) is value_type and row[field] == value:
+                del row[field]
+    return {'__by_customer_id': rows, '__record_defaults': defaults}
