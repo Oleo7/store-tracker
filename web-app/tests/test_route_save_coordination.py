@@ -122,7 +122,24 @@ class CoordinatedRouteSaveTests(PlanningApiTestCase):
         self.assertEqual(response.status_code, 409, response.get_json())
         self.assertEqual(len(self.planning_rows()), 1)
 
-    def test_selected_customer_scope_avoids_whole_portfolio_rescore(self):
+    def test_route_scoped_scores_match_full_portfolio_v35(self):
+        # The route can use only one customer, but its scoring inputs must
+        # include all stores (segment priors and portfolio benchmarks).
+        customers = self.spreadsheet.worksheet("customers_enriched").dict_rows()
+        selected_id = customers[0]["customer_id"]
+        with patch.object(a, "stockholm_now", return_value=fixture.NOW):
+            full = a.get_authoritative_priority_snapshot(
+                self.spreadsheet, today=fixture.NOW.date(), as_of=fixture.NOW)
+            selected = a.get_authoritative_priority_snapshot(
+                self.spreadsheet, today=fixture.NOW.date(),
+                as_of=fixture.NOW, customer_ids={selected_id})
+        expected = [row for row in full["priorities"]
+                    if row["customer_id"] == selected_id]
+        self.assertEqual(len(expected), 1)
+        self.assertEqual(selected["priorities"], expected)
+        self.assertEqual(len(selected["customers"]), len(customers))
+
+    def test_route_save_uses_full_portfolio_v35_inputs(self):
         token = self.preview()
         real = a.build_current_priority_snapshot
         sizes = []
@@ -132,7 +149,27 @@ class CoordinatedRouteSaveTests(PlanningApiTestCase):
         with patch.object(a, 'build_current_priority_snapshot', side_effect=measured):
             response = self.save(token)
         self.assertEqual(response.status_code, 200, response.get_json())
-        self.assertEqual(sizes, [1])
+        self.assertTrue(sizes)
+        self.assertTrue(all(count == len(a.get_customer_rows(self.spreadsheet))
+                            for count in sizes))
+
+    def test_recipient_change_for_unrelated_customer_does_not_expire_route(self):
+        rows = [{"customer_id": "11111111-1111-4111-8111-111111111111"}]
+        messages = fixture.FakeWorksheet(
+            "email_messages", ["email_id", "customer_id", "customer"],
+            [{"email_id": "selected-mail", "customer_id": rows[0]["customer_id"]},
+             {"email_id": "other-mail", "customer_id": "33333333-3333-4333-8333-333333333333"}])
+        recipients = fixture.FakeWorksheet(
+            "email_recipients", ["email_id", "status"],
+            [{"email_id": "selected-mail", "status": "sent"},
+             {"email_id": "other-mail", "status": "sent"}])
+        self.spreadsheet.sheets["email_messages"] = messages
+        self.spreadsheet.sheets["email_recipients"] = recipients
+        before = a.route_decision_source_version(self.spreadsheet, rows)
+        recipients.update_cell(3, 2, "opened")
+        self.assertEqual(a.route_decision_source_version(self.spreadsheet, rows), before)
+        recipients.update_cell(2, 2, "bounced")
+        self.assertNotEqual(a.route_decision_source_version(self.spreadsheet, rows), before)
 
     def test_two_concurrent_saves_create_one_route(self):
         token = self.preview()
@@ -215,10 +252,11 @@ class CoordinatedRouteSaveTests(PlanningApiTestCase):
                     stock.SyncWindow('incremental',{},None), spreadsheet=book)
                 self.assertTrue(entered.wait(3))
                 save = pool.submit(save_route)
-                self.assertFalse(save.done())
+                # External API waits do not own the CRM write lease.
+                self.assertEqual(save.result(timeout=5), 200)
+                self.assertFalse(sync.done())
                 release.set()
                 self.assertFalse(sync.result(timeout=5).dry_run)
-                self.assertEqual(save.result(timeout=5), 200)
         self.assertEqual(len(self.planning_rows()), 1)
 
     def test_real_adapter_batches_fresh_decision_sources(self):
