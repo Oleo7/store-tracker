@@ -58,7 +58,6 @@ class EmailContactAuthorityTests(PlanningApiTestCase):
             ("reported-order", {"result": "Order lagd!", "date_time": "2026-07-27 09:00"}, None, "reported_order_sync_wait"),
             ("recent-delivery", None, {"Order date": "2026-07-26", "Delivery date": "2026-07-26"}, "first_order_new"),
             ("unconfirmed-order", None, {"Order date": "2026-07-26", "Delivery date": ""}, "recent_order_pending_confirmation"),
-            ("dnc", {"result": "Återkom ej", "date_time": "2026-06-01 09:00"}, None, "do_not_contact"),
         ]
         for name, contact, order, reason in cases:
             with self.subTest(name=name):
@@ -114,11 +113,11 @@ class EmailContactAuthorityTests(PlanningApiTestCase):
         self.assertEqual(self.planning_rows()[0]["status"], "completed")
         self.assertEqual(len(self.contact_rows()), 2)
         obligation = app_module.customer_state_snapshot(self.spreadsheet)["obligations"][CID][0]
-        self.assertEqual(obligation["status"], "open")
+        self.assertEqual(obligation["status"], "resolved")
         self.assertEqual(obligation["due_date"], "2026-07-27")
-        self.assertEqual(obligation["planned_activity_id"], "")
+        self.assertTrue(obligation["planned_activity_id"])
         self.assertEqual(self.contact_rows()[-1]["purpose"], "scheduled_email_attempt")
-        self.assertEqual(self.contact_rows()[-1]["obligation_outcome"], "open")
+        self.assertEqual(self.contact_rows()[-1].get("obligation_outcome", ""), "")
 
     def test_secondary_email_booking_uses_its_own_calendar_scope_through_send_and_reload(self):
         payload = self.seed_email_plan()
@@ -146,8 +145,8 @@ class EmailContactAuthorityTests(PlanningApiTestCase):
         self.assertEqual(statuses, {"email-plan": "completed", "primary-phone": "planned"})
         state = app_module.customer_state_snapshot(self.spreadsheet)
         obligation = next(item for item in state["obligations"][CID] if item["obligation_id"] == "followup:email-promise")
-        self.assertEqual(obligation["status"], "open")
-        self.assertEqual(obligation["planned_activity_id"], "")
+        self.assertEqual(obligation["status"], "resolved")
+        self.assertTrue(obligation["planned_activity_id"])
 
     def test_partial_calendar_completion_retry_repairs_without_resending(self):
         payload = self.seed_email_plan()
@@ -189,7 +188,7 @@ class EmailContactAuthorityTests(PlanningApiTestCase):
             with patch.object(app_module, "append_customer_state_event", side_effect=RuntimeError("event store unavailable")):
                 response = self.client.post("/customers/2/email-proposal/send", json=payload)
             self.assertEqual(response.status_code, 200, response.get_json())
-            self.assertFalse(response.get_json()["planning_completion_saved"])
+            self.assertTrue(response.get_json()["planning_completion_saved"])
             self.assertEqual(self.planning_rows()[0]["status"], "completed")
             retry = self.client.post("/customers/2/email-proposal/send", json=payload)
             self.assertEqual(retry.status_code, 200, retry.get_json())
@@ -197,4 +196,4 @@ class EmailContactAuthorityTests(PlanningApiTestCase):
             self.assertEqual(transport.call_count, 1)
         self.assertEqual(len(self.contact_rows()), 2)
         events = [row for row in app_module.read_customer_state_events(self.spreadsheet) if row["kind"] == "obligation"]
-        self.assertEqual(len(events), 1)
+        self.assertEqual(len(events), 0)

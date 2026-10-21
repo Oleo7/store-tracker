@@ -1862,7 +1862,6 @@
     .planning-attention-type { font-size: .68rem; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; color: #9b4743; }
     .planning-attention-notice { margin-top: 7px; font-size: .75rem; color: var(--pb-muted); line-height: 1.5; }
     .customer-decision-detail { margin-top: 14px; }
-    .permission-form-fields[hidden], .obligation-outcome-field[hidden] { display: none; }
     @media (max-width: 620px) {
       .planning-attention-actions .planning-compact-btn { flex: 1 1 calc(50% - 6px); }
       .customer-workflow-actions { align-items: stretch; }
@@ -4380,28 +4379,7 @@
           <option>Negativ</option>
           <option>Ej anträffbar</option>
           <option>Order lagd!</option>
-          <option>Återkom ej</option>
-          <option>Kontakt tillåten</option>
         </select>
-      </div>
-      <div class="permission-form-fields" id="f-permission-fields" hidden>
-        <div class="form-field">
-          <label for="f-permission-source">Källa till kundens besked</label>
-          <input id="f-permission-source" type="text" maxlength="200" placeholder="Till exempel kundens besked i telefon idag" />
-        </div>
-        <div class="form-field">
-          <label for="f-permission-reason">Vad har kunden uttryckligen meddelat?</label>
-          <textarea id="f-permission-reason" maxlength="500" placeholder="Dokumentera förbudet eller den nya tillåtelsen."></textarea>
-        </div>
-      </div>
-      <div class="form-field obligation-outcome-field" id="f-obligation-field" hidden>
-        <label for="f-obligation-outcome">Den här uppföljningen</label>
-        <select id="f-obligation-outcome">
-          <option value="open">Åtagandet är kvar</option>
-          <option value="resolved">Uppföljningen är utförd</option>
-          <option value="cancelled">Åtagandet har uttryckligen avskrivits</option>
-        </select>
-        <p class="planning-field-help" id="f-obligation-help">Ett kontaktförsök avslutar inte automatiskt kundens uppföljning.</p>
       </div>
       <div class="form-field" id="f-onboarding-field" hidden>
         <label class="planning-followup-toggle" for="f-onboarding-completed">
@@ -4475,13 +4453,6 @@
             <label for="f-followup-note">Anteckning</label>
             <input type="text" id="f-followup-note" maxlength="300" placeholder="Vad ska följas upp?" />
           </div>
-        </div>
-        <div class="form-field">
-          <label class="planning-followup-toggle" for="f-followup-agreement">
-            <input type="checkbox" id="f-followup-agreement" />
-            Överenskommen uppföljning med kunden
-          </label>
-          <p class="planning-field-help">En kundöverenskommelse avslutas separat. En vanlig intern påminnelse kan ersättas av senare kundarbete.</p>
         </div>
         <div class="form-field" id="f-followup-appointment-field">
           <label class="planning-followup-toggle" for="f-followup-appointment">
@@ -4636,7 +4607,6 @@
   let detailReturnView = "list";
   let formReturnView = "detail";
   let activePlannedActivityId = "";
-  let activeContactObligation = null;
   let contactClientRequestId = "";
   let contactRetryPayload = null;
   let insights = {};
@@ -4681,7 +4651,6 @@
   let planningAttention = { items: [], total: 0, nextOffset: 0, owner: "", asOf: "", loaded: false, error: null, invalidCount: 0 };
   let planningAttentionLoading = false;
   let planningAttentionRequestSerial = 0;
-  const customerDecisionRequestIds = new Map();
   const planningAttentionRequestIds = new Map();
   let planningEditorActivity = null;
   let planningEditorCustomer = null;
@@ -5210,21 +5179,6 @@
     return "wait";
   }
 
-  function customerRequiresReview(customer) {
-    const insight = getCustomerInsight(customer);
-    const guidance = getCustomerListGuidance(insight);
-    return Boolean(guidance.requires_review || insight.requires_review || guidance.review_only
-      || guidance.review_obligation_ids?.length || insight.review_obligation_ids?.length
-      || (insight.open_obligations || []).some(item => item.status === "needs_review"));
-  }
-
-  document.getElementById("work-filter-row").addEventListener("click", event => {
-    const button = event.target.closest("[data-work-filter]");
-    if (!button || !["all", "act", "planned", "wait"].includes(button.dataset.workFilter)) return;
-    listWorkFilter = button.dataset.workFilter;
-    document.querySelectorAll("[data-work-filter]").forEach(item => item.setAttribute("aria-pressed", String(item.dataset.workFilter === listWorkFilter)));
-    renderList();
-  });
 
   function businessValueSort(a, b) {
     return compareDescendingMissingLast(
@@ -5416,36 +5370,22 @@
     const guidance = getCustomerListGuidance(c);
     const seed = getCustomerPlanningSeed(c);
     const activityId = guidance.planned_activity_id || seed.planned_activity_id || "";
-    if (customerHasContactBan(c) && !activityId) return "";
     const label = activityId ? "Visa / ändra planering"
       : guidance.status_key === "overdue_followup" || seed.obligation_id ? "Planera om"
-      : customerCanStartContact(c) ? "Planera kontakt" : "";
+      : "Planera kontakt";
     if (!label) return "";
     const date = planningDateKeyFromIso(seed.due_at || guidance.next_contact_at || seed.due_date);
     return `<button class="planning-card-plan-btn" type="button" data-plan-row="${c.row}" data-customer-id="${escAttr(c.customer_id || "")}" data-planned-activity-id="${escAttr(activityId)}" data-plan-date="${escAttr(date)}">${label}</button>`;
   }
 
-  function customerHasContactBan(customer) {
-    const insight = getCustomerInsight(customer);
-    const guidance = getCustomerListGuidance(insight);
-    return (insight.contact_permission?.status || insight.contact_permission_status) === "do_not_contact"
-      || guidance.reason_code === "do_not_contact"
-      || (Array.isArray(guidance.reason_codes) && guidance.reason_codes.includes("do_not_contact"));
-  }
-
   function customerCanStartContact(customer) {
-    if (customerHasContactBan(customer)) return false;
     const guidance = getCustomerListGuidance(customer);
     if (typeof guidance.can_start_unscheduled_contact === "boolean") return guidance.can_start_unscheduled_contact;
     return guidance.status_key !== "planned" && guidance.can_contact_now === true;
   }
 
   function customerCanExecutePlanned(customer, activity = {}) {
-    if (!customer || customerHasContactBan(customer)) return false;
-    if (typeof activity.can_execute_planned_contact === "boolean") return activity.can_execute_planned_contact;
-    const guidance = getCustomerListGuidance(customer);
-    if (typeof guidance.can_execute_planned_contact === "boolean") return guidance.can_execute_planned_contact;
-    return Boolean(guidance.status_key && planningActivityId(activity));
+    return Boolean(customer && planningActivityId(activity) && activity.status === "planned");
   }
 
   function getCustomerPlanningSeed(customer) {
@@ -5463,27 +5403,17 @@
     };
   }
 
-  function getCustomerWorkflowButtonHtml(customer) {
-    if (!currentUserCanPlan() || !customer?.customer_id || isCancelledCustomer(customer)) return "";
-    return `${customerRequiresReview(customer) ? `<button class="customer-workflow-menu-btn customer-review-link" type="button" data-customer-workflow="${escAttr(customer.customer_id)}">Separat kundärende att hantera</button>` : ""}<button class="customer-workflow-menu-btn" type="button" data-customer-workflow="${escAttr(customer.customer_id)}" aria-label="Hantera prioritering och kontaktinställningar för ${escAttr(customer.customer)}">Hantera</button>`;
-  }
 
   function bindCustomerDecisionControls(container) {
     container.querySelectorAll(".priority-why").forEach(details => details.addEventListener("click", event => event.stopPropagation()));
-    container.querySelectorAll("[data-customer-workflow]").forEach(button => button.addEventListener("click", event => {
-      event.stopPropagation();
-      const matches = customers.filter(c => String(c.customer_id) === button.dataset.customerWorkflow);
-      if (matches.length === 1) openCustomerWorkflow(matches[0]);
-    }));
+
   }
 
   function renderCustomerDecisionDetail(customer) {
     const target = document.getElementById("d-customer-decision");
     if (!target || !customer) return;
-    const banned = customerHasContactBan(customer);
     target.innerHTML = `${getPrioritySummaryHtml(customer)}${getNextActionHtml(customer)}${getPriorityWhyHtml(customer)}
-      ${banned ? '<div class="customer-permission-note">Kontakta inte. Tidigare bokningar och uppföljningar kan granskas eller avbokas. Ny tillåtelse registreras under Hantera.</div>' : ""}
-      <div class="customer-workflow-actions">${getCustomerWorkflowButtonHtml(customer)}</div>`;
+      <div class="customer-workflow-actions"></div>`;
     bindCustomerDecisionControls(target);
     const canStart = customerCanStartContact(customer);
     for (const id of ["d-call-btn", "d-mail-btn", "d-reminder-btn"]) {
@@ -5491,11 +5421,11 @@
       if (!button) continue;
       const hasContact = id === "d-call-btn" ? Boolean(customer.phone) : id === "d-mail-btn" ? Boolean(button.dataset.mailto) : true;
       button.disabled = !canStart || !hasContact;
-      button.title = banned ? "Kontakta inte" : !canStart ? "Öppna kundens planering eller avvakta enligt vägledningen" : "";
+      button.title = !canStart ? "Öppna kundens planering eller avvakta enligt vägledningen" : "";
     }
-    document.getElementById("update-contact-btn").disabled = banned;
+    document.getElementById("update-contact-btn").disabled = false;
     const hasPlan = Boolean(getCustomerListGuidance(customer).planned_activity_id || getCustomerPlanningSeed(customer).planned_activity_id);
-    document.getElementById("d-plan-btn").disabled = banned && !hasPlan;
+    document.getElementById("d-plan-btn").disabled = false;
     document.getElementById("d-plan-btn").textContent = hasPlan ? "Visa / ändra planering" : "Planera kontakt";
     for (const [id,value,prefix] of [["d-phone",customer.phone,"tel:"],["d-email",customer.email,"mailto:"],["d-order-email",customer.email_last_order,"mailto:"]]) {
       const link = document.getElementById(id);
@@ -5513,99 +5443,7 @@
     return loaded;
   }
 
-  function customerWorkflowCanDismiss(customer) {
-    const insight = getCustomerInsight(customer);
-    if (typeof insight.customer_workflow?.can_dismiss === "boolean") return insight.customer_workflow.can_dismiss;
-    const focus = getCustomerListGuidance(insight).focus_key;
-    if (focus === "a_prospect") return false;
-    // Older responses may lack the explicit workflow permission.
-    const segment = String(customer?.customer_segment || insight.customer_segment || "").trim().toUpperCase();
-    const deliveries = sortedModelValue(insight, "business_verified_delivery_count") ?? sortedModelValue(insight, "delivery_count");
-    return !(segment.startsWith("A") && (deliveries === null || deliveries === 0));
-  }
 
-  function openCustomerWorkflow(customer) {
-    const insight = getCustomerInsight(customer);
-    const workflow = insight.customer_workflow || {};
-    const banned = customerHasContactBan(customer);
-    const canDismiss = customerWorkflowCanDismiss(customer);
-    const paused = ["snoozed", "dismissed"].includes(workflow.status)
-      || ["snoozed", "dismissed"].includes(getCustomerListGuidance(insight).reason_code);
-    const obligations = Array.isArray(insight.open_obligations) ? insight.open_obligations : [];
-    openPlanningModal("Hantera kunden", customer.customer, `<div class="planning-dialog-form">
-      ${banned ? '<div class="customer-permission-note">Kontakta inte. Ett snooze- eller prioriteringsbeslut ändrar inte kontaktförbudet.</div>' : ""}
-      ${workflow.snooze_until ? `<div class="planning-field-help">Pausad till ${esc(String(workflow.snooze_until).slice(0, 10))}.</div>` : ""}
-      <div class="planning-attention-actions">
-        ${paused ? '<button class="planning-compact-btn primary" type="button" data-customer-decision="restore">Återuppta prioriteringen</button>' : `<button class="planning-compact-btn" type="button" data-customer-decision="snooze">Snooza 7 dagar</button>${canDismiss ? '<button class="planning-compact-btn" type="button" data-customer-decision="dismiss">Dölj detta prioriteringsförslag</button>' : ""}`}
-      </div>
-      ${!canDismiss ? '<p class="planning-field-help">A-prospekt följs upp igen efter en tidsbegränsad paus.</p>' : ""}
-      <p class="planning-field-help">Kunden och affärsvärdet finns kvar när ett prioriteringsförslag pausas eller döljs. Kundens uttryckliga uppföljningar hanteras separat.</p>
-      ${obligations.length ? `<div><strong>Kundens öppna åtaganden</strong>${obligations.map((item, index) => `<div class="planning-attention-item"><span>${esc(item.note || "Planerad kontakt eller uppföljning")} · ${esc(item.due_date || "datum saknas")}${item.snooze_until ? ` · pausat till ${esc(planningDateKeyFromIso(item.snooze_until))}` : ""}</span> <button class="planning-compact-btn" type="button" data-customer-obligation="${index}">Hantera åtagandet</button></div>`).join("")}</div>` : ""}
-      <button class="planning-compact-btn ${banned ? "" : "danger"}" id="customer-permission-open" type="button">${banned ? "Registrera ny tillåtelse till kontakt" : "Registrera Återkom ej"}</button>
-      <div class="planning-dialog-error" id="customer-workflow-error" role="alert"></div>
-    </div>`);
-    planningModalContent.querySelectorAll("[data-customer-decision]").forEach(button => button.addEventListener("click", () => mutateCustomerWorkflow(customer, button.dataset.customerDecision)));
-    planningModalContent.querySelectorAll("[data-customer-obligation]").forEach(button => button.addEventListener("click", () => openPlanningAttentionReview(obligations[Number(button.dataset.customerObligation)], customer)));
-    document.getElementById("customer-permission-open").addEventListener("click", () => openContactPermissionDialog(customer, banned ? "allowed" : "do_not_contact"));
-  }
-
-  async function mutateCustomerWorkflow(customer, action) {
-    if (!["snooze", "dismiss", "restore"].includes(action) || !customer?.customer_id) return;
-    if (action === "dismiss" && !customerWorkflowCanDismiss(customer)) { showToast("A-prospekt kan snoozas under en begränsad tid."); return; }
-    const insight = getCustomerInsight(customer), workflow = insight.customer_workflow || {};
-    const key = `${customer.customer_id}:${action}:${workflow.decision_context_hash || ""}:${workflow.revision ?? 0}`;
-    const requestId = customerDecisionRequestIds.get(key) || planningClientRequestId(`customer-${action}`);
-    customerDecisionRequestIds.set(key, requestId);
-    const buttons = [...planningModalContent.querySelectorAll("button")];
-    buttons.forEach(button => button.disabled = true);
-    try {
-      await planningFetchJson("/customer-workflow/action", {method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({
-        customer_id: customer.customer_id, action, client_request_id: requestId,
-        decision_context_hash: workflow.decision_context_hash || getCustomerListGuidance(insight).context_key || undefined,
-        expected_revision: Number(workflow.revision || 0),
-        snooze_until: action === "snooze" ? planningStockholmIso(planningAddDays(planningTodayKey(), 7), "08:00") : undefined,
-      })});
-      customerDecisionRequestIds.delete(key);
-      closePlanningModal();
-      await refreshCustomerDecisions();
-      showToast(action === "restore" ? "Prioriteringen återupptogs" : action === "snooze" ? "Prioriteringen är snoozad i 7 dagar" : "Förslaget doldes. Kunden finns kvar.");
-    } catch (error) {
-      buttons.forEach(button => button.disabled = false);
-      const target = document.getElementById("customer-workflow-error");
-      if (target) { target.textContent = error.message || "Beslutet kunde inte sparas. Försök igen."; target.classList.add("visible"); }
-      if (error.status === 409) {customerDecisionRequestIds.delete(key); await refreshCustomerDecisions();}
-    }
-  }
-
-  function openContactPermissionDialog(customer, status) {
-    const permission = getCustomerInsight(customer).contact_permission || {};
-    let requestId = planningClientRequestId("contact-permission");
-    openPlanningModal(status === "allowed" ? "Registrera ny tillåtelse" : "Registrera Återkom ej", customer.customer,
-      `<form class="planning-dialog-form" id="customer-permission-form">
-        <p class="planning-field-help">${status === "allowed" ? "Kunden behöver uttryckligen ha tillåtit ny kontakt. En order eller vanlig positiv dialog räcker inte." : "Detta stoppar nya kontaktförslag. Befintliga aktiviteter kan fortfarande granskas och avbokas."}</p>
-        <div class="planning-field"><label for="customer-permission-source">Källa till kundens besked</label><input id="customer-permission-source" maxlength="200" required placeholder="Till exempel kundens mejl idag" /></div>
-        <div class="planning-field"><label for="customer-permission-reason">Dokumentera beskedet</label><textarea id="customer-permission-reason" maxlength="500" required></textarea></div>
-        <div class="planning-dialog-error" id="customer-permission-error" role="alert"></div>
-        <div class="planning-dialog-actions"><button class="action-btn secondary" id="customer-permission-cancel" type="button">Avbryt</button><button class="action-btn" id="customer-permission-save" type="submit">${status === "allowed" ? "Registrera tillåtelse" : "Spara kontaktförbud"}</button></div>
-      </form>`);
-    document.getElementById("customer-permission-cancel").addEventListener("click", closePlanningModal);
-    document.getElementById("customer-permission-form").addEventListener("input", () => {requestId = planningClientRequestId("contact-permission");});
-    document.getElementById("customer-permission-form").addEventListener("submit", async event => {
-      event.preventDefault();
-      const source = document.getElementById("customer-permission-source").value.trim();
-      const reason = document.getElementById("customer-permission-reason").value.trim();
-      if (!source || !reason) return;
-      const button = document.getElementById("customer-permission-save");button.disabled = true;
-      try {
-        await planningFetchJson("/customer-contact-permission", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({customer_id:customer.customer_id,status,source,reason,expected_revision:Number(permission.revision || 0),client_request_id:requestId})});
-        closePlanningModal();await refreshCustomerDecisions();showToast(status === "allowed" ? "Ny tillåtelse registrerades" : "Kontaktförbud registrerades");
-      } catch(error) {
-        const target = document.getElementById("customer-permission-error");
-        if(target){target.textContent=error.message || "Beskedet kunde inte sparas";target.classList.add("visible");}
-        if(error.status===409) await refreshCustomerDecisions();
-      } finally {if(document.body.contains(button))button.disabled=false;}
-    });
-  }
 
   function getListSignature() {
     return [
@@ -6457,7 +6295,7 @@
           ${getNextActionHtml(c)}
           ${getPriorityWhyHtml(c)}
           ${getCardDatesHtml(c)}
-          <div class="customer-workflow-actions">${getCardPlanningButtonHtml(c)}${getCustomerWorkflowButtonHtml(c)}</div>
+          <div class="customer-workflow-actions">${getCardPlanningButtonHtml(c)}</div>
         </div>`;
     }).join("") + (remainingCount > 0
       ? `<button class="load-more-btn" id="load-more-btn">Visa fler (${remainingCount} kvar)</button>`
@@ -6995,7 +6833,6 @@
   function reminderErrorMessage(error, serverMessage = "") {
     if (error === "email_contact_blocked") return `${serverMessage || "Kundens aktuella åtgärd tillåter inte detta mejl."} Stäng utkastet och ladda om kundens aktuella åtgärd.`;
     const messages = {
-      do_not_contact: "Kontakta inte. Kunden har bett om att slippa kontakt. Stäng utkastet och kontrollera kundens kontaktbesked under Hantera.",
       customer_cancelled: "Kunden är avslutad och kan inte få mejlförslag.",
       no_valid_recipients: "Välj minst en giltig mottagare.",
       recipient_blocked: "En vald adress är blockerad eller avregistrerad.",
@@ -7087,7 +6924,8 @@
   function getPlannedEmailContext(customer, activity) {
     if (!customer?.customer_id || activity?.contact_type !== "email" || activity.status !== "planned"
         || (activity.customer_id && activity.customer_id !== customer.customer_id)
-        || !customerCanExecutePlanned(customer, activity)) return null;
+        || !(typeof activity.can_execute_planned_contact === "boolean"
+          ? activity.can_execute_planned_contact : getCustomerListGuidance(customer).can_execute_planned_contact)) return null;
     const planId = planningActivityId(activity);
     const linked = (getCustomerInsight(customer).open_obligations || []).find(item => item.planned_activity_id === planId);
     const obligationId = activity.obligation_id || linked?.obligation_id;
@@ -7733,15 +7571,7 @@
 
   function openContactFormForCustomer(customer, { activity = null, obligation = null, returnView = "detail" } = {}) {
     if (!customer) return;
-    if ((activity || obligation) && customerHasContactBan(customer)) { showToast("Kontakta inte. Registrera ny tillåtelse under Hantera om kunden uttryckligen har ändrat sitt besked."); return; }
-    if (activity && (!customerCanExecutePlanned(customer, activity) || obligation?.can_execute_planned_contact === false)) { showToast("Den planerade kontakten är spärrad. Granska kundens vägledning."); return; }
-    if (obligation?.review_only || (!activity && obligation?.can_contact_now === false)) { showToast("Uppföljningen behöver granskas innan ny kontakt. Åtagandet kan fortfarande hanteras."); return; }
     currentCustomer = customer;
-    activeContactObligation = obligation || (activity?.obligation_id ? {
-      obligation_id: activity.obligation_id, source_contact_id: activity.source_contact_id,
-      revision: activity.obligation_revision ?? (getCustomerInsight(customer).open_obligations || []).find(item => item.obligation_id === activity.obligation_id)?.revision,
-      note: activity.note, due_date: planningDateKeyFromIso(activity.scheduled_at),
-    } : null);
     formReturnView = returnView;
     activePlannedActivityId = activity ? planningActivityId(activity) : "";
     contactClientRequestId = planningClientRequestId("contact-log");
@@ -7758,16 +7588,9 @@
       PLANNING_CONTACT_TYPES[activity?.contact_type || obligation?.contact_type]?.channel || "";
     document.getElementById("f-result").value = "";
     document.getElementById("f-comment").value = "";
-    document.getElementById("f-permission-source").value = "";
-    document.getElementById("f-permission-reason").value = "";
-    document.getElementById("f-obligation-outcome").value = "open";
     document.getElementById("f-onboarding-completed").checked = false;
     document.getElementById("f-onboarding-field").hidden = !["first_order_onboarding", "check_placement"].includes(
       getCustomerListGuidance(customer).underlying_action_type || getCustomerListGuidance(customer).action_type);
-    document.getElementById("f-obligation-field").hidden = !activeContactObligation;
-    document.getElementById("f-obligation-help").textContent = activeContactObligation
-      ? `Åtagande från ${activeContactObligation.due_date || "tidigare planering"}${activeContactObligation.note ? `: ${activeContactObligation.note}` : "."} Välj uttryckligen om uppgiften är utförd. Ett kontaktförsök avslutar inte löftet.`
-      : "";
     document.getElementById("f-nextFollowUp").min = planningTodayKey();
     document.getElementById("f-followup-enabled").checked = false;
     document.getElementById("f-followup-owner").value = "";
@@ -7777,7 +7600,6 @@
     contactTimeSuggestion?.reset();
     document.getElementById("f-followup-note").value = "";
     document.getElementById("f-followup-appointment").checked = false;
-    if (document.getElementById("f-followup-agreement")) document.getElementById("f-followup-agreement").checked = false;
     document.getElementById("f-followup-picking-help").checked = false;
     syncVisitCompetitorButtons({});
     setFreezerSectionInvalid(false);
@@ -7785,21 +7607,9 @@
     showContactSaveError("");
     updateContactChannelFields();
     updateFollowupFields();
-    updateContactResultFields();
     showView("form");
   }
 
-  function updateContactResultFields() {
-    const result = document.getElementById("f-result").value;
-    const permission = ["Återkom ej", "Kontakt tillåten"].includes(result);
-    document.getElementById("f-permission-fields").hidden = !permission;
-    for (const id of ["f-permission-source", "f-permission-reason"]) document.getElementById(id).required = permission;
-    const outcome = document.getElementById("f-obligation-outcome");
-    outcome.disabled = result === "Ej anträffbar";
-    if (result === "Ej anträffbar") outcome.value = "open";
-  }
-
-  document.getElementById("f-result").addEventListener("change", updateContactResultFields);
 
   document.getElementById("update-contact-btn").addEventListener("click", () => {
     openContactFormForCustomer(currentCustomer, { returnView: "detail" });
@@ -7850,24 +7660,12 @@
         contact_type: followupType,
         scheduled_at: followupScheduledAt,
         note: followupNote,
-        customer_agreement_confirmed: document.getElementById("f-followup-agreement").checked,
         appointment_confirmed: ["visit", "phone"].includes(followupType) && document.getElementById("f-followup-appointment").checked,
         picking_help: followupType === "visit" && document.getElementById("f-followup-picking-help").checked,
       } : { enabled: false },
       onboarding_completed: !document.getElementById("f-onboarding-field").hidden && document.getElementById("f-onboarding-completed").checked,
       purpose: !document.getElementById("f-onboarding-field").hidden && document.getElementById("f-onboarding-completed").checked ? "first_order_onboarding" : undefined,
       planned_activity_id: activePlannedActivityId || undefined,
-      obligation_id: activeContactObligation?.obligation_id || undefined,
-      expected_obligation_revision: activeContactObligation?.revision ?? activeContactObligation?.obligation_revision,
-      obligation_outcome: activeContactObligation
-        ? (document.getElementById("f-result").value === "Ej anträffbar" ? "open" : document.getElementById("f-obligation-outcome").value)
-        : undefined,
-      contact_permission: ["Återkom ej", "Kontakt tillåten"].includes(document.getElementById("f-result").value) ? {
-        status: document.getElementById("f-result").value === "Återkom ej" ? "do_not_contact" : "allowed",
-        source: document.getElementById("f-permission-source").value.trim(),
-        reason: document.getElementById("f-permission-reason").value.trim(),
-        expected_revision: Number(getCustomerInsight(currentCustomer).contact_permission?.revision || 0),
-      } : undefined,
       client_request_id: contactClientRequestId || document.getElementById("f-client-request-id").value,
       user_name: followupEnabled && userIsAdmin()
         ? document.getElementById("f-followup-owner").value
@@ -7877,15 +7675,6 @@
     const payload = contactRetryPayload || JSON.parse(JSON.stringify(draftPayload));
     const retryingPartialSave = Boolean(contactRetryPayload);
 
-    if (!retryingPartialSave && payload.obligation_id && payload.expected_obligation_revision == null) {
-      showContactSaveError("Åtagandets version saknas. Öppna det på nytt från planeringen innan kontakten sparas.");
-      return;
-    }
-
-    if (!retryingPartialSave && payload.contact_permission && (!payload.contact_permission.source || !payload.contact_permission.reason)) {
-      showToast("Ange källa och orsak för kontaktbeskedet.");
-      document.getElementById("f-permission-source").focus(); return;
-    }
     if (!retryingPartialSave && followupEnabled && followupScheduledAt && new Date(followupScheduledAt).getTime() < Math.floor(Date.now() / 60000) * 60000) {
       showToast("Välj en uppföljningstid idag eller framåt.");
       document.getElementById("f-nextFollowUp").focus(); return;
@@ -7941,7 +7730,6 @@
         contactClientRequestId = "";
         contactRetryPayload = null;
         activePlannedActivityId = "";
-        activeContactObligation = null;
         setContactFormRetryMode(false);
         contactLogLoaded = false;
         planningData = null;
@@ -8256,9 +8044,9 @@
   }
 
   function planningAttentionItemIsEligible(item, today = planningTodayKey()) {
-    if (!["missed_calendar_activity", "overdue_explicit_follow_up"].includes(item?.item_type)) return false;
+    if (!["missed_calendar_activity", "overdue_follow_up", "overdue_explicit_follow_up"].includes(item?.item_type)) return false;
     if (!String(item?.obligation_id || "").trim() || !String(item?.customer_id || "").trim()) return false;
-    if (["resolved", "cancelled", "superseded"].includes(item.status)) return false;
+    if (["resolved", "cancelled", "skipped", "superseded"].includes(item.status)) return false;
     const due = planningDateKeyFromIso(item.due_date || item.due_at);
     if (!due || due >= today) return false;
     if (item.item_type === "missed_calendar_activity" && !item.planned_activity_id) return false;
@@ -8349,16 +8137,6 @@
     if (currentCustomer && document.getElementById("view-detail").classList.contains("active")) renderCustomerDecisionDetail(currentCustomer);
   }
 
-  function planningAttentionBlockText(item) {
-    if (item.contact_block_reason === "do_not_contact" || item.contact_permission?.status === "do_not_contact") {
-      return `Kontakta inte. ${item.contact_permission?.reason || "Kontaktförbud registrerat."}`;
-    }
-    if (item.review_only) return "Granska uppföljningen och historiken innan en ny kontakt planeras.";
-    if (item.contact_block_reason === "unrelated_booking_scope_review") return "En annan kontakt är bokad. Granska vilket åtagande som återstår.";
-    if (!item.can_contact_now && !item.can_execute_planned_contact) return "Kontakt avvaktas. Åtagandet kan fortfarande granskas och hanteras.";
-    return "";
-  }
-
   function renderPlanningAttention() {
     const target = document.getElementById("planning-backlog");
     const count = document.getElementById("planning-attention-count");
@@ -8370,8 +8148,7 @@
     const body = items.map((item, index) => {
       const missed = item.item_type === "missed_calendar_activity";
       const customer = planningCustomerForItem(item);
-      const banned = item.contact_block_reason === "do_not_contact" || customerHasContactBan(customer);
-      const canLog = !banned && !item.review_only && (missed ? item.can_execute_planned_contact : item.can_contact_now);
+      const canLog = Boolean(customer);
       const type = PLANNING_CONTACT_TYPES[item.contact_type]?.label || "Kontakttyp behöver väljas";
       const date = planningFormatDate(planningDateKeyFromIso(item.due_date || item.due_at), { year: true });
       const time = item.due_at ? planningTimeFromIso(item.due_at) : "";
@@ -8381,12 +8158,10 @@
         <div class="planning-backlog-meta">${esc(date)}${time ? ` kl. ${esc(time)}` : ""} · ${esc(type)}</div>
         ${item.note ? `<div class="planning-attention-note">${esc(item.note)}</div>` : ""}
         ${Number(item.older_missed_count) > 0 ? `<div class="planning-backlog-meta">${esc(item.older_missed_note)}</div>` : ""}
-        ${planningAttentionBlockText(item) ? `<div class="customer-permission-note">${esc(planningAttentionBlockText(item))}</div>` : ""}
         <div class="planning-attention-actions">
           ${canLog ? `<button class="planning-compact-btn primary" type="button" data-attention-action="log" data-attention-index="${index}">Logga kontakt</button>` : ""}
-          ${!banned ? `<button class="planning-compact-btn" type="button" data-attention-action="reschedule" data-attention-index="${index}" ${customer ? "" : "disabled"}>Planera om</button>` : ""}
-          ${missed ? `<button class="planning-compact-btn" type="button" data-attention-action="skip" data-attention-index="${index}">Överhoppad</button>` : ""}
-          <button class="planning-compact-btn" type="button" data-attention-action="review" data-attention-index="${index}">Hantera</button>
+          <button class="planning-compact-btn" type="button" data-attention-action="reschedule" data-attention-index="${index}" ${customer ? "" : "disabled"}>Planera om</button>
+          <button class="planning-compact-btn" type="button" data-attention-action="skip" data-attention-index="${index}">Hoppa över</button>
         </div>
       </article>`;
     }).join("");
@@ -8420,17 +8195,27 @@
     try {
       if (action === "customer") {
         await openDetail(Number(customer.row), { returnView: "planning", returnState: { owner: planningSelectedUserName, selectedDate: planningSelectedDate, weekStart: planningWeekStart, scrollY: window.scrollY } });
-      } else if (action === "review") {
-        openPlanningAttentionReview(item, customer);
+
       } else if (action === "reschedule") {
-        if (customerHasContactBan(customer) || item.contact_block_reason === "do_not_contact") return;
         if (!await selectPlanningOwnerForCustomer(customer)) return;
-        openPlanningEditor({ customer, date: planningTodayKey(), seed: { ...item, expected_revision: item.revision, original_due_date: item.original_due_date || item.due_date } });
+        const activity = item.planned_activity_id ? await loadPlanningActivityForItem(item) : null;
+        openPlanningEditor({ customer, activity, date: planningTodayKey(), seed: { ...item, expected_revision: item.revision, original_due_date: item.original_due_date || item.due_date } });
       } else if (action === "skip") {
-        const activity = await loadPlanningActivityForItem(item);
-        await updatePlanningActivityStatus(activity, "skipped");
+        if (item.planned_activity_id) {
+          const activity = await loadPlanningActivityForItem(item);
+          await updatePlanningActivityStatus(activity, "skipped");
+        } else {
+          const requestKey = JSON.stringify([item.obligation_id, item.revision, "skip"]);
+          const requestId = planningAttentionRequestIds.get(requestKey) || planningClientRequestId("skip-followup");
+          planningAttentionRequestIds.set(requestKey, requestId);
+          await planningFetchJson("/customer-obligations/action", {method:"POST", headers:{"Content-Type":"application/json"},
+            body: JSON.stringify({customer_id:item.customer_id, obligation_id:item.obligation_id, action:"skip",
+              expected_revision:item.revision, client_request_id:requestId})});
+          planningAttentionRequestIds.delete(requestKey);
+          insightsRequestSerial += 1;
+          await refreshWorkflowViews({ planning: true });
+        }
       } else if (action === "log") {
-        if (customerHasContactBan(customer) || item.review_only || !(item.can_contact_now || item.can_execute_planned_contact)) return;
         const activity = item.planned_activity_id ? await loadPlanningActivityForItem(item) : null;
         openContactFormForCustomer(customer, { activity, obligation: item, returnView: "planning" });
       }
@@ -8442,24 +8227,6 @@
     }
   }
 
-  function openPlanningAttentionReview(item, customer) {
-    if (customerHasContactBan(customer)) item = { ...item, contact_block_reason: "do_not_contact", contact_permission: getCustomerInsight(customer).contact_permission };
-    const snoozed = item.snooze_until && new Date(item.snooze_until).getTime() > Date.now();
-    openPlanningModal("Hantera åtagande", customer.customer, `<div class="planning-dialog-form">
-      <p>${esc(planningAttentionBlockText(item) || "Bekräfta vad som återstår innan åtagandet avslutas.")}</p>
-      <p>Förfallodatum: <strong>${esc(item.original_due_date || item.due_date)}</strong>${item.source_contact_id ? " · länkat till en loggad kontakt" : " · kalenderaktivitet"}</p>
-      ${item.note ? `<div class="planning-detail-note">${esc(item.note)}</div>` : ""}
-      ${snoozed ? `<p>Pausat till ${esc(planningFormatDate(planningDateKeyFromIso(item.snooze_until), { year: true }))}.</p>` : ""}
-      <div class="planning-field"><label for="attention-reason">Vad har hanterats?</label><textarea id="attention-reason" maxlength="1000" placeholder="Ange varför åtagandet avslutas eller pausas"></textarea></div>
-      <div class="planning-dialog-error" id="attention-action-error" role="alert"></div>
-      <div class="planning-attention-actions">
-        <button class="planning-compact-btn primary" type="button" data-obligation-action="resolve">Uppgiften utförd</button>
-        <button class="planning-compact-btn" type="button" data-obligation-action="cancel">Avskriv åtagandet</button>
-        <button class="planning-compact-btn" type="button" data-obligation-action="${snoozed ? "restore" : "snooze"}">${snoozed ? "Återuppta åtagandet" : "Pausa åtagandet 7 dagar"}</button>
-      </div><p class="planning-field-help">Pausen gäller bara detta åtagande. Det återkommer efter pausen; dess ursprungliga förfallodatum bevaras.</p>
-    </div>`);
-    planningModalContent.querySelectorAll("[data-obligation-action]").forEach(button => button.addEventListener("click", () => mutatePlanningObligation(item, button.dataset.obligationAction)));
-  }
 
   function applyConfirmedObligationUpdate(obligation) {
     if (!obligation?.obligation_id || !obligation?.customer_id) return;
@@ -8481,43 +8248,6 @@
     insightsRevision += 1;
   }
 
-  async function mutatePlanningObligation(item, action) {
-    const reason = document.getElementById("attention-reason")?.value.trim() || "";
-    const errorBox = document.getElementById("attention-action-error");
-    if (!reason && ["resolve", "cancel", "snooze"].includes(action)) {
-      errorBox.textContent = "Ange en kort orsak så att beslutet går att följa.";
-      errorBox.classList.add("visible"); return;
-    }
-    const requestKey = JSON.stringify([item.obligation_id, item.revision, action, reason]);
-    const requestId = planningAttentionRequestIds.get(requestKey) || planningClientRequestId(`obligation-${action}`);
-    planningAttentionRequestIds.set(requestKey, requestId);
-    const controls = Array.from(planningModalContent.querySelectorAll("button, textarea"));
-    controls.forEach(control => control.disabled = true);
-    try {
-      const result = await planningFetchJson("/customer-obligations/action", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ customer_id: item.customer_id, obligation_id: item.obligation_id,
-          user_name: item.owner_user_name || undefined, action, reason,
-          expected_revision: Number(item.revision || 0), client_request_id: requestId,
-          ...(action === "snooze" ? { snooze_until: planningStockholmIso(planningAddDays(planningTodayKey(), 7), "08:00") } : {}) }),
-      });
-      applyConfirmedObligationUpdate(result.obligation);
-      planningAttentionRequestIds.delete(requestKey);
-      closePlanningModal();
-      await refreshWorkflowViews({ planning: true });
-      showToast(action === "snooze" ? "Åtagandet är pausat i 7 dagar" : action === "restore" ? "Åtagandet återupptogs" : "Åtagandet uppdaterades");
-    } catch (error) {
-      errorBox.textContent = error.message || "Åtagandet kunde inte sparas.";
-      errorBox.classList.add("visible");
-      if (error.status === 409) {
-        planningAttentionRequestIds.delete(requestKey);
-        await loadPlanningAttention();
-        errorBox.textContent += " Stäng dialogen och öppna det uppdaterade ärendet innan du försöker igen.";
-      }
-    } finally {
-      controls.forEach(control => control.disabled = false);
-    }
-  }
 
   function openPlanningView({ date = "" } = {}) {
     const targetDate = planningDateFromKey(date) ? date : (planningSelectedDate || planningTodayKey());
@@ -8567,7 +8297,6 @@
       openPlanningActivityDetail(activityId);
       return;
     }
-    if (customerHasContactBan(customer)) { showToast("Kontakta inte. Granska kundens kontaktbesked under Hantera."); return; }
     if (userIsAdmin() && planningSelectedUserName !== previousOwner) await loadPlanningWeek();
     const suggested = planningDateFromKey(suggestedDate) ? suggestedDate : planningTodayKey();
     const notBefore = planningDateKeyFromIso(guidance.contact_not_before);
@@ -9771,7 +9500,7 @@
           <label for="planning-editor-customer">Kund</label>
           ${suggestionLocked
             ? `<input id="planning-editor-customer-search" type="text" value="${escAttr(planningEditorCustomer?.customer || "")}" disabled aria-describedby="planning-editor-customer-locked" />
-               <div class="planning-field-help" id="planning-editor-customer-locked">Kunden är kopplad till detta åtagande.</div>`
+               <div class="planning-field-help" id="planning-editor-customer-locked">Kunden är kopplad till denna aktivitet.</div>`
             : `<div class="planning-combobox">
                 <input id="planning-editor-customer-search"
                   type="text"
@@ -9802,13 +9531,6 @@
             </label>`
           ).join("")}
         </fieldset>
-        <div class="planning-appointment-field">
-          <label class="planning-followup-toggle" for="planning-editor-agreement">
-            <input id="planning-editor-agreement" type="checkbox" ${planningTruthy(activity?.customer_agreement_confirmed ?? seed?.customer_agreement_confirmed) ? "checked" : ""} />
-            Överenskommen uppföljning med kunden
-          </label>
-          <p class="planning-field-help">Behåll kundens överenskommelse separat tills den har utförts eller avskrivits. För ett osäkert serviceärende: skriv i anteckningen vad som klarlagts och bekräfta kundens överenskommelse för att aktivera uppgiften.</p>
-        </div>
         <div class="planning-appointment-field" id="planning-editor-appointment-field" ${["visit", "phone"].includes(selectedType) ? "" : "hidden"}>
           <label class="planning-followup-toggle" for="planning-editor-appointment">
             <input id="planning-editor-appointment" type="checkbox" ${["visit", "phone"].includes(selectedType) && planningTruthy(activity?.appointment_confirmed ?? seed?.appointment_confirmed) ? "checked" : ""} />
@@ -9909,7 +9631,6 @@
     const note = document.getElementById("planning-editor-note").value.trim();
     const scheduledAt = planningStockholmIso(dateKey, timeValue);
     if (!customer || !Number.isFinite(row) || !customer.customer_id) { showPlanningEditorError("Välj en kund med stabil kundidentitet."); return; }
-    if (customerHasContactBan(customer)) { showPlanningEditorError("Kontakta inte. Häv förbudet först efter dokumenterad ny tillåtelse."); return; }
     if (!planningEditorActivity && userIsAdmin() && !planningSelectedOwner()) { showPlanningEditorError("Välj en aktiv säljare innan aktiviteten planeras."); return; }
     if (!PLANNING_CONTACT_TYPES[contactType] || !scheduledAt) { showPlanningEditorError("Välj kontakttyp, datum och tid."); return; }
     if (new Date(scheduledAt).getTime() < Math.floor(Date.now() / 60000) * 60000) { showPlanningEditorError("Välj en tid idag eller framåt."); return; }
@@ -9918,7 +9639,6 @@
     const obligationSeed = !editing && planningEditorSeed?.obligation_id ? { ...planningEditorSeed } : null;
     const payload = {
       customer_id: customer.customer_id, contact_type: contactType, scheduled_at: scheduledAt, note,
-      customer_agreement_confirmed: document.getElementById("planning-editor-agreement").checked,
       appointment_confirmed: ["visit", "phone"].includes(contactType) && document.getElementById("planning-editor-appointment").checked,
       picking_help: contactType === "visit" && document.getElementById("planning-editor-picking-help").checked,
       client_request_id: planningEditorRequestId,
@@ -9989,16 +9709,15 @@
     const terminal = ["completed", "cancelled", "superseded"].includes(activity.status);
     const canExecute = customerCanExecutePlanned(boundCustomer, activity);
     const canSendPlannedEmail = Boolean(getPlannedEmailContext(boundCustomer, activity));
-    const banned = customerHasContactBan(boundCustomer);
     const plannedActions = !terminal && activity.status === "planned" ? `
       ${canSendPlannedEmail ? '<button class="planning-compact-btn primary" type="button" data-planning-detail-action="email">Öppna bokat mejl</button>' : ''}
       ${canExecute ? '<button class="planning-compact-btn primary" type="button" data-planning-detail-action="log">Logga kontakt</button>' : '<div class="customer-permission-note">Kontakt avvaktas enligt kundens vägledning. Du kan granska, hoppa över eller avboka aktiviteten.</div>'}
-      ${!banned ? '<button class="planning-compact-btn" type="button" data-planning-detail-action="edit">Redigera / flytta</button>' : ''}
+      <button class="planning-compact-btn" type="button" data-planning-detail-action="edit">Redigera / flytta</button>
       <button class="planning-compact-btn" type="button" data-planning-detail-action="skip">Hoppa över</button>
       <button class="planning-compact-btn danger" type="button" data-planning-detail-action="cancel">Avboka</button>
     ` : "";
     const skippedActions = activity.status === "skipped" ? `
-      ${!banned ? '<button class="planning-compact-btn primary" type="button" data-planning-detail-action="restore">Återställ</button><button class="planning-compact-btn" type="button" data-planning-detail-action="edit">Flytta aktiviteten</button>' : '<div class="customer-permission-note">Kontakta inte. Avboka aktiviteten eller registrera ny tillåtelse i kundens Hantera-meny.</div>'}
+      <button class="planning-compact-btn primary" type="button" data-planning-detail-action="restore">Återställ</button><button class="planning-compact-btn" type="button" data-planning-detail-action="edit">Flytta aktiviteten</button>
       <button class="planning-compact-btn danger" type="button" data-planning-detail-action="cancel">Avboka</button>
     ` : "";
     openPlanningModal(

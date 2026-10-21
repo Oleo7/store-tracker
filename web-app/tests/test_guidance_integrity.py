@@ -174,20 +174,13 @@ class GuidanceIntegrityTests(TestCase):
             self.assertEqual(g['reason_text'],'En tidigare leverans · 200 dagar sedan senaste leveransen')
 
     def test_true_followup_today_overrides_commercial_copy_only_when_date_exists(self):
-        for segment in ('A','C'):
-            for mail in (None,email()):
-                item=scored(store=customer(segment),mail=mail,
-                            contacts=[contact(10,'Positiv',TODAY.isoformat())])
-                g=item['customer_guidance']
-                self.assertEqual(g['status_key'],'act_now')
-                self.assertEqual(g['action_key'],'follow_up_today')
-                self.assertEqual(g['reason_code'],'follow_up_due_today')
-                self.assertEqual(g['reason_text'],'Uttrycklig uppf\u00f6ljning f\u00f6rfaller i dag')
-        # An order resolves order-acquisition signals, not an independently
-        # promised service contact. It needs explicit linked completion.
+        for segment in ['A','C']:
+            item=scored(store=customer(segment),contacts=[contact(10,'Positiv',TODAY.isoformat())])
+            self.assertTrue(item['can_start_unscheduled_contact'])
+            self.assertFalse(item['customer_guidance']['review_only'])
         still_due=scored(contacts=[contact(10,'Positiv',TODAY.isoformat())],orders=[order('today',0)])
-        self.assertEqual(still_due['customer_guidance']['action_key'],'follow_up_today')
-        self.assertTrue(still_due['can_start_unscheduled_contact'])
+        self.assertFalse(still_due['can_start_unscheduled_contact'])
+        self.assertFalse(still_due['customer_guidance']['review_only'])
 
     def test_real_plans_overdue_and_suppressions_stay_authoritative(self):
         for planned,status in [([activity(1)],'planned'),([activity(-1)],'overdue_followup'),
@@ -203,7 +196,7 @@ class GuidanceIntegrityTests(TestCase):
                              ({'contacts':[contact(1)]},'recent_reached_routine_wait'),
                              ({'contacts':[contact(3,'Negativ')]},'negative_contact_cooldown'),
                              ({'mail':email(age=2)},'recent_email_engagement_wait'),
-                             ({'suppressions':{'c':'snoozed'}},'snoozed')]:
+                             ({'contacts':[contact(3,'Negativ')]},'negative_contact_cooldown')]:
             item=scored(store=customer('A'),**kwargs)
             self.assertEqual(item['customer_guidance']['status_key'],'wait')
             self.assertEqual(item['customer_guidance']['reason_code'],reason)

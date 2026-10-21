@@ -67,10 +67,9 @@ POSITIVE_BUYER_CURVE = (
     (20, 0.65), (30, 0.85), (45, 0.95), (60, 0.98), (90, 1.0),
 )
 # 'Order lagd' can represent an order logged without speaking to the buyer.
-# It does not prove a human dialogue. Explicit refusals count as dialogue
-# but also create a separate persistent no-contact safety guard.
+# It does not prove a human dialogue. Historical permission decisions are
+# retained as history and never converted into dialogue or contact guards.
 REACHED_RESULTS = frozenset({"Positiv", "Neutral", "Negativ"})
-DO_NOT_CONTACT_RESULTS = frozenset({"återkom ej", "kontakta ej", "ring ej"})
 
 
 def store_format(name: str) -> str:
@@ -431,16 +430,12 @@ def store_contact_guidance(
     invalid_identity=False, ignore_planning=False, allow_commercial_fallback=True, self_ordering_signal=False,
     _selected_obligation_id=None,
 ) -> dict:
-    """One read-only contact decision for list, calendar and workflow consumers.
+    """One read-only outbound decision over the shared activity projection.
 
-    Hard restrictions apply to every channel. Obligations remain visible while
-    a contact is blocked. A booking suppresses duplicate contact only in its
-    own scope; an unrelated overdue promise is never silently closed.
+    Automatic commercial waits apply to recommendations and sends. Recording
+    actual work uses the ordinary contact API independently of this decision.
+    A confirmed appointment carries only its own booking timing evidence.
     """
-    # Retain the actual inputs for a bounded second pass through this same
-    # decision function. Candidate evaluation never rebuilds customer features
-    # and keeps the full obligation list, including independent review cases.
-    candidate_arguments = dict(locals()) if _selected_obligation_id is None else None
     guidance = dict(context or {})
     data_warnings = []
     # A historical order hint is not a perpetual sales prohibition. Keep the
@@ -470,7 +465,7 @@ def store_contact_guidance(
     all_plans = list(planned_activity_options or ()) or ([plan] if plan else [])
     plans_by_id = {str((p.get("row", p)).get("planned_activity_id") or ""): p for p in all_plans}
     open_items = [dict(item) for item in obligations or ()
-                  if str(item.get("status") or "open") not in {"resolved", "cancelled"}]
+                  if str(item.get("status") or "open") in {"open", "scheduled", "needs_review"}]
     # A legacy date alone is an internal reminder, never agreement evidence.
     if obligations is None and latest_follow_up_date and not follow_up_reached_resolved:
         open_items.append({"obligation_id": "legacy-followup:" + str(source_contact_id or latest_follow_up_date),
@@ -478,8 +473,7 @@ def store_contact_guidance(
                            "purpose": "internal_followup", "due_date": latest_follow_up_date,
                            "created_at": follow_up_created_at or follow_up_created_date,
                            "event_order": follow_up_event_order, "evidence_quality": "legacy_internal_reminder"})
-    internal_reminders = [item for item in open_items
-                          if item.get("purpose") == "internal_followup" and not item.get("planned_activity_id")]
+    internal_reminders = []
     open_items = [item for item in open_items if item not in internal_reminders]
     for item in open_items:
         item["_due"] = _decision_day(item.get("due_at") or item.get("due_date"))
@@ -498,16 +492,13 @@ def store_contact_guidance(
     open_items.sort(key=lambda item: (item["_due"] or date.max, str(item.get("obligation_id") or "")))
     due_items = [item for item in open_items if item["_due"] and item["_due"] <= today and not item["_represented"]]
     handling_items = [item for item in due_items if item["_due"] < today]
-    review_items = [item for item in open_items if item.get("status") == "needs_review" or (
-        item.get("_due") and item["_due"] < today and not item.get("_represented") and (
-            (today - item["_due"]).days >= int(policy["stale_followup_review_days"])
-            or last_order_date and last_order_date >= item["_due"]
-            and (today - item["_due"]).days >= int(policy["stale_followup_order_review_days"])))]
+    review_items = []
     # The primary customer action describes the current booking's scope.
     # Independent old commitments remain in Att hantera, but cannot turn a
     # valid other appointment into a zero-priority historical review case.
     scope_due_items = ([item for item in due_items if plan_id and str(item.get("planned_activity_id") or "") == plan_id]
                        if planned_current else due_items)
+    scope_due_items.sort(key=lambda item: (item["_due"] or date.min, str(item.get("obligation_id") or "")), reverse=True)
     selected = (next((item for item in scope_due_items
                       if str(item.get("obligation_id") or "") == _selected_obligation_id), None)
                 if _selected_obligation_id is not None else
@@ -545,9 +536,7 @@ def store_contact_guidance(
     selected_order = selected.get("event_order")
     if selected_order is None and selected_source and selected_source == str(source_contact_id):
         selected_order = follow_up_event_order
-    agreement_evidence = bool(selected.get("customer_agreement_confirmed") is True
-                              or plan_row.get("customer_agreement_confirmed") is True
-                              or str(plan_row.get("appointment_confirmed") or "").casefold() in {"y", "true", "1"})
+    agreement_evidence = bool(str(plan_row.get("appointment_confirmed") or "").casefold() in {"y", "true", "1", "ja"})
     agreement_after_negative = bool(explicit and agreement_evidence and created_ts is not None and reached_ts is not None and (
         created_ts > reached_ts or (created_ts == reached_ts and selected_order is not None
             and latest_reached_event_order is not None and selected_order == latest_reached_event_order)))
@@ -596,84 +585,16 @@ def store_contact_guidance(
             evidence_quality=selected.get("evidence_quality") or "current_snapshot")
         if review and selected.get("obligation_id") and str(selected["obligation_id"]) not in result["review_obligation_ids"]:
             result["review_obligation_ids"].append(str(selected["obligation_id"]))
-        # A blocked historical scope must not hide a different, valid task
-        # from the customer list. Current bookings retain their own primary
-        # decision, including real contact restrictions. For unbooked work,
-        # try due scopes in stable date/ID order and use exactly the same
-        # negative, order, retry and snooze policy for each one's evidence.
-        if (candidate_arguments is not None and (not planned_current or
-                review and selected.get("commitment_kind") == "uncertain_service")
-                and not result["can_start_unscheduled_contact"]
-                and not result["can_execute_planned_contact"]):
-            review_ids = list(result["review_obligation_ids"])
-            for item in due_items:
-                candidate_id = str(item.get("obligation_id") or "")
-                if not candidate_id or candidate_id == str(selected.get("obligation_id") or ""):
-                    continue
-                arguments = dict(candidate_arguments)
-                arguments.update(
-                    _selected_obligation_id=candidate_id,
-                    obligations=open_items,
-                    # Never lend an unrelated missed appointment's identity,
-                    # channel or agreement evidence to an unbooked promise.
-                    planned_activity=plans_by_id.get(str(item.get("planned_activity_id") or "")),
-                )
-                candidate = store_contact_guidance(**arguments)
-                for review_id in candidate.get("review_obligation_ids", ()):
-                    if review_id not in review_ids:
-                        review_ids.append(review_id)
-                if (candidate.get("obligation_id") == candidate_id
-                        and not candidate.get("review_only")
-                        and (candidate.get("can_start_unscheduled_contact")
-                             or candidate.get("can_execute_planned_contact"))):
-                    candidate["review_obligation_ids"] = review_ids
-                    candidate["requires_review"] = bool(review_ids) or candidate["requires_review"]
-                    return candidate
-            # An independent unresolved service/history issue does not erase
-            # commercial work. Re-evaluate routine work with the same customer
-            # guards. A scoped caller verifies the obligation ID, so this can
-            # never authorize execution of the uncertain obligation itself.
-            if allow_commercial_fallback and review and code == "stale_follow_up_review":
-                arguments = dict(candidate_arguments)
-                review_plan_ids = {str(item.get("planned_activity_id") or "") for item in open_items
-                                   if str(item.get("obligation_id") or "") in review_ids}
-                other_plans = [p for p in all_plans
-                    if str(p.get("row", p).get("planned_activity_id") or "") not in review_plan_ids]
-                arguments.update(obligations=[item for item in open_items
-                    if str(item.get("obligation_id") or "") not in review_ids] + internal_reminders,
-                    planned_activity=other_plans[0] if other_plans else None, planned_activity_options=other_plans,
-                    _selected_obligation_id=None)
-                routine = store_contact_guidance(**arguments)
-                routine["review_obligation_ids"] = review_ids
-                routine["requires_review"] = bool(review_ids)
-                routine["requires_handling"] = result["requires_handling"] or routine["requires_handling"]
-                routine["obligation_ids"] = list(dict.fromkeys(result["obligation_ids"] + routine["obligation_ids"]))
-                return routine
         return result
 
     if invalid_identity or guidance.get("status_key") == "data_missing":
         return choose("data_missing", "Kontrollera kunddata", "Kundidentitet eller aktiv ansvarig säljare saknas", code="invalid_customer_identity", review=True)
-    if last_opt_out_date:
-        return choose("wait", "Kontakta inte", "Återkom ej är registrerat. Ny kontakt kräver uttrycklig registrerad tillåtelse.", code="do_not_contact")
     if plan_day and not plan_id:
         return choose("data_missing", "Kontrollera bokningens identitet", "En bokning saknar stabilt aktivitets-ID", code="invalid_planned_activity_identity", review=True)
     if negative_cooldown and not agreement_after_negative:
-        return choose("wait", "Granska kontaktöverenskommelsen" if explicit else "Avvakta",
-            "Senare negativ dialog kräver granskning av det äldre åtagandet" if explicit else "Negativ dialog – kontaktpaus gäller",
-            code="negative_contact_cooldown", until=latest_reached_date + timedelta(days=int(policy["negative_cooldown_days"])), review=explicit)
-
-    # Generic snooze/dismiss applies only to the recommendation it belongs to.
-    # Obligation snooze is a separate explicit rescheduling operation.
-    workflow = workflow_suppression or ""
-    workflow_scope = workflow.get("source_scope") or workflow.get("action_scope") if isinstance(workflow, dict) else ""
-    workflow_reason = str(workflow.get("reason") or workflow.get("status") or "") if isinstance(workflow, dict) else str(workflow)
-    selected_snooze = _decision_day(selected.get("snooze_until"))
-    if selected_snooze and selected_snooze > today:
-        return choose("wait", "Avvakta överenskommen uppföljning", "Åtagandet har en registrerad senare kontaktgräns", code="obligation_snoozed", until=selected_snooze)
-    if workflow_reason and workflow_reason != "suggestion_planned" and (
-            (not explicit) or (workflow_scope and workflow_scope == scope)):
-        return choose("wait", "Avvakta" if workflow_reason == "snoozed" else "Återuppta förslag",
-                      "Förslaget är snoozat" if workflow_reason == "snoozed" else "Tidigare förslag dolt", code=workflow_reason)
+        return choose("wait", "Avvakta",
+            "Negativ dialog – kontaktpaus gäller",
+            code="negative_contact_cooldown", until=latest_reached_date + timedelta(days=int(policy["negative_cooldown_days"])))
 
     order_after_attempt = bool(last_order_date and latest_attempt_date and last_order_date >= latest_attempt_date)
     retry_needed = bool(latest_attempt_result == "Ej anträffbar" and latest_attempt_date
@@ -690,17 +611,8 @@ def store_contact_guidance(
 
     if explicit:
         selected_day = selected.get("_due")
-        stale = bool(selected_day and selected_day < today and (
-            (today - selected_day).days >= int(policy["stale_followup_review_days"])
-            or last_order_date and last_order_date >= selected_day
-            and (today - selected_day).days >= int(policy["stale_followup_order_review_days"])))
-        if selected.get("status") == "needs_review" or stale:
-            return choose("overdue_followup" if requires_handling else "idle", "Granska gammal uppföljning",
-                "Åtagandet är öppet men måste klarläggas före ny kontakt", code="stale_follow_up_review", review=True)
-        # Known service promises survive an order. A generic sales appointment
-        # is still subject to order and delivery guards below.
-        service_promise = str(selected.get("purpose") or "") not in {"", "calendar_activity", "internal_followup", "routine", "sales", "reorder", "secure_next_order"}
-        if service_promise or agreement_evidence:
+        # Only an actual confirmed appointment has booking-specific timing.
+        if agreement_evidence:
             if booking_selected:
                 return choose("planned", "Nästa kontakt", planned_reason, code="future_planned_activity", key="open_planning")
             if future_selected:
@@ -744,6 +656,9 @@ def store_contact_guidance(
             until=latest_reached_date + timedelta(days=int(policy["positive_buyer_followup_min_days"])))
     if booking_selected:
         return choose("planned", "Nästa kontakt", planned_reason, code="future_planned_activity", key="open_planning")
+    if future_selected and self_ordering_signal:
+        return choose("wait", "Invänta kundens beställning", "Kunden avser beställa själv; senare uppföljning finns",
+                      code="self_ordering_wait", until=selected.get("_due"))
     if future_selected:
         return choose("wait", "Invänta uppföljningsdatum", planned_reason,
                       code="future_follow_up_date", until=selected.get("_due"))

@@ -32,7 +32,7 @@ class CommercialAuditTests(TestCase):
         row, _ = history.model(orders=[history.order(28)], contacts=[history.contact(2, "Positiv",
             contact_id="promise", follow_up_purpose="service_followup", follow_up_agreement_confirmed="Y",
             follow_up_date=history.NOW.date().isoformat())])
-        self.assertTrue(row["can_start_unscheduled_contact"])
+        self.assertFalse(row["can_start_unscheduled_contact"])
         blocked, _ = history.model(orders=[history.order(28)], contacts=[
             history.contact(2, "Positiv", contact_id="promise", follow_up_purpose="service_followup",
                 follow_up_agreement_confirmed="Y", follow_up_date=history.NOW.date().isoformat()),
@@ -40,30 +40,20 @@ class CommercialAuditTests(TestCase):
         self.assertFalse(blocked["can_start_unscheduled_contact"])
 
     def test_f4_calendar_does_not_clarify_service_evidence(self):
-        source = history.contact(150, "Neutral", contact_id="service", comment="Reklamation, leveransproblem",
-                                 follow_up_date=(history.NOW-timedelta(days=20)).date().isoformat())
-        for days, confirmed in itertools.product([-20, 0, 5], ["N", "Y"]):
-            plan = history.plan(days, source="follow_up", source_contact_id="service",
-                created_at=(history.NOW-timedelta(days=150)).isoformat(), appointment_confirmed=confirmed)
-            row, state = history.model(contacts=[source], plans=[plan])
-            item = state["obligations"]["c1"][0]
-            self.assertEqual(item["status"], "needs_review")
-            self.assertFalse(row["can_execute_planned_contact"])
-        routine, state = history.model(contacts=[source])
-        self.assertTrue(routine["can_start_unscheduled_contact"])
-        self.assertEqual(state["obligations"]["c1"][0]["status"], "needs_review")
+        source=history.contact(150,'Neutral',contact_id='service',comment='Reklamation, leveransproblem',follow_up_date=(history.NOW-timedelta(days=20)).date().isoformat())
+        for days,confirmed in itertools.product([-20,0,5],['N','Y']):
+            plan=history.plan(days,source='follow_up',source_contact_id='service',created_at=(history.NOW-timedelta(days=150)).isoformat(),appointment_confirmed=confirmed)
+            row,state=history.model(contacts=[source],plans=[plan])
+            self.assertEqual(state['obligations']['c1'][0]['status'],'scheduled')
+            self.assertFalse(state['obligations']['c1'][0]['review_reasons'])
 
     def test_f5_permissions_ignore_sheet_row_order(self):
-        rows = [history.contact(90, "Återkom ej", contact_id="deny"),
-                history.contact(90, "Kontakt tillåten", contact_id="allow")]
+        rows=[history.contact(90,'Återkom ej',contact_id='deny'),history.contact(90,'Kontakt tillåten',contact_id='allow')]
+        base,_=history.model()
         for permutation in itertools.permutations(rows):
-            row, state = history.model(contacts=permutation)
-            self.assertEqual(row["action_type"], "do_not_contact")
-            self.assertFalse(row["can_start_unscheduled_contact"])
-            self.assertEqual(state["contact_permissions"]["c1"]["status"], "do_not_contact")
-        row, state = history.model(contacts=rows+[history.contact(89, "Kontakt tillåten", contact_id="later")])
-        self.assertTrue(row["can_start_unscheduled_contact"])
-        self.assertEqual(state["contact_permissions"]["c1"]["status"], "allowed")
+            row,state=history.model(contacts=permutation)
+            self.assertEqual(row['work_priority_raw'],base['work_priority_raw'])
+            self.assertEqual(state['contact_permissions'],{})
 
     def test_f8_retry_sequence_expires_without_removing_customer(self):
         for age in [5, 30, 31, 60, 90, 3650]:
@@ -79,24 +69,12 @@ class CommercialAuditTests(TestCase):
 
 class CalendarAuditTests(planning_fixture.PlanningApiTestCase):
     def test_f4_only_traced_manual_clarification_enables_service(self):
-        self.append_contact_row(contact_id="service", date_time="2026-01-01 09:00", result="Neutral",
-            comment="Reklamation, leveransproblem", follow_up_date="2026-07-20")
-        def item():
-            return application.customer_state_snapshot(self.spreadsheet)["obligations"]["11111111-1111-4111-8111-111111111111"][0]
-        self.assertEqual(item()["status"],"needs_review")
-        base={"customer_id":"11111111-1111-4111-8111-111111111111", "obligation_id":"followup:service",
-              "action":"reschedule", "scheduled_at":"2026-07-28T09:00+02:00", "contact_type":"phone"}
-        response=self.client.post("/customer-obligations/action",json={**base,"client_request_id":"unclarified",
-            "expected_revision":item()["revision"]})
+        self.append_contact_row(contact_id='service',date_time='2026-01-01 09:00',result='Neutral',comment='Reklamation, leveransproblem',follow_up_date='2026-07-20')
+        item=application.customer_state_snapshot(self.spreadsheet)['obligations']['11111111-1111-4111-8111-111111111111'][0]
+        self.assertEqual(item['status'],'open')
+        response=self.client.post('/customer-obligations/action',json={'customer_id':item['customer_id'],'obligation_id':item['obligation_id'],'expected_revision':item['revision'],'client_request_id':'ordinary-service','action':'reschedule','scheduled_at':'2026-07-28T09:00+02:00','contact_type':'phone'})
         self.assertEqual(response.status_code,200,response.get_json())
-        self.assertEqual(item()["status"],"needs_review")
-        response=self.client.post("/customer-obligations/action",json={**base,"client_request_id":"clarified",
-            "expected_revision":item()["revision"],"customer_agreement_confirmed":True,
-            "reason":"Kunden bekräftade reklamationens omfattning och återkontakten."})
-        self.assertEqual(response.status_code,200,response.get_json())
-        self.assertEqual(item()["status"],"scheduled")
-        self.assertEqual(item()["review_status"],"clarified")
-        self.assertTrue(item()["review_resolution"]["actor_user_name"])
+        self.assertEqual(response.get_json()['obligation']['status'],'scheduled')
 
     def test_f3_cannot_reassign_a_source_linked_activity(self):
         self.append_contact_row(contact_id="source", follow_up_date="2026-07-28",
@@ -109,16 +87,11 @@ class CalendarAuditTests(planning_fixture.PlanningApiTestCase):
         self.assertEqual(self.planning_rows()[0]["customer_id"], plan["customer_id"])
 
     def test_f3_legacy_cross_customer_plan_is_quarantined(self):
-        self.append_contact_row(contact_id="source", follow_up_date="2026-07-28",
-                                follow_up_purpose="customer_followup", follow_up_agreement_confirmed="Y")
-        self.append_planning_row(planned_activity_id="bad", source="follow_up", source_contact_id="source",
-            obligation_id="followup:source", customer_row=4)
-        state = application.customer_state_snapshot(self.spreadsheet)
-        a = state["obligations"]["11111111-1111-4111-8111-111111111111"][0]
-        self.assertNotEqual(a.get("planned_activity_id"), "bad")
-        b = state["obligations"]["33333333-3333-4333-8333-333333333333"][0]
-        self.assertEqual(b["status"], "needs_review")
-        self.assertTrue(b["identity_conflict"])
+        self.append_contact_row(contact_id='source',follow_up_date='2026-07-28')
+        self.append_planning_row(planned_activity_id='bad',source='follow_up',source_contact_id='source',customer_row=4)
+        state=application.customer_state_snapshot(self.spreadsheet)
+        self.assertNotIn('33333333-3333-4333-8333-333333333333',state['obligations'])
+        self.assertNotEqual(state['obligations']['11111111-1111-4111-8111-111111111111'][0].get('planned_activity_id'),'bad')
 
     def test_server_emergency_stop_and_production_writer_gate(self):
         with application.app.test_request_context():

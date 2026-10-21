@@ -58,144 +58,24 @@ class PlanningSuggestionApiTests(PlanningApiTestCase):
         self.assertEqual(rows[0]["status"], "pending")
         self.assertIn(SCORE_EVENTS_SHEET, self.spreadsheet.sheets)
 
-    def test_snooze_is_exactly_seven_days_and_dismiss_is_terminal_for_hash(self):
-        first = self.current()["suggestion"]
-        snoozed = self.mutate(first, "snooze", "snooze-once")
-        self.assertEqual(snoozed.status_code, 200, snoozed.get_json())
-        self.assertEqual(snoozed.get_json()["next_suggestion"]["customer"], "Butik C")
-        row = self.spreadsheet.worksheet(SUGGESTIONS_SHEET).dict_rows()[0]
-        self.assertEqual(
-            app_module.parse_planning_instant(row["snooze_until"]),
-            NOW + timedelta(days=7),
-        )
 
-        second = snoozed.get_json()["next_suggestion"]
-        dismissed = self.mutate(second, "dismiss", "dismiss-once")
-        self.assertEqual(dismissed.status_code, 200, dismissed.get_json())
-        self.assertIsNone(dismissed.get_json()["next_suggestion"])
-        after = self.current()
-        self.assertIsNone(after["suggestion"])
-        self.assertEqual(after["pending_count"], 0)
 
-    def test_snoozed_context_is_resolved_when_new_business_context_arrives(self):
-        suggestion = self.current()["suggestion"]
-        response = self.mutate(suggestion, "snooze", "snooze-before-order")
-        self.assertEqual(response.status_code, 200, response.get_json())
-        order_sheet = self.spreadsheet.worksheet("order_rows")
-        order = {
-            "Reference": "ORDER-DURING-SNOOZE",
-            "Order date": "2026-07-27",
-            "Delivery date": "2026-07-29",
-            "Customer": suggestion["customer"],
-            "Quantity": "4",
-            "Total": "400",
-            "Currency": "SEK",
-            "customer_id": suggestion["customer_id"],
-        }
-        order_sheet.append_row([
-            order.get(column, "") for column in app_module.ORDER_COLUMNS
-        ])
 
-        self.current()
-
-        rows = self.spreadsheet.worksheet(SUGGESTIONS_SHEET).dict_rows()
-        old = next(row for row in rows if row["suggestion_id"] == suggestion["suggestion_id"])
-        self.assertEqual(old["status"], "resolved")
-        self.assertEqual(old["resolved_by_type"], "business_context")
-        self.assertFalse(any(
-            row["suggestion_id"] == suggestion["suggestion_id"]
-            and row["status"] in {"pending", "snoozed", "planned"}
-            for row in rows
-        ))
-
-    def test_snoozed_context_expires_when_trigger_disappears(self):
-        suggestion = self.current()["suggestion"]
-        response = self.mutate(suggestion, "snooze", "snooze-before-trigger-loss")
-        self.assertEqual(response.status_code, 200, response.get_json())
-        owner = {"user_name": "olle", "name": "Olle"}
-        candidates = [
-            candidate
-            for candidate in app_module.planning_suggestion_candidates(
-                self.spreadsheet, owner
-            )
-            if candidate["customer_id"] != suggestion["customer_id"]
-        ]
-
-        app_module.planning_suggestion_service(self.spreadsheet).queue(
-            owner, candidates
-        )
-
-        old = next(
-            row for row in self.spreadsheet.worksheet(SUGGESTIONS_SHEET).dict_rows()
-            if row["suggestion_id"] == suggestion["suggestion_id"]
-        )
-        self.assertEqual(old["status"], "expired")
-
-    def test_unchanged_snoozed_context_reopens_at_exactly_seven_days(self):
-        suggestion = self.current()["suggestion"]
-        response = self.mutate(suggestion, "snooze", "snooze-exactly-seven-days")
-        self.assertEqual(response.status_code, 200, response.get_json())
-
-        with patch.object(app_module, "stockholm_now", return_value=NOW + timedelta(days=7)):
-            current = self.current()
-
-        self.assertEqual(current["suggestion"]["suggestion_id"], suggestion["suggestion_id"])
-        old = next(
-            row for row in self.spreadsheet.worksheet(SUGGESTIONS_SHEET).dict_rows()
-            if row["suggestion_id"] == suggestion["suggestion_id"]
-        )
-        self.assertEqual(old["status"], "pending")
-        self.assertEqual(old["snooze_until"], "")
 
     def test_mutation_revision_is_stale(self):
-        suggestion = self.current()["suggestion"]
-        response = self.client.post(
-            f"/planning/suggestions/{suggestion['suggestion_id']}/snooze",
-            json={
-                "client_request_id": "stale-snooze",
-                "expected_revision": suggestion["revision"] + 1,
-            },
-        )
-        self.assertEqual(response.status_code, 409)
-        self.assertEqual(response.get_json()["code"], "suggestion_stale")
+        suggestion=self.current()['suggestion']
+        response=self.client.post('/planning/suggestions/'+suggestion['suggestion_id']+'/plan',json={'client_request_id':'stale-plan','expected_suggestion_revision':999,'customer_id':suggestion['customer_id'],'contact_type':'phone','scheduled_at':'2026-07-28T14:00+02:00'})
+        self.assertEqual(response.status_code,409,response.get_json())
+        self.assertEqual(self.planning_rows(),[])
 
     def test_parametrized_primary_state_transitions(self):
-        expected = {
-            "snooze": "snoozed",
-            "plan": "planned",
-            "dismiss": "dismissed",
-            "resolve": "resolved",
-            "expire": "expired",
-        }
-        for action, target in expected.items():
-            with self.subTest(action=action):
-                self.spreadsheet = default_spreadsheet()
-                self.spreadsheet_patcher.stop()
-                self.spreadsheet_patcher = patch.object(
-                    app_module,
-                    "get_spreadsheet_with_retry",
-                    return_value=self.spreadsheet,
-                )
-                self.spreadsheet_patcher.start()
-                self.login()
-                suggestion = self.current()["suggestion"]
-                service = app_module.planning_suggestion_service(self.spreadsheet)
-                request_id = f"transition-{action}"
-                updated, duplicate = service.transition(
-                    suggestion["suggestion_id"],
-                    owner_name="olle",
-                    action=action,
-                    expected_revision=suggestion["revision"],
-                    request_id=request_id,
-                    fingerprint=mutation_fingerprint(
-                        action, suggestion["suggestion_id"], request_id
-                    ),
-                    planned_activity_id="activity-1" if action == "plan" else "",
-                    resolved_by_type="contact" if action == "resolve" else "",
-                    resolved_by_id="contact-1" if action == "resolve" else "",
-                )
-                self.assertFalse(duplicate)
-                self.assertEqual(updated["status"], target)
+        from planning_suggestions import SuggestionError
+        suggestion=self.current()['suggestion'];before={k:[list(r) for r in v.values] for k,v in self.spreadsheet.sheets.items()}
+        for action in ['snooze','dismiss']:
+            with self.assertRaises(SuggestionError) as error:
+                app_module.planning_suggestion_service(self.spreadsheet).transition(suggestion['suggestion_id'],owner_name='olle',action=action,expected_revision=1,request_id='removed-'+action,fingerprint='removed')
+            self.assertEqual(error.exception.status,410)
+        self.assertEqual(before,{k:v.values for k,v in self.spreadsheet.sheets.items()})
 
     def _plan_case(self, contact_type):
         self.spreadsheet = default_spreadsheet()
@@ -339,7 +219,7 @@ class PlanningSuggestionApiTests(PlanningApiTestCase):
             json={
                 "client_request_id": "complete-linked-suggestion",
                 "planned_activity_id": planned["activity"]["planned_activity_id"],
-                "date_time": "2026-07-30 09:10",
+                "date_time": NOW.isoformat(),
                 "contact_channel": "Telefon",
                 "result": "Positiv",
                 "comment": "Genomförd",
@@ -403,7 +283,7 @@ class PlanningSuggestionApiTests(PlanningApiTestCase):
             json={
                 "client_request_id": "later-contact-resolves-suggestion",
                 "customer_id": suggestion["customer_id"],
-                "date_time": "2026-07-31 10:00",
+                "date_time": NOW.isoformat(),
                 "contact_channel": "Telefon",
                 "result": "Positiv",
                 "comment": "Senare kontakt",
@@ -463,20 +343,14 @@ class PlanningSuggestionApiTests(PlanningApiTestCase):
         other = self.current()["suggestion"]
         self.login("olle")
         forbidden_mutation = self.mutate(other, "dismiss", "wrong-owner")
-        self.assertEqual(forbidden_mutation.status_code, 403)
+        self.assertEqual(forbidden_mutation.status_code, 410)
 
     def test_admin_selected_owner_can_read_and_mutate(self):
-        self.login("admin")
-        body = self.client.get("/planning/suggestions?owner=sofia").get_json()
-        self.assertEqual(body["suggestion"]["customer"], "Butik B")
-        response = self.client.post(
-            f"/planning/suggestions/{body['suggestion']['suggestion_id']}/snooze",
-            json={
-                "client_request_id": "admin-snooze-sofia",
-                "expected_revision": body["suggestion"]["revision"],
-            },
-        )
-        self.assertEqual(response.status_code, 200, response.get_json())
+        self.login('admin')
+        suggestion=self.client.get('/planning/suggestions?user_name=olle').get_json()['suggestion']
+        response=self.client.post('/planning/suggestions/'+suggestion['suggestion_id']+'/plan',json={'user_name':'olle','client_request_id':'admin-plan','expected_suggestion_revision':suggestion['revision'],'customer_id':suggestion['customer_id'],'contact_type':'phone','scheduled_at':'2026-07-28T14:00+02:00'})
+        self.assertEqual(response.status_code,201,response.get_json())
+        self.assertEqual(self.planning_rows()[0]['user_name'],'olle')
 
 
 class PlanningSuggestionProductionGuardTests(TestCase):
@@ -495,38 +369,6 @@ class PersistentAProspectSuggestionTests(PlanningApiTestCase):
         self.assertEqual(response.status_code, 200, response.get_json())
         return response.get_json()
 
-    def test_new_a_prospect_can_snooze_but_not_be_permanently_hidden(self):
-        suggestion = self.current()["suggestion"]
-        self.assertEqual(
-            suggestion["customer_guidance"]["focus_key"], "a_prospect"
-        )
-
-        dismissed = self.client.post(
-            f"/planning/suggestions/{suggestion['suggestion_id']}/dismiss",
-            json={
-                "client_request_id": "reject-a-dismiss",
-                "expected_revision": suggestion["revision"],
-            },
-        )
-        self.assertEqual(dismissed.status_code, 409, dismissed.get_json())
-        self.assertEqual(
-            dismissed.get_json()["code"], "a_prospect_requires_snooze"
-        )
-
-        snoozed = self.client.post(
-            f"/planning/suggestions/{suggestion['suggestion_id']}/snooze",
-            json={
-                "client_request_id": "snooze-a-prospect",
-                "expected_revision": suggestion["revision"],
-            },
-        )
-        self.assertEqual(snoozed.status_code, 200, snoozed.get_json())
-        stored = self.spreadsheet.worksheet(SUGGESTIONS_SHEET).dict_rows()[0]
-        self.assertEqual(stored["status"], "snoozed")
-        self.assertEqual(
-            app_module.parse_planning_instant(stored["snooze_until"]),
-            NOW + timedelta(days=7),
-        )
 
     def test_resolved_a_prospect_reopens_after_contact_pause(self):
         suggestion = self.current()["suggestion"]
@@ -538,7 +380,7 @@ class PersistentAProspectSuggestionTests(PlanningApiTestCase):
             "/customers/Butik%20A/contacts",
             json={
                 "client_request_id": "a-prospect-contact",
-                "date_time": "2026-07-27 10:15",
+                "date_time": NOW.isoformat(),
                 "contact_channel": "Telefon",
                 "result": "Neutral",
                 "comment": "Kontakt genomförd utan order",
@@ -613,88 +455,7 @@ class PersistentAProspectSuggestionTests(PlanningApiTestCase):
         )
         return legacy_id
 
-    def test_pre_segment_snooze_is_preserved_in_queue_and_customer_list(self):
-        suggestion = self.current()["suggestion"]
-        snoozed = self.client.post(
-            f"/planning/suggestions/{suggestion['suggestion_id']}/snooze",
-            json={
-                "client_request_id": "legacy-schema-snooze",
-                "expected_revision": suggestion["revision"],
-            },
-        )
-        self.assertEqual(snoozed.status_code, 200, snoozed.get_json())
-        legacy_id = self._rewrite_suggestion_as_pre_segment_context(suggestion)
 
-        insights = self.client.get("/customer-insights")
-        self.assertEqual(insights.status_code, 200, insights.get_json())
-        butik = insights.get_json()["butik a"]
-        self.assertEqual(
-            butik["recommendation_suppression_reason"], "snoozed"
-        )
-        self.assertEqual(
-            butik["customer_guidance"]["status_key"], "wait"
-        )
-
-        queue = self.current()
-        self.assertNotEqual(
-            (queue.get("suggestion") or {}).get("customer_id"),
-            suggestion["customer_id"],
-        )
-        stored = [
-            row
-            for row in self.spreadsheet.worksheet(SUGGESTIONS_SHEET).dict_rows()
-            if row["customer_id"] == suggestion["customer_id"]
-        ]
-        self.assertEqual(len(stored), 1)
-        self.assertEqual(stored[0]["suggestion_id"], legacy_id)
-        self.assertEqual(stored[0]["status"], "snoozed")
-
-    def test_explicit_legacy_state_wins_if_canonical_duplicate_exists(self):
-        suggestion = self.current()["suggestion"]
-        snoozed = self.client.post(
-            f"/planning/suggestions/{suggestion['suggestion_id']}/snooze",
-            json={
-                "client_request_id": "legacy-state-before-duplicate",
-                "expected_revision": suggestion["revision"],
-            },
-        )
-        self.assertEqual(snoozed.status_code, 200, snoozed.get_json())
-        legacy_id = self._rewrite_suggestion_as_pre_segment_context(suggestion)
-
-        owner = {"user_name": "olle", "name": "Olle"}
-        candidate = next(
-            item
-            for item in app_module.planning_suggestion_candidates(
-                self.spreadsheet, owner, self.planning_rows()
-            )
-            if item["customer_id"] == suggestion["customer_id"]
-        )
-        service = app_module.planning_suggestion_service(self.spreadsheet)
-        canonical = service._candidate_row(owner, candidate)
-        sheet = self.spreadsheet.worksheet(SUGGESTIONS_SHEET)
-        headers = sheet.row_values(1)
-        sheet.append_row([canonical.get(header, "") for header in headers])
-
-        insights = self.client.get("/customer-insights")
-        self.assertEqual(insights.status_code, 200, insights.get_json())
-        butik = insights.get_json()["butik a"]
-        self.assertEqual(
-            butik["recommendation_suppression_reason"], "snoozed"
-        )
-
-        current = self.current()
-        self.assertNotEqual(
-            (current.get("suggestion") or {}).get("customer_id"),
-            suggestion["customer_id"],
-        )
-        rows = [
-            row
-            for row in sheet.dict_rows()
-            if row["customer_id"] == suggestion["customer_id"]
-        ]
-        self.assertEqual(len(rows), 2)
-        legacy = next(row for row in rows if row["suggestion_id"] == legacy_id)
-        self.assertEqual(legacy["status"], "snoozed")
 
     def test_pre_segment_planned_link_can_cancel_and_reopen(self):
         suggestion = self.current()["suggestion"]
@@ -742,87 +503,22 @@ class PersistentAProspectSuggestionTests(PlanningApiTestCase):
         self.assertEqual(reopened["suggestion_id"], legacy_id)
         self.assertEqual(reopened["status"], "pending")
 
-    def test_pre_segment_a_prospect_state_does_not_survive_segment_change(self):
-        suggestion = self.current()["suggestion"]
-        snoozed = self.client.post(
-            f"/planning/suggestions/{suggestion['suggestion_id']}/snooze",
-            json={
-                "client_request_id": "legacy-schema-before-segment-change",
-                "expected_revision": suggestion["revision"],
-            },
-        )
-        self.assertEqual(snoozed.status_code, 200, snoozed.get_json())
-        legacy_id = self._rewrite_suggestion_as_pre_segment_context(suggestion)
 
-        customer_sheet = self.spreadsheet.worksheet("customers_enriched")
-        customer_rows = customer_sheet.dict_rows()
-        customer_offset = next(
-            index
-            for index, row in enumerate(customer_rows, start=2)
-            if row["customer_id"] == suggestion["customer_id"]
-        )
-        app_module.update_sheet_row(
-            customer_sheet,
-            customer_offset,
-            customer_sheet.row_values(1),
-            {"customer_segment": "B"},
-        )
 
-        insights = self.client.get("/customer-insights")
-        self.assertEqual(insights.status_code, 200, insights.get_json())
-        butik = insights.get_json()["butik a"]
-        self.assertNotEqual(
-            butik["recommendation_suppression_reason"], "snoozed"
-        )
 
-        self.current()
-        old = next(
-            row
-            for row in self.spreadsheet.worksheet(SUGGESTIONS_SHEET).dict_rows()
-            if row["suggestion_id"] == legacy_id
-        )
-        self.assertIn(old["status"], {"resolved", "expired"})
-
-    def test_historical_hidden_a_prospect_is_visible_and_explicitly_resumable(self):
-        suggestion = self.current()["suggestion"]
-        owner = {"user_name": "olle", "name": "Olle"}
-        candidates = app_module.planning_suggestion_candidates(
-            self.spreadsheet, owner
-        )
-        live = next(
-            item for item in candidates
-            if item["customer_id"] == suggestion["customer_id"]
-        )
-        service = app_module.planning_suggestion_service(self.spreadsheet)
-        service.transition(
-            suggestion["suggestion_id"],
-            owner_name="olle",
-            action="dismiss",
-            expected_revision=suggestion["revision"],
-            request_id="historical-dismiss",
-            fingerprint=mutation_fingerprint(
-                "dismiss", suggestion["suggestion_id"], "historical-dismiss"
-            ),
-            live_candidate=live,
-        )
-
-        payload = self.current()
-        hidden = next(item for item in [payload["suggestion"], *payload["queue_preview"]]
-                      if item["suggestion_id"] == suggestion["suggestion_id"])
-        self.assertEqual(hidden["suggestion_id"], suggestion["suggestion_id"])
-        self.assertEqual(hidden["status"], "dismissed")
-        self.assertEqual(
-            hidden["customer_guidance"]["reason_text"], "Tidigare förslag dolt"
-        )
-
-        resumed = self.client.post(
-            f"/planning/suggestions/{hidden['suggestion_id']}/resume",
-            json={
-                "client_request_id": "resume-historical-a",
-                "expected_revision": hidden["revision"],
-            },
-        )
-        self.assertEqual(resumed.status_code, 200, resumed.get_json())
-        self.assertEqual(
-            resumed.get_json()["next_suggestion"]["status"], "pending"
-        )
+class HistoricalSuggestionStateTests(PlanningApiTestCase):
+    def setUp(self):
+        super().setUp()
+        app_module.app.config['PLANNING_SUGGESTIONS_STUB']=True
+        self.addCleanup(app_module.app.config.pop,'PLANNING_SUGGESTIONS_STUB',None)
+    current=PlanningSuggestionApiTests.current
+    def test_old_manual_states_do_not_suppress_live_queue(self):
+        suggestion=self.current()['suggestion']
+        sheet=self.spreadsheet.worksheet(SUGGESTIONS_SHEET)
+        for status in ['snoozed','dismissed']:
+            sheet.values[1][sheet.values[0].index('status')]=status
+            sheet.values[1][sheet.values[0].index('snooze_until')]='2099-01-01T09:00+01:00'
+            app_module.invalidate_sheet_for_write(sheet)
+            current=self.current()
+            self.assertEqual(current['suggestion']['customer_id'],suggestion['customer_id'])
+            self.assertEqual(current['suggestion']['status'],'pending')

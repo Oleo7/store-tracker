@@ -11,7 +11,7 @@ function source(name) {
 }
 const functions=['sortedModelValue','getWorkPriorityValue','getCustomerGuidance','getCustomerListGuidance',
   'stableCustomerTieBreak','compareDescendingMissingLast','contactPrioritySort','mapPriorityValue','mapPrioritySort',
-  'customerHasContactBan','customerCanStartContact'];
+  'customerCanStartContact'];
 const context=vm.createContext({assert,console});
 vm.runInContext(`const getCustomerInsight=c=>c||{};${functions.map(source).join('\n')}`,context);
 vm.runInContext(`

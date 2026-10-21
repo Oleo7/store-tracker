@@ -219,7 +219,7 @@ for (const changes of [{total_minutes:550},{break_minutes:-1},{wait_minutes:0},
         self.assertIn("await loadPlanningAttention()", load_week.group(1))
 
         mutation = re.search(
-            r"async function mutatePlanningObligation\(item, action\) \{(.*?)\n  \}",
+            r"async function handlePlanningAttentionAction\(action, item, button = null\) \{(.*?)\n  \}",
             self.html,
             flags=re.DOTALL,
         )
@@ -356,7 +356,7 @@ const renderPlanningRecommendation = () => {}, renderPlanningCandidates = () => 
 const planningDragSavingIds = new Set();
 const simulateCriticalWorkflowMutation = async activity => {
   await planningFetchJson('/planning/activities/'+activity.id, {method:'PATCH'});
-  await refreshWorkflowViews({planning:true});
+  await refreshWorkflowViews({ planning: true });
 };
 const buildInsightDropdowns = () => {}, updateEmailClickNoOrderChip = () => {}, updateChip = () => {};
 const showToast = text => toasts.push(text);
@@ -365,7 +365,7 @@ ${['fetchJsonShared','loadInsights','loadPlanningAttention','loadPlanningWeek','
    'customerInsightKey','getCustomerInsight','getCustomerGuidance','getCustomerListGuidance','hasPriorityScore',
    'getGuidanceStatusClass','getNextActionColorClass','guidanceContactLabel','getNextActionHtml',
    'getPrioritySummaryHtml','getPriorityWhyHtml','getWorkPriorityValue','sortedModelValue','getPotentialHtml','getCardDateHtml','getDeliveryVolumeText',
-   'getCustomerPlanningSeed','planningContactTypeKey','customerHasContactBan','customerCanStartContact','planningDateFromKey','planningDateKeyFromIso','planningTimeFromIso',
+   'getCustomerPlanningSeed','planningContactTypeKey','customerCanStartContact','planningDateFromKey','planningDateKeyFromIso','planningTimeFromIso',
    'getCardDatesHtml','getPriorityCardClass','getCustomerCardAriaLabel','getCardPlanningButtonHtml']
    .map(source).join('\n')}
 `, context);
@@ -894,7 +894,7 @@ vm.runInContext(`(async () => {
         self.assertNotIn("planningWeekStart", body)
 
     def test_obligation_actions_lock_identity_preserve_revision_and_source(self):
-        for token in ["Kunden är kopplad till detta åtagande", "obligationSeed.obligation_id",
+        for token in ["Kunden är kopplad till denna aktivitet", "obligationSeed.obligation_id",
                       "obligationSeed.expected_revision", 'payload.action = "reschedule"',
                       "source_contact_id = planningEditorSeed.source_contact_id",
                       "if (!suggestionLocked) setupPlanningCustomerCombobox",

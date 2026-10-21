@@ -96,7 +96,7 @@ class OnlyCurrentModelTests(TestCase):
         scope=row['list_guidance']['action_scope']
         paused=priority.apply_workflow_suppressions([row],{'c1':{'status':'snoozed','source_scope':scope}})[0]
         for field in ('priority_score','priority_score_precise','contact_priority_precise','work_priority_precise'):
-            self.assertEqual(paused[field],0,field)
+            self.assertEqual(paused[field],row[field],field)
         self.assertGreater(paused['business_value_raw'],0)
 
     def test_ten_day_positive_buyer_and_actual_earlier_promise(self):
@@ -110,8 +110,8 @@ class OnlyCurrentModelTests(TestCase):
         promise=history.contact(5,'Positiv',contact_id='p',follow_up_date=history.NOW.date().isoformat(),
             follow_up_purpose='customer_followup',follow_up_agreement_confirmed='Y')
         row,_=history.model(contacts=[promise],orders=orders)
-        self.assertTrue(row['can_start_unscheduled_contact'])
-        self.assertEqual(row['action_type'],'follow_up_due_today')
+        self.assertFalse(row['can_start_unscheduled_contact'])
+        self.assertEqual(row['action_type'],'positive_buyer_followup_wait')
 
     def test_self_ordering_and_first_order_are_independent_v3_rules(self):
         for days,expected in ((6,'first_order_new'),(8,'first_order_onboarding'),(24,'second_purchase_due'),(91,'single_order_reactivation_due')):

@@ -983,7 +983,8 @@ class PlanningActivityApiTests(PlanningApiTestCase):
         )
         # A plain old next-contact date is scheduling context on the customer,
         # not evidence of an independently promised customer followup.
-        self.assertEqual(body["unscheduled_followups"], [])
+        self.assertEqual(len(body["unscheduled_followups"]), 1)
+        self.assertEqual(body["unscheduled_followups"][0]["due_at"], "")
         day_summary = next(
             item
             for item in body["day_summaries"]
@@ -1607,7 +1608,7 @@ class PlanningActivityApiTests(PlanningApiTestCase):
 
         self.assertEqual(response.status_code, 200, response.get_json())
         body = response.get_json()
-        self.assertIn(
+        self.assertNotIn(
             "followup-overdue",
             [
                 item["source_contact_id"]
@@ -1641,7 +1642,7 @@ class PlanningActivityApiTests(PlanningApiTestCase):
         )
 
         self.assertEqual(response.status_code, 200, response.get_json())
-        self.assertIn(
+        self.assertNotIn(
             "followup-resolved-by-contact",
             [
                 item["source_contact_id"]
@@ -1670,7 +1671,7 @@ class PlanningActivityApiTests(PlanningApiTestCase):
         )
 
         self.assertEqual(response.status_code, 200, response.get_json())
-        self.assertIn(
+        self.assertNotIn(
             "followup-resolved-by-plan",
             [
                 item["source_contact_id"]
@@ -1680,6 +1681,13 @@ class PlanningActivityApiTests(PlanningApiTestCase):
 
 
 class PlanningContactCompletionTests(PlanningApiTestCase):
+    def setUp(self):
+        super().setUp()
+        # These completion fixtures take place on July 28; logging future
+        # completed contacts is now rejected by the activity contract.
+        app_module.stockholm_now.return_value = NOW.replace(day=28)
+        app_module.stockholm_today.return_value = NOW.replace(day=28).date()
+
     def contact_payload(self, activity, **overrides):
         payload = {
             "client_request_id": "complete-contact-1",
@@ -1800,9 +1808,9 @@ class PlanningContactCompletionTests(PlanningApiTestCase):
         self.assertEqual(row["completed_contact_id"], "")
         self.assertTrue(app_module.public_planned_activity(row, now=NOW)["overdue"])
         calendar = self.client.get("/planning/activities?start=2026-07-26&end=2026-07-26").get_json()
-        self.assertEqual(calendar["activities"][0]["status"], "planned")
-        self.assertEqual(calendar["days"]["2026-07-26"]["planned"], 1)
-        self.assertEqual(calendar["days"]["2026-07-26"]["activity_count"], 1)
+        self.assertEqual(calendar["activities"][0]["status"], "superseded")
+        self.assertEqual(calendar["days"]["2026-07-26"]["planned"], 0)
+        self.assertEqual(calendar["days"]["2026-07-26"]["activity_count"], 0)
 
     def test_future_plan_after_contact_stays_planned(self):
         self.append_planning_row(

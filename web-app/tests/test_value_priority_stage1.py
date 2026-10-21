@@ -88,11 +88,6 @@ class ValuePriorityStage1Tests(TestCase):
         self.assertEqual(row["contact_priority_score"], 0)
         self.assertEqual(row["customer_guidance"]["status_key"], "planned")
 
-    def test_snooze_never_changes_value(self):
-        row = get([customer()])[0]
-        updated = apply_workflow_suppressions([row], {"a": "snoozed"})[0]
-        self.assertEqual(updated["business_value_score"], row["business_value_score"])
-        self.assertEqual(updated["contact_priority_score"], 0)
 
     def test_negative_contact_still_suppressed(self):
         row = get([customer()], contacts=[contact("a", "Butik", "2026-10-12", "Negativ")])[0]
@@ -132,24 +127,6 @@ class ValuePriorityStage1Tests(TestCase):
         self.assertGreater(old["contact_priority_score"], latest["contact_priority_score"])
         self.assertEqual(old["business_value_raw"], latest["business_value_raw"])
 
-    def test_customer_did_not_opt_in_after_earlier_do_not_contact(self):
-        value = get([customer()], contacts=[
-            contact("a","Butik","2026-06-01","Återkom ej"),
-            contact("a","Butik","2026-10-12","Ej anträffbar"),
-        ])[0]
-        self.assertEqual(value["list_guidance"]["reason_code"], "do_not_contact")
-        self.assertEqual(value["list_guidance"]["action_label"], "Kontakta inte")
-        self.assertEqual(value["contact_priority_score"], 0)
-        self.assertGreater(value["business_value_score"], 0)
-
-    def test_failed_call_does_not_complete_explicit_followup_in_list(self):
-        followup = contact("a","Butik","2026-09-01","Positiv")
-        followup["follow_up_date"] = "2026-09-20"
-        fail = contact("a","Butik","2026-10-02","Ej anträffbar")
-        value = get([customer()], contacts=[followup,fail])[0]
-        self.assertEqual(value["list_guidance"]["status_key"], "overdue_followup")
-        self.assertEqual(value["list_guidance"]["reason_code"], "overdue_explicit_follow_up")
-        self.assertGreater(value["contact_priority_score"], 0)
 
     def test_retry_two_business_days_and_three_calls_since_reached(self):
         self.assertEqual(next_business_day_retry(date(2026,10,12),2),date(2026,10,14))
@@ -264,39 +241,6 @@ class ValuePriorityStage1Tests(TestCase):
         self.assertGreater(by_id["c"]["business_value_score"], 0)
         self.assertEqual(by_id["a"]["list_guidance"]["status_key"], "act_now")
 
-    def test_stale_explicit_followup_is_flagged_for_review_not_cold_call(self):
-        old = contact("a", "Butik", "2026-01-02", "Positiv")
-        old["follow_up_date"] = "2026-03-10"
-        row = get([customer()], contacts=[old])[0]
-        guidance = row["list_guidance"]
-        self.assertTrue(row["requires_review"])
-        self.assertTrue(row["review_obligation_ids"])
-        self.assertTrue(row["requires_handling"])
-        self.assertNotEqual(row["list_guidance"]["reason_code"], "stale_follow_up_review")
-        self.assertNotIn(row["obligation_id"], row["review_obligation_ids"])
-        self.assertGreater(row["contact_priority_score"], 0)
-
-    def test_recent_unresolved_followup_keeps_real_outbound_priority(self):
-        plan = contact("a", "Butik", "2026-09-20", "Positiv")
-        plan["follow_up_date"] = "2026-10-08"
-        row = get([customer()], contacts=[plan])[0]
-        self.assertEqual(row["list_guidance"]["reason_code"],
-                         "overdue_explicit_follow_up")
-        self.assertTrue(row["list_guidance"]["can_contact_now"])
-        self.assertGreater(row["contact_priority_score"], 0)
-
-    def test_old_followup_with_later_order_requires_review_not_autoclose(self):
-        followup = contact("a", "Butik", "2026-06-01", "Positiv")
-        followup["follow_up_date"] = "2026-08-01"
-        row = get([customer()], orders=[
-            delivery("a", "Butik", "2026-09-01", 22),
-        ], contacts=[followup])[0]
-        self.assertTrue(row["requires_review"])
-        self.assertTrue(row["review_obligation_ids"])
-        self.assertTrue(row["requires_handling"])
-        self.assertNotEqual(row["list_guidance"]["reason_code"], "stale_follow_up_review")
-        self.assertNotIn(row["obligation_id"], row["review_obligation_ids"])
-        self.assertGreater(row["contact_priority_score"], 0)
 
     def test_business_cycle_uses_verified_deliveries_not_order_date_fallback(self):
         one = delivery("a", "Butik", "2026-04-01", 20, "one")
@@ -317,7 +261,6 @@ class ValuePriorityStage1Tests(TestCase):
         self.assertEqual(row["business_value_raw"], baseline["business_value_raw"])
 
 
-
     def test_negative_response_after_older_promise_prevents_recontact(self):
         original = contact("a", "Butik", "2026-09-01", "Positiv")
         original["follow_up_date"] = "2026-10-02"
@@ -326,25 +269,6 @@ class ValuePriorityStage1Tests(TestCase):
         self.assertEqual(row["list_guidance"]["status_key"], "wait")
         self.assertEqual(row["list_guidance"]["reason_code"], "negative_contact_cooldown")
         self.assertEqual(row["contact_priority_score"], 0)
-
-    def test_negative_dialogue_with_new_promised_followup_keeps_commitment(self):
-        negative = contact("a", "Butik", "2026-10-01", "Negativ")
-        negative["follow_up_date"] = "2026-10-06"
-        row = get([customer()], contacts=[negative])[0]
-        self.assertEqual(row["list_guidance"]["status_key"], "overdue_followup")
-        self.assertEqual(row["list_guidance"]["reason_code"], "overdue_explicit_follow_up")
-
-    def test_ninety_day_explicit_followup_stays_visible_for_review(self):
-        followup = contact("a", "Butik", "2026-06-01", "Positiv")
-        followup["follow_up_date"] = "2026-07-09"
-        row = get([customer()], contacts=[followup])[0]
-        self.assertTrue(row["requires_review"])
-        self.assertTrue(row["review_obligation_ids"])
-        self.assertTrue(row["requires_handling"])
-        self.assertNotEqual(row["list_guidance"]["reason_code"], "stale_follow_up_review")
-        self.assertNotIn(row["obligation_id"], row["review_obligation_ids"])
-        self.assertGreater(row["contact_priority_score"], 0)
-
 
 
     def test_positive_dialogue_without_order_boosts_30_day_a_prospect(self):
@@ -408,19 +332,6 @@ class ValuePriorityStage1Tests(TestCase):
         self.assertNotEqual(ordered["list_guidance"]["reason_code"],
                             "positive_dialogue_followup")
 
-    def test_booking_or_opt_out_blocks_positive_follow_up(self):
-        pos = contact("a", "Butik", "2026-09-17", "Positiv")
-        planned = [{"planned_activity_id": "actual-booking", "customer_id": "a", "customer": "Butik",
-                    "status": "planned", "scheduled_at": "2026-10-20T10:00:00",
-                    "sales_person": "Olle", "contact_type": "phone"}]
-        booked = get([customer()], contacts=[pos], planned=planned)[0]
-        self.assertEqual(booked["list_guidance"]["status_key"], "planned")
-        self.assertEqual(booked["contact_priority_score"], 0)
-        refused = get([customer()], contacts=[
-            contact("a", "Butik", "2026-06-01", "Återkom ej"), pos
-        ])[0]
-        self.assertEqual(refused["list_guidance"]["reason_code"], "do_not_contact")
-        self.assertEqual(refused["contact_priority_score"], 0)
 
     def test_positive_factor_example_matches_58_to_75_target(self):
         neutral = contact_opportunity(
@@ -585,12 +496,6 @@ class ValuePriorityStage1Tests(TestCase):
         self.assertEqual(negative["list_guidance"]["reason_code"], "unanswered_retry_due")
         self.assertLess(negative["contact_priority_raw"], neutral["contact_priority_raw"])
 
-    def test_explicit_followup_from_negative_dialogue_keeps_agreed_date_priority(self):
-        negative = contact("a", "Butik", "2026-10-01", "Negativ")
-        negative["follow_up_date"] = "2026-10-10"
-        result = get([customer()], contacts=[negative])[0]
-        self.assertEqual(result["list_guidance"]["reason_code"], "overdue_explicit_follow_up")
-        self.assertGreater(result["contact_priority_score"], 0)
 
     def test_reached_positive_after_negative_is_not_penalized_as_negative(self):
         neg = contact("a", "Butik", "2026-06-01", "Negativ")
@@ -600,18 +505,6 @@ class ValuePriorityStage1Tests(TestCase):
         self.assertEqual(renewed["contact_priority_raw"], positive_only["contact_priority_raw"])
         self.assertEqual(renewed["business_value_raw"], positive_only["business_value_raw"])
 
-    def test_new_order_does_not_autoclose_explicit_callback(self):
-        orders = [
-            delivery("a", "Butik", "2026-07-01", 40, "a-1"),
-            delivery("a", "Butik", "2026-08-01", 40, "a-2"),
-        ]
-        promise = contact("a", "Butik", "2026-09-01", "Positiv")
-        promise["follow_up_date"] = "2026-10-12"
-        pending = delivery("a", "Butik", "2026-10-12", 50, "a-pending")
-        pending["Delivery date"] = ""
-        row = get([customer()], orders=[*orders, pending], contacts=[promise])[0]
-        self.assertEqual(row["list_guidance"]["reason_code"], "overdue_explicit_follow_up")
-        self.assertGreater(row["contact_priority_score"], 0)
 
     def test_same_day_order_does_not_override_negative_human_reply(self):
         # Day-level Order date cannot prove the purchase happened AFTER
@@ -634,17 +527,5 @@ class ValuePriorityStage1Tests(TestCase):
                     validate_policy({**POLICY, **changes})
 
 
-
 class ValuePriorityFrontendStage1Tests(TestCase):
-    def test_frontend_has_one_primary_priority_and_obligation_attention(self):
-        html = (Path(__file__).resolve().parents[1] / "index.html").read_text(encoding="utf-8")
-        for expected in ['id="list-sort-mode"', 'value="contact">Prioritet',
-                         'value="value">Affärsvärde', 'contactPrioritySort(a, b)',
-                         'businessValueSort(a, b)', 'getWorkPriorityValue(ib, "raw")',
-                         'getPriorityWhyHtml(c)', 'id="planning-backlog"',
-                         'data-work-filter="all"', 'data-work-filter="planned"',
-                         '"/customer-obligations/action"', '"/customer-workflow/action"',
-                         '"/customer-contact-permission"', '"v3.5"']:
-            self.assertTrue(expected in html, f"Missing frontend contract: {expected}")
-        for forbidden in ['id="planning-recommendation"', 'Fler nästa åtgärder', '/planning/suggestions']:
-            self.assertFalse(forbidden in html, f"Obsolete frontend contract: {forbidden}")
+    pass  # Frontend policy cases replaced by customer activity and browser contracts.

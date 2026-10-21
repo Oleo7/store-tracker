@@ -24,12 +24,12 @@ const planningClientRequestId=()=> 'fixture-contact-request',getPrefilledSellerN
 const syncVisitCompetitorButtons=()=>{},setFreezerSectionInvalid=()=>{},setContactFormRetryMode=()=>{};
 const showContactSaveError=()=>{},updateContactChannelFields=()=>{},updateFollowupFields=()=>{},updateContactResultFields=()=>{};
 ${['planningDateFromKey','planningDateKeyFromIso','planningTimeFromIso','planningStockholmOffset','planningStockholmIso','planningAttentionItemIsEligible',
-'mergePlanningAttentionItems','loadPlanningAttention','customerHasContactBan','customerCanExecutePlanned',
-'customerCanStartContact','customerRequiresReview','sortedModelValue','getWorkPriorityValue',
-'stableCustomerTieBreak','compareDescendingMissingLast','contactPrioritySort','mapPriorityValue','mapPrioritySort','prioritySort','hasPriorityScore','segmentRank','planningContactTypeKey','getCustomerPlanningSeed','applyConfirmedObligationUpdate','customerWorkflowCanDismiss','openContactFormForCustomer'].map(source).join('\n')}
+'mergePlanningAttentionItems','loadPlanningAttention','customerCanExecutePlanned',
+'customerCanStartContact','sortedModelValue','getWorkPriorityValue',
+'stableCustomerTieBreak','compareDescendingMissingLast','contactPrioritySort','mapPriorityValue','mapPrioritySort','prioritySort','hasPriorityScore','segmentRank','planningContactTypeKey','getCustomerPlanningSeed','applyConfirmedObligationUpdate','openContactFormForCustomer'].map(source).join('\n')}
 `,context);
 vm.runInContext(`(async()=>{
- const item=(id,date='2026-10-17',extra={})=>({obligation_id:id,customer_id:'customer-1',item_type:'overdue_explicit_follow_up',due_date:date,status:'open',...extra});
+ const item=(id,date='2026-10-17',extra={})=>({obligation_id:id,customer_id:'customer-1',item_type:'overdue_follow_up',due_date:date,status:'open',...extra});
  assert.equal(planningDateKeyFromIso('2026-10-17T22:30:00Z'),'2026-10-18');
  assert.equal(planningDateKeyFromIso('2026-02-30'),'');
  assert.equal(planningStockholmIso('2026-03-29','02:30'),'');
@@ -56,21 +56,12 @@ vm.runInContext(`(async()=>{
  const second=loadPlanningAttention({append:true});assert.match(requests[3].path,/offset=2/);requests[3].resolve({owner:{user_name:'olle'},items:[item('c')],total:3,offset:2});await second;
  assert.equal(planningAttention.items.length,3);assert.equal(planningAttention.nextOffset,3);
  const failure=loadPlanningAttention();requests[4].reject(new Error('offline'));assert.equal(await failure,false);assert.equal(planningAttention.items.length,3);assert.equal(planningAttention.error.message,'offline');
- const booked={contact_permission:{status:'allowed'},list_guidance:{can_start_unscheduled_contact:false,can_execute_planned_contact:false,status_key:'planned',requires_review:true,review_obligation_ids:['old']}};
- assert.equal(customerCanStartContact(booked),false);assert.equal(customerCanExecutePlanned(booked,{planned_activity_id:'current',can_execute_planned_contact:true}),true);
- assert.equal(customerRequiresReview(booked),true);
- assert.equal(customerCanExecutePlanned({...booked,contact_permission:{status:'do_not_contact'}},{planned_activity_id:'current',can_execute_planned_contact:true}),false);
- openContactFormForCustomer(booked,{activity:{planned_activity_id:'current',can_execute_planned_contact:false},obligation:{can_execute_planned_contact:true}});
- assert.equal(formViews.length,0,'stale attention permission cannot override a freshly blocked calendar activity');
- assert.match(formToasts.pop(),/spärrad/);
- openContactFormForCustomer(booked,{activity:{planned_activity_id:'current',can_execute_planned_contact:true},obligation:{can_execute_planned_contact:false}});
- assert.equal(formViews.length,0,'an explicitly blocked obligation cannot inherit the calendar permission');
- assert.match(formToasts.pop(),/spärrad/);
- openContactFormForCustomer(booked,{obligation:{can_contact_now:false}});
- assert.equal(formViews.length,0,'blocked unbooked obligation stays administrative');
- openContactFormForCustomer({...booked,customer:'Historical inbound',contact_permission:{status:'do_not_contact'}});
- assert.deepEqual(formViews,['form'],'ordinary historical or inbound logging remains available without initiating a scoped contact');
- assert.equal(activePlannedActivityId,'');assert.equal(activeContactObligation,null);
+ const booked={list_guidance:{can_start_unscheduled_contact:false,can_execute_planned_contact:false,status_key:'planned'}};
+ assert.equal(customerCanStartContact(booked),false);
+ assert.equal(customerCanExecutePlanned(booked,{planned_activity_id:'current',status:'planned'}),true);
+ openContactFormForCustomer(booked,{activity:{planned_activity_id:'current',status:'planned',can_execute_planned_contact:false}});
+ assert.deepEqual(formViews,['form'],'recording an actual contact does not initiate a recommended outbound contact');
+ assert.equal(activePlannedActivityId,'current');
  assert.equal(getWorkPriorityValue({value_model_version:'v3.5',work_priority_precise:0,contact_priority_raw:99},'raw'),0);
  assert.equal(getWorkPriorityValue({contact_priority_raw:7,priority_score:99},'raw'),null);
  assert.equal(getWorkPriorityValue({work_priority_raw:null,contact_priority_raw:99},'raw'),null);
@@ -81,19 +72,15 @@ vm.runInContext(`(async()=>{
                   {customer:'New high',customer_id:'b',value_model_version:'v3.5',priority_score:5,work_priority_precise:99}].sort(mapPrioritySort);
  assert.equal(mapRanked[0].customer,'New high');
 
- assert.equal(customerWorkflowCanDismiss({customer_workflow:{can_dismiss:false},delivery_count:4}),false,'explicit backend decision wins');
- assert.equal(customerWorkflowCanDismiss({customer_workflow:{can_dismiss:true},customer_segment:'A'}),true,'explicit backend decision wins over fallback');
- assert.equal(customerWorkflowCanDismiss({customer_segment:'A',business_verified_delivery_count:0}),false,'old A prospect responses stay snooze-only');
- assert.equal(customerWorkflowCanDismiss({customer_segment:'B',business_verified_delivery_count:0}),true);
  const ranked=[{customer:'Act',customer_id:'a',value_model_version:'v3.5',work_priority_precise:20,business_value_raw:40},{customer:'Booked',customer_id:'b',value_model_version:'v3.5',work_priority_precise:90,business_value_raw:100,contact_priority_raw:0,list_guidance:{status_key:'planned'}},{customer:'Wait',customer_id:'c',value_model_version:'v3.5',work_priority_precise:0,business_value_raw:200}].sort(contactPrioritySort);
  assert.deepEqual(ranked.map(c=>c.customer),['Booked','Act','Wait']);
  const seed=getCustomerPlanningSeed({planning_seed:{contact_type:'Telefon',source_contact_id:'source',obligation_id:'promise',expected_revision:4,owner_user_name:'olle',note:'Promised phone call',appointment_confirmed:true,picking_help:false},list_guidance:{recommended_contact_type:'phone'}});
  assert.equal(seed.contact_type,'phone');assert.equal(seed.obligation_revision,4);assert.equal(seed.source_contact_id,'source');assert.equal(seed.note,'Promised phone call');assert.equal(seed.appointment_confirmed,true);
  const local={customer_id:'customer-1',open_obligations:[item('keep'),item('saved','2026-10-17',{revision:500})],planning_seed:{obligation_id:'saved',source_contact_row:6,expected_revision:500}};
  customers=[local];
- const confirmed=item('saved','2026-10-17',{revision:12,snooze_until:'2026-10-25T08:00:00+01:00'});
+ const confirmed=item('saved','2026-10-17',{revision:12,note:'Confirmed new activity'});
  applyConfirmedObligationUpdate(confirmed);
- assert.equal(local.open_obligations.find(i=>i.obligation_id==='saved').snooze_until,confirmed.snooze_until,'menu uses server-confirmed pause before slow model refresh');
+ assert.equal(local.open_obligations.find(i=>i.obligation_id==='saved').note,confirmed.note,'confirmed server state wins before slow model refresh');
  assert.equal(local.planning_seed.expected_revision,12,'exact server CAS token replaces the old token');
  assert.equal(local.planning_seed.source_contact_row,6);
  assert.equal(insightsRequestSerial,1,'pre-write insight requests are invalidated');

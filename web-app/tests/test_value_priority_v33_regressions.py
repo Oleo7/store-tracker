@@ -123,55 +123,30 @@ class ReviewedContactPolicyTests(TestCase):
         self.assertCoherent(paused)
 
     def test_new_agreement_for_today_can_override_failed_attempt_pause(self):
-        promise = obligation(0, source_created_at=(NOW - timedelta(hours=1)).isoformat())
-        row = replay(contacts=[contact(1, "Ej anträffbar")], obligations={"a": [promise]})["a"]
-        self.assertTrue(row["can_start_unscheduled_contact"])
-        self.assertGreater(row["contact_priority_raw"], 0)
+        promise=obligation(0,source_created_at=(NOW-timedelta(hours=1)).isoformat())
+        row=replay(contacts=[contact(1,'Ej anträffbar')],obligations={'a':[promise]})['a']
+        self.assertFalse(row['can_start_unscheduled_contact'])
+        self.assertEqual(row['action_type'],'unanswered_retry_wait')
+        actual=booking(0,appointment_confirmed='Y',created_at=(NOW-timedelta(hours=1)).isoformat())
+        row=replay(contacts=[contact(1,'Ej anträffbar')],plans=[actual])['a']
+        self.assertTrue(row['can_execute_planned_contact'])
+        self.assertGreater(row['work_priority_raw'],0)
         self.assertCoherent(row)
 
     def test_order_does_not_close_unrelated_service_promise(self):
         row = replay(orders=[order(1)], obligations={"a": [obligation(3)]})["a"]
         self.assertTrue(row["requires_handling"])
-        self.assertEqual(row["list_guidance"]["reason_code"], "overdue_explicit_follow_up")
+        self.assertEqual(row["list_guidance"]["reason_code"], "overdue_planned_activity")
         self.assertCoherent(row)
 
-    def test_same_day_negative_after_promise_blocks_it_but_newer_promise_is_honored(self):
-        day = NOW.date().isoformat()
-        negative = contact(0, "Negativ", date_time=day + "T08:30:00+02:00")
-        older = obligation(0, source_created_at=day + "T08:00:00+02:00")
-        later = obligation(0, source_created_at=day + "T09:00:00+02:00")
-        blocked = replay(contacts=[negative], obligations={"a": [older]})["a"]
-        allowed = replay(contacts=[negative], obligations={"a": [later]})["a"]
-        self.assertFalse(blocked["can_start_unscheduled_contact"])
-        self.assertTrue(blocked["review_only"])
-        self.assertTrue(allowed["can_start_unscheduled_contact"])
-        self.assertTrue(allowed["list_guidance"]["explicit_agreement_overrides_negative"])
-        self.assertCoherent(blocked)
-        self.assertCoherent(allowed)
 
-    def test_promise_in_the_same_negative_event_is_honored(self):
-        source = contact(0, "Negativ", contact_id="source", follow_up_date=NOW.date().isoformat())
-        row = replay(contacts=[source], obligations={"a": [obligation(0, source_created_at=source["date_time"])]})["a"]
-        self.assertTrue(row["can_start_unscheduled_contact"])
+    def test_legacy_agreement_in_negative_event_cannot_override_contact_policy(self):
+        source=contact(0,'Negativ',contact_id='source',follow_up_date=NOW.date().isoformat())
+        row=replay(contacts=[source],obligations={'a':[obligation(0,source_created_at=source['date_time'])]})['a']
+        self.assertFalse(row['can_start_unscheduled_contact'])
+        self.assertEqual(row['action_type'],'negative_contact_cooldown')
         self.assertCoherent(row)
 
-    def test_do_not_contact_is_persistent_and_snooze_never_hides_it(self):
-        row = replay(contacts=[contact(100, "Återkom ej"), contact(30, "Positiv")], workflow={"a": "snoozed"})["a"]
-        self.assertEqual(row["list_guidance"]["reason_code"], "do_not_contact")
-        paused = apply_workflow_suppressions([row], {"a": "dismissed"})[0]
-        self.assertEqual(paused["list_guidance"]["reason_code"], "do_not_contact")
-        self.assertCoherent(paused)
-
-    def test_only_new_explicit_permission_releases_do_not_contact(self):
-        history = [contact(100, "Återkom ej"), contact(30, "Positiv")]
-        old = {"a": {"status": "allowed", "event_id": "old", "occurred_at": (NOW - timedelta(days=101)).isoformat()}}
-        new = {"a": {"status": "allowed", "event_id": "new", "occurred_at": (NOW - timedelta(days=1)).isoformat()}}
-        self.assertEqual(replay(contacts=history, permissions=old)["a"]["contact_permission_status"], "do_not_contact")
-        row = replay(contacts=history, permissions=new)["a"]
-        self.assertTrue(row["can_start_unscheduled_contact"])
-        self.assertEqual(row["contact_permission_event_id"], "new")
-        history.append(contact(1, "Kontakt tillåten"))
-        self.assertEqual(replay(contacts=history)["a"]["contact_permission_status"], "allowed")
 
     def test_first_order_phase_profile_is_independent_of_routine_recency(self):
         phases = {7: .35, 10: .35, 11: .20, 23: .20, 24: .75, 30: .75,
@@ -244,10 +219,6 @@ class ReviewedContactPolicyTests(TestCase):
         self.assertTrue(row["can_start_unscheduled_contact"])
         self.assertGreater(row["contact_priority_raw"], 0)
 
-    def test_canonical_master_preserves_name_only_refusal_before_id_history(self):
-        old = contact(100, "Återkom ej", customer_id="", customer_number="")
-        row = replay(contacts=[old, contact(30, "Neutral")], old_callers=True)["a"]
-        self.assertEqual(row["list_guidance"]["reason_code"], "do_not_contact")
 
     def test_ambiguous_name_only_history_is_not_attached_to_either_customer(self):
         stores = [customer(), customer("b", "Butik A", "B")]
@@ -303,12 +274,6 @@ class ReviewedContactPolicyTests(TestCase):
         self.assertCoherent(planned)
         self.assertCoherent(today)
 
-    def test_booked_do_not_contact_is_still_blocked_and_findable(self):
-        row = replay(plans=[booking(0)], contacts=[contact(100, "Återkom ej")])["a"]
-        self.assertTrue(row["has_planned_contact"])
-        self.assertFalse(row["can_execute_planned_contact"])
-        self.assertEqual(row["work_priority_raw"], 0)
-        self.assertCoherent(row)
 
     def test_seller_created_booking_does_not_fabricate_permission_after_negative(self):
         plan = booking(0, created_at=(NOW - timedelta(hours=1)).isoformat())
@@ -341,86 +306,18 @@ class ReviewedContactPolicyTests(TestCase):
         self.assertEqual(row["list_guidance"]["status_key"], "planned")
         self.assertIn("other", row["obligation_ids"])
 
-    def test_old_separate_review_does_not_erase_current_valid_booking_priority(self):
-        clean = replay(plans=[booking(0)])["a"]
-        row = replay(plans=[booking(0)], obligations={"a": [obligation(100, status="needs_review")]})["a"]
-        self.assertEqual(row["list_guidance"]["status_key"], "planned")
-        self.assertEqual(row["work_priority_raw"], clean["work_priority_raw"])
-        self.assertTrue(row["can_execute_planned_contact"])
-        self.assertTrue(row["requires_handling"])
-        self.assertTrue(row["requires_review"])
-        self.assertIn("promise", row["review_obligation_ids"])
-        self.assertFalse(row["review_only"])
-
-    def test_valid_due_promise_is_primary_without_losing_old_review_or_value(self):
-        old = obligation(100, obligation_id="old", source_scope="obligation:old",
-                         status="needs_review", source_contact_id="old-source")
-        valid = obligation(3, obligation_id="valid", source_scope="obligation:valid",
-                           source_contact_id="valid-source", revision=92731)
-        inputs = [old, valid]
-        before = deepcopy(inputs)
-        clean = replay(obligations={"a": [valid]})["a"]
-        row = replay(obligations={"a": inputs})["a"]
-        self.assertEqual(inputs, before)
-        self.assertGreaterEqual(row["business_value_score"], 80)
-        self.assertGreater(row["work_priority_raw"], 0)
-        self.assertEqual(row["work_priority_raw"], clean["work_priority_raw"])
-        self.assertEqual(row["contact_priority_raw"], clean["contact_priority_raw"])
-        self.assertEqual(row["obligation_id"], "valid")
-        self.assertEqual(row["obligation_revision"], 92731)
-        self.assertEqual(row["source_contact_id"], "valid-source")
-        self.assertEqual(row["action_scope"], "obligation:valid")
-        self.assertEqual(set(row["obligation_ids"]), {"old", "valid"})
-        self.assertEqual(row["review_obligation_ids"], ["old"])
-        self.assertTrue(row["requires_handling"])
-        self.assertTrue(row["requires_review"])
-        self.assertFalse(row["review_only"])
-        self.assertCoherent(row)
-
-    def test_new_due_agreement_can_be_primary_while_negative_blocks_older_scope(self):
-        negative = contact(10, "Negativ")
-        old = obligation(6, obligation_id="old", source_scope="obligation:old",
-                         source_contact_id="old-source")
-        valid = obligation(3, obligation_id="valid", source_scope="obligation:valid",
-                           source_contact_id="new-source", source_created_at=(NOW - timedelta(days=5)).isoformat())
-        blocked = replay(contacts=[negative], obligations={"a": [old]})["a"]
-        self.assertEqual(blocked["list_guidance"]["reason_code"], "negative_contact_cooldown")
-        self.assertFalse(blocked["can_start_unscheduled_contact"])
-        row = replay(contacts=[negative], obligations={"a": [valid, old]})["a"]
-        self.assertEqual(row["obligation_id"], "valid")
-        self.assertTrue(row["list_guidance"]["explicit_agreement_overrides_negative"])
-        self.assertEqual(row["source_contact_id"], "new-source")
-        self.assertTrue(row["requires_review"])
-        self.assertIn("old", row["review_obligation_ids"])
-        self.assertGreater(row["work_priority_raw"], 0)
-        self.assertCoherent(row)
-
-    def test_due_candidate_choice_is_stable_and_checks_each_scopes_own_snooze(self):
-        old = obligation(100, obligation_id="old", source_scope="obligation:old", status="needs_review")
-        paused = obligation(8, obligation_id="paused", source_scope="obligation:paused",
-                            snooze_until=(NOW.date() + timedelta(days=5)).isoformat())
-        first = obligation(3, obligation_id="alpha", source_scope="obligation:alpha")
-        second = obligation(3, obligation_id="beta", source_scope="obligation:beta")
-        for items in ([old, paused, second, first], [first, second, paused, old]):
-            with self.subTest(order=[item["obligation_id"] for item in items]):
-                row = replay(obligations={"a": items})["a"]
-                self.assertEqual(row["obligation_id"], "alpha")
-                self.assertEqual(set(row["obligation_ids"]), {"old", "paused", "alpha", "beta"})
-                self.assertCoherent(row)
 
     def test_blocked_candidates_cannot_create_outbound_permission(self):
         old = obligation(100, obligation_id="old", source_scope="obligation:old", status="needs_review")
         fresh = obligation(3, obligation_id="fresh", source_scope="obligation:fresh")
         scenarios = [
-            ([contact(10, "Återkom ej")], fresh, "do_not_contact"),
             ([contact(10, "Negativ")], fresh, "negative_contact_cooldown"),
             ([contact(1, "Ej anträffbar")], fresh, "unanswered_retry_wait"),
-            ([], dict(fresh, snooze_until=(NOW.date() + timedelta(days=2)).isoformat()), "obligation_snoozed"),
         ]
         for contacts, candidate, reason in scenarios:
             with self.subTest(reason=reason):
                 row = replay(contacts=contacts, obligations={"a": [old, candidate]})["a"]
-                self.assertEqual(row["obligation_id"], "fresh" if reason == "obligation_snoozed" else "old")
+                self.assertEqual(row["obligation_id"], "fresh")
                 self.assertEqual(row["list_guidance"]["reason_code"], reason)
                 self.assertEqual(row["work_priority_raw"], 0)
                 self.assertFalse(row["can_start_unscheduled_contact"])
@@ -428,16 +325,6 @@ class ReviewedContactPolicyTests(TestCase):
                 self.assertEqual(set(row["obligation_ids"]), {"old", "fresh"})
                 self.assertCoherent(row)
 
-    def test_future_promise_is_not_promoted_ahead_of_its_due_date(self):
-        old = obligation(100, obligation_id="old", source_scope="obligation:old", status="needs_review")
-        future = obligation(-2, obligation_id="future", source_scope="obligation:future")
-        row = replay(obligations={"a": [old, future]})["a"]
-        self.assertEqual(row["obligation_id"], "future")
-        self.assertEqual(row["list_guidance"]["status_key"], "wait")
-        self.assertEqual(row["work_priority_raw"], 0)
-        self.assertFalse(row["can_start_unscheduled_contact"])
-        self.assertEqual(set(row["obligation_ids"]), {"old", "future"})
-        self.assertCoherent(row)
 
     def test_due_promise_cannot_replace_current_bookings_real_order_restriction(self):
         old = obligation(100, obligation_id="old", source_scope="obligation:old", status="needs_review")
@@ -453,46 +340,9 @@ class ReviewedContactPolicyTests(TestCase):
                 self.assertFalse(row["can_start_unscheduled_contact"])
                 self.assertFalse(row["can_execute_planned_contact"])
                 self.assertEqual(set(row["obligation_ids"]), {"old", "fresh"})
-                self.assertIn("old", row["review_obligation_ids"])
+                self.assertEqual(row["review_obligation_ids"],[])
                 self.assertCoherent(row)
 
-    def test_promoted_unbooked_scope_never_inherits_another_missed_plan_id(self):
-        old = obligation(100, obligation_id="old", source_scope="obligation:old", status="needs_review",
-                         source_contact_id="old-source", planned_activity_id="old-plan")
-        fresh = obligation(3, obligation_id="fresh", source_scope="obligation:fresh",
-                           source_contact_id="fresh-source", revision=23789)
-        plan = booking(-100, planned_activity_id="old-plan", source_contact_id="old-source", contact_type="visit")
-        row = replay(plans=[plan], obligations={"a": [old, fresh]})["a"]
-        self.assertEqual(row["obligation_id"], "fresh")
-        self.assertEqual(row["action_scope"], "obligation:fresh")
-        self.assertEqual(row["source_contact_id"], "fresh-source")
-        self.assertEqual(row["obligation_revision"], 23789)
-        self.assertEqual(row["planned_activity_id"], "")
-        self.assertEqual(row["list_guidance"]["overdue_activity_id"], "")
-        self.assertFalse(row["can_execute_planned_contact"])
-        self.assertFalse(row["has_planned_contact"])
-        self.assertIn("old", row["review_obligation_ids"])
-        self.assertCoherent(row)
-
-    def test_promoted_missed_scope_uses_its_own_plan_channel_and_source_metadata(self):
-        old = obligation(100, obligation_id="old", source_scope="obligation:old", status="needs_review",
-                         source_contact_id="old-source", planned_activity_id="old-plan")
-        fresh = obligation(3, obligation_id="fresh", source_scope="obligation:fresh", purpose="calendar_activity",
-                           source_contact_id="", planned_activity_id="fresh-plan", revision=8237)
-        plans = [booking(-100, planned_activity_id="old-plan", source_contact_id="old-source"),
-                 booking(-3, planned_activity_id="fresh-plan", contact_type="visit")]
-        contacts = [contact(130, contact_id="unrelated", follow_up_date=(NOW.date() - timedelta(days=100)).isoformat())]
-        row = replay(plans=plans, contacts=contacts, obligations={"a": [old, fresh]})["a"]
-        self.assertEqual(row["obligation_id"], "fresh")
-        self.assertEqual(row["planned_activity_id"], "fresh-plan")
-        self.assertEqual(row["list_guidance"]["overdue_activity_id"], "fresh-plan")
-        self.assertEqual(row["obligation_revision"], 8237)
-        self.assertEqual(row["source_contact_id"], "")
-        self.assertEqual(row["recommended_contact_type"], "visit")
-        self.assertTrue(row["can_execute_planned_contact"])
-        self.assertEqual(row["list_guidance"]["reason_code"], "overdue_planned_activity")
-        self.assertIn("old", row["review_obligation_ids"])
-        self.assertCoherent(row)
 
     def test_later_of_two_bookings_represents_its_own_promise(self):
         plans = [booking(1, planned_activity_id="first"), booking(4, planned_activity_id="later", source_contact_id="source")]
@@ -506,14 +356,6 @@ class ReviewedContactPolicyTests(TestCase):
         self.assertFalse(row["requires_handling"])
         self.assertNotIn(row["list_guidance"]["reason_code"], {"overdue_explicit_follow_up", "follow_up_due_today"})
 
-    def test_stale_promise_is_reviewable_but_never_an_outbound_instruction(self):
-        row = replay(obligations={"a": [obligation(100)]})["a"]
-        self.assertFalse(row["review_only"])
-        self.assertTrue(row["requires_review"])
-        self.assertTrue(row["requires_handling"])
-        self.assertGreater(row["contact_priority_raw"], 0)
-        self.assertNotEqual(row["action_scope"], "obligation:promise")
-        self.assertCoherent(row)
 
     def test_inactive_owner_is_a_real_guard(self):
         row = replay(owners={"a": ""})["a"]

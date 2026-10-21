@@ -114,8 +114,8 @@ class CustomerNextFollowUpTests(PlanningApiTestCase):
 
         payload = self.get_stats()
 
-        self.assertEqual(payload["next_follow_up"]["source"], "planned_activity")
-        self.assertEqual(payload["next_follow_up"]["date"], "2026-07-29")
+        self.assertEqual(payload["next_follow_up"]["source"], "latest_contact")
+        self.assertEqual(payload["next_follow_up"]["date"], "2026-07-28")
 
     def test_past_legacy_follow_up_is_not_selected(self):
         self.append_contact_row(
@@ -222,7 +222,7 @@ class CustomerNameRoutingTests(PlanningApiTestCase):
                     json={
                         "client_request_id": f"routing-contact-{index}",
                         "customer_id": "11111111-1111-4111-8111-111111111111",
-                        "date_time": "2026-07-28 09:10",
+                        "date_time": "2026-07-27 09:10",
                         "contact_channel": "Telefon",
                         "result": "Positiv",
                         "comment": f"Kontakt för {name}",
@@ -247,7 +247,7 @@ class CustomerNameRoutingTests(PlanningApiTestCase):
             self.customer_url(other_name, "contacts"),
             json={
                 "customer_id": "22222222-2222-4222-8222-222222222222",
-                "date_time": "2026-07-28 09:10",
+                "date_time": "2026-07-27 09:10",
                 "contact_channel": "Telefon",
                 "result": "Positiv",
                 "comment": "Får inte sparas",

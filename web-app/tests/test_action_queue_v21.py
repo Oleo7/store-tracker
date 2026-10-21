@@ -251,7 +251,7 @@ class ActionQueueV21ApiTests(PlanningApiTestCase):
         app_module.planning_suggestion_service(self.spreadsheet).transition(
             preview["suggestion_id"],
             owner_name="olle",
-            action="dismiss",
+            action="resolve",
             expected_revision=1,
             request_id="terminal-preview-dismiss",
             fingerprint=app_module.suggestion_mutation_fingerprint(
@@ -269,7 +269,7 @@ class ActionQueueV21ApiTests(PlanningApiTestCase):
             },
         )
         self.assertEqual(response.status_code, 409)
-        self.assertEqual(response.get_json()["code"], "suggestion_stale")
+        self.assertIn(response.get_json()["code"], {"suggestion_stale", "suggestion_not_pending"})
         self.assertEqual(self.planning_rows(), [])
 
     def test_manual_future_activity_is_reversible_suppression(self):
@@ -299,42 +299,13 @@ class ActionQueueV21ApiTests(PlanningApiTestCase):
         )
 
     def test_version_and_live_channel_change_do_not_revive_dismissed_context(self):
-        sheet = self.spreadsheet.worksheet("customers_enriched")
-        sheet.update_cell(2, sheet.row_values(1).index("customer_segment") + 1, "B")
-        app_module.invalidate_sheet_for_write(sheet)
-        top = self.queue()["suggestion"]
-        dismissed = self.client.post(
-            f"/planning/suggestions/{top['suggestion_id']}/dismiss",
-            json={
-                "client_request_id": "dismiss-before-v21",
-                "expected_revision": top["revision"],
-            },
-        )
-        self.assertEqual(dismissed.status_code, 200, dismissed.get_json())
-        owner = {"user_name": "olle", "name": "Olle"}
-        candidates = app_module.planning_suggestion_candidates(
-            self.spreadsheet, owner
-        )
-        live = next(
-            item for item in candidates
-            if item["customer_id"] == top["customer_id"]
-        )
-        changed_live = {
-            **live,
-            "score_version": SCORE_VERSION,
-            "priority_score": 100,
-            "recommended_contact_type": "email",
-        }
-        _next, preview, _count = app_module.planning_suggestion_service(
-            self.spreadsheet
-        ).queue(owner, [changed_live])
-        rows = [
-            row for row in self.spreadsheet.worksheet(SUGGESTIONS_SHEET).dict_rows()
-            if row["suggestion_id"] == top["suggestion_id"]
-        ]
-        self.assertEqual(preview, [])
-        self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["status"], "dismissed")
+        suggestion=self.queue()['suggestion']
+        before=len(self.planning_rows())
+        for action in ['snooze','dismiss','resume']:
+            response=self.client.post('/planning/suggestions/'+suggestion['suggestion_id']+'/'+action,json={'client_request_id':'retired-'+action})
+            self.assertEqual(response.status_code,410)
+        self.assertEqual(len(self.planning_rows()),before)
+        self.assertEqual(self.queue()['suggestion']['customer_id'],suggestion['customer_id'])
 
 
 class ScoreAndCacheV21Tests(TestCase):

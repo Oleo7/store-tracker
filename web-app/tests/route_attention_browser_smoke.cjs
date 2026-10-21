@@ -10,6 +10,7 @@ assert.ok(['127.0.0.1','localhost'].includes(new URL(base).hostname),'Only isola
    const page=await context.newPage();const errors=[];page.on('pageerror',e=>errors.push(String(e)));
    const login=await page.request.post(base+'/login',{data:{user_name:'sofia',password:'secret'}});
    assert.equal(login.status(),200,await login.text());
+   await page.clock.install({time:new Date('2026-10-20T10:00:00+02:00')});
    await page.goto(base+'/__test__/login');
    await page.waitForFunction(()=>typeof insightsLoaded!=='undefined'&&insightsLoaded);
    await page.locator('#planning-mode-btn').click();
@@ -23,8 +24,9 @@ assert.ok(['127.0.0.1','localhost'].includes(new URL(base).hostname),'Only isola
    await page.locator('#planning-attention-search').fill('');
    await page.request.post(base+'/__test__/service');
    await page.evaluate(()=>loadPlanningAttention());
-   await page.waitForFunction(()=>planningAttention.total===2&&!planningAttentionLoading);
-   assert.match(await page.locator('#planning-backlog').innerText(),/Separat reklamation/);
+   await page.waitForFunction(()=>planningAttention.total===1&&!planningAttentionLoading);
+   assert.match(await page.locator('#planning-backlog').innerText(),/3 äldre missade aktiviteter/);
+   assert.equal(await page.locator('[data-attention-action=review]').count(),0);
    await page.request.post(base+'/__test__/reset-route-attention');
    await page.evaluate(()=>loadPlanningWeek());
    await page.waitForFunction(()=>!planningLoading);
@@ -66,13 +68,11 @@ assert.ok(['127.0.0.1','localhost'].includes(new URL(base).hostname),'Only isola
    await page.request.post(base+'/__test__/reset-route-attention');
    await page.evaluate(()=>loadPlanningAttention());
    const item=await page.evaluate(()=>planningAttention.items[0]);
-   const cancel=await page.request.post(base+'/customer-obligations/action',{data:{
-    client_request_id:`browser-cancel-${width}`,customer_id:item.customer_id,obligation_id:item.obligation_id,
-    expected_revision:item.revision,action:'cancel',reason:'Uppföljningen avbokad i isolerat test'}});
-   assert.equal(cancel.status(),200,await cancel.text());
-   await page.evaluate(()=>loadPlanningAttention());assert.equal(await page.locator('#planning-backlog .planning-attention-item').count(),0);
+   await page.locator('[data-attention-action="skip"]').click();
+   await page.waitForFunction(()=>planningAttention.total===0&&!planningAttentionLoading);
+   assert.equal(await page.locator('#planning-backlog .planning-attention-item').count(),0);
    assert.deepEqual(errors,[]);
-   console.log(`${width}px: grouping, history count, search, separate service, route preview/save/retry, new ban and no older resurrection PASS`);
+   console.log(`${width}px: grouping, historical notes, search, route preview/save/retry, source changes and skipped group PASS`);
    await context.close();
   }
  }finally{await browser.close();}

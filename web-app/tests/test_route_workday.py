@@ -139,7 +139,7 @@ class RouteWorkdayTests(TestCase):
                     self.assertEqual([item["customer_id"] for item in self.legacy((2, 4))["stops"]], [C])
         self.planned.values = self.planned.values[:1]
         self.activity(user_name="other", sales_person="Other Seller")
-        self.assertEqual({item["customer_id"] for item in self.inputs()["shipments"]}, {A, C})
+        self.assertEqual({item["customer_id"] for item in self.inputs()["shipments"]}, {C})
 
     def test_legacy_cache_requires_current_planning_snapshot_and_workday_policy(self):
         def cached_payload():
@@ -147,7 +147,7 @@ class RouteWorkdayTests(TestCase):
                 app_module.read_planned_activity_snapshot(self.sheet)[2], OWNER, DAY,
             )
             return {"workday_policy": app_module.WORKDAY_POLICY_VERSION,
-                    "ranking_contract": "v35-priority-lexicographic-2", "ranking_mode": "v3",
+                    "ranking_contract": "v35-priority-lexicographic-activity-1", "ranking_mode": "v3",
                     "plan_fingerprint": app_module.planning_state_fingerprint(rows)}
 
         baseline = cached_payload()

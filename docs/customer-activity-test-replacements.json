@@ -1,0 +1,115 @@
+{
+  "replacement_suite": "web-app/tests/test_customer_activity_loop.py",
+  "reason": "Source-specific promise, manual suppression and contact-ban behavior replaced by the chronological customer activity contract. Numeric, write-safety and unrelated tests retained.",
+  "replaced_tests": {
+    "test_customer_obligations": [
+      "test_read_only_attention_strict_dates_and_separate_scopes",
+      "test_same_source_today_booking_deduplicates_only_its_promise",
+      "test_actual_failed_post_preserves_source_then_snapshot_and_attention",
+      "test_explicit_resolved_post_does_not_reappear_from_source_date",
+      "test_contact_partial_save_retry_repairs_one_event_and_one_contact",
+      "test_snooze_restore_and_expiry_do_not_change_source_due",
+      "test_cancel_and_restore_are_scoped_and_revision_conflicts_are_visible",
+      "test_legacy_calendar_cancel_does_not_cancel_explicit_promise",
+      "test_virtual_workflow_snooze_dismiss_restore_and_idempotency",
+      "test_a_prospect_requires_dated_snooze_and_can_restore",
+      "test_permission_event_blocks_email_candidates_and_required_route",
+      "test_explicit_contact_permission_survives_positive_contact_and_can_be_lifted",
+      "test_contact_form_cannot_grant_permission_without_current_permission_revision",
+      "test_failed_post_with_next_booking_moves_same_promise_without_duplicates",
+      "test_exact_linked_legacy_reached_completion_is_resolved_but_order_is_review",
+      "test_permission_identical_timestamps_refusal_wins",
+      "test_stale_contact_form_cannot_reopen_resolved_obligation",
+      "test_partial_permission_event_retry_uses_matching_saved_contact",
+      "test_permission_legacy_change_invalidates_open_grant_form",
+      "test_workflow_requires_exact_context_for_virtual_revision_zero"
+    ],
+    "test_history_priority_v34": [
+      "test_duplicate_anchor_preserves_both_sources_and_refuses_mutation",
+      "test_later_reached_or_order_replaces_internal_not_customer_promise",
+      "test_later_failed_attempt_is_not_fulfillment",
+      "test_multiple_old_dates_become_one_current_internal_schedule",
+      "test_service_hint_is_preserved_but_not_agreement_proof",
+      "test_replacement_future_plan_covers_reminder_but_not_separate_service",
+      "test_saved_snooze_and_explicit_resolution_are_not_inferred_away",
+      "test_stale_separate_task_does_not_zero_normal_commercial_work",
+      "test_stale_service_does_not_erase_future_internal_reminder",
+      "test_future_internal_followup_clears_after_order_in_detail_projection"
+    ],
+    "test_value_priority_stage1": [
+      "test_snooze_never_changes_value",
+      "test_customer_did_not_opt_in_after_earlier_do_not_contact",
+      "test_failed_call_does_not_complete_explicit_followup_in_list",
+      "test_stale_explicit_followup_is_flagged_for_review_not_cold_call",
+      "test_recent_unresolved_followup_keeps_real_outbound_priority",
+      "test_old_followup_with_later_order_requires_review_not_autoclose",
+      "test_negative_dialogue_with_new_promised_followup_keeps_commitment",
+      "test_ninety_day_explicit_followup_stays_visible_for_review",
+      "test_booking_or_opt_out_blocks_positive_follow_up",
+      "test_explicit_followup_from_negative_dialogue_keeps_agreed_date_priority",
+      "test_new_order_does_not_autoclose_explicit_callback",
+      "test_frontend_has_one_primary_priority_and_obligation_attention"
+    ],
+    "test_value_priority_v33_regressions": [
+      "test_same_day_negative_after_promise_blocks_it_but_newer_promise_is_honored",
+      "test_do_not_contact_is_persistent_and_snooze_never_hides_it",
+      "test_only_new_explicit_permission_releases_do_not_contact",
+      "test_canonical_master_preserves_name_only_refusal_before_id_history",
+      "test_booked_do_not_contact_is_still_blocked_and_findable",
+      "test_old_separate_review_does_not_erase_current_valid_booking_priority",
+      "test_valid_due_promise_is_primary_without_losing_old_review_or_value",
+      "test_new_due_agreement_can_be_primary_while_negative_blocks_older_scope",
+      "test_due_candidate_choice_is_stable_and_checks_each_scopes_own_snooze",
+      "test_future_promise_is_not_promoted_ahead_of_its_due_date",
+      "test_promoted_unbooked_scope_never_inherits_another_missed_plan_id",
+      "test_promoted_missed_scope_uses_its_own_plan_channel_and_source_metadata",
+      "test_stale_promise_is_reviewable_but_never_an_outbound_instruction"
+    ],
+    "test_priority_v4": [
+      "test_past_unresolved_followup_preserves_stable_explicit_obligation",
+      "test_unlinked_later_contact_does_not_close_explicit_promise",
+      "test_later_order_does_not_close_explicit_promise",
+      "test_modern_linked_activity_prevents_legacy_duplicate",
+      "test_explicit_obligation_wins_over_click_and_reference_modifiers_are_preserved",
+      "test_explicit_obligation_wins_over_positive_dialogue_for_prospect_and_buyer",
+      "test_click_wait_boundary_keeps_explicit_obligation_and_context",
+      "test_explicit_promise_precedes_click_reorder_and_positive_dialogue"
+    ],
+    "test_skipped_obligations": [
+      "test_skipped_manual_appointment_cannot_replace_old_review_as_primary",
+      "test_skipped_linked_appointment_preserves_explicit_promise_for_review",
+      "test_saved_scheduled_snapshot_cannot_resurrect_a_skipped_activity",
+      "test_skipping_one_manual_activity_preserves_another_valid_explicit_scope"
+    ],
+    "test_obligation_contact_scope": [
+      "test_attention_practises_each_promises_own_negative_exception",
+      "test_missed_secondary_booking_cannot_inherit_a_primary_agreement",
+      "test_existing_inbound_history_can_be_recorded_while_outbound_scope_is_paused"
+    ],
+    "test_planning_suggestions_v2": [
+      "test_overdue_activity_survives_a_later_unlinked_contact",
+      "test_snoozed_context_is_noneligible_but_remains_in_customer_insights",
+      "test_dismissed_context_still_suppresses_after_live_reactivation",
+      "test_snoozed_context_keeps_suggestion_id_after_live_reactivation"
+    ],
+    "test_planning_suggestions_v3": [
+      "test_dismissed_onboarding_suppresses_later_reorder_same_context"
+    ],
+    "test_planning_suggestions_v4": [
+      "test_click_materializes_one_stable_context_and_dismiss_is_terminal",
+      "test_dismissed_generic_context_does_not_erase_explicit_promise_after_click",
+      "test_snoozed_generic_context_does_not_erase_explicit_promise_after_click"
+    ],
+    "test_planning_suggestions": [
+      "test_explicit_legacy_state_wins_if_canonical_duplicate_exists",
+      "test_historical_hidden_a_prospect_is_visible_and_explicitly_resumable",
+      "test_new_a_prospect_can_snooze_but_not_be_permanently_hidden",
+      "test_pre_segment_a_prospect_state_does_not_survive_segment_change",
+      "test_pre_segment_snooze_is_preserved_in_queue_and_customer_list",
+      "test_snooze_is_exactly_seven_days_and_dismiss_is_terminal_for_hash",
+      "test_snoozed_context_expires_when_trigger_disappears",
+      "test_snoozed_context_is_resolved_when_new_business_context_arrives",
+      "test_unchanged_snoozed_context_reopens_at_exactly_seven_days"
+    ]
+  }
+}

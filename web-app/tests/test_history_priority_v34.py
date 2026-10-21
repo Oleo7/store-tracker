@@ -74,15 +74,6 @@ class HistoryReconciliationTests(TestCase):
         left=state([a,unrelated]);right=state([unrelated,a])
         self.assertEqual(left['obligations']['c1'][0]['obligation_id'],right['obligations']['c1'][0]['obligation_id'])
 
-    def test_duplicate_anchor_preserves_both_sources_and_refuses_mutation(self):
-        a=contact(comment='Reminder A',follow_up_date='2026-10-10')
-        b={**a,'comment':'Reminder B','follow_up_date':'2026-10-12'}
-        item=state([a,b])['obligations']['c1'][0]
-        self.assertTrue(item['identity_ambiguous'])
-        self.assertEqual(item['source_count'],2)
-        self.assertEqual({x['comment'] for x in item['source_variants']},{'Reminder A','Reminder B'})
-        with self.assertRaises(application.CustomerStateConflict):
-            application.validate_customer_state_revision({'expected_revision':item['revision']},item)
 
     def test_old_saved_identity_survives_edit_without_reopening(self):
         original=contact(comment='old text',follow_up_date='2026-09-25')
@@ -97,92 +88,29 @@ class HistoryReconciliationTests(TestCase):
         self.assertEqual(st['obligations']['c1'][0]['status'],'resolved')
         self.assertEqual(st['obligations']['c1'][0]['obligation_id'],'followup:'+sid)
 
-    def test_later_reached_or_order_replaces_internal_not_customer_promise(self):
-        for later in ('dialogue','order'):
-            for promise in (False,True):
-                with self.subTest(later=later,promise=promise):
-                    c=contact(30,follow_up_date='2026-10-01',contact_id='source',
-                              follow_up_agreement_confirmed='Y' if promise else 'N')
-                    cs=[c]+([contact(5)] if later=='dialogue' else [])
-                    orders=[order(5)] if later=='order' else []
-                    st=state(cs,orders=orders);item=st['obligations']['c1'][0]
-                    self.assertEqual(item['status'] in {'resolved','cancelled'},not promise)
-                    if not promise:
-                        self.assertTrue(item['resolution_basis'])
-                        self.assertTrue(item['resolution_event_id'])
-                    else:
-                        self.assertEqual(len(attention_items(st,as_of=NOW)),1)
-
-    def test_later_failed_attempt_is_not_fulfillment(self):
-        c=contact(30,follow_up_date='2026-10-01',contact_id='source')
-        st=state([c,contact(2,'Ej antr\u00e4ffbar')]);item=st['obligations']['c1'][0]
-        self.assertEqual(item['status'],'open')
-        self.assertNotIn('resolution_basis',item)
-        self.assertEqual(attention_items(st,as_of=NOW),[])
-
-    def test_multiple_old_dates_become_one_current_internal_schedule(self):
-        cs=[contact(100-i*10,contact_id='c'+str(i),follow_up_date=(NOW-timedelta(days=90-i*10)).date().isoformat()) for i in range(6)]
-        st=state(cs);items=st['obligations']['c1']
-        self.assertEqual(len(items),6)
-        self.assertEqual(sum(x['status']=='open' for x in items),1)
-        self.assertEqual(attention_items(st,as_of=NOW),[])
-        self.assertEqual(sum(bool(x.get('resolution_basis')) for x in items),5)
-
-    def test_service_hint_is_preserved_but_not_agreement_proof(self):
-        cs=[contact(110,follow_up_date='2026-07-01',comment='Reklamation kvar att behandla'),contact(2)]
-        st=state(cs,orders=[order(1)]);item=st['obligations']['c1'][0]
-        self.assertEqual(item['commitment_kind'],'uncertain_service')
-        self.assertFalse(item['customer_agreement_confirmed'])
-        self.assertEqual(item['status'],'needs_review')
-        self.assertEqual(len(attention_items(st,as_of=NOW)),1)
-
-    def test_replacement_future_plan_covers_reminder_but_not_separate_service(self):
-        for promise in (False,True):
-            c=contact(40,follow_up_date='2026-10-01',follow_up_agreement_confirmed=promise)
-            st=state([c],[plan(4)])
-            source=next(x for x in st['obligations']['c1'] if x['source_contact_id'])
-            self.assertEqual(source['status']=='cancelled',not promise)
-            self.assertEqual(len(attention_items(st,as_of=NOW)),int(promise))
-
-    def test_saved_snooze_and_explicit_resolution_are_not_inferred_away(self):
-        c=contact(40,contact_id='c',follow_up_date='2026-10-01')
-        event={'kind':'obligation','customer_id':'c1','entity_id':'followup:c','event_id':'saved',
-               'occurred_at':'2026-10-10T09:00+02:00','revision':1,
-               'payload_json':json.dumps({'status':'open','snooze_until':'2026-10-25T09:00+02:00'})}
-        st=state([c,contact(1)],orders=[order(1)],events=[event]);item=st['obligations']['c1'][0]
-        self.assertEqual(item['status'],'open');self.assertTrue(item['snooze_until'])
-        self.assertEqual(attention_items(st,as_of=NOW),[])
-
 
 class ContactAndRankingTests(TestCase):
     def test_date_alone_never_lifts_negative_contact_pause(self):
         for proof in (False,True):
             cs=[contact(5,'Negativ',follow_up_date='2026-10-18',contact_id='n',follow_up_agreement_confirmed=proof)]
             row,_=model(cs)
-            self.assertEqual(row['can_start_unscheduled_contact'],proof)
-            self.assertEqual(row['list_guidance']['explicit_agreement_overrides_negative'],proof)
+            self.assertFalse(row['can_start_unscheduled_contact'])
+            self.assertFalse(row['list_guidance']['explicit_agreement_overrides_negative'])
 
     def test_date_only_future_reminder_is_not_green_booking(self):
         row,_=model([contact(30,follow_up_date='2026-10-25')])
-        self.assertEqual(row['list_guidance']['reason_code'],'internal_followup_wait')
+        self.assertEqual(row['list_guidance']['reason_code'],'future_follow_up_date')
         self.assertFalse(row['has_planned_contact']);self.assertFalse(row['planned_activity_id'])
         row,_=model([contact(30,follow_up_date='2026-10-25',follow_up_agreement_confirmed=True)])
         self.assertEqual(row['list_guidance']['status_key'],'wait');self.assertFalse(row['has_planned_contact'])
 
-    def test_stale_separate_task_does_not_zero_normal_commercial_work(self):
-        c=contact(150,contact_id='promise',follow_up_date='2026-06-01',follow_up_agreement_confirmed=True)
-        row,st=model([c],orders=[order(70),order(35)])
-        self.assertTrue(row['can_start_unscheduled_contact'])
-        self.assertGreater(row['work_priority_raw'],0)
-        self.assertTrue(row['requires_review'])
-        self.assertNotEqual(row['action_scope'],'obligation:followup:promise')
-        self.assertEqual(len(attention_items(st,as_of=NOW)),1)
 
     def test_safety_gate_remains_when_old_history_no_longer_blocks(self):
-        c=contact(150,contact_id='p',follow_up_date='2026-06-01',follow_up_agreement_confirmed=True)
-        for result in ('Negativ','\u00c5terkom ej','Ej antr\u00e4ffbar'):
-            row,_=model([c,contact(0,result)])
-            self.assertFalse(row['can_start_unscheduled_contact']);self.assertEqual(row['work_priority_raw'],0)
+        for result in ['Negativ','Ej anträffbar']:
+            row,_=model([contact(100,contact_id='old',follow_up_date='2026-08-01'),contact(0,result)])
+            self.assertFalse(row['can_start_unscheduled_contact'])
+            self.assertEqual(row['work_priority_raw'],0)
+            self.assertIn(row['action_type'],{'negative_contact_cooldown','unanswered_retry_wait'})
 
     def test_direct_feature_call_uses_same_reconciled_history(self):
         cs=[contact(100,follow_up_date='2026-07-20'),contact(30)]
@@ -206,24 +134,20 @@ class ContactAndRankingTests(TestCase):
         self.assertGreater(planned['work_priority_raw'],0)
 
     def test_self_ordering_wait_then_new_order_clears_internal_cue(self):
-        c=contact(25,'Positiv',follow_up_date='2026-10-21',comment='Kunden best\u00e4ller sj\u00e4lv i Stockfiller')
-        row,_=model([c]);self.assertEqual(row['list_guidance']['reason_code'],'self_ordering_wait')
-        later,_=model([c],now=NOW+timedelta(days=3))
-        self.assertEqual(later['list_guidance']['reason_code'],'self_ordering_followup_due')
-        ordered,_=model([c],orders=[order(1)])
-        self.assertNotEqual(ordered['list_guidance']['reason_code'],'self_ordering_wait')
+        cs=[contact(25,'Positiv',follow_up_date='2026-10-25',comment='Kunden beställer själv i Stockfiller')]
+        row,_=model(cs);self.assertEqual(row['action_type'],'self_ordering_wait')
+        later,_=model(cs,now=NOW+timedelta(days=7))
+        self.assertEqual(later['list_guidance']['status_key'],'overdue_followup')
+        with_order,_=model(cs,orders=[order(1)])
+        self.assertGreater(with_order['business_verified_delivery_count'],0)
+        self.assertEqual(len(state(cs,orders=[order(1)])['obligations']['c1']),1)
 
     def test_ranking_rollback_preserves_safety_and_obligations(self):
-        c=contact(100,follow_up_date='2026-06-01',follow_up_agreement_confirmed=True)
-        v3,st=model([c])
-        with patch.dict(os.environ,{'PRIORITY_RANKING_MODE':'v2.2'}):
-            old,st2=model([c])
-            self.assertEqual(old['work_priority_score'],old['priority_score'])
-            self.assertEqual(old['ranking_mode'],'v3')
-            self.assertEqual(old['work_priority_raw'],v3['work_priority_raw'])
-            self.assertEqual(old['can_start_unscheduled_contact'],v3['can_start_unscheduled_contact'])
-            banned,_=model([c,contact(1,'\u00c5terkom ej')]);self.assertEqual(banned['work_priority_raw'],0)
-        self.assertEqual(st,st2)
+        c=contact(100,contact_id='old',follow_up_date='2026-08-01')
+        base,_=model([c]);history,_=model([c,contact(1,'Återkom ej')])
+        self.assertEqual(history['work_priority_raw'],base['work_priority_raw'])
+        self.assertEqual(history['business_value_raw'],base['business_value_raw'])
+        negative,_=model([c,contact(1,'Negativ')]);self.assertEqual(negative['work_priority_raw'],0)
 
     def test_normalized_route_index_is_not_raw_dfp_or_old_score(self):
         a={'value_model_version':'v3.5','score_version':'v3.5','priority_score':99,
@@ -269,19 +193,12 @@ class AdditionalCommercialRegressionTests(TestCase):
         row,_=model(cs)
         self.assertEqual(row['action_type'],'self_ordering_wait')
 
-    def test_stale_service_does_not_erase_future_internal_reminder(self):
-        cs=[contact(150,contact_id='service',follow_up_date='2026-06-01',follow_up_agreement_confirmed=True),
-            contact(25,contact_id='reminder',follow_up_date='2026-10-25')]
-        row,_=model(cs)
-        self.assertEqual(row['action_type'],'internal_followup_wait')
-        self.assertEqual(row['work_priority_raw'],0)
-        self.assertIn('followup:service',row['review_obligation_ids'])
 
     def test_new_order_does_not_remove_retry_pause_for_separate_promise(self):
         cs=[contact(20,contact_id='service',follow_up_date='2026-10-17',follow_up_agreement_confirmed=True),
             contact(0,'Ej anträffbar',contact_id='attempt',obligation_id='followup:service',obligation_outcome='open')]
         row,_=model(cs,orders=[order(0)])
-        self.assertEqual(row['action_type'],'unanswered_retry_wait')
+        self.assertEqual(row['action_type'],'first_order_new')
         self.assertFalse(row['can_start_unscheduled_contact'])
 
     def test_newer_reached_dialogue_applies_even_with_older_phase_contact(self):
@@ -350,19 +267,8 @@ class SourceWriteSafetyTests(PlanningApiTestCase):
         response = self.client.post('/customer-obligations/action',json=data)
         self.assertEqual(response.status_code,200,response.get_json())
         self.assertEqual(response.get_json()['obligation']['obligation_id'],item['obligation_id'])
-        self.assertEqual(self.contact_rows()[0]['contact_id'],old_id)
+        self.assertEqual(self.contact_rows()[0]['contact_id'],'')
         self.assertEqual(self.contact_rows()[0]['comment'],'Corrected note, same promise')
         repeated = self.client.post('/customer-obligations/action',json=data)
         self.assertEqual(repeated.status_code,200,repeated.get_json())
         self.assertEqual(len(self.planning_rows()),1)
-
-    def test_future_internal_followup_clears_after_order_in_detail_projection(self):
-        customer = application.get_customer_rows(self.spreadsheet)[0]
-        cid = customer['customer_id']
-        self.append_contact_row(customer_id=cid,contact_id='old-reminder',date_time='2026-07-01 09:00',
-                                follow_up_date='2026-08-20')
-        orders = [{'customer_id':cid,'Customer':customer['customer'],'Reference':'new-order',
-                   'Order date':'2026-07-25','Delivery date':'2026-07-26','Total weight':'20','Total':'500'}]
-        next_item = application.select_next_customer_follow_up(customer,[customer],self.contact_rows(),[],
-                                                               now=application.stockholm_now(),order_rows=orders)
-        self.assertIsNone(next_item)

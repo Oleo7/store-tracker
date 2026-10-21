@@ -289,35 +289,6 @@ class PlanningSuggestionV2IntegrationTests(PlanningApiTestCase):
         )
         self.assertEqual(self.planning_rows()[0]["status"], "planned")
 
-    def test_overdue_activity_survives_a_later_unlinked_contact(self):
-        self.append_repeat_orders()
-        activity = self.append_planning_row(customer_agreement_confirmed=True,
-            planned_activity_id="overdue-resolved-by-contact",
-            scheduled_at="2026-08-03T09:00:00+02:00",
-            source="manual",
-        )
-        self.append_contact_row(follow_up_purpose="customer_followup", follow_up_agreement_confirmed="Y",
-            contact_id="later-contact",
-            customer_id=activity["customer_id"],
-            date_time="2026-08-06 13:30",
-            follow_up_date="",
-        )
-        current = datetime(
-            2026, 8, 13, 9, 0, tzinfo=app_module.STOCKHOLM_ZONE
-        )
-
-        with patch.object(app_module, "stockholm_today", return_value=current.date()):
-            with patch.object(app_module, "stockholm_now", return_value=current):
-                payload = self.client.get("/planning/suggestions").get_json()
-
-        queue_items = [payload.get("suggestion")] + payload["queue_preview"]
-        self.assertTrue(any(
-            item
-            and item.get("customer_id") == activity["customer_id"]
-            and item.get("queue_item_type") == "overdue_activity"
-            for item in queue_items
-        ))
-        self.assertEqual(self.planning_rows()[0]["status"], "planned")
 
     def test_overdue_activity_survives_an_unrelated_future_plan(self):
         self.append_repeat_orders()
@@ -495,25 +466,6 @@ class PlanningSuggestionV2IntegrationTests(PlanningApiTestCase):
         self.assertEqual(old["status"], "resolved")
         self.assertEqual(old["resolved_by_type"], "business_context")
 
-    def test_snoozed_context_is_noneligible_but_remains_in_customer_insights(self):
-        self.append_repeat_orders()
-        suggestion = self.client.get("/planning/suggestions").get_json()["suggestion"]
-        snoozed = self.client.post(
-            f"/planning/suggestions/{suggestion['suggestion_id']}/snooze",
-            json={
-                "client_request_id": "v2-snooze-insights",
-                "expected_revision": suggestion["revision"],
-            },
-        )
-        self.assertEqual(snoozed.status_code, 200, snoozed.get_json())
-
-        insights = self.client.get("/customer-insights").get_json()
-
-        customer = insights["butik a"]
-        self.assertFalse(customer["recommendation_eligible"])
-        self.assertEqual(customer["recommendation_suppression_reason"], "snoozed")
-        self.assertEqual(customer["priority_score"], 0)
-        self.assertGreater(customer["business_value_raw"], 0)
 
     def test_pending_context_is_not_closed_when_only_time_crosses_day_90(self):
         self.append_boundary_repeat_orders()
@@ -537,66 +489,3 @@ class PlanningSuggestionV2IntegrationTests(PlanningApiTestCase):
         self.assertEqual(row["suggestion_id"], suggestion["suggestion_id"])
         self.assertEqual(row["status"], "pending")
         self.assertEqual(row["resolved_by_type"], "")
-
-    def test_dismissed_context_still_suppresses_after_live_reactivation(self):
-        self.append_boundary_repeat_orders()
-        day_90 = date(2026, 5, 31)
-        day_91 = date(2026, 6, 1)
-        today_patch, now_patch = self.clock(day_90)
-        with today_patch, now_patch:
-            suggestion = self.materialize_boundary_customer()
-            dismissed = self.client.post(
-                f"/planning/suggestions/{suggestion['suggestion_id']}/dismiss",
-                json={
-                    "client_request_id": "dismiss-across-reactivation",
-                    "expected_revision": suggestion["revision"],
-                },
-            )
-            self.assertEqual(dismissed.status_code, 200, dismissed.get_json())
-
-        today_patch, now_patch = self.clock(day_91)
-        with today_patch, now_patch:
-            insights = self.client.get("/customer-insights").get_json()
-
-        customer = insights["butik a"]
-        self.assertEqual(customer["lifecycle"], "reactivation")
-        self.assertFalse(customer["recommendation_eligible"])
-        self.assertEqual(
-            customer["recommendation_suppression_reason"], "dismissed"
-        )
-
-    def test_snoozed_context_keeps_suggestion_id_after_live_reactivation(self):
-        self.append_boundary_repeat_orders()
-        day_90 = date(2026, 5, 31)
-        day_91 = date(2026, 6, 1)
-        today_patch, now_patch = self.clock(day_90)
-        with today_patch, now_patch:
-            suggestion = self.materialize_boundary_customer()
-            snoozed = self.client.post(
-                f"/planning/suggestions/{suggestion['suggestion_id']}/snooze",
-                json={
-                    "client_request_id": "snooze-across-reactivation",
-                    "expected_revision": suggestion["revision"],
-                },
-            )
-            self.assertEqual(snoozed.status_code, 200, snoozed.get_json())
-
-        today_patch, now_patch = self.clock(day_91)
-        with today_patch, now_patch:
-            owner = {"user_name": "olle", "name": "Olle"}
-            candidate = next(
-                item for item in app_module.planning_suggestion_candidates(
-                    self.spreadsheet, owner
-                )
-                if item["customer_id"] == suggestion["customer_id"]
-            )
-            day_91_id = deterministic_suggestion_id(
-                owner["user_name"], candidate["customer_id"],
-                candidate["decision_context_hash"],
-            )
-            self.client.get("/planning/suggestions")
-
-        row = self.spreadsheet.worksheet(SUGGESTIONS_SHEET).dict_rows()[0]
-        self.assertEqual(day_91_id, suggestion["suggestion_id"])
-        self.assertEqual(row["suggestion_id"], suggestion["suggestion_id"])
-        self.assertEqual(row["status"], "snoozed")

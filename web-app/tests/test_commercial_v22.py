@@ -52,7 +52,7 @@ class CommercialV22Tests(TestCase):
         for reason in ("snoozed", "dismissed"):
             item = build_priority_customers(stores, build_order_features(rows), {}, "Olle", self.today, workflow_suppressions={"s": reason})[0]
             self.assertEqual(item["history_index"], 60)
-            self.assertFalse(item["recommendation_eligible"])
+            self.assertTrue(item["recommendation_eligible"])
         negative = priorities(stores, rows, [contact("Store", self.today - timedelta(days=30), "Negativ")], today=self.today)[0]
         self.assertFalse(negative["recommendation_eligible"])
 

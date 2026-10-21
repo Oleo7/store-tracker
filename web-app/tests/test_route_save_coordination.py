@@ -353,16 +353,11 @@ class CoordinatedRouteSaveTests(PlanningApiTestCase):
             self.assertEqual(self.save(response.get_json()['preview_token']).status_code,409)
         self.assertEqual([r['planned_activity_id'] for r in self.planning_rows()],['route-phone'])
 
-    def test_manually_documented_route_promise_is_never_automatically_cancelled(self):
-        for evidence in [{'customer_agreement_confirmed':'Y'},{'note':'Reklamation: utlovad ersättningsleverans'}]:
-            with self.subTest(evidence=evidence):
-                sheet=self.spreadsheet.worksheet(a.PLANNED_ACTIVITIES_SHEET);sheet.values=sheet.values[:1]
-                self.append_planning_row(planned_activity_id='route-promise',source='route',customer_row=4,**evidence)
-                token=self.preview()
-                before=deepcopy(self.planning_rows())
-                response=self.save(token)
-                self.assertEqual(response.status_code,409,response.get_json())
-                self.assertEqual(self.planning_rows(),before)
+    def test_actual_confirmed_route_appointment_is_never_automatically_cancelled(self):
+        self.append_planning_row(planned_activity_id='confirmed-route',source='route',customer_row=4,appointment_confirmed='Y')
+        token=self.preview();before=deepcopy(self.planning_rows());response=self.save(token)
+        self.assertEqual(response.status_code,409,response.get_json())
+        self.assertEqual(self.planning_rows(),before)
 
     def test_web_app_starts_with_only_the_render_root_directory(self):
         import subprocess
