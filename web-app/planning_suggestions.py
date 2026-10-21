@@ -88,8 +88,8 @@ SCORE_EVENT_COLUMNS = [
     "history_index",
 ]
 
-ACTIVE_STATUSES = {"pending", "snoozed", "planned"}
-ALL_STATUSES = ACTIVE_STATUSES | {"dismissed", "resolved", "expired"}
+ACTIVE_STATUSES = {"pending", "planned"}
+ALL_STATUSES = ACTIVE_STATUSES | {"snoozed", "dismissed", "resolved", "expired"}
 
 
 class SuggestionError(Exception):
@@ -323,9 +323,10 @@ def _snapshot(sheet, expected_columns, values_reader=None):
     for row_index, values_row in enumerate(values[1:], start=2):
         padded = values_row + [""] * (len(headers) - len(values_row))
         raw = dict(zip(headers, padded))
-        rows.append((row_index, {
-            column: raw.get(column, "") for column in expected_columns
-        }))
+        row = {column: raw.get(column, "") for column in expected_columns}
+        if "suggestion_id" in expected_columns and _key(row.get("status")) in {"snoozed", "dismissed"}:
+            row.update(status="pending", snooze_until="", dismissed_at="")
+        rows.append((row_index, row))
     return headers, rows
 
 
@@ -701,23 +702,7 @@ class PlanningSuggestionService:
                     == _text(row.get("customer_id"))
                     for candidate in candidate_by_id.values()
                 )
-                if status == "snoozed":
-                    due = _instant(row.get("snooze_until"), self.zone)
-                    if suggestion_id not in candidate_by_id:
-                        if same_customer_has_new_context:
-                            changes = {
-                                "status": "resolved",
-                                "resolved_at": _timestamp(self.now),
-                                "resolved_by_type": "business_context",
-                                "resolved_by_id": "",
-                            }
-                            event_type = "suggestion_resolved"
-                        else:
-                            changes = {"status": "expired"}
-                            event_type = "suggestion_expired"
-                    elif due and self.now >= due:
-                        changes = {"status": "pending", "snooze_until": ""}
-                elif status == "planned":
+                if status == "planned":
                     activity = activities.get(_text(row.get("planned_activity_id")))
                     activity_status = _key((activity or {}).get("status"))
                     if (
@@ -985,9 +970,9 @@ class PlanningSuggestionService:
                    expected_revision, request_id, fingerprint,
                    planned_activity_id="", actual_contact_type="",
                    resolved_by_type="", resolved_by_id="", live_candidate=None):
+        if action in {"snooze", "dismiss"}:
+            raise SuggestionError("operation_retired", "Funktionen har tagits bort. Ladda om sidan.", 410)
         targets = {
-            "snooze": "snoozed",
-            "dismiss": "dismissed",
             "plan": "planned",
             "resolve": "resolved",
             "expire": "expired",
@@ -1021,12 +1006,10 @@ class PlanningSuggestionService:
             before = _key(row.get("status")) or "pending"
             target = targets[action]
             allowed = {
-                "snooze": {"pending"},
-                "dismiss": {"pending"},
                 "plan": {"pending"},
                 "resolve": ACTIVE_STATUSES,
                 "expire": ACTIVE_STATUSES,
-                "reopen": {"planned", "dismissed"},
+                "reopen": {"planned"},
             }
             if before not in allowed[action]:
                 raise SuggestionError(
@@ -1043,15 +1026,7 @@ class PlanningSuggestionService:
                 "last_mutation_fingerprint": fingerprint,
             }
             event_type = f"suggestion_{target}"
-            if action == "snooze":
-                changes["snooze_until"] = _timestamp(
-                    self.now + timedelta(days=7)
-                )
-                event_type = "suggestion_snoozed"
-            elif action == "dismiss":
-                changes["dismissed_at"] = _timestamp(self.now)
-                event_type = "suggestion_dismissed"
-            elif action == "plan":
+            if action == "plan":
                 changes["planned_activity_id"] = _text(planned_activity_id)
                 event_type = "suggestion_planned"
             elif action == "resolve":
@@ -1065,10 +1040,7 @@ class PlanningSuggestionService:
                 event_type = "suggestion_expired"
             elif action == "reopen":
                 changes["planned_activity_id"] = ""
-                event_type = (
-                    "suggestion_resumed"
-                    if before == "dismissed" else "linked_activity_cancelled"
-                )
+                event_type = "linked_activity_cancelled"
             _update(sheet, row_index, headers, changes, self.invalidator)
             updated = {**row, **changes}
             event_row = self._live_event_row(updated, live_candidate)

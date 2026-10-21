@@ -135,7 +135,8 @@ class PriorityReadCacheTests(TestCase):
         before = next(r for r in first['priorities'] if r['customer_id'] == row['customer_id'])
         after = next(r for r in second['priorities'] if r['customer_id'] == row['customer_id'])
         self.assertNotEqual(before.get('contact_permission_status'), 'do_not_contact')
-        self.assertEqual(after['contact_permission_status'], 'do_not_contact')
+        self.assertEqual(after['contact_permission_status'], before['contact_permission_status'])
+        self.assertEqual(after['work_priority_raw'], before['work_priority_raw'])
 
     def test_planning_due_boundary_invalidates_live_result(self):
         sheet = self.book.worksheet(a.PLANNED_ACTIVITIES_SHEET)

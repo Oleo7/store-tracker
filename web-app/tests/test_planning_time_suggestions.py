@@ -119,7 +119,6 @@ const openPlanningModal=(_title,_subtitle,body)=>{
 };
 ${['planningActivityId','planningTruthy','normalizePlanningActivity','planningSelectedOwner','planningContactTypeKey','getCustomerPlanningSeed',
    'renderContactFollowupOwner','updateFollowupFields','updateFollowupAppointmentField',
-   'updateContactResultFields',
    'openContactFormForCustomer','selectPlanningOwnerForCustomer','openPlanningEditorForCustomer',
    'openPlanningEditor','syncPlanningEditorAppointment'].map(source).join('\n')}
 const chooseType=async value=>{

@@ -18,12 +18,12 @@ const window={confirm:()=>{confirmations++;throw new Error('Hard contact blocks 
 const showToast=message=>toasts.push(message),refreshCustomerDecisions=async()=>{refreshes++;};
 const refreshStats=async()=>{},refreshWorkflowViews=async()=>{};
 const fetch=async(url,options)=>{requests.push({url,body:JSON.parse(options.body)});return {status:responseStatus,ok:responseStatus<400,json:async()=>responseBody}};
-${['customerHasContactBan','customerCanExecutePlanned','getPlannedEmailContext','collectReminderPayload','reminderErrorMessage','setReminderRetryMode','sendReminderEmail','closeReminderModal'].map(source).join('\n')}
+${['customerCanExecutePlanned','getPlannedEmailContext','collectReminderPayload','reminderErrorMessage','setReminderRetryMode','sendReminderEmail','closeReminderModal'].map(source).join('\n')}
 `,context);
 vm.runInContext(`(async()=>{
 const customer={customer_id:'customer-1',row:2,list_guidance:{can_execute_planned_contact:true},contact_permission:{status:'allowed'}};
 const activity={planned_activity_id:'plan-1',customer_id:'customer-1',contact_type:'email',status:'planned',revision:7,obligation_id:'followup:source-1',obligation_revision:281474976710123,scheduled_at:'2026-10-18T10:00:00+02:00'};
-assert.equal(getPlannedEmailContext({...customer,contact_permission:{status:'do_not_contact'}},activity),null);
+assert.ok(getPlannedEmailContext({...customer,contact_permission:{status:'do_not_contact'}},activity),'historical permission fields are inert');
 assert.equal(getPlannedEmailContext(customer,{...activity,contact_type:'phone'}),null);
 assert.equal(getPlannedEmailContext(customer,{...activity,customer_id:'another-customer'}),null);
 assert.equal(getPlannedEmailContext(customer,{...activity,can_execute_planned_contact:false}),null);
@@ -45,7 +45,7 @@ assert.equal(reminderDraft,draft,'a blocked send retains the draft for review');
 assert.equal(elements.get('email-send').disabled,true);
 assert.match(elements.get('email-send-error').textContent,/ny order.*ladda om kundens aktuella åtgärd/s);
 assert.equal(elements.get('email-send-error').classList.contains('visible'),true);
-assert.match(reminderErrorMessage('do_not_contact'),/Kontakta inte.*Hantera/);
+assert.ok(!reminderErrorMessage('do_not_contact').includes('Hantera'));
 // A partially saved calendar log locks the already-sent email and retries an identical payload.
 responseStatus=200;responseBody={ok:true,is_test:false,planning_completion_saved:false};
 await sendReminderEmail(false);

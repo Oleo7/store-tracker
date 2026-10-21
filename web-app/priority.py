@@ -7,11 +7,10 @@ import re
 from commercial_orders import order_volume, commercial_order
 from contact_channel import recommend_contact_channel
 from customer_obligations import stable_contact_source_id
-from contact_permissions import permission_order
 from statistics import median
 from value_prioritization import (VERSION as VALUE_MODEL_VERSION, POLICY as VALUE_POLICY,
     POLICY_VERSION as VALUE_POLICY_VERSION,
-    REACHED_RESULTS, DO_NOT_CONTACT_RESULTS, complete_deliveries,
+    REACHED_RESULTS, complete_deliveries,
     segment_prior, business_opportunity, contact_opportunity,
     store_contact_guidance,
     store_format, empirical_format_prior)
@@ -310,7 +309,6 @@ def normalize_contact_result(result: str) -> str:
         "Positivt": "Positiv",
         "Positiv": "Positiv",
         "Kräver mer bearbetning!": "Negativ",
-        "Återkom ej": "Negativ",
         "Negativ": "Negativ",
         "Negativt": "Negativ",
         "Neutral": "Neutral",
@@ -624,20 +622,11 @@ def build_contact_features(sales_activities: list[dict], order_features: dict, *
         activities.sort(key=lambda activity: activity["sort_key"])
         latest_activity = activities[-1]
         human_activities = [activity for activity in activities if not activity["is_email"]
-                            and str(activity["row"].get("result") or "").strip().casefold() != "kontakt tillåten"]
+                            and str(activity["row"].get("result") or "").strip().casefold() not in {"kontakt tillåten", "återkom ej", "kontakta ej", "ring ej"}]
         latest_human = human_activities[-1] if human_activities else None
         reached = [a for a in human_activities if normalize_contact_result(a["row"].get("result")) in REACHED_RESULTS]
         last_reached = reached[-1] if reached else None
         unanswered_dates = [a["datetime"].date() for a in human_activities if normalize_contact_result(a["row"].get("result")) == "Ej anträffbar"]
-        opt_out_rows = [
-            a for a in human_activities
-            if str(a["row"].get("result") or "").strip().casefold() in DO_NOT_CONTACT_RESULTS
-        ]
-        permission_rows = [a for a in activities if not a["is_email"] and (
-            str(a["row"].get("result") or "").strip().casefold() in DO_NOT_CONTACT_RESULTS
-            or str(a["row"].get("result") or "").strip().casefold() == "kontakt tillåten")]
-        latest_permission = max(permission_rows, key=lambda a: permission_order(a["row"], a["datetime"])) if permission_rows else None
-        permission_denied = bool(latest_permission and str(latest_permission["row"].get("result") or "").strip().casefold() in DO_NOT_CONTACT_RESULTS)
         reported_orders = [a for a in human_activities if normalize_contact_result(a["row"].get("result")) == "Order lagd"]
         reached_by_purpose = {}
         completed_by_purpose = {}
@@ -740,11 +729,6 @@ def build_contact_features(sales_activities: list[dict], order_features: dict, *
             "latest_reported_order_date": reported_orders[-1]["datetime"].date() if reported_orders else None,
             "unanswered_attempt_dates": unanswered_dates,
             "unanswered_sequence_dates": unanswered_sequence_dates,
-            "last_opt_out_date": opt_out_rows[-1]["datetime"].date() if permission_denied else None,
-            "last_opt_out_datetime": opt_out_rows[-1]["datetime"] if opt_out_rows else None,
-            "contact_permission_status": "do_not_contact" if permission_denied else "allowed" if latest_permission else "",
-            "contact_permission_datetime": latest_permission["datetime"] if latest_permission else None,
-            "contact_permission_event_id": str(latest_permission["row"].get("contact_id") or "") if latest_permission else "",
             "latest_reached_result": (
                 normalize_contact_result(last_reached["row"].get("result"))
                 if last_reached else ""
@@ -855,22 +839,8 @@ def _planned_activity_state(
     future = []
     overdue = []
     for item in matches:
-        if owner_user_name is not None:
-            # Production resolves the current customer owner through users once
-            # per snapshot. Match the booking's canonical login, never its
-            # display name (which may be old or formatted differently).
-            canonical_owner = normalize_customer_key(owner_user_name)
-            booking_owner = normalize_customer_key(item["row"].get("user_name"))
-            if not canonical_owner or booking_owner != canonical_owner:
-                continue
-        else:
-            # Compatibility for pure/legacy callers without a users snapshot.
-            # An explicit booking login still takes precedence over display text.
-            row_owner = normalize_customer_key(
-                item["row"].get("user_name") or item["row"].get("sales_person")
-            )
-            if row_owner and owner_key and row_owner != owner_key:
-                continue
+        if owner_user_name is not None and not normalize_customer_key(owner_user_name):
+            continue
         scheduled = item["scheduled_at"].replace(tzinfo=None)
         if scheduled.date() >= current.date():
             future.append(item)
@@ -1143,7 +1113,7 @@ def build_priority_customers(
     if obligation_states is not None:
         closed_activities = {str(item.get("planned_activity_id") or item.get("original_planned_activity_id") or "")
             for items in obligation_states.values() for item in items
-            if item.get("status") in {"resolved", "cancelled"} and item.get("resolution_basis")}
+            if item.get("status") not in {"open", "scheduled", "needs_review"}}
         planned_activities = [row for row in (planned_activities or ())
                               if str(row.get("planned_activity_id") or "") not in closed_activities]
     activity_index = _planned_activity_index(planned_activities)
@@ -1360,7 +1330,7 @@ def build_priority_customers(
             "segment_and_format" if has_store_format_prior else "segment"
         )
 
-        workflow_reason = workflow_suppressions.get(customer_id)
+        workflow_reason = None
         decision_context = {
             "status_key": "idle",
             "reason_code": "recent_email_engagement_wait" if business_email_intent.get("waiting") else "",
@@ -1377,19 +1347,7 @@ def build_priority_customers(
         materially_overdue = bool(business_delivery_count >= 2 and business_lifecycle != "reactivation"
             and business_overdue_days is not None and business_overdue_days >= int(VALUE_POLICY["material_reorder_overdue_days"])
             and (days_since_reached is None or days_since_reached >= int(VALUE_POLICY["material_reorder_min_dialogue_days"])))
-        permission_status = contact.get("contact_permission_status") or ("do_not_contact" if contact.get("last_opt_out_date") else "")
-        permission_event = contact.get("contact_permission_event_id") or ""
-        permission_at = contact.get("contact_permission_datetime")
-        permission = (contact_permissions or {}).get(customer_id) or {}
-        explicit_permission_at = _local_datetime(permission.get("occurred_at"))
-        if permission and explicit_permission_at and _event_timestamp(explicit_permission_at) <= snapshot.timestamp() and (
-                permission_at is None or _event_timestamp(explicit_permission_at) > _event_timestamp(permission_at)
-                or _event_timestamp(explicit_permission_at) == _event_timestamp(permission_at) and permission_status != "do_not_contact"):
-            permission_status = str(permission.get("status") or permission_status)
-            permission_at = explicit_permission_at
-            permission_event = str(permission.get("event_id") or "")
-        last_opt_out_date = ((permission_at or contact.get("last_opt_out_datetime") or snapshot).date()
-                            if permission_status == "do_not_contact" else None)
+        permission_status, permission_event, last_opt_out_date = "", "", None
         obligations = None if obligation_states is None else []
         for obligation in ((obligation_states or {}).get(customer_id) or []):
             if not _known_at(obligation, snapshot):
@@ -1640,49 +1598,8 @@ def build_priority_customers(
 
 
 def apply_workflow_suppressions(priority_customers, suppressions):
-    """Project a matched workflow pause through every canonical decision field.
-
-    Generic suggestion state never erases a commitment or replaces a safety
-    reason. Scoped obligation rescheduling belongs to the obligation reducer.
-    """
-    result = []
-    for customer in priority_customers:
-        updated = dict(customer)
-        state = (suppressions or {}).get(str(customer.get("customer_id") or "")) or ""
-        reason = str(state.get("reason") or state.get("status") or "") if isinstance(state, dict) else str(state)
-        scope = str(state.get("source_scope") or state.get("action_scope") or "") if isinstance(state, dict) else ""
-        guidance = dict(updated.get("list_guidance") or updated.get("customer_guidance") or {})
-        current_scope = str(guidance.get("action_scope") or "")
-        protected = (guidance.get("reason_code") in {"do_not_contact", "negative_contact_cooldown", "invalid_customer_identity",
-            "future_delivery", "reported_order_sync_wait", "reported_order_sync_review", "recent_order_pending_confirmation",
-            "stale_unconfirmed_order_review", "order_without_verified_delivery", "unanswered_retry_wait"}
-            or guidance.get("status_key") == "data_missing" or guidance.get("review_only"))
-        commitment = current_scope.startswith(("obligation:", "planned_activity:")) or guidance.get("status_key") in {"planned", "overdue_followup"}
-        if not reason or reason == "suggestion_planned" or protected or commitment and (not scope or scope != current_scope):
-            result.append(updated)
-            continue
-        guidance.update(status_key="wait", status_label="Avvakta", action_type=reason,
-            action_key="resume_suggestion" if reason == "dismissed" else "wait",
-            action_label="Återuppta förslag" if reason == "dismissed" else "Avvakta",
-            reason_code=reason, reason_codes=[reason],
-            reason_text="Förslaget är snoozat" if reason == "snoozed" else "Tidigare förslag dolt",
-            can_contact_now=False, can_start_unscheduled_contact=False, can_execute_planned_contact=False,
-            recommended_contact_type="", channel_reason_code="")
-        updated.update(list_guidance=dict(guidance), customer_guidance=dict(guidance),
-            recommendation_eligible=False, recommendation_suppression_reason=reason,
-            contact_priority_score=0, contact_priority_raw=0.0, contact_relevance_factor=0.0, contact_factor=0.0,
-            work_priority_raw=0.0, work_priority_score=0, work_priority_precise=0.0, work_contact_factor=0.0,
-            priority_score=0, priority_score_precise=0.0, contact_priority_precise=0.0,
-            work_can_start_unscheduled_contact=False,
-            contact_priority_bucket=3, primary_trigger_type="", primary_trigger_key="scoring_context", covered_trigger_keys=[],
-            primary_reason_code=reason, primary_reason_text=guidance["reason_text"], planning_status_text=guidance["reason_text"],
-            recommended_action=guidance["action_label"], recommended_channel="avvakta",
-            next_action=_decision_next_action(guidance, segment=updated.get("segment")))
-        for field in ("action_type", "reason_codes", "can_contact_now", "can_start_unscheduled_contact",
-                      "can_execute_planned_contact", "recommended_contact_type"):
-            updated[field] = guidance[field]
-        result.append(updated)
-    return result
+    """Compatibility adapter: retired manual states never affect scoring."""
+    return priority_customers
 
 
 def _priority_level(score: int) -> str:

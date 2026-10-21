@@ -87,9 +87,24 @@ class RouteContactPolicyTests(TestCase):
                 spreadsheet=self.spreadsheet, owner=OWNER, route_date=day or NOW.date(), start=GPS,
             )
 
+    def test_replaced_miss_is_not_a_blocker_in_email_or_either_route_engine(self):
+        contacts=[contact(30,"Neutral")]
+        baseline=self.snapshot(contacts=contacts)
+        previous=appointment(-40,created_at=(NOW-timedelta(days=50)).isoformat(),planned_activity_id="old-miss")
+        current=self.snapshot(contacts=contacts,plans=[previous])
+        before=self.priority(baseline);after=self.priority(current)
+        self.assertEqual(after["list_guidance"],before["list_guidance"])
+        self.assertEqual(after["business_value_raw"],before["business_value_raw"])
+        self.assertEqual(after["obligation_ids"],[])
+        self.assertEqual(app_module.email_contact_decision(after),app_module.email_contact_decision(before))
+        for legacy in (False,True):
+            result,error=self.route(current,legacy=legacy)
+            self.assertIsNone(error,error)
+            rows=result["stops"] if legacy else result["shipments"]
+            self.assertTrue(any(row.get("customer_id")==CID or row.get("row")==2 for row in rows),rows)
+
     def test_required_visits_cannot_override_contact_restrictions(self):
         cases = [
-            ("do_not_contact", [], [contact(30, "Återkom ej")]),
             ("negative_contact_cooldown", [], [contact(30, "Negativ")]),
             ("unanswered_retry_wait", [], [contact(0, "Ej anträffbar")]),
             ("recent_order_pending_confirmation", [order(**{"Delivery date": ""})], []),
@@ -162,7 +177,7 @@ class RouteContactPolicyTests(TestCase):
         visit = appointment()
         snapshot = self.snapshot(contacts=[source], plans=[phone, visit])
         priority = self.priority(snapshot)
-        self.assertTrue(priority["can_execute_planned_contact"])
+        self.assertFalse(priority["can_execute_planned_contact"])
         self.assertEqual(priority["list_guidance"]["planned_activity_id"], "phone-a")
         decision = app_module.route_planned_contact_decision(priority, visit, snapshot=snapshot, route_date=NOW.date())
         self.assertFalse(decision["allowed"])

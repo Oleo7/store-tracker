@@ -160,5 +160,5 @@ class CanonicalPriorityIdentityTests(TestCase):
             orders=[order("cid-1", "100", "Ännu ett namn", "later", "2026-07-15")],
             contacts=[followup],
         )["cid-1"]
-        self.assertFalse(result["follow_up_due"])
+        self.assertTrue(result["follow_up_due"])
         self.assertTrue(result["has_order_after_latest_contact"])

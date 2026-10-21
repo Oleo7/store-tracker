@@ -86,30 +86,6 @@ class PlanningSuggestionV4IntegrationTests(PlanningApiTestCase):
             [row.get(column, "") for column in app_module.CONTACT_COLUMNS]
         )
 
-    def test_click_materializes_one_stable_context_and_dismiss_is_terminal(self):
-        self.append_click()
-        today_patch, now_patch = self.clock(date(2026, 8, 5))
-        with today_patch, now_patch:
-            first = self.client.get("/planning/suggestions").get_json()["suggestion"]
-            dismissed = self.client.post(
-                f"/planning/suggestions/{first['suggestion_id']}/dismiss",
-                json={"client_request_id": "dismiss-v4-click", "expected_revision": first["revision"]},
-            )
-        self.assertEqual(first["trigger_key"], "stockfiller_click_followup")
-        self.assertEqual(dismissed.status_code, 200, dismissed.get_json())
-
-        today_patch, now_patch = self.clock(date(2026, 8, 20))
-        with today_patch, now_patch:
-            payload = self.client.get("/planning/suggestions").get_json()
-            candidates = app_module.planning_suggestion_candidates(
-                self.spreadsheet, {"user_name": "olle", "name": "Olle"}
-            )
-        self.assertIsNone(payload["suggestion"])
-        self.assertEqual(len(candidates), 1)
-        expected_id = app_module.deterministic_suggestion_id(
-            "olle", candidates[0]["customer_id"], candidates[0]["decision_context_hash"]
-        )
-        self.assertEqual(expected_id, first["suggestion_id"])
 
     def test_later_order_resolves_click_context(self):
         self.append_click()
@@ -150,71 +126,9 @@ class PlanningSuggestionV4IntegrationTests(PlanningApiTestCase):
         today_patch, now_patch = self.clock(date(2026, 8, 2))
         with today_patch, now_patch:
             payload = self.client.get("/planning/suggestions").get_json()
-        self.assertEqual(payload["suggestion"]["trigger_key"], "overdue_explicit_follow_up")
+        self.assertEqual(payload["suggestion"]["trigger_key"], "overdue_planned_activity")
         self.assertEqual(self.planning_rows(), [])
 
-    def test_dismissed_generic_context_does_not_erase_explicit_promise_after_click(self):
-        self.append_legacy_followup()
-        today_patch, now_patch = self.clock(date(2026, 8, 4))
-        with today_patch, now_patch:
-            waiting = self.client.get("/planning/suggestions").get_json()["suggestion"]
-            response = self.client.post(
-                f"/planning/suggestions/{waiting['suggestion_id']}/dismiss",
-                json={
-                    "client_request_id": "dismiss-legacy-wait",
-                    "expected_revision": waiting["revision"],
-                },
-            )
-        self.assertEqual(waiting["trigger_key"], "overdue_explicit_follow_up")
-        self.assertEqual(response.status_code, 200, response.get_json())
-        self.append_click()
-
-        today_patch, now_patch = self.clock(date(2026, 8, 5))
-        with today_patch, now_patch:
-            payload = self.client.get("/planning/suggestions").get_json()
-            candidate = app_module.planning_suggestion_candidates(
-                self.spreadsheet, {"user_name": "olle", "name": "Olle"}
-            )[0]
-        self.assertEqual(payload["suggestion"]["trigger_key"], "overdue_explicit_follow_up")
-        self.assertEqual(candidate["primary_trigger_key"], "overdue_explicit_follow_up")
-        self.assertEqual(
-            app_module.deterministic_suggestion_id(
-                "olle", candidate["customer_id"], candidate["decision_context_hash"]
-            ),
-            payload["suggestion"]["suggestion_id"],
-        )
-        self.assertNotEqual(payload["suggestion"]["suggestion_id"], waiting["suggestion_id"])
-
-    def test_snoozed_generic_context_does_not_erase_explicit_promise_after_click(self):
-        self.append_legacy_followup()
-        today_patch, now_patch = self.clock(date(2026, 8, 4))
-        with today_patch, now_patch:
-            waiting = self.client.get("/planning/suggestions").get_json()["suggestion"]
-            response = self.client.post(
-                f"/planning/suggestions/{waiting['suggestion_id']}/snooze",
-                json={
-                    "client_request_id": "snooze-legacy-wait",
-                    "expected_revision": waiting["revision"],
-                },
-            )
-        self.assertEqual(response.status_code, 200, response.get_json())
-        self.append_click()
-
-        today_patch, now_patch = self.clock(date(2026, 8, 5))
-        with today_patch, now_patch:
-            payload = self.client.get("/planning/suggestions").get_json()
-            candidate = app_module.planning_suggestion_candidates(
-                self.spreadsheet, {"user_name": "olle", "name": "Olle"}
-            )[0]
-        self.assertEqual(payload["suggestion"]["trigger_key"], "overdue_explicit_follow_up")
-        self.assertEqual(candidate["primary_trigger_key"], "overdue_explicit_follow_up")
-        self.assertEqual(
-            app_module.deterministic_suggestion_id(
-                "olle", candidate["customer_id"], candidate["decision_context_hash"]
-            ),
-            payload["suggestion"]["suggestion_id"],
-        )
-        self.assertNotEqual(payload["suggestion"]["suggestion_id"], waiting["suggestion_id"])
 
     def test_empty_calibration_export_is_read_only(self):
         before = set(self.spreadsheet.sheets)

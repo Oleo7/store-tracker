@@ -746,6 +746,7 @@ PLANNED_ACTIVITY_COLUMNS = [
     "appointment_confirmed",
     "picking_help",
     "obligation_id", "customer_agreement_confirmed", "agreed_at",
+    "planning_decided_at", "skipped_through_at",
 ]
 PLANNING_CONTACT_TYPES = {"visit", "phone", "email"}
 PLANNING_CONTACT_TYPE_LABELS = {
@@ -1407,37 +1408,12 @@ def write_planned_activity_snapshot(spreadsheet):
 
 
 def superseded_planned_activity_candidates(activity_rows, contact_rows):
-    """Only an explicit replacement of this source can supersede a booking."""
-    explicit = {}
-    for contact in contact_rows:
-        if normalize_key(contact.get("result")) == "ej anträffbar":
-            continue
-        activity_id = str(contact.get("supersedes_planned_activity_id") or "").strip()
-        if activity_id and str(contact.get("obligation_outcome") or "") in {"resolved", "cancelled"}:
-            explicit[activity_id] = str(contact.get("customer_id") or "").strip()
-    return [(index, row) for index, row in activity_rows
-            if row.get("status", "planned") == "planned"
-            and explicit.get(str(row.get("planned_activity_id") or "")) == str(row.get("customer_id") or "")
-            and str(row.get("planned_activity_id") or "") in explicit]
+    """Supersession is a read projection; preserve persisted history."""
+    return []
 
 
 def reconcile_superseded_planned_activities(spreadsheet, contact_rows, *, apply=False):
-    """Idempotent read or write pass under the planning mutation lock."""
-    with planning_write_lock():
-        if apply:
-            sheet, headers, activities = write_planned_activity_snapshot(spreadsheet)
-        else:
-            sheet, headers, activities = read_planned_activity_snapshot(spreadsheet)
-        candidates = superseded_planned_activity_candidates(activities, contact_rows)
-        if apply and sheet is not None:
-            for row_index, row in candidates:
-                update_sheet_row(sheet, row_index, headers, {
-                    "status": "superseded",
-                    "revision": planning_revision(row) + 1,
-                    "updated_at": next_planning_updated_at(row.get("updated_at")),
-                })
-        return [str(row.get("planned_activity_id") or "").strip()
-                for _row_index, row in candidates]
+    return []
 
 
 def get_saved_route_proposal(spreadsheet, user_name, route_date):
@@ -2904,19 +2880,9 @@ def route_candidate_value(candidate):
         raise ValueError("Missing current v3 route priority")
     return round(float(value), 6)
 
-def priority_has_contact_ban(priority):
-    priority = priority or {}
-    guidance = priority.get("list_guidance") or priority.get("customer_guidance") or {}
-    return bool((priority.get("contact_permission") or {}).get("status") == "do_not_contact"
-                or guidance.get("contact_permission_status") == "do_not_contact"
-                or guidance.get("reason_code") == "do_not_contact"
-                or priority.get("recommendation_suppression_reason") == "do_not_contact")
-
 
 def route_priority_suppressed(priority, activity_rows):
     priority = priority or {}
-    if priority_has_contact_ban(priority):
-        return True
     reason = priority.get("recommendation_suppression_reason")
     if reason == "future_planned_activity" and priority.get(
         "recommendation_suppression_source_type"
@@ -2989,8 +2955,6 @@ def _scoped_contact_decision(priority, *, customer_id, obligation_id="", activit
                 "guidance": {"can_contact_now": False, "can_start_unscheduled_contact": False,
                              "can_execute_planned_contact": False, "review_only": review}}
 
-    if priority_has_contact_ban(priority):
-        return blocked("do_not_contact")
     prepared = prepared if prepared is not None else {}
     inputs = _scoped_contact_decision_inputs(snapshot, current, prepared)
     if inputs is None:
@@ -3016,14 +2980,6 @@ def _scoped_contact_decision(priority, *, customer_id, obligation_id="", activit
     if activity is not None and str(selected_item.get("planned_activity_id") or "") != activity_id:
         return blocked("contact_scope_unavailable", review=True)
     plan_day = parse_date_value((activity or {}).get("scheduled_at"))
-    # A separate current booking forbids another unplanned contact for an older
-    # unresolved scope, while two valid current appointments remain executable.
-    if (not plan_day or plan_day < current.date()) and any(
-        item.get("obligation_id") != obligation_id and item.get("status") in OPEN_OBLIGATION_STATUSES
-        and item.get("planned_activity_id") and str(item.get("due_date") or "") >= current.date().isoformat()
-        for item in items
-    ):
-        return blocked("unrelated_booking_scope_review", review=True)
     if (str(guidance.get("obligation_id") or "") == obligation_id
             and (not activity_id or str(guidance.get("planned_activity_id") or "") == activity_id)
             and parse_planning_instant(priority.get("as_of")) == current):
@@ -3039,9 +2995,6 @@ def _scoped_contact_decision(priority, *, customer_id, obligation_id="", activit
         planning_owner_user_names=owner_names, allow_commercial_fallback=False)
     enrich_customer_state_priorities(scoped, state, snapshot.get("customer_state_events", ()),
                                     owner_names or {}, now=current)
-    workflow = (scoped[0].get("customer_workflow") or {}) if scoped else {}
-    if workflow.get("status") in {"snoozed", "dismissed"}:
-        scoped = apply_workflow_suppressions(scoped, {customer_id: workflow})
     selected = (scoped[0].get("list_guidance") or {}) if scoped else {}
     allowed = selected.get("can_execute_planned_contact") if activity_id else selected.get("can_start_unscheduled_contact")
     same_scope = str(selected.get("obligation_id") or "") == obligation_id and (
@@ -3064,8 +3017,6 @@ def route_planned_contact_decision(priority, activity, *, snapshot, route_date, 
     """Read-only authorization for this exact appointment on the requested day."""
     priority = priority or {}
     guidance = priority.get("list_guidance") or priority.get("customer_guidance") or {}
-    if priority_has_contact_ban(priority):
-        return {"allowed": False, "reason_code": "do_not_contact", "guidance": guidance, "priority": priority}
     if priority.get("value_model_version") != SCORE_VERSION:
         return {"allowed": False, "reason_code": "current_priority_unavailable", "guidance": guidance, "priority": priority}
     current = parse_planning_instant(priority.get("as_of") or snapshot.get("snapshot_created_at"))
@@ -3858,10 +3809,7 @@ def planning_suggestion_candidates(spreadsheet, owner, activity_rows=()):
     # Workflow visibility may blank the canonical action, but cannot
     # change a stored suggestion's business identity or attribution.
     raw_priorities = {str(row.get("customer_id") or ""): row for row in priorities}
-    priorities = apply_workflow_suppressions(
-        priorities,
-        priority_workflow_suppressions(spreadsheet, priorities),
-    )
+    priorities = priorities
     candidates = []
     for priority in priorities:
         if not str(priority.get("customer_id") or "").strip():
@@ -4195,8 +4143,8 @@ def build_planned_activity_row(
         "time_is_estimated": "Y" if time_is_estimated else "N",
         "note": text_to_sheet_value(note, max_length=300),
         "status": status,
-        "customer_agreement_confirmed": "Y" if is_yes(customer_agreement_confirmed) else "N",
-        "agreed_at": str(agreed_at or (created_at or now_value) if is_yes(customer_agreement_confirmed) else ""),
+        "customer_agreement_confirmed": "N",
+        "agreed_at": str(agreed_at or created_at or now_value) if normalize_planning_appointment_confirmed(appointment_confirmed, contact_type) else "",
         "source": source,
         "source_contact_id": str(source_contact_id or "").strip(),
         "completed_contact_id": str(completed_contact_id or "").strip(),
@@ -4207,6 +4155,7 @@ def build_planned_activity_row(
         "last_mutation_request_id": str(last_mutation_request_id or "").strip(),
         "last_mutation_fingerprint": str(last_mutation_fingerprint or "").strip(),
         "revision": max(1, int(revision or 1)),
+        "planning_decided_at": str(created_at or now_value).strip(),
         "created_at": str(created_at or now_value).strip(),
         "updated_at": str(updated_at or now_value).strip(),
         "source_suggestion_id": str(source_suggestion_id or "").strip(),
@@ -4391,6 +4340,8 @@ def resolve_contact_planned_activity(
                         row.get("planned_activity_id") or ""
                     ).strip(),
                     "scheduled_at": planning_datetime_text(row.get("scheduled_at")),
+            "planning_decided_at": str(row.get("planning_decided_at") or ""),
+            "skipped_through_at": str(row.get("skipped_through_at") or ""),
                     "contact_type": normalize_planning_contact_type(
                         row.get("contact_type")
                     ),
@@ -4427,10 +4378,12 @@ def ensure_followup_source_contact_id(
     )
     candidate = None
     exact_candidates = []
-    for row_index, row in worksheet_snapshot(
+    source_rows = worksheet_snapshot(
         sheet,
         expected_columns=CONTACT_COLUMNS,
-    )[1]:
+        use_cache=False,
+    )[1]
+    for row_index, row in source_rows:
         if target_customer is None or related_row_customer(
             row, customers, customer_lookup=customer_lookup
         ) is not target_customer:
@@ -4469,6 +4422,10 @@ def ensure_followup_source_contact_id(
         return ""
     row_index, row = candidate
     contact_id = str(row.get("contact_id") or "").strip()
+    resolved_id = contact_id or requested
+    if resolved_id and any(index != row_index and str(other.get("contact_id") or "").strip() == resolved_id
+                           for index, other in source_rows):
+        return ""
     if not contact_id:
         contact_id = requested or stable_contact_source_id({**row, "customer_id": str((target_customer or {}).get("customer_id") or "")})
         update_sheet_row(
@@ -4636,7 +4593,7 @@ def build_unscheduled_followup_groups(*, indexed_contacts, activities, customers
         for obligation in obligations:
             if owner_user_name is not None and normalize_key(obligation.get("owner_user_name")) != normalize_key(owner_user_name):
                 continue
-            if obligation.get("purpose") != "explicit_followup" or obligation.get("status") not in OPEN_OBLIGATION_STATUSES:
+            if obligation.get("status") not in OPEN_OBLIGATION_STATUSES:
                 continue
             if obligation.get("planned_activity_id") and obligation.get("status") == "scheduled":
                 continue
@@ -4661,7 +4618,7 @@ def build_unscheduled_followup_groups(*, indexed_contacts, activities, customers
 
 def planning_preview_serializer():
     secret = str(app.config.get("SECRET_KEY") or "").strip()
-    return URLSafeTimedSerializer(secret, salt="polarbar-planning-route-preview-v1")
+    return URLSafeTimedSerializer(secret, salt="polarbar-planning-route-preview-activity-v1")
 
 
 def blocked_recipient_reasons(recipient_rows):
@@ -4788,8 +4745,6 @@ def email_contact_decision(priority, *, planned_activity_id=""):
     priority = priority or {}
     guidance = priority.get("list_guidance") or priority.get("customer_guidance") or {}
     reason = str(guidance.get("reason_code") or priority.get("recommendation_suppression_reason") or "contact_permission_unavailable")
-    if priority_has_contact_ban(priority):
-        return {"allowed": False, "reason_code": "do_not_contact"}
     if route_priority_values(priority, required=bool(planned_activity_id)) is None:
         return {"allowed": False, "reason_code": "current_priority_unavailable"}
     if planned_activity_id:
@@ -4809,8 +4764,6 @@ def build_email_proposal_status(customer, priority, relationship, latest_live_pr
     blockers = []
     if customer_is_cancelled(customer):
         blockers.append("customer_cancelled")
-    if priority_has_contact_ban(priority):
-        blockers.append("do_not_contact")
     contact_decision = email_contact_decision(priority)
     if not contact_decision["allowed"] and contact_decision["reason_code"] not in blockers:
         blockers.append(contact_decision["reason_code"])
@@ -5122,8 +5075,7 @@ def build_sales_activity_for_email(spreadsheet, *, email_id, email_type,
     }
     if planned_activity_id:
         row_data.update(contact_id=stable_planning_uuid("sent-email", customer_id, email_id),
-                        planned_activity_id=planned_activity_id, obligation_id=obligation_id,
-                        obligation_outcome="open", purpose="scheduled_email_attempt",
+                        planned_activity_id=planned_activity_id, purpose="scheduled_email_attempt",
                         contact_request_fingerprint=request_fingerprint)
     append_dict_row(
         sheet,
@@ -5364,24 +5316,6 @@ def complete_sent_email_attempt(spreadsheet, email_contact, context):
             "last_mutation_request_id": email_contact["email_id"],
             "last_mutation_fingerprint": context.get("request_fingerprint", ""),
         })
-    if context.get("obligation_purpose") == "explicit_followup":
-        cid = str(email_contact.get("customer_id") or "")
-        request_id = "email-complete-" + str(email_contact["contact_id"])
-        events = read_customer_state_events(spreadsheet, use_cache=False)
-        duplicate = existing_customer_state_mutation(events, kind="obligation", customer_id=cid,
-                    request_id=request_id, fingerprint=context["request_fingerprint"])
-        if not duplicate:
-            customer = next(item for item in get_customer_rows(spreadsheet) if item.get("customer_id") == cid)
-            owner = canonical_owner_for_customer(spreadsheet, customer)
-            if not owner:
-                raise CustomerStateConflict("planning_owner_not_found", "Kundens ansvariga behöver verifieras innan åtagandet kan sparas.")
-            append_customer_state_event(spreadsheet, kind="obligation", entity_id=context["obligation_id"],
-                customer=customer, owner=owner, request_id=request_id, fingerprint=context["request_fingerprint"], revision=0,
-                payload={"status": "open", "planned_activity_id": "", "due_at": "",
-                         "due_date": context.get("obligation_due_date", ""), "latest_attempt_at": email_contact["date_time"],
-                         "latest_attempt_result": email_contact["result"], "evidence_quality": "email_attempt_promise_open",
-                         "updated_at": stockholm_now().isoformat()})
-
 
 def recover_sent_email_attempt(spreadsheet, message, customer, data):
     """Repair a saved send's contact/calendar writes without another provider call."""
@@ -5449,8 +5383,7 @@ def _send_email_proposal_locked(row, data, draft_id):
     try:
         current = stockholm_now()
         snapshot = get_authoritative_priority_snapshot(spreadsheet, today=current.date(), as_of=current)
-        priorities = apply_workflow_suppressions(snapshot["priorities"],
-                      priority_workflow_suppressions(spreadsheet, snapshot["priorities"]))
+        priorities = snapshot["priorities"]
         priority = next((item for item in priorities if str(item.get("customer_id") or "")
                          == str(customer.get("customer_id") or "")), None)
     except Exception:
@@ -7118,6 +7051,8 @@ def priority_planned_activity_signature(rows):
             "sales_person": normalize_key(row.get("sales_person")),
             "status": str(row.get("status") or "").strip().casefold(),
             "scheduled_at": planning_datetime_text(row.get("scheduled_at")),
+            "planning_decided_at": str(row.get("planning_decided_at") or ""),
+            "skipped_through_at": str(row.get("skipped_through_at") or ""),
             "source_suggestion_id": str(
                 row.get("source_suggestion_id") or ""
             ).strip(),
@@ -7206,7 +7141,7 @@ def get_authoritative_priority_snapshot(
     )
     snapshot_epoch = _priority_snapshot_epoch
     key = (
-        id(spreadsheet), date_key, dependency_signature, planning_signature, SCORE_VERSION, snapshot_epoch,
+        id(spreadsheet), date_key, dependency_signature, planning_signature, SCORE_VERSION, "customer-activity-v1", snapshot_epoch,
         planning_time_signature, canonical_payload_fingerprint(state_events),
         "live" if live else as_of.isoformat(timespec="microseconds"),
     )
@@ -7512,95 +7447,8 @@ def build_calibration_rows(score_events, order_rows, customers, *, today=None):
 
 
 def priority_workflow_suppressions(spreadsheet, priority_customers):
-    try:
-        users = get_user_rows(spreadsheet)
-        owners = {}
-        for user in users:
-            if not is_yes(user.get("active")):
-                continue
-            user_name = str(user.get("user_name") or "").strip()
-            owners[normalize_key(user_name)] = user_name
-            owners[normalize_key(user.get("name"))] = user_name
-        try:
-            _sheet = get_worksheet(spreadsheet, "planning_suggestions")
-            _headers, stored = worksheet_snapshot(_sheet)
-        except WorksheetNotFound:
-            stored = []
-        state_events = read_customer_state_events(spreadsheet)
-    except (WorksheetNotFound, AttributeError):
-        return {}
-    except Exception:
-        app.logger.exception("Could not load suggestion suppression state")
-        return {}
-
-    by_identity = defaultdict(list)
-    for _index, row in stored:
-        by_identity[(
-            normalize_key(row.get("user_name")),
-            str(row.get("customer_id") or "").strip(),
-            str(row.get("decision_context_hash") or "").strip(),
-        )].append(row)
-    now = stockholm_now().astimezone(STOCKHOLM_ZONE)
-    suppressions = {}
-    for priority in priority_customers:
-        customer_id = str(priority.get("customer_id") or "").strip()
-        owner_name = owners.get(normalize_key(priority.get("sales_person")), "")
-        if not customer_id or not owner_name:
-            continue
-        context_hash = priority_decision_context_hash(priority, owner_name)
-        compatible_hashes = priority_compatible_decision_context_hashes(
-            priority, owner_name
-        )
-        canonical_rows = by_identity.get(
-            (normalize_key(owner_name), customer_id, context_hash), []
-        )
-        legacy_rows = []
-        current_trigger = str(
-            priority.get("primary_trigger_key")
-            or priority.get("primary_trigger_type")
-            or ""
-        ).strip().casefold()
-        for compatible_hash in compatible_hashes:
-            for stored_row in by_identity.get(
-                (normalize_key(owner_name), customer_id, compatible_hash), []
-            ):
-                stored_trigger = str(
-                    stored_row.get("primary_trigger_key")
-                    or stored_row.get("primary_trigger_type")
-                    or ""
-                ).strip().casefold()
-                # Segment was absent from the historic hash. Require the same
-                # concrete trigger before adopting that old row so A<->B/C
-                # reclassification cannot inherit stale workflow state.
-                if stored_trigger in priority_compatible_trigger_keys(priority):
-                    legacy_rows.append(stored_row)
-        row = preferred_compatible_suggestion(
-            canonical_rows + legacy_rows,
-            canonical_id=deterministic_suggestion_id(
-                owner_name, customer_id, context_hash
-            ),
-        )
-        status = str((row or {}).get("status") or "").strip().casefold()
-        if status == "snoozed":
-            due = parse_planning_instant((row or {}).get("snooze_until"))
-            if due and due > now:
-                suppressions[customer_id] = "snoozed"
-        elif status == "dismissed":
-            suppressions[customer_id] = "dismissed"
-        elif status == "planned":
-            suppressions[customer_id] = "suggestion_planned"
-    for priority in priority_customers:
-        customer_id = str(priority.get("customer_id") or "").strip()
-        owner_name = owners.get(normalize_key(priority.get("sales_person")), "")
-        state = customer_workflow_read_state(priority, owner_name, state_events, now=now)
-        priority["customer_workflow"] = state
-        if state.get("status") in {"snoozed", "dismissed"}:
-            suppressions[customer_id] = state["status"]
-        elif state.get("override_legacy"):
-            suppressions.pop(customer_id, None)
-        elif customer_id in suppressions:
-            priority["customer_workflow"] = {**state, "status": suppressions[customer_id], "legacy": True}
-    return suppressions
+    """Retired decisions are inert, including legacy suggestion storage."""
+    return {}
 
 
 def read_customer_state_events(spreadsheet, *, use_cache=True):
@@ -7638,6 +7486,26 @@ class CustomerStateConflict(ValueError):
 
 def customer_state_error(exc):
     return planning_error(exc.code, str(exc), exc.status, **exc.extra)
+
+
+def current_customer_for_activity_write(spreadsheet, customer_id, *, owner=None):
+    """Revalidate active master identity inside the shared mutation lock.
+
+    A cached card/preview is never authority to write to a removed customer.
+    Two portfolio reads per mutation suffice; there is no history-row IO.
+    """
+    invalidate_sheet_cache(spreadsheet, "customers_enriched", "users")
+    customer = resolve_planning_customer(spreadsheet, {"customer_id": customer_id})
+    if not customer or not customer_access_allowed(customer, current_user()):
+        raise CustomerStateConflict("customer_not_found", "Butiken kunde inte hittas.", 404)
+    if customer_is_cancelled(customer):
+        raise CustomerStateConflict("customer_cancelled", "Kunden är inte längre aktiv.", 409)
+    current_owner = canonical_owner_for_customer(spreadsheet, customer)
+    if not current_owner:
+        raise CustomerStateConflict("planning_owner_not_found", "Kundens ansvariga säljare kunde inte verifieras.", 422)
+    if owner and normalize_key(current_owner.get("user_name")) != normalize_key(owner.get("user_name")):
+        raise CustomerStateConflict("planning_owner_customer_mismatch", "Kunden har bytt ansvarig säljare. Ladda om kunden.", 409)
+    return customer
 
 
 def customer_state_mutation_context(spreadsheet, data):
@@ -7716,45 +7584,10 @@ def append_customer_state_event(spreadsheet, *, kind, entity_id, customer, owner
     return row
 
 
-def customer_workflow_context(priority, owner_name):
-    guidance = priority.get("list_guidance") or priority.get("customer_guidance") or {}
-    scope = str(guidance.get("action_scope") or guidance.get("source_scope") or "").strip()
-    return canonical_payload_fingerprint({
-        "context": priority_decision_context_hash(priority, owner_name), "action_scope": scope,
-    })
-
-
-def customer_workflow_read_state(priority, owner_name, events, *, now=None):
-    current = now or stockholm_now()
-    context_hash = customer_workflow_context(priority, owner_name)
-    cid = str(priority.get("customer_id") or "").strip()
-    rows = [event for (kind, event_cid, _entity), event in latest_state_events(events, as_of=current).items()
-            if kind == "workflow" and event_cid == cid
-            and normalize_key(event.get("owner_user_name")) == normalize_key(owner_name)]
-    rows = [event for event in rows if event_payload(event).get("decision_context_hash") == context_hash]
-    row = max(rows, key=lambda event: (str(event.get("occurred_at") or ""), event_revision(event)), default=None)
-    result = {"status": "active", "revision": 0, "decision_context_hash": context_hash,
-              "snooze_until": "", "source_scope": (priority.get("list_guidance") or {}).get("action_scope", "")}
-    if row:
-        result.update(event_payload(row), revision=event_revision(row))
-        due = parse_planning_instant(result.get("snooze_until"))
-        if result.get("status") == "snoozed" and (due is None or due <= current):
-            result["status"] = "active"
-    # Retain the previous model's strategic A-prospect protection. Historical
-    # dismissals remain restorable, but no new permanent dismissal is offered.
-    guidance = priority.get("list_guidance") or priority.get("customer_guidance") or {}
-    result["requires_snooze"] = guidance.get("focus_key") == "a_prospect"
-    result["can_dismiss"] = not result["requires_snooze"]
-    return result
-
 
 def enrich_customer_state_priorities(priorities, state, events, owner_names, *, now):
     for priority in priorities:
         cid = str(priority.get("customer_id") or "").strip()
-        permission = state.get("contact_permissions", {}).get(cid, {})
-        priority["contact_permission"] = {"status": "allowed", "revision": 0,
-                                           "reason": "", "updated_at": "", **permission}
-        priority["customer_workflow"] = customer_workflow_read_state(priority, owner_names.get(cid, ""), events, now=now)
         guidance = priority.get("list_guidance") or priority.get("customer_guidance") or {}
         oid = str(guidance.get("obligation_id") or "")
         aid = str(guidance.get("planned_activity_id") or "")
@@ -7763,9 +7596,9 @@ def enrich_customer_state_priorities(priorities, state, events, owner_names, *, 
         if selected is None:
             selected = next((item for item in obligations if aid and item.get("planned_activity_id") == aid), None)
         priority["open_obligations"] = [item for item in obligations if item.get("status") in OPEN_OBLIGATION_STATUSES]
-        resolved_reminders = [item for item in obligations if item.get("resolution_basis")]
+        resolved_reminders = [item for item in obligations if item.get("status") == "superseded"]
         priority["historical_reminders_resolved"] = len(resolved_reminders)
-        priority["history_note"] = (f"{len(resolved_reminders)} äldre interna påminnelser har ersatts av senare kundarbete. Historiken finns kvar." if resolved_reminders else "")
+        priority["history_note"] = (f"{len(resolved_reminders)} äldre aktiviteter har ersatts av senare kundarbete. Historiken finns kvar." if resolved_reminders else "")
         if selected:
             priority["planning_seed"] = {name: selected.get(name) for name in (
                 "customer_id", "owner_user_name", "obligation_id", "source_contact_id", "source_contact_row",
@@ -7801,23 +7634,11 @@ def get_planning_attention():
         items = items[offset:offset + limit]
         page_customer_ids = {item["customer_id"] for item in items}
         priorities = [dict(row) for row in snapshot["priorities"] if str(row.get("customer_id") or "") in page_customer_ids]
-        priorities = apply_workflow_suppressions(priorities, priority_workflow_suppressions(spreadsheet, priorities))
+        priorities = priorities
         by_id = {str(item.get("customer_id") or ""): item for item in priorities}
-        decision_inputs = {}
         for item in items:
-            priority = by_id.get(item["customer_id"], {})
-            decision = obligation_contact_decision(priority, item, snapshot=snapshot, as_of=now, prepared=decision_inputs)
-            guidance = decision["guidance"]
-            permission = state.get("contact_permissions", {}).get(item["customer_id"], {})
-            refused = permission.get("status") == "do_not_contact" or decision["reason_code"] == "do_not_contact"
-            review_only = bool(item.get("review_only") or guidance.get("review_only"))
-            can_contact = bool(decision["allowed"] and guidance.get("can_contact_now"))
-            can_execute = bool(decision["allowed"] and guidance.get("can_execute_planned_contact"))
-            item.update(review_only=review_only, contact_type=normalize_planning_contact_type(item.get("contact_type")),
-                        can_contact_now=bool(can_contact and not refused and not review_only),
-                        can_execute_planned_contact=bool(can_execute and not refused and not review_only),
-                        contact_block_reason="do_not_contact" if refused else decision["reason_code"],
-                        contact_permission=permission)
+            item.update(review_only=False, contact_type=normalize_planning_contact_type(item.get("contact_type")),
+                        can_contact_now=True, can_execute_planned_contact=True, contact_block_reason="")
         return jsonify(ok=True, owner=public_user(owner), items=items,
                        total=total, offset=offset, limit=limit, as_of=now.isoformat())
     except Exception:
@@ -7827,223 +7648,88 @@ def get_planning_attention():
 
 @app.route("/customer-obligations/action", methods=["POST"])
 def mutate_customer_obligation():
+    """Narrow adapter for date-only legacy follow-ups, never case management."""
     data = request.get_json(silent=True)
+    if not isinstance(data, dict) or data.get("action") not in {"reschedule", "skip"}:
+        return planning_error("operation_retired", "Använd Logga kontakt, Planera om eller Hoppa över. Ladda om sidan.", 410)
     try:
         spreadsheet = get_spreadsheet_with_retry()
         with planning_write_lock():
             customer, owner = customer_state_mutation_context(spreadsheet, data)
-            cid, oid = str(customer.get("customer_id") or ""), str(data.get("obligation_id") or "").strip()
-            action, request_id = str(data.get("action") or ""), data.get("client_request_id")
-            if action not in {"resolve", "cancel", "reschedule", "snooze", "restore"}:
-                raise CustomerStateConflict("invalid_obligation_action", "Välj en giltig åtgärd.", 400)
-            events = read_customer_state_events(spreadsheet, use_cache=False)
+            cid, oid = str(customer.get("customer_id") or ""), str(data.get("obligation_id") or "")
+            request_id = data.get("client_request_id")
             fingerprint = canonical_payload_fingerprint(data)
-            duplicate = existing_customer_state_mutation(events, kind="obligation", customer_id=cid,
-                                                         request_id=request_id, fingerprint=fingerprint)
-            if duplicate:
-                state = customer_state_snapshot(spreadsheet, events=events)
-                item = next((row for row in state["obligations"].get(cid, []) if row["obligation_id"] == oid), event_payload(duplicate))
-                return jsonify(ok=True, duplicate=True, obligation=item)
+            events = read_customer_state_events(spreadsheet, use_cache=False)
+            kind = "activity_skip" if data["action"] == "skip" else "obligation"
+            duplicate = existing_customer_state_mutation(events, kind=kind, customer_id=cid,
+                            request_id=request_id, fingerprint=fingerprint)
             state = customer_state_snapshot(spreadsheet, events=events)
             item = next((row for row in state["obligations"].get(cid, []) if row["obligation_id"] == oid), None)
+            if duplicate:
+                return jsonify(ok=True, duplicate=True, obligation=item)
             if item is None:
-                raise CustomerStateConflict("obligation_not_found", "Åtagandet kunde inte hittas.", 404)
-            pending_activity_rows = read_planned_activity_snapshot(spreadsheet, use_cache=False)[2]
-            pending_event_id = customer_state_event_identity("obligation", cid, request_id)
-            recovery = [row for _index, row in pending_activity_rows if
-                        row.get("last_mutation_request_id") == pending_event_id
-                        or row.get("planned_activity_id") == stable_planning_uuid("obligation-activity", cid, oid, request_id)]
+                raise CustomerStateConflict("activity_not_found", "Uppföljningen kunde inte hittas.", 404)
+            activity_id = stable_planning_uuid("legacy-followup", cid, oid, request_id)
+            if item.get("planned_activity_id") and item["planned_activity_id"] != activity_id:
+                raise CustomerStateConflict("use_activity_api", "Ändra den faktiska kalenderaktiviteten.", 409)
+            sheet, headers, rows = write_planned_activity_snapshot(spreadsheet) if data["action"] == "reschedule" else (None, None, [])
+            recovery = next((row for _index, row in rows if row.get("planned_activity_id") == activity_id), None)
             if recovery:
-                if any(str(row.get("last_mutation_fingerprint") or row.get("create_fingerprint") or "") != fingerprint for row in recovery):
-                    raise CustomerStateConflict("idempotency_payload_mismatch", "Request-ID:t hör till en annan tidigare åtgärd.")
+                if recovery.get("create_fingerprint") != fingerprint:
+                    raise CustomerStateConflict("idempotency_payload_mismatch", "Request-ID:t hör till en annan bokning.")
             else:
                 validate_customer_state_revision(data, item)
-            updated = dict(item)
-            updated["reason"] = str(data.get("reason") or "").strip()[:1000]
-            if item.get("identity_conflict") and action not in {"cancel", "snooze"}:
-                raise CustomerStateConflict("cross_customer_source",
-                    "Aktivitetens kundkoppling är felaktig. Avskriv den och skapa en ny aktivitet för rätt kund.")
-            if (item.get("evidence_status") == "uncertain" and action == "reschedule"
-                    and normalize_planning_appointment_confirmed(data.get("customer_agreement_confirmed"), "visit")):
-                reason = str(data.get("reason") or data.get("note") or "").strip()
-                if not reason:
-                    raise CustomerStateConflict("review_evidence_required",
-                        "Dokumentera vad som klarlagts och överenskommits innan serviceuppgiften aktiveras.", 400)
-                updated.update(evidence_status="documented", review_status="clarified",
-                    commitment_kind="customer_promise", customer_agreement_confirmed=True,
-                    agreed_at=planning_timestamp(), review_resolution={"reason": reason[:1000],
-                        "actor_user_name": current_user().get("user_name"), "occurred_at": planning_timestamp(),
-                        "client_request_id": request_id})
-            activity = None
-            if action in {"resolve", "cancel"}:
-                updated.update(status="resolved" if action == "resolve" else "cancelled", snooze_until="",
-                               resolution_event_id=customer_state_event_identity("obligation", cid, request_id))
-            elif action == "restore":
-                linked = next((row for _index, row in pending_activity_rows
-                               if row.get("planned_activity_id") == item.get("planned_activity_id")
-                               and row.get("status") == "planned"), None)
-                updated.update(status="scheduled" if linked else "open", snooze_until="", resolution_event_id="",
-                               planned_activity_id=linked.get("planned_activity_id") if linked else "",
-                               due_at=linked.get("scheduled_at") if linked else "")
-            elif action == "snooze":
-                due = parse_planning_instant(data.get("snooze_until"))
-                if due is None or due <= stockholm_now():
-                    raise CustomerStateConflict("invalid_snooze_until", "Välj en framtida tid för återupptagning.", 400)
-                updated["snooze_until"] = due.isoformat()
-            elif action == "reschedule":
+                if item["status"] not in OPEN_OBLIGATION_STATUSES:
+                    raise CustomerStateConflict("activity_closed", "Uppföljningen är redan hanterad.", 409)
+            activity = recovery
+            if data["action"] == "skip":
+                cutoff = parse_planning_instant(item.get("due_at") or item.get("due_date"))
+                if cutoff is None or cutoff.date() >= stockholm_today():
+                    raise CustomerStateConflict("not_missed", "Uppföljningen är inte missad.", 409)
+                payload = {"skipped_through_at": cutoff.isoformat()}
+            else:
                 scheduled = parse_planning_datetime(data.get("scheduled_at"))
-                contact_type = normalize_planning_contact_type(data.get("contact_type") or item.get("contact_type"))
+                contact_type = normalize_planning_contact_type(data.get("contact_type"))
                 if scheduled is None or scheduled < stockholm_now().replace(second=0, microsecond=0):
                     raise CustomerStateConflict("invalid_scheduled_at", "Välj en tid idag eller framåt.", 400)
                 if contact_type not in PLANNING_CONTACT_TYPES:
                     raise CustomerStateConflict("invalid_contact_type", "Välj Besök, Telefon eller Mejl.", 400)
-                if state["contact_permissions"].get(cid, {}).get("status") == "do_not_contact":
-                    raise CustomerStateConflict("do_not_contact", "Kontakta inte kunden. Häv förbudet efter dokumenterad ny tillåtelse innan en kontakt bokas.")
-                if item.get("source_contact_id"):
-                    source_id = ensure_followup_source_contact_id(spreadsheet, customer_name=customer.get("customer"),
-                                                                  customer_id=cid, source_contact_id=item["source_contact_id"], owner=owner)
-                    if not source_id:
-                        raise CustomerStateConflict("follow_up_source_not_found", "Åtagandets källa måste granskas innan ombokning.")
-                sheet, headers, rows = write_planned_activity_snapshot(spreadsheet)
-                activity_id = stable_planning_uuid("obligation-activity", cid, oid, request_id)
-                activity = next((row for _index, row in rows if row.get("planned_activity_id") == activity_id), None)
                 if activity is None:
-                    activity = build_planned_activity_row(
-                        activity_id=activity_id, owner=owner, customer=customer, contact_type=contact_type,
-                        scheduled_at=scheduled, note=data.get("note", item.get("note", "")),
-                        source="follow_up" if item.get("source_contact_id") else "manual",
-                        source_contact_id=source_id if item.get("source_contact_id") else "",
-                        customer_agreement_confirmed=data.get("customer_agreement_confirmed", item.get("customer_agreement_confirmed", False)),
-                        agreed_at=item.get("agreed_at", ""),
-                        appointment_confirmed=data.get("appointment_confirmed", item.get("appointment_confirmed", False)),
-                        picking_help=data.get("picking_help", item.get("picking_help", False)),
-                        client_request_id=planning_request_scope(current_user(), "obligation-reschedule", oid, request_id),
-                        create_fingerprint=fingerprint,
-                    )
-                    activity["obligation_id"] = oid
+                    source_contact_id = ensure_followup_source_contact_id(spreadsheet,
+                        customer_name=customer.get("customer"), customer_id=cid,
+                        source_contact_id=item.get("source_contact_id", ""), owner=owner)
+                    if not source_contact_id:
+                        raise CustomerStateConflict("follow_up_source_ambiguous",
+                            "Källkontakten kunde inte identifieras entydigt. Ladda om planeringen.", 409)
+                    activity = build_planned_activity_row(activity_id=activity_id, owner=owner, customer=customer,
+                        contact_type=contact_type, scheduled_at=scheduled, note=data.get("note", item.get("note", "")),
+                        source="follow_up", source_contact_id=source_contact_id,
+                        appointment_confirmed=data.get("appointment_confirmed", False),
+                        picking_help=data.get("picking_help", False), create_fingerprint=fingerprint,
+                        client_request_id=planning_request_scope(current_user(), "legacy-followup", oid, request_id))
                     append_dict_row(sheet, PLANNED_ACTIVITY_COLUMNS, activity)
-                elif activity.get("create_fingerprint") != fingerprint:
-                    raise CustomerStateConflict("idempotency_payload_mismatch", "Request-ID:t hör till en annan bokning.")
-                # Complete the explicit replacement link even after a partial retry.
-                for row_index, old in rows:
-                    if old.get("planned_activity_id") == item.get("planned_activity_id") and old.get("planned_activity_id") != activity_id and old.get("status") == "planned":
-                        update_sheet_row(sheet, row_index, headers, {"status": "superseded", "revision": planning_revision(old) + 1,
-                                                                   "updated_at": planning_timestamp(),
-                                                                   "last_mutation_request_id": pending_event_id,
-                                                                   "last_mutation_fingerprint": fingerprint})
-                updated.update(status="scheduled", planned_activity_id=activity_id, due_at=scheduled.isoformat(),
-                               due_date=scheduled.date().isoformat(), snooze_until="", resolution_event_id="")
-            # Resolve/cancel controls the promise; close only its current calendar link.
-            if action in {"resolve", "cancel"} and item.get("planned_activity_id"):
-                sheet, headers, rows = write_planned_activity_snapshot(spreadsheet)
-                for row_index, old in rows:
-                    if old.get("planned_activity_id") == item["planned_activity_id"] and old.get("status") == "planned":
-                        update_sheet_row(sheet, row_index, headers, {"status": "cancelled", "revision": planning_revision(old) + 1,
-                                                                   "updated_at": planning_timestamp(),
-                                                                   "last_mutation_request_id": pending_event_id,
-                                                                   "last_mutation_fingerprint": fingerprint})
-            append_customer_state_event(spreadsheet, kind="obligation", entity_id=oid, customer=customer, owner=owner,
-                                        request_id=request_id, fingerprint=fingerprint, payload=updated,
-                                        revision=int(item.get("revision") or 0) + 1)
+                payload = {**item, "status": "scheduled", "planned_activity_id": activity_id,
+                           "due_at": scheduled.isoformat(), "due_date": scheduled.date().isoformat()}
+            append_customer_state_event(spreadsheet, kind=kind, entity_id=oid, customer=customer, owner=owner,
+                request_id=request_id, fingerprint=fingerprint, payload=payload, revision=int(item["revision"]) + 1)
             fresh = customer_state_snapshot(spreadsheet)
             result = next(row for row in fresh["obligations"][cid] if row["obligation_id"] == oid)
             return jsonify(ok=True, obligation=result, activity=public_planned_activity(activity) if activity else None)
     except CustomerStateConflict as exc:
         return customer_state_error(exc)
     except Exception:
-        app.logger.exception("Could not persist obligation action")
-        return planning_error("obligation_store_unavailable", "Åtgärden kunde inte sparas helt. Försök igen med samma request-ID.", 503)
+        app.logger.exception("Could not save legacy follow-up action")
+        return planning_error("activity_store_unavailable", "Åtgärden kunde inte sparas helt. Försök igen med samma request-ID.", 503)
 
 
 @app.route("/customer-workflow/action", methods=["POST"])
 def mutate_customer_workflow():
-    data = request.get_json(silent=True)
-    try:
-        spreadsheet = get_spreadsheet_with_retry()
-        with planning_write_lock():
-            customer, owner = customer_state_mutation_context(spreadsheet, data)
-            cid, action = str(customer.get("customer_id") or ""), str(data.get("action") or "")
-            if action not in {"snooze", "dismiss", "restore"}:
-                raise CustomerStateConflict("invalid_workflow_action", "Välj en giltig åtgärd.", 400)
-            fingerprint = canonical_payload_fingerprint(data)
-            events = read_customer_state_events(spreadsheet, use_cache=False)
-            duplicate = existing_customer_state_mutation(events, kind="workflow", customer_id=cid,
-                                                         request_id=data.get("client_request_id"), fingerprint=fingerprint)
-            if duplicate:
-                return jsonify(ok=True, duplicate=True, customer_workflow={**event_payload(duplicate), "revision": event_revision(duplicate)})
-            snapshot = get_authoritative_priority_snapshot(spreadsheet, today=stockholm_today())
-            priority = next((row for row in snapshot["priorities"] if str(row.get("customer_id") or "") == cid), None)
-            if priority is None:
-                raise CustomerStateConflict("priority_unavailable", "Kundens prioritering kunde inte verifieras.")
-            current = customer_workflow_read_state(priority, owner.get("user_name"), events)
-            supplied_context = str(data.get("decision_context_hash") or "")
-            if not supplied_context:
-                raise CustomerStateConflict("decision_context_required", "Beslutets kontext saknas. Ladda om kunden.", 400)
-            if supplied_context != current["decision_context_hash"]:
-                raise CustomerStateConflict("decision_context_changed", "Kundens förutsättningar har ändrats. Ladda om kunden.", current=current)
-            validate_customer_state_revision(data, current)
-            if action == "dismiss" and not current.get("can_dismiss", True):
-                raise CustomerStateConflict("a_prospect_requires_snooze", "A-prospekt ska pausas till ett bestämt datum och får inte döljas permanent.")
-            payload = {**current, "status": {"snooze": "snoozed", "dismiss": "dismissed", "restore": "active"}[action], "snooze_until": ""}
-            if action == "snooze":
-                due = parse_planning_instant(data.get("snooze_until"))
-                if due is None or due <= stockholm_now():
-                    raise CustomerStateConflict("invalid_snooze_until", "Välj en framtida tid för återupptagning.", 400)
-                payload["snooze_until"] = due.isoformat()
-            payload["override_legacy"] = action == "restore"
-            event = append_customer_state_event(spreadsheet, kind="workflow", entity_id=current["decision_context_hash"],
-                                                customer=customer, owner=owner, request_id=data.get("client_request_id"),
-                                                fingerprint=fingerprint, payload=payload, revision=int(current["revision"]) + 1)
-            return jsonify(ok=True, customer_workflow={**payload, "revision": event_revision(event)})
-    except CustomerStateConflict as exc:
-        return customer_state_error(exc)
-    except Exception:
-        app.logger.exception("Could not persist customer workflow")
-        return planning_error("workflow_store_unavailable", "Beslutet kunde inte sparas. Försök igen med samma request-ID.", 503)
-
-
-def persist_contact_permission(spreadsheet, *, customer, owner, data, request_id, occurred_at=None, source_contact_id=""):
-    status = str(data.get("status") or "")
-    reason = str(data.get("reason") or "").strip()
-    if status not in {"allowed", "do_not_contact"} or not reason:
-        raise CustomerStateConflict("permission_reason_required", "Status och dokumenterad orsak krävs.", 400)
-    cid = str(customer.get("customer_id") or "")
-    fingerprint = canonical_payload_fingerprint({"data": data, "source_contact_id": source_contact_id})
-    events = read_customer_state_events(spreadsheet, use_cache=False)
-    duplicate = existing_customer_state_mutation(events, kind="permission", customer_id=cid,
-                                                 request_id=request_id, fingerprint=fingerprint)
-    if duplicate:
-        fresh = customer_state_snapshot(spreadsheet, events=events)
-        return fresh["contact_permissions"].get(cid, event_payload(duplicate)), True
-    state = customer_state_snapshot(spreadsheet, events=events)
-    current = state["contact_permissions"].get(cid, {"status": "allowed", "revision": 0})
-    if "expected_revision" in data:
-        validate_customer_state_revision(data, current)
-    elif not source_contact_id:
-        raise CustomerStateConflict("expected_revision_required", "Aktuell revision krävs. Ladda om kunden.", 400)
-    payload = {"status": status, "reason": reason[:1000], "source_contact_id": source_contact_id,
-               "source": str(data.get("source") or "explicit_permission"), "actor_user_name": current_user().get("user_name")}
-    event = append_customer_state_event(spreadsheet, kind="permission", entity_id="contact_permission", customer=customer,
-                                        owner=owner, request_id=request_id, fingerprint=fingerprint, payload=payload,
-                                        revision=int(current.get("revision") or 0) + 1, occurred_at=occurred_at)
-    return customer_state_snapshot(spreadsheet)["contact_permissions"][cid], False
+    return planning_error("operation_retired", "Funktionen har tagits bort. Ladda om sidan.", 410)
 
 
 @app.route("/customer-contact-permission", methods=["POST"])
 def mutate_customer_contact_permission():
-    data = request.get_json(silent=True)
-    try:
-        spreadsheet = get_spreadsheet_with_retry()
-        with planning_write_lock():
-            customer, owner = customer_state_mutation_context(spreadsheet, data)
-            permission, duplicate = persist_contact_permission(spreadsheet, customer=customer, owner=owner, data=data,
-                                                               request_id=data.get("client_request_id"))
-            return jsonify(ok=True, permission=permission, duplicate=duplicate)
-    except CustomerStateConflict as exc:
-        return customer_state_error(exc)
-    except Exception:
-        app.logger.exception("Could not persist explicit contact permission")
-        return planning_error("permission_store_unavailable", "Kontaktstatus kunde inte sparas. Försök igen med samma request-ID.", 503)
+    return planning_error("operation_retired", "Funktionen har tagits bort. Ladda om sidan.", 410)
 
 
 @app.route("/customer-insights", methods=["GET"])
@@ -8157,10 +7843,7 @@ def build_customer_insights_response(spreadsheet, today, user, global_snapshot):
         if str(priority.get("customer_id") or "").strip()
         in accessible_customer_ids
     ]
-    priority_customers = apply_workflow_suppressions(
-        priority_customers,
-        priority_workflow_suppressions(spreadsheet, priority_customers),
-    )
+    priority_customers = priority_customers
     record_performance_step(
         "calculation.priority",
         priority_started,
@@ -8721,17 +8404,17 @@ def mutate_planning_suggestion(suggestion_id, action):
 
 @app.route("/planning/suggestions/<suggestion_id>/snooze", methods=["POST"])
 def snooze_planning_suggestion(suggestion_id):
-    return mutate_planning_suggestion(suggestion_id, "snooze")
+    return planning_error("operation_retired", "Funktionen har tagits bort. Ladda om sidan.", 410)
 
 
 @app.route("/planning/suggestions/<suggestion_id>/dismiss", methods=["POST"])
 def dismiss_planning_suggestion(suggestion_id):
-    return mutate_planning_suggestion(suggestion_id, "dismiss")
+    return planning_error("operation_retired", "Funktionen har tagits bort. Ladda om sidan.", 410)
 
 
 @app.route("/planning/suggestions/<suggestion_id>/resume", methods=["POST"])
 def resume_planning_suggestion(suggestion_id):
-    return mutate_planning_suggestion(suggestion_id, "reopen")
+    return planning_error("operation_retired", "Funktionen har tagits bort. Ladda om sidan.", 410)
 
 
 @app.route("/planning/suggestions/<suggestion_id>/plan", methods=["POST"])
@@ -9037,6 +8720,9 @@ def plan_planning_suggestion(suggestion_id):
 def planning_activities():
     data = request.get_json(silent=True) if request.method == "POST" else {}
     data = data if isinstance(data, dict) else {}
+    if request.method == "POST" and "customer_agreement_confirmed" in data:
+        return planning_error("operation_retired", "Planeringsformuläret har ändrats. Ladda om sidan.", 410)
+
     try:
         spreadsheet = get_spreadsheet_with_retry()
     except Exception:
@@ -9152,9 +8838,6 @@ def planning_activities():
                 409,
             )
 
-        permission = customer_state_snapshot(spreadsheet)["contact_permissions"].get(str(customer.get("customer_id") or ""), {})
-        if permission.get("status") == "do_not_contact":
-            return planning_error("do_not_contact", "Kontakta inte kunden. Ny kontakt kräver dokumenterad tillåtelse.", 409)
         requested_obligation_id = str(data.get("obligation_id") or "").strip()
         if requested_obligation_id:
             state = customer_state_snapshot(spreadsheet)
@@ -9184,6 +8867,11 @@ def planning_activities():
                 )
 
         with planning_write_lock():
+            try:
+                customer = current_customer_for_activity_write(spreadsheet, customer["customer_id"], owner=owner)
+            except (CustomerStateConflict, CustomerResolutionError) as exc:
+                return planning_error(exc.code, str(exc), exc.status)
+
             sheet, _headers, existing_rows = write_planned_activity_snapshot(
                 spreadsheet
             )
@@ -9300,7 +8988,12 @@ def planning_activities():
             )
             if requested_obligation_id:
                 row_data["obligation_id"] = requested_obligation_id
-            append_dict_row(sheet, PLANNED_ACTIVITY_COLUMNS, row_data)
+            try:
+                append_dict_row(sheet, PLANNED_ACTIVITY_COLUMNS, row_data)
+            except Exception:
+                app.logger.exception("Could not save planned activity")
+                return planning_error("planning_store_unavailable", "Aktiviteten kunde inte sparas. Försök igen med samma request-ID.", 503)
+
             try:
                 mirror_synced = sync_planned_followup_mirror(
                     spreadsheet,
@@ -9444,8 +9137,7 @@ def planning_activities():
             week_customer_ids = {str(activity.get("customer_id") or "") for activity in activities}
             week_priorities = [dict(row) for row in activity_snapshot["priorities"]
                                if str(row.get("customer_id") or "") in week_customer_ids]
-            visible_priorities = apply_workflow_suppressions(week_priorities,
-                                  priority_workflow_suppressions(spreadsheet, week_priorities))
+            visible_priorities = week_priorities
             activity_priorities = {str(item.get("customer_id") or ""): item for item in visible_priorities}
         except Exception:
             # Keep the calendar readable during a model outage, but do not
@@ -9463,7 +9155,7 @@ def planning_activities():
         if obligation:
             activity.update(obligation_id=obligation["obligation_id"], obligation_revision=obligation["revision"],
                             obligation_status=obligation["status"], source_contact_id=obligation.get("source_contact_id", ""))
-            if activity.get("status") == "planned" and obligation.get("resolution_basis") and obligation["status"] in {"resolved", "cancelled"}:
+            if activity.get("status") == "planned" and obligation.get("resolution_basis") and obligation["status"] in {"resolved", "cancelled", "skipped", "superseded"}:
                 activity.update(source_status="planned", status="superseded", is_overdue=False, overdue=False,
                                 resolution_basis=obligation["resolution_basis"],
                                 status_label="Ersatt av senare kundarbete")
@@ -9705,6 +9397,8 @@ def update_planning_activity(activity_id):
             "Begäran är ogiltig.",
             400,
         )
+    if "customer_agreement_confirmed" in data:
+        return planning_error("operation_retired", "Planeringsformuläret har ändrats. Ladda om sidan.", 410)
     client_request_id = normalize_client_request_id(
         data.get("client_request_id")
     )
@@ -9769,6 +9463,8 @@ def update_planning_activity(activity_id):
             )
 
     with planning_write_lock():
+        invalidate_sheet_cache(spreadsheet, "customers_enriched", "users")
+
         sheet, headers, row_index, current = find_planned_activity(
             spreadsheet,
             activity_id,
@@ -9869,8 +9565,6 @@ def update_planning_activity(activity_id):
                 data.get("picking_help"),
                 data.get("contact_type", current.get("contact_type")),
             )
-        if "customer_agreement_confirmed" in data:
-            mutation_changes["customer_agreement_confirmed"] = is_yes(data.get("customer_agreement_confirmed"))
         mutation_fingerprint = planning_update_fingerprint(
             actor=caller,
             activity_id=activity_id,
@@ -9971,6 +9665,16 @@ def update_planning_activity(activity_id):
                 409,
             )
 
+        # Revalidate operational state under the same lock as the write. Raw
+        # planned rows can already be replaced by later customer work.
+        invalidate_sheet_cache(spreadsheet, "sales_activities", PLANNED_ACTIVITIES_SHEET, CUSTOMER_STATE_EVENTS_SHEET)
+        state = customer_state_snapshot(spreadsheet)
+        projected = next((item for item in state["obligations"].get(str(current.get("customer_id") or ""), ())
+                          if item.get("planned_activity_id") == activity_id), None)
+        if current_status == "planned" and projected and projected.get("status") in {"superseded", "resolved", "cancelled", "skipped"}:
+            return planning_error("superseded_activity_immutable",
+                "Aktiviteten har ersatts av senare kundarbete. Ladda om planeringen.", 409)
+
         updates = {}
         if "customer_id" in data:
             if (str(updated_customer.get("customer_id") or "") != str(current.get("customer_id") or "")
@@ -10019,6 +9723,11 @@ def update_planning_activity(activity_id):
                     effective_contact_type,
                 ) else "N"
             )
+        if "appointment_confirmed" in updates:
+            if updates["appointment_confirmed"] == "Y" and not is_yes(current.get("appointment_confirmed")):
+                updates["agreed_at"] = planning_timestamp()
+            elif updates["appointment_confirmed"] == "N":
+                updates["agreed_at"] = ""
         if "picking_help" in data:
             updates["picking_help"] = (
                 "Y" if normalize_planning_picking_help(
@@ -10030,10 +9739,6 @@ def update_planning_activity(activity_id):
             updates["appointment_confirmed"] = "N"
         if effective_contact_type != "visit":
             updates["picking_help"] = "N"
-        if "customer_agreement_confirmed" in data:
-            agreed = is_yes(data.get("customer_agreement_confirmed"))
-            updates["customer_agreement_confirmed"] = "Y" if agreed else "N"
-            updates["agreed_at"] = str(current.get("agreed_at") or planning_timestamp()) if agreed else ""
         if "scheduled_at" in data:
             scheduled_at = parse_planning_datetime(data.get("scheduled_at"))
             if scheduled_at is None:
@@ -10105,6 +9810,12 @@ def update_planning_activity(activity_id):
                 "route_sequence": "",
                 "time_is_estimated": "N",
             })
+        if "scheduled_at" in updates and updates["scheduled_at"] != current.get("scheduled_at"):
+            updates["planning_decided_at"] = planning_timestamp()
+        if updates.get("status") == "skipped":
+            missed_at = parse_planning_instant(current.get("scheduled_at"))
+            if missed_at and missed_at.date() < stockholm_today():
+                updates["skipped_through_at"] = missed_at.isoformat()
         updates["last_mutation_request_id"] = mutation_request_scope
         updates["last_mutation_fingerprint"] = mutation_fingerprint
         updates["revision"] = current_revision + 1
@@ -10351,9 +10062,7 @@ def calculate_route_proposal_for_user(
             503,
         )
 
-    priority_customers = apply_workflow_suppressions(
-        priority_customers, priority_workflow_suppressions(spreadsheet, priority_customers)
-    )
+    priority_customers = priority_customers
     route_activity_rows = snapshot.get("planned_activity_rows") or []
     booked_rows = planning_route_booked_rows(route_activity_rows, owner or user, route_date)
     route_start_at, route_lunch, lunch_error = planning_route_lunch(route_start_at, booked_rows)
@@ -10436,10 +10145,6 @@ def calculate_route_proposal_for_user(
             customer_scope_owner is not None
             and not customer_owned_by_user(customer, customer_scope_owner)
         ):
-            continue
-        if priority_has_contact_ban(priority):
-            if row in required_set:
-                return None, route_proposal_error("do_not_contact", "Ett obligatoriskt stopp har Återkom ej. Hantera kontaktförbudet innan en rutt skapas.", 409)
             continue
         if row in required_set:
             if str(customer.get("customer_id") or "") in route_contact_customer_ids(route_activity_rows, owner or user, route_date, customers):
@@ -10719,6 +10424,8 @@ def planning_state_fingerprint(rows):
             "id": str(row.get("planned_activity_id") or "").strip(),
             "customer_id": str(row.get("customer_id") or "").strip(),
             "scheduled_at": planning_datetime_text(row.get("scheduled_at")),
+            "planning_decided_at": str(row.get("planning_decided_at") or ""),
+            "skipped_through_at": str(row.get("skipped_through_at") or ""),
             "contact_type": normalize_planning_contact_type(
                 row.get("contact_type")
             ),
@@ -11587,10 +11294,7 @@ def build_route_optimization_inputs(
             customer_ids=duplicate_ids,
         )
     customers_by_id = {customer_id: matches[0] for customer_id, matches in by_id_lists.items()}
-    route_priorities = apply_workflow_suppressions(
-        snapshot.get("priorities") or [],
-        priority_workflow_suppressions(spreadsheet, snapshot.get("priorities") or []),
-    )
+    route_priorities = snapshot.get("priorities") or []
     priorities_by_id = {
         str(item.get("customer_id") or "").strip(): item
         for item in route_priorities
@@ -11618,9 +11322,6 @@ def build_route_optimization_inputs(
                     409,
                     planned_activity_ids=[str(row.get("planned_activity_id") or "").strip()],
                 )
-            if priority_has_contact_ban(priorities_by_id.get(customer_id)):
-                return None, planning_error("do_not_contact", "Ett bokat besök har Återkom ej. Hantera kontaktförbudet innan rutten optimeras.", 409,
-                                            planned_activity_ids=[str(row.get("planned_activity_id") or "").strip()])
             permission = route_planned_contact_decision(priorities_by_id.get(customer_id), row,
                 snapshot=snapshot, route_date=route_date, prepared=contact_decision_inputs)
             if not permission["allowed"]:
@@ -13564,8 +13265,8 @@ def replaceable_route_activity(row):
     return (str(row.get("source") or "").casefold() == "route"
             and normalize_planning_contact_type(row.get("contact_type")) == "visit"
             and str(row.get("status") or "").casefold() == "planned"
-            and not row.get("obligation_id") and not row.get("source_contact_id")
-            and commitment_evidence({}, row)[0] == "planned_task")
+            and not row.get("source_contact_id")
+            and not normalize_planning_appointment_confirmed(row.get("appointment_confirmed"), "visit"))
 
 
 def route_decision_source_version(spreadsheet, stops):
@@ -13815,8 +13516,7 @@ def _apply_planning_route_current(
                 "Ett tidigare ruttbesök innehåller ett separat kundåtagande. Öppna och spara bokningen i kalendern och beräkna rutten igen.", 409)
         live = get_authoritative_priority_snapshot(spreadsheet, today=route_date,
             planned_activity_rows=route_rows, customer_ids=set(signed_customer_ids))
-        live_priorities = apply_workflow_suppressions(live["priorities"],
-            priority_workflow_suppressions(spreadsheet, live["priorities"]))
+        live_priorities = live["priorities"]
         by_customer = {str(p.get("customer_id") or ""): p for p in live_priorities}
         phone_email_ids = route_contact_customer_ids(route_rows, owner, route_date, live["customers"])
         future_visit_ids, existing_visit_ids = set(), defaultdict(set)
@@ -13966,6 +13666,7 @@ def _apply_planning_route_current(
                         estimated_text = route_time_text(estimated)
                         if planning_datetime_text(row.get("scheduled_at")) != estimated_text:
                             updates["scheduled_at"] = estimated_text
+                            updates["planning_decided_at"] = planning_timestamp()
                         if not is_yes(row.get("time_is_estimated")):
                             updates["time_is_estimated"] = "Y"
                     if updates:
@@ -13985,7 +13686,7 @@ def _apply_planning_route_current(
             if existing:
                 existing_row = existing[1]
                 if existing_row.get("status") == "route_pending":
-                    row_changes.append((existing[0], {"status": "planned"}))
+                    row_changes.append((existing[0], {"status": "planned", "planning_decided_at": planning_timestamp()}))
                     existing_row = {**existing_row, "status": "planned"}
                 elif existing_row.get("status") != "planned":
                     return None, planning_error("route_recovery_conflict", "Ett tidigare ruttförsök behöver granskas. Beräkna rutten igen.", 409)
@@ -14052,7 +13753,7 @@ def _apply_planning_route_current(
         pending_rows = [{**row, "status": "route_pending"} for row in new_rows]
         if pending_rows:
             pending_indexes = append_dict_rows(sheet, headers, pending_rows)
-            row_changes.extend((index, {"status": "planned"}) for index in pending_indexes)
+            row_changes.extend((index, {"status": "planned", "planning_decided_at": planning_timestamp()}) for index in pending_indexes)
         # Re-read and verify every pre-existing positional row and staged ID.
         original_values = sheet.get_all_values()
         _, staged = worksheet_snapshot(sheet, expected_columns=PLANNED_ACTIVITY_COLUMNS, use_cache=False)
@@ -15467,19 +15168,12 @@ def add_contact(customer_name):
             400,
             field="contact_channel",
         )
-    permission_result = normalize_key(data.get("result")) in {"återkom ej", "kontakt tillåten", "kontakta ej", "ring ej"}
-    result_class = "permission" if permission_result else normalize_result_class(data.get("result"))
-    obligation_outcome = str(data.get("obligation_outcome") or "open").strip().casefold()
-    if obligation_outcome not in {"open", "resolved", "cancelled"}:
-        return planning_error("invalid_obligation_outcome", "Välj om åtagandet är utfört eller kvarstår.", 400)
-    if result_class == "unreachable":
-        obligation_outcome = "open"
-    permission_data = dict(data.get("contact_permission") or {}) if isinstance(data.get("contact_permission"), dict) else {}
-    if permission_result:
-        permission_data["status"] = "allowed" if normalize_key(data.get("result")) == "kontakt tillåten" else "do_not_contact"
-        permission_data["reason"] = str(permission_data.get("reason") or data.get("comment") or "").strip()
-    elif permission_data:
-        return planning_error("explicit_permission_result_required", "Registrera Återkom ej eller Kontakt tillåten som uttryckligt utfall.", 400)
+    if any(field in data for field in ("obligation_outcome", "contact_permission", "expected_obligation_revision")) or normalize_key(data.get("result")) in {"återkom ej", "kontakt tillåten", "kontakta ej", "ring ej"}:
+        return planning_error("operation_retired", "Kontaktformuläret har ändrats. Ladda om sidan.", 410)
+    occurred = parse_planning_instant(data.get("date_time", stockholm_now().isoformat()))
+    if occurred is None or occurred > stockholm_now():
+        return planning_error("invalid_contact_time", "Ange en faktisk kontakttid som inte ligger i framtiden.", 400)
+    result_class = normalize_result_class(data.get("result"))
     contact_request_fingerprint = canonical_payload_fingerprint({key: value for key, value in data.items() if key not in {"client_request_id", "expected_obligation_revision"}})
     physical_contact = contact_type == "visit"
     freezer_values = {
@@ -15517,6 +15211,8 @@ def add_contact(customer_name):
             "scheduled_at": data.get("follow_up_scheduled_at"),
             "note": data.get("follow_up_note"),
         }
+    if "customer_agreement_confirmed" in follow_up:
+        return planning_error("operation_retired", "Kontaktformuläret har ändrats. Ladda om sidan.", 410)
     follow_up_enabled = is_yes(follow_up.get("enabled")) or follow_up.get(
         "enabled"
     ) is True
@@ -15934,11 +15630,13 @@ def add_contact(customer_name):
     duplicate_contact = False
     follow_up_activity = None
     partial_errors = []
-    obligation_id = str(data.get("obligation_id") or "").strip()
-    obligation_before = None
-    saved_permission = None
-
     with planning_write_lock():
+        try:
+            customer = current_customer_for_activity_write(spreadsheet, customer["customer_id"],
+                            owner=owner if calendar_coupled else None)
+        except (CustomerStateConflict, CustomerResolutionError) as exc:
+            return planning_error(exc.code, str(exc), exc.status)
+
         if planned_activity_id:
             (
                 _live_planned_sheet,
@@ -15971,42 +15669,6 @@ def add_contact(customer_name):
         )
         existing_retry_contact = next((row for _index, row in contact_rows if str(row.get("contact_id") or "") == contact_id), None)
         matching_saved_request = bool(existing_retry_contact and existing_retry_contact.get("contact_request_fingerprint") == contact_request_fingerprint)
-        # Capture the commitment before marking its calendar attempt completed.
-        if obligation_id or (planned_activity_id and (planned_row.get("source_contact_id") or planned_row.get("source") == "follow_up")):
-            state_before = customer_state_snapshot(spreadsheet, contacts=[row for _index, row in contact_rows])
-            cid = str((customer or {}).get("customer_id") or planned_row.get("customer_id") or "").strip()
-            candidates = state_before["obligations"].get(cid, [])
-            obligation_before = next((item for item in candidates if
-                (obligation_id and item["obligation_id"] == obligation_id)
-                or (not obligation_id and item.get("planned_activity_id") == planned_activity_id)
-                or (not obligation_id and item.get("original_planned_activity_id") == planned_activity_id)), None)
-            if obligation_before is None and obligation_id:
-                return planning_error("obligation_not_found", "Åtagandet hör inte till den här kunden eller finns inte längre.", 409)
-            if obligation_before:
-                obligation_id = obligation_before["obligation_id"]
-                if str(data.get("obligation_id") or "").strip() and not matching_saved_request:
-                    try:
-                        validate_customer_state_revision({"expected_revision": data.get("expected_obligation_revision")}, obligation_before)
-                    except CustomerStateConflict as exc:
-                        return customer_state_error(exc)
-                if obligation_before.get("status") not in OPEN_OBLIGATION_STATUSES and not matching_saved_request:
-                    return planning_error("obligation_closed", "Åtagandet har avslutats. Ladda om kunden innan en ny kontakt kopplas till det.", 409)
-        if (permission_data.get("status") == "allowed" and "expected_revision" not in permission_data
-                and not matching_saved_request):
-            return planning_error("expected_revision_required", "Aktuell kontaktstatus krävs innan ett kontaktförbud hävs. Ladda om kunden.", 400)
-        if permission_data and "expected_revision" in permission_data:
-            # Validate before writing the contact. The contact itself becomes
-            # the permission source, so retries need not compare a new revision.
-            permission_events = read_customer_state_events(spreadsheet, use_cache=False)
-            previous_permission_event = next((event for event in permission_events if
-                event.get("event_id") == customer_state_event_identity("permission", str((customer or {}).get("customer_id") or ""), contact_id)), None)
-            if previous_permission_event is None and not matching_saved_request:
-                prior_permission = customer_state_snapshot(spreadsheet, contacts=[row for _index, row in contact_rows], events=permission_events)["contact_permissions"].get(str((customer or {}).get("customer_id") or ""), {"revision": 0})
-                try:
-                    validate_customer_state_revision(permission_data, prior_permission)
-                except CustomerStateConflict as exc:
-                    return customer_state_error(exc)
-
         contacts_with_id = [
             (row_index, row)
             for row_index, row in contact_rows
@@ -16167,14 +15829,12 @@ def add_contact(customer_name):
                 "customer_contact_person": text_to_sheet_value(
                     data.get("customer_contact_person")
                 ),
-                "follow_up_date": "" if (obligation_id and obligation_outcome == "open" and follow_up_enabled) else mirrored_follow_up_date,
+                "follow_up_date": "" if follow_up_enabled else mirrored_follow_up_date,
                 "contact_id": contact_id,
                 "planned_activity_id": planned_activity_id,
-                "obligation_id": obligation_id,
-                "obligation_outcome": obligation_outcome if obligation_id else "",
-                "purpose": str(data.get("purpose") or (obligation_before or {}).get("purpose") or ""),
-                "follow_up_purpose": ("customer_followup" if is_yes(follow_up.get("customer_agreement_confirmed")) or follow_up_appointment_confirmed else "internal_followup") if follow_up_enabled else "",
-                "follow_up_agreement_confirmed": "Y" if follow_up_enabled and (is_yes(follow_up.get("customer_agreement_confirmed")) or follow_up_appointment_confirmed) else "N",
+                "purpose": str(data.get("purpose") or ""),
+                "follow_up_purpose": "internal_followup" if follow_up_enabled else "",
+                "follow_up_agreement_confirmed": "N",
                 "onboarding_completed": "Y" if is_yes(data.get("onboarding_completed")) and result_class in {"positive", "neutral"} and data.get("purpose") == "first_order_onboarding" else "N",
                 "contact_request_fingerprint": contact_request_fingerprint,
                 "recorded_at": stockholm_now().isoformat(),
@@ -16260,52 +15920,6 @@ def add_contact(customer_name):
                     "message": str(exc)[:200],
                 })
 
-        if obligation_before and obligation_id:
-            try:
-                events = read_customer_state_events(spreadsheet, use_cache=False)
-                mutation_fingerprint = canonical_payload_fingerprint({"contact_id": contact_id, "obligation_id": obligation_id,
-                                                                      "outcome": obligation_outcome})
-                duplicate_event = existing_customer_state_mutation(events, kind="obligation", customer_id=cid,
-                                                                     request_id=contact_id, fingerprint=mutation_fingerprint)
-                if duplicate_event is None:
-                    saved_contact = existing_contact if duplicate_contact else row_data
-                    payload = {**obligation_before, "status": obligation_outcome,
-                               "planned_activity_id": "", "due_at": "", "snooze_until": "",
-                               "latest_attempt_at": str(saved_contact.get("date_time") or ""),
-                               "latest_attempt_result": str(saved_contact.get("result") or ""),
-                               "resolution_event_id": contact_id if obligation_outcome in {"resolved", "cancelled"} else "",
-                               "evidence_quality": "explicit_outcome"}
-                    append_customer_state_event(spreadsheet, kind="obligation", entity_id=obligation_id,
-                                                customer=customer, owner=owner, request_id=contact_id,
-                                                fingerprint=mutation_fingerprint, payload=payload,
-                                                revision=int(obligation_before.get("revision") or 0) + 1)
-            except Exception as exc:
-                app.logger.exception("Contact saved but commitment state could not be saved")
-                partial_errors.append({"step": "save_obligation", "message": str(exc)[:200]})
-        if permission_data:
-            try:
-                saved_contact = existing_contact if duplicate_contact else row_data
-                event_data = {name: value for name, value in permission_data.items() if name != "expected_revision"}
-                saved_permission, _duplicate_permission = persist_contact_permission(
-                    spreadsheet, customer=customer, owner=owner, data=event_data, request_id=contact_id,
-                    occurred_at=saved_contact.get("date_time"), source_contact_id=contact_id)
-            except Exception as exc:
-                app.logger.exception("Contact saved but permission event could not be saved")
-                partial_errors.append({"step": "save_permission", "message": str(exc)[:200]})
-
-        try:
-            reconcile_superseded_planned_activities(
-                spreadsheet,
-                [existing_contact if duplicate_contact else row_data],
-                apply=True,
-            )
-        except Exception as exc:
-            app.logger.exception("Contact saved but old plans could not be superseded")
-            partial_errors.append({
-                "step": "supersede_activities",
-                "message": str(exc)[:200],
-            })
-
         if follow_up_enabled and customer:
             try:
                 follow_sheet, _follow_headers, follow_rows = (
@@ -16326,14 +15940,6 @@ def add_contact(customer_name):
                     follow_up_saved = True
                 else:
                     follow_source_contact_id = contact_id
-                    if obligation_before and obligation_outcome == "open":
-                        follow_source_contact_id = obligation_before.get("source_contact_id") or contact_id
-                        if obligation_before.get("source_contact_id"):
-                            resolved_source_id = ensure_followup_source_contact_id(spreadsheet, customer_name=customer.get("customer"),
-                                                                                   customer_id=customer.get("customer_id"),
-                                                                                   source_contact_id=follow_source_contact_id, owner=owner)
-                            if not resolved_source_id:
-                                raise RuntimeError("The explicit promise source could not be verified")
                     follow_up_activity = build_planned_activity_row(
                         activity_id=follow_up_activity_id,
                         owner=owner,
@@ -16343,7 +15949,7 @@ def add_contact(customer_name):
                         note=follow_up_note,
                         source="follow_up",
                         source_contact_id=follow_source_contact_id,
-                        customer_agreement_confirmed=is_yes(follow_up.get("customer_agreement_confirmed")) or follow_up_appointment_confirmed,
+                        customer_agreement_confirmed=False,
                         agreed_at=data.get("date_time") or stockholm_now().isoformat(),
                         appointment_confirmed=(
                             follow_up_appointment_confirmed
@@ -16374,26 +15980,10 @@ def add_contact(customer_name):
                         ),
                         revision=1,
                     )
-                    if obligation_before and obligation_outcome == "open":
-                        follow_up_activity["obligation_id"] = obligation_id
                     append_dict_row(follow_sheet, PLANNED_ACTIVITY_COLUMNS, follow_up_activity)
                     follow_up_saved = True
-                if follow_up_saved and obligation_before and obligation_outcome == "open":
-                    event_request_id = contact_id + "-reschedule"
-                    events = read_customer_state_events(spreadsheet, use_cache=False)
-                    event_fingerprint = canonical_payload_fingerprint({"contact_id": contact_id, "obligation_id": obligation_id,
-                                                                       "follow_up_activity_id": follow_up_activity_id})
-                    if not existing_customer_state_mutation(events, kind="obligation", customer_id=cid,
-                                                            request_id=event_request_id, fingerprint=event_fingerprint):
-                        fresh_state = customer_state_snapshot(spreadsheet, events=events)
-                        current_obligation = next(item for item in fresh_state["obligations"][cid] if item["obligation_id"] == obligation_id)
-                        moved = {**current_obligation, "status": "scheduled", "planned_activity_id": follow_up_activity_id,
-                                 "due_date": follow_up_at.date().isoformat(), "due_at": follow_up_at.isoformat(),
-                                 "snooze_until": "", "resolution_event_id": ""}
-                        append_customer_state_event(spreadsheet, kind="obligation", entity_id=obligation_id,
-                                                    customer=customer, owner=owner, request_id=event_request_id,
-                                                    fingerprint=event_fingerprint, payload=moved,
-                                                    revision=int(current_obligation.get("revision") or 0) + 1)
+                if follow_up_saved and not sync_planned_followup_mirror(spreadsheet, follow_up_activity):
+                    raise RuntimeError("Uppföljningen sparades men datumvisningen kunde inte synkas. Försök igen.")
             except Exception as exc:
                 app.logger.exception("Contact saved but follow-up append failed")
                 partial_errors.append({
@@ -16441,9 +16031,7 @@ def add_contact(customer_name):
         "ok": True,
         "status": "saved",
         "duplicate": duplicate_contact,
-        "obligation_id": obligation_id,
-        "obligation_outcome": obligation_outcome if obligation_id else "",
-        "contact_permission": saved_permission,
+        "contact_permission": {},
         "contact_id": contact_id,
         "contact_saved": contact_saved,
         "planned_activity_id": planned_activity_id,

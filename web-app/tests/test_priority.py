@@ -61,7 +61,7 @@ class PriorityTests(TestCase):
             ("Positiv", "Positiv"),
             ("Kräver mer bearbetning!", "Negativ"),
             ("Kräver mer bearbetning!\xa0", "Negativ"),
-            ("Återkom ej", "Negativ"),
+            ("Återkom ej", "Återkom ej"),
             ("Neutral", "Neutral"),
             ("Neutralt", "Neutral"),
             ("Uppföljning behövs", "Neutral"),
@@ -1674,10 +1674,12 @@ class PriorityTests(TestCase):
         ]
         fake_spreadsheet = FakeSpreadsheet({
             "sales_activities": contacts,
+            "users": [list(app_module.USER_COLUMNS), _row(app_module.USER_COLUMNS, {"user_name":"sofia","name":"Sofia","role":"Säljare","active":"Y"})],
             "customers_enriched": [
                 list(app_module.CUSTOMER_COLUMNS),
                 _row(app_module.CUSTOMER_COLUMNS, {
                     "customer": "Store A",
+                    "sales_person": "Sofia",
                     "customer_id": "11111111-1111-4111-8111-111111111111",
                 }),
             ],
@@ -1709,10 +1711,12 @@ class PriorityTests(TestCase):
         contacts = [headers_without_none]
         fake_spreadsheet = FakeSpreadsheet({
             "sales_activities": contacts,
+            "users": [list(app_module.USER_COLUMNS), _row(app_module.USER_COLUMNS, {"user_name":"sofia","name":"Sofia","role":"Säljare","active":"Y"})],
             "customers_enriched": [
                 list(app_module.CUSTOMER_COLUMNS),
                 _row(app_module.CUSTOMER_COLUMNS, {
                     "customer": "Store A",
+                    "sales_person": "Sofia",
                     "customer_id": "11111111-1111-4111-8111-111111111111",
                 }),
             ],

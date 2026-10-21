@@ -168,40 +168,6 @@ class PlanningSuggestionV3IntegrationTests(PlanningApiTestCase):
         ordered = sorted(candidates, key=app_module.planning_suggestion_sort_key)
         self.assertEqual([item["customer_id"] for item in ordered], ["d", "a", "b", "c"])
 
-    def test_dismissed_onboarding_suppresses_later_reorder_same_context(self):
-        self._append_order("FIRST-1", "2026-01-01", sku="ONLY-SKU")
-        day_8 = date(2026, 1, 9)
-        day_24 = date(2026, 1, 25)
-
-        today_patch, now_patch = self.clock(day_8)
-        with today_patch, now_patch:
-            onboarding = self.client.get(
-                "/planning/suggestions"
-            ).get_json()["suggestion"]
-            response = self.client.post(
-                f"/planning/suggestions/{onboarding['suggestion_id']}/dismiss",
-                json={
-                    "client_request_id": "dismiss-first-order-context",
-                    "expected_revision": onboarding["revision"],
-                },
-            )
-            self.assertEqual(response.status_code, 200, response.get_json())
-
-        today_patch, now_patch = self.clock(day_24)
-        with today_patch, now_patch:
-            payload = self.client.get("/planning/suggestions").get_json()
-            candidate = app_module.planning_suggestion_candidates(
-                self.spreadsheet, {"user_name": "olle", "name": "Olle"}
-            )[0]
-
-        self.assertIsNone(payload["suggestion"])
-        row = self.spreadsheet.worksheet(SUGGESTIONS_SHEET).dict_rows()[0]
-        self.assertEqual(row["status"], "dismissed")
-        self.assertEqual(candidate["primary_trigger_key"], "second_purchase_due")
-        expected_id = app_module.deterministic_suggestion_id(
-            "olle", candidate["customer_id"], candidate["decision_context_hash"]
-        )
-        self.assertEqual(expected_id, onboarding["suggestion_id"])
 
     def test_second_order_resolves_first_order_context(self):
         self._append_order("FIRST-1", "2026-01-01", sku="ONLY-SKU")
