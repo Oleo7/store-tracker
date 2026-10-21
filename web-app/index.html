@@ -390,7 +390,7 @@
       user-select: none;
     }
     .filter-option:active { background: #f7f8fa; }
-    .filter-option input[type=checkbox] {
+    .filter-option input {
       width: 18px; height: 18px;
       accent-color: #1a1a2e;
       flex-shrink: 0;
@@ -1838,18 +1838,12 @@
       padding: 12px 12px 44px;
     }
 
-    .list-sort-control { display: flex; flex-wrap: wrap; align-items: center; gap: 9px; }
-    .list-sort-control label { font-size: .76rem; font-weight: 750; color: var(--pb-ink); }
-    .list-sort-control select { max-width: 100%; border: 1px solid var(--pb-border-strong); border-radius: 9px; padding: 8px; font: inherit; font-size: .8rem; background: #fff; color: var(--pb-ink); }
     .score-pair { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0 5px; }
     .score-pair-item { display: flex; align-items: baseline; gap: 5px; border-radius: 8px; padding: 6px 9px; font-size: .72rem; background: #f8f5f7; color: var(--pb-muted); }
     .score-pair-item strong { font-size: .95rem; color: var(--pb-ink); }
     .score-pair-item.contact strong { color: var(--pb-chocolate); }
-    .priority-why { margin: 6px 0 10px; color: var(--pb-muted); font-size: .76rem; }
-    .priority-why summary { width: fit-content; cursor: pointer; padding: 5px 0; font-weight: 600; }
-    .priority-why-body { display: grid; gap: 6px; margin-top: 6px; line-height: 1.5; }
-    .work-filter-row { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 9px; }
-    .work-filter-row .chip[aria-pressed="true"] { background: var(--pb-chocolate); color: white; border-color: var(--pb-chocolate); }
+    .customer-value-summary { display: grid; gap: 4px; margin: 8px 0 10px; color: var(--pb-muted); font-size: .76rem; line-height: 1.5; }
+    .customer-value-summary strong { color: var(--pb-ink); }
     .customer-workflow-actions { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 8px; }
     .customer-workflow-actions .planning-card-plan-btn { margin: 0; flex: 1 1 180px; }
     .customer-workflow-menu-btn { border: 1px solid var(--pb-border); border-radius: 9px; padding: 9px 12px; background: white; color: var(--pb-ink); font: inherit; font-size: .76rem; cursor: pointer; }
@@ -1865,13 +1859,6 @@
     @media (max-width: 620px) {
       .planning-attention-actions .planning-compact-btn { flex: 1 1 calc(50% - 6px); }
       .customer-workflow-actions { align-items: stretch; }
-      .work-filter-row .chip { min-height: 36px; }
-    }
-    .list-guidance-help {
-      margin: 8px 2px 0;
-      color: var(--pb-muted);
-      font-size: 0.72rem;
-      line-height: 1.35;
     }
 
     .customer-card {
@@ -2026,13 +2013,6 @@
       color: var(--pb-chocolate);
     }
 
-    .potential-summary {
-      margin-top: 7px;
-      color: var(--pb-muted);
-      font-size: 0.72rem;
-      font-weight: 700;
-    }
-
     .card-dates {
       display: grid;
       grid-template-columns: minmax(0, 1fr) auto;
@@ -2179,7 +2159,7 @@
       box-shadow: 0 20px 50px rgba(37,28,37,0.18);
     }
 
-    .filter-option input[type=checkbox] {
+    .filter-option input {
       accent-color: var(--pb-pink-strong);
     }
 
@@ -3915,6 +3895,7 @@
       <input type="search" id="search-input" placeholder="Sök butik eller stad..." />
     </div>
     <div class="chip-row">
+      <button class="chip" id="chip-status">Status</button>
       <button class="chip" id="chip-region">Region</button>
       <button class="chip" id="chip-city">Stad</button>
       <button class="chip" id="chip-segment">Segment</button>
@@ -3928,14 +3909,6 @@
     <div id="clear-filters-row" style="display:none">
       <button class="chip chip-clear" id="clear-filters-btn">✕ Rensa filter</button>
     </div>
-    <div class="list-sort-control"><label for="list-sort-mode">Sortera</label><select id="list-sort-mode"><option value="contact">Prioritet</option><option value="value">Affärsvärde</option></select></div>
-    <div class="work-filter-row" id="work-filter-row" role="group" aria-label="Kundernas kontaktläge">
-      <button class="chip" type="button" data-work-filter="all" aria-pressed="true">Alla</button>
-      <button class="chip" type="button" data-work-filter="act" aria-pressed="false">Att agera</button>
-      <button class="chip" type="button" data-work-filter="planned" aria-pressed="false">Planerade</button>
-      <button class="chip" type="button" data-work-filter="wait" aria-pressed="false">Avvakta</button>
-    </div>
-    <p class="list-guidance-help">Prioritet hjälper dig hålla ordning på kundarbetet. Gröna kunder har redan en planerad kontakt. Öppna deras planering i stället för att kontakta dem en extra gång.</p>
   </div>
 
   <div class="list-body" id="customer-list">
@@ -4171,8 +4144,6 @@
             <div class="planning-attention-count" id="planning-attention-count"></div>
           </div>
         </div>
-        <label class="planning-attention-count" for="planning-attention-search">Sök ärenden</label>
-        <input id="planning-attention-search" type="search" placeholder="Butik, kundnummer eller anteckning" style="width:100%;margin:6px 0 12px" />
         <div id="planning-backlog" aria-live="polite">
           <div class="planning-state">Laddar…</div>
         </div>
@@ -4601,7 +4572,6 @@
   let customers = [];
   let currentUser = null;
   let searchQuery = "";
-  let listSortMode = "contact";
   let listWorkFilter = "all";
   let currentCustomer = null;
   let detailReturnView = "list";
@@ -4896,7 +4866,9 @@
 
   // ── Filter bottom sheet state ──
   let _sheetKey = null;
+  let _filterModalCloseTimer = 0;
   const _sheetLabels = {
+    status:      "Status",
     segment:     "Segment",
     city:        "Stad",
     region:      "Region",
@@ -4907,6 +4879,7 @@
     emailProposal: "Mejl-förslag",
   };
   const _chipIds = {
+    status:      "chip-status",
     segment:     "chip-segment",
     city:        "chip-city",
     region:      "chip-region",
@@ -4922,8 +4895,10 @@
     "Varm möjlighet": "warm_opportunity", "Övrigt": "other",
   };
   const FOCUS_LABELS = Object.keys(FOCUS_KEYS_BY_LABEL);
+  const STATUS_KEYS_BY_LABEL = { "Alla": "all", "Att agera": "act", "Planerade": "planned", "Avvakta": "wait" };
 
   function getFilterOptionValue(key, label) {
+    if (key === "status") return STATUS_KEYS_BY_LABEL[label];
     return key === "focus" ? FOCUS_KEYS_BY_LABEL[label] : label;
   }
   const _sheetValues = { segment: [], city: [], region: [], focus: FOCUS_LABELS.slice(), risk: [], delivery: [], latestContact: ["<1 månad", "1-2 månader", ">3 månader", "Saknar kontakt"], emailProposal: ["Påminnelse", "Återaktivering", "Nykund"] };
@@ -4936,6 +4911,7 @@
   };
 
   function getAvailableValues(key) {
+    if (key === "status") return Object.keys(STATUS_KEYS_BY_LABEL);
     // Insight-based filters are not cascaded
     if (key === "focus" || key === "risk" || key === "delivery" || key === "latestContact" || key === "emailProposal") return _sheetValues[key];
     // Apply all active filters except the one being opened
@@ -4949,18 +4925,20 @@
 
   function renderFilterOptions(q) {
     const values = getAvailableValues(_sheetKey);
-    const state  = filterState[_sheetKey];
+    const isStatus = _sheetKey === "status";
+    const state = isStatus ? new Set([listWorkFilter]) : filterState[_sheetKey];
     const filtered = q ? values.filter(v => v.toLowerCase().includes(q.toLowerCase())) : values;
     const body = document.getElementById("filter-modal-body");
     body.innerHTML = filtered.map(v => `
       <label class="filter-option">
-        <input type="checkbox" value="${escAttr(getFilterOptionValue(_sheetKey, v))}" ${state.has(getFilterOptionValue(_sheetKey, v)) ? "checked" : ""} />
+        <input type="${isStatus ? "radio" : "checkbox"}" name="filter-option" value="${escAttr(getFilterOptionValue(_sheetKey, v))}" ${state.has(getFilterOptionValue(_sheetKey, v)) ? "checked" : ""} />
         ${esc(v)}
       </label>
     `).join("");
-    body.querySelectorAll("input[type=checkbox]").forEach(cb => {
+    body.querySelectorAll("input").forEach(cb => {
       cb.addEventListener("change", () => {
-        if (cb.checked) filterState[_sheetKey].add(cb.value);
+        if (isStatus) listWorkFilter = cb.value;
+        else if (cb.checked) filterState[_sheetKey].add(cb.value);
         else filterState[_sheetKey].delete(cb.value);
         updateChip(_sheetKey);
         renderList();
@@ -4969,6 +4947,7 @@
   }
 
   function openFilterModal(key) {
+    clearTimeout(_filterModalCloseTimer);
     document.getElementById("filter-modal").style.visibility = "";
     _sheetKey = key;
     document.getElementById("filter-modal-title").textContent = _sheetLabels[key];
@@ -4991,7 +4970,7 @@
     const modal = document.getElementById("filter-modal");
     modal.classList.remove("open");
     document.getElementById("filter-backdrop").classList.remove("open");
-    setTimeout(() => { modal.style.visibility = "hidden"; }, 260);
+    _filterModalCloseTimer = setTimeout(() => { modal.style.visibility = "hidden"; }, 260);
   }
 
   document.getElementById("filter-modal-close").addEventListener("click", closeFilterModal);
@@ -5172,26 +5151,12 @@
   }
 
   function getCustomerWorkState(customer) {
+    if (!insightsLoaded || insightsLoadFailed) return null;
     const guidance = getCustomerListGuidance(customer);
-    if (guidance.review_only || ["stale_follow_up_review", "unconfirmed_order_review", "reported_order_pending_review"].includes(guidance.reason_code)) return "wait";
-    if (guidance.status_key === "planned") return "planned";
-    if (guidance.can_start_unscheduled_contact === true || guidance.can_contact_now === true) return "act";
-    return "wait";
+    if (!guidance.focus_key || !guidance.status_key) return null;
+    const tone = getNextActionColorClass(guidance.review_only ? "review" : guidance.status_key);
+    return tone === "next-action-red" ? "act" : tone === "next-action-green" ? "planned" : "wait";
   }
-
-
-  function businessValueSort(a, b) {
-    return compareDescendingMissingLast(
-      sortedModelValue(getCustomerInsight(a), "business_value_raw"),
-      sortedModelValue(getCustomerInsight(b), "business_value_raw")
-    ) || stableCustomerTieBreak(a, b);
-  }
-
-  document.getElementById("list-sort-mode").addEventListener("change", event => {
-    if (!["contact", "value"].includes(event.target.value)) return;
-    listSortMode = event.target.value;
-    renderList();
-  });
 
   function getCustomerGuidance(customerOrInsight) {
     const insight = customerOrInsight?.customer_guidance
@@ -5254,38 +5219,31 @@
 
   function getPrioritySummaryHtml(c) {
     const ins = getCustomerInsight(c);
-    const value = listSortMode === "value" ? sortedModelValue(ins, "business_value_score") : getWorkPriorityValue(ins);
+    const value = getWorkPriorityValue(ins);
     const score = value == null ? "—" : value.toLocaleString("sv-SE", { maximumFractionDigits: 0 });
-    const label = listSortMode === "value" ? "Affärsvärde" : "Prioritet";
-    return `<div class="score-pair" aria-label="${label}">
-      <span class="score-pair-item contact" title="${listSortMode === "value" ? "Uppskattad affärspotential" : "Kundens aktuella arbetsprioritet"}">${label} <strong>${esc(score)}</strong></span>
+    return `<div class="score-pair" aria-label="Prioritet">
+      <span class="score-pair-item contact" title="Kundens aktuella arbetsprioritet">Prioritet <strong>${esc(score)}</strong></span>
     </div>`;
   }
 
-  function getPriorityWhyHtml(c) {
+  function formatCustomerMetric(value) {
+    if (value == null || typeof value === "boolean" || String(value).trim() === "") return "—";
+    const number = Number(value);
+    return Number.isFinite(number) ? Math.round(number).toLocaleString("sv-SE", { maximumFractionDigits: 0 }) : "—";
+  }
+
+  function getCustomerValueHtml(c) {
     const ins = getCustomerInsight(c);
-    const value = sortedModelValue(ins, "business_value_score");
-    const guidance = getCustomerListGuidance(ins);
-    return `<details class="priority-why"><summary>Varför denna prioritet?</summary><div class="priority-why-body">
-      <span>Affärsvärde: <strong>${value == null ? "saknas" : esc(value.toLocaleString("sv-SE", {maximumFractionDigits: 0}))}</strong> · uppskattad potential</span>
+    return `<div class="customer-value-summary">
+      <div>Affärsvärde: <strong>${esc(formatCustomerMetric(ins.business_value_score))}</strong></div>
       ${getPotentialHtml(c)}
-      ${ins.business_value_confidence ? `<span>Underlag: ${esc(ins.business_value_confidence)}</span>` : ""}
-      ${guidance.status_key === "planned" ? "<span>Kundens planerade arbete ingår i prioriteten. Extra obokad kontakt är inte rekommenderad.</span>" : ""}
-      ${ins.history_note ? `<span>${esc(ins.history_note)}</span>` : ""}
-      ${(ins.data_warnings || guidance.data_warnings || []).map(warning => `<span class="customer-history-warning">${esc(warning.text || "")}</span>`).join("")}
-      <span>Poängen är ett index, inte en köpchans eller en försäljningsprognos.</span>
-    </div></details>`;
+    </div>`;
   }
 
   function getPotentialHtml(c) {
     const ins = getCustomerInsight(c);
-    const estimate = ins?.business_expected_dfp_per_delivery;
-    const potential = estimate == null ? NaN : Number(estimate);
-    if (!Number.isFinite(potential) || potential <= 0) {
-      return '<div class="potential-summary">Potential ej beräknad · leveransstorlek saknas</div>';
-    }
-    const text = potential.toLocaleString("sv-SE", { maximumFractionDigits: 1 });
-    return `<div class="potential-summary">Uppskattad leveransstorlek: ca ${esc(text)} DFP</div>`;
+    const value = formatCustomerMetric(ins.business_expected_dfp_per_delivery);
+    return `<div>Uppskattad leveransstorlek: <strong>${esc(value)}${value === "—" ? "" : " DFP"}</strong></div>`;
   }
 
   function getCardDateHtml(value, compact = false) {
@@ -5404,17 +5362,11 @@
   }
 
 
-  function bindCustomerDecisionControls(container) {
-    container.querySelectorAll(".priority-why").forEach(details => details.addEventListener("click", event => event.stopPropagation()));
-
-  }
-
   function renderCustomerDecisionDetail(customer) {
     const target = document.getElementById("d-customer-decision");
     if (!target || !customer) return;
-    target.innerHTML = `${getPrioritySummaryHtml(customer)}${getNextActionHtml(customer)}${getPriorityWhyHtml(customer)}
+    target.innerHTML = `${getPrioritySummaryHtml(customer)}${getNextActionHtml(customer)}${getCustomerValueHtml(customer)}
       <div class="customer-workflow-actions"></div>`;
-    bindCustomerDecisionControls(target);
     const canStart = customerCanStartContact(customer);
     for (const id of ["d-call-btn", "d-mail-btn", "d-reminder-btn"]) {
       const button = document.getElementById(id);
@@ -5448,7 +5400,6 @@
   function getListSignature() {
     return [
       searchQuery,
-      `list-sort:${listSortMode}`,
       `work-filter:${listWorkFilter}`,
       emailClickNoOrderActive ? "email-click-no-order:1" : "email-click-no-order:0",
       ...Object.keys(filterState).sort().map(key => `${key}:${[...filterState[key]].sort().join("|")}`),
@@ -5458,6 +5409,13 @@
   function updateChip(key) {
     const chip = document.getElementById(_chipIds[key]);
     if (!chip) return;
+    if (key === "status") {
+      const label = Object.keys(STATUS_KEYS_BY_LABEL).find(label => STATUS_KEYS_BY_LABEL[label] === listWorkFilter);
+      chip.textContent = listWorkFilter === "all" ? "Status" : `Status · ${label}`;
+      chip.classList.toggle("active", listWorkFilter !== "all");
+      updateClearBtn();
+      return;
+    }
     const set   = filterState[key];
     const label = _sheetLabels[key];
     if (set.size === 0) {
@@ -5479,7 +5437,7 @@
   }
 
   function updateClearBtn() {
-    const anyActive = emailClickNoOrderActive || Object.values(filterState).some(s => s.size > 0);
+    const anyActive = listWorkFilter !== "all" || emailClickNoOrderActive || Object.values(filterState).some(s => s.size > 0);
     document.getElementById("clear-filters-row").style.display = anyActive ? "block" : "none";
   }
 
@@ -5496,6 +5454,7 @@
 
   document.getElementById("clear-filters-btn").addEventListener("click", () => {
     Object.keys(filterState).forEach(key => filterState[key].clear());
+    listWorkFilter = "all";
     emailClickNoOrderActive = false;
     Object.keys(_chipIds).forEach(key => updateChip(key));
     updateEmailClickNoOrderChip();
@@ -5541,19 +5500,13 @@
       filtered = filtered.filter(c => Boolean(getCustomerInsight(c)?.email_click_without_order));
     }
 
-    if (!modelUnavailable && listWorkFilter !== "all") filtered = filtered.filter(c => {
-      const guidance = getCustomerListGuidance(c);
-      if (listWorkFilter === "planned") return guidance.has_planned_contact === true || getCustomerInsight(c).has_planned_contact === true || guidance.status_key === "planned";
-      return getCustomerWorkState(c) === listWorkFilter;
-    });
+    if (listWorkFilter !== "all") filtered = filtered.filter(c => getCustomerWorkState(c) === listWorkFilter);
 
     return filtered;
   }
 
   function getBaseFilteredCustomers() {
-    return getFilteredCustomers().slice().sort(
-      listSortMode === "value" ? businessValueSort : contactPrioritySort
-    );
+    return getFilteredCustomers().slice().sort(contactPrioritySort);
   }
 
   function parseRouteCoordinate(value, min, max) {
@@ -6259,9 +6212,12 @@
       document.getElementById("subtitle").textContent = `${filtered.length} av ${customers.length} butiker`;
     }
     filteredCustomers = filtered;
-    const insightsErrorHtml = insightsLoadFailed
+    const unknownStatusCount = listWorkFilter === "all" ? 0 : customers.filter(c => getCustomerWorkState(c) === null).length;
+    const statusNoticeHtml = unknownStatusCount
+      ? `<div class="list-insights-error" role="status">${unknownStatusCount} ${unknownStatusCount === 1 ? "butik saknar" : "butiker saknar"} aktuell status och ingår inte i statusfiltret.</div>` : "";
+    const insightsErrorHtml = (insightsLoadFailed
       ? `<div class="list-insights-error" role="status">${esc(insightsLoadMessage || "Kundprioriteringen kunde inte laddas. Listan visas utan prioritetspoäng.")}</div>`
-      : "";
+      : "") + statusNoticeHtml;
 
     if (filtered.length === 0) {
       list.innerHTML = `${insightsErrorHtml}<div class="state-msg">Inga butiker matchar.</div>`;
@@ -6293,7 +6249,7 @@
           ${routeSummary}
           ${getPrioritySummaryHtml(c)}
           ${getNextActionHtml(c)}
-          ${getPriorityWhyHtml(c)}
+          ${getCustomerValueHtml(c)}
           ${getCardDatesHtml(c)}
           <div class="customer-workflow-actions">${getCardPlanningButtonHtml(c)}</div>
         </div>`;
@@ -6301,7 +6257,6 @@
       ? `<button class="load-more-btn" id="load-more-btn">Visa fler (${remainingCount} kvar)</button>`
       : "");
 
-    bindCustomerDecisionControls(list);
 
     list.querySelectorAll(".customer-card").forEach(card => {
       const openCard = () => {
@@ -8063,16 +8018,6 @@
     return Array.from(byId.values());
   }
 
-  let planningAttentionSearch = "";
-  let planningAttentionSearchTimer = 0;
-  document.getElementById("planning-attention-search")?.addEventListener("input", event => {
-    planningAttentionSearch = event.target.value;
-    // Invalidate an in-flight page immediately, before the debounce expires.
-    planningAttentionRequestSerial += 1;
-    window.clearTimeout(planningAttentionSearchTimer);
-    planningAttentionSearchTimer = window.setTimeout(() => loadPlanningAttention(), 200);
-  });
-
   async function loadPlanningAttention({ append = false } = {}) {
     if (append && planningAttentionLoading) return false;
     const owner = planningAttentionOwnerKey();
@@ -8085,7 +8030,6 @@
     renderPlanningAttention();
     try {
       const params = planningOwnerQuery(new URLSearchParams({ offset: String(offset), limit: "50" }));
-      if (planningAttentionSearch.trim()) params.set("q", planningAttentionSearch.trim());
       const payload = await planningFetchJson(`/planning/attention?${params.toString()}`);
       if (requestSerial !== planningAttentionRequestSerial || owner !== planningAttentionOwnerKey()) return false;
       const responseOwner = normalizePlanningUser(payload.owner || {}).user_name;

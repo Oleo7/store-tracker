@@ -4,6 +4,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 const assert = require('node:assert/strict');
 const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+for (const removed of ['planning-attention-search','planningAttentionSearch','list-sort-mode','listSortMode','work-filter-row','list-guidance-help','priority-why']) assert.ok(!html.includes(removed), removed);
 function source(name) {
   const start = html.indexOf(`  function ${name}(`);
   assert.notEqual(start, -1, name);
@@ -13,7 +14,10 @@ function source(name) {
 }
 const functions = ['getCustomerListGuidance', 'getFilterOptionValue', 'getCardDateHtml', 'getDeliveryVolumeText',
   'getCardDatesHtml','planningDateFromKey','planningDateKeyFromIso','planningTimeFromIso',
-  'getFilteredCustomers', 'renderFilterOptions'];
+  'getFilteredCustomers', 'renderFilterOptions', 'getCustomerWorkState', 'getNextActionColorClass',
+  'getBaseFilteredCustomers', 'contactPrioritySort', 'getWorkPriorityValue', 'sortedModelValue',
+  'compareDescendingMissingLast', 'stableCustomerTieBreak', 'formatCustomerMetric', 'getPotentialHtml',
+  'getCustomerValueHtml', 'getPrioritySummaryHtml'];
 const constants = html.slice(html.indexOf('  const FOCUS_KEYS_BY_LABEL ='),
   html.indexOf('  function getFilterOptionValue('));
 const context = vm.createContext({assert, console});
@@ -24,10 +28,11 @@ const getCustomerInsight = c => c;
 const getCustomerGuidance = c => c.customer_guidance || {};
 const filterState = Object.fromEntries(['segment','city','region','focus','risk','delivery','latestContact','emailProposal'].map(k=>[k,new Set()]));
 let customers = [], searchQuery = '', emailClickNoOrderActive = false, listWorkFilter='all';
+let insightsLoaded = true, insightsLoadFailed = false;
 let _sheetKey = 'focus';
 const filterBody = {innerHTML:'',querySelectorAll:()=>[]};
 const document = {getElementById:()=>filterBody};
-const getAvailableValues = () => FOCUS_LABELS;
+const getAvailableValues = key => key === 'status' ? Object.keys(STATUS_KEYS_BY_LABEL) : FOCUS_LABELS;
 ${constants}
 ${functions.map(source).join('\n')}
 `, context);
@@ -80,5 +85,37 @@ filterState.focus.add('repeat_purchase');
 assert.equal(getFilteredCustomers().length,3);
 filterState.focus.clear();
 assert.equal(getFilteredCustomers().length,3);
+
+// Single status group follows the same tone as the action box, not a booking flag.
+const store=(name,status,extra={})=>({customer:name,customer_id:name,city:'Göteborg',region_google:'Väst',customer_segment:'A',
+  value_model_version:'v3.5',work_priority_score:75,work_priority_precise:75.1,business_value_raw:10,
+  list_guidance:{focus_key:'repeat_purchase',status_key:status,...extra}});
+customers=[store('A low','act_now'),{...store('Z high','overdue_followup',{has_planned_contact:true}),work_priority_precise:75.4},
+  store('Booked','planned'),store('Idle','wait'),store('Review','act_now',{review_only:true}),
+  {customer:'Unknown',city:'Göteborg'}];
+assert.deepEqual(customers.map(getCustomerWorkState),['act','act','planned','wait','wait',null]);
+listWorkFilter='act';
+assert.deepEqual(getBaseFilteredCustomers().map(c=>c.customer),['Z high','A low']);
+filterState.region.add('Öst');assert.equal(getFilteredCustomers().length,0);filterState.region.clear();
+searchQuery='Z high';assert.deepEqual(getFilteredCustomers().map(c=>c.customer),['Z high']);searchQuery='';
+listWorkFilter='planned';assert.deepEqual(getFilteredCustomers().map(c=>c.customer),['Booked']);
+listWorkFilter='wait';assert.deepEqual(getFilteredCustomers().map(c=>c.customer),['Idle','Review']);
+insightsLoaded=false;assert.equal(getFilteredCustomers().length,0);
+listWorkFilter='all';assert.equal(getFilteredCustomers().length,6);
+insightsLoaded=true;insightsLoadFailed=true;listWorkFilter='planned';assert.equal(getFilteredCustomers().length,0);
+insightsLoadFailed=false;
+_sheetKey='status';renderFilterOptions('');
+assert.equal((filterBody.innerHTML.match(/type="radio"/g)||[]).length,4);
+assert.match(filterBody.innerHTML,/value="planned" checked/);
+assert.doesNotMatch(filterBody.innerHTML,/checkbox/);
+for(const [value,expected] of [[12.6,'13'],[12.4,'12'],[12.5,'13'],[0,'0'],['87','87'],[1234,'1\u00a0234']]) {
+  assert.equal(formatCustomerMetric(value),expected);
+}
+for(const value of [undefined,null,'','  ','bad',NaN,Infinity,true,false])assert.equal(formatCustomerMetric(value),'—');
+assert.match(getCustomerValueHtml({business_value_score:86.6,business_expected_dfp_per_delivery:12.6}),/Affärsvärde: <strong>87<\/strong>/);
+assert.match(getPotentialHtml({business_expected_dfp_per_delivery:12.6}),/<strong>13 DFP<\/strong>/);
+assert.match(getPotentialHtml({}),/<strong>—<\/strong>/);
+assert.doesNotMatch(getCustomerValueHtml({history_note:'private',data_warnings:[{text:'warning'}]}),/details|private|warning|ca |saknas/);
+assert.match(getPrioritySummaryHtml(store('A','act_now')),/>Prioritet <strong>75<\/strong>/);
 console.log('Guidance/delivery frontend: date-volume pairs, missing data, planning context and stable focus filters PASS');
 `, context);
