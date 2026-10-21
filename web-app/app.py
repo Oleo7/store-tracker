@@ -4378,10 +4378,12 @@ def ensure_followup_source_contact_id(
     )
     candidate = None
     exact_candidates = []
-    for row_index, row in worksheet_snapshot(
+    source_rows = worksheet_snapshot(
         sheet,
         expected_columns=CONTACT_COLUMNS,
-    )[1]:
+        use_cache=False,
+    )[1]
+    for row_index, row in source_rows:
         if target_customer is None or related_row_customer(
             row, customers, customer_lookup=customer_lookup
         ) is not target_customer:
@@ -4420,6 +4422,10 @@ def ensure_followup_source_contact_id(
         return ""
     row_index, row = candidate
     contact_id = str(row.get("contact_id") or "").strip()
+    resolved_id = contact_id or requested
+    if resolved_id and any(index != row_index and str(other.get("contact_id") or "").strip() == resolved_id
+                           for index, other in source_rows):
+        return ""
     if not contact_id:
         contact_id = requested or stable_contact_source_id({**row, "customer_id": str((target_customer or {}).get("customer_id") or "")})
         update_sheet_row(
@@ -7689,9 +7695,15 @@ def mutate_customer_obligation():
                 if contact_type not in PLANNING_CONTACT_TYPES:
                     raise CustomerStateConflict("invalid_contact_type", "Välj Besök, Telefon eller Mejl.", 400)
                 if activity is None:
+                    source_contact_id = ensure_followup_source_contact_id(spreadsheet,
+                        customer_name=customer.get("customer"), customer_id=cid,
+                        source_contact_id=item.get("source_contact_id", ""), owner=owner)
+                    if not source_contact_id:
+                        raise CustomerStateConflict("follow_up_source_ambiguous",
+                            "Källkontakten kunde inte identifieras entydigt. Ladda om planeringen.", 409)
                     activity = build_planned_activity_row(activity_id=activity_id, owner=owner, customer=customer,
                         contact_type=contact_type, scheduled_at=scheduled, note=data.get("note", item.get("note", "")),
-                        source="follow_up", source_contact_id=item.get("source_contact_id", ""),
+                        source="follow_up", source_contact_id=source_contact_id,
                         appointment_confirmed=data.get("appointment_confirmed", False),
                         picking_help=data.get("picking_help", False), create_fingerprint=fingerprint,
                         client_request_id=planning_request_scope(current_user(), "legacy-followup", oid, request_id))
@@ -9652,6 +9664,16 @@ def update_planning_activity(activity_id):
                 ),
                 409,
             )
+
+        # Revalidate operational state under the same lock as the write. Raw
+        # planned rows can already be replaced by later customer work.
+        invalidate_sheet_cache(spreadsheet, "sales_activities", PLANNED_ACTIVITIES_SHEET, CUSTOMER_STATE_EVENTS_SHEET)
+        state = customer_state_snapshot(spreadsheet)
+        projected = next((item for item in state["obligations"].get(str(current.get("customer_id") or ""), ())
+                          if item.get("planned_activity_id") == activity_id), None)
+        if current_status == "planned" and projected and projected.get("status") in {"superseded", "resolved", "cancelled", "skipped"}:
+            return planning_error("superseded_activity_immutable",
+                "Aktiviteten har ersatts av senare kundarbete. Ladda om planeringen.", 409)
 
         updates = {}
         if "customer_id" in data:

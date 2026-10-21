@@ -318,18 +318,25 @@ def build_customer_state(customers, contact_rows, planned_activity_rows, state_e
             status="scheduled" if aid else "open", snooze_until="", resolution_event_id="",
             latest_attempt_at=text(attempts.get(cid, {}).get("date_time")),
             latest_attempt_result=text(attempts.get(cid, {}).get("result")),
-            source_state_fingerprint=fingerprint(source), planning_state_fingerprint=fingerprint(plan))
+            # Persisting the already projected source ID is not a source edit.
+            source_state_fingerprint=fingerprint({k: v for k, v in source.items()
+                if k not in {"contact_id", "_stable_source_id"}}), planning_state_fingerprint=fingerprint(plan))
         status = key(plan.get("status"))
         if status in {"completed", "cancelled", "skipped", "superseded"}:
             item.update(status={"completed": "resolved"}.get(status, status),
                         resolution_event_id=text(plan.get("completed_contact_id") or aid),
                         resolution_basis="activity_" + status)
-        event = saved.get(("obligation", cid, text(plan.get("obligation_id")) or oid))
+        calendar_event = saved.get(("obligation", cid, "calendar:" + aid)) if aid else None
+        event = calendar_event or saved.get(("obligation", cid, text(plan.get("obligation_id")) or oid))
         if event:
             payload = event_payload(event)
+            event_aid = text(payload.get("planned_activity_id") or payload.get("original_planned_activity_id"))
+            # A shared source identifies the contact, not a calendar occurrence.
+            # Unscoped legacy closures belong only to the virtual follow-up.
+            same_occurrence = event_aid == aid if event_aid else (bool(calendar_event) if aid else True)
             # Preserve real legacy closures and virtual rescheduling. Old pauses
             # and review classifications have no operational effect.
-            if payload.get("status") in {"resolved", "cancelled", "skipped"} and item["status"] in OPEN_STATUSES:
+            if same_occurrence and payload.get("status") in {"resolved", "cancelled", "skipped"} and item["status"] in OPEN_STATUSES:
                 item.update(status=payload["status"], resolution_basis="legacy_administrative_closure",
                             resolution_event_id=text(event.get("event_id")))
             elif not aid and payload.get("status") == "scheduled":
