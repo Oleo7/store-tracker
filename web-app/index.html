@@ -5462,7 +5462,7 @@
     renderList();
   });
 
-  function getFilteredCustomers() {
+  function getFilteredCustomers({ includeStatus = true } = {}) {
     const q = searchQuery.toLowerCase();
     let filtered = customers;
     const modelUnavailable = typeof insightsLoadFailed !== "undefined" && insightsLoadFailed;
@@ -5500,7 +5500,7 @@
       filtered = filtered.filter(c => Boolean(getCustomerInsight(c)?.email_click_without_order));
     }
 
-    if (listWorkFilter !== "all") filtered = filtered.filter(c => getCustomerWorkState(c) === listWorkFilter);
+    if (includeStatus && listWorkFilter !== "all") filtered = filtered.filter(c => getCustomerWorkState(c) === listWorkFilter);
 
     return filtered;
   }
@@ -6201,6 +6201,16 @@
       lastListSignature = signature;
     }
 
+    if (listWorkFilter !== "all" && (!insightsLoaded || insightsLoadFailed)) {
+      filteredCustomers = [];
+      const message = insightsLoadFailed
+        ? "Kundprioriteringen kunde inte laddas. Ladda om kundunderlaget och försök igen."
+        : "Laddar kundinsikter…";
+      document.getElementById("subtitle").textContent = insightsLoadFailed ? "Statusfiltret är inte tillgängligt" : message;
+      list.innerHTML = `<div class="${insightsLoadFailed ? "list-insights-error" : "state-msg"}" role="status">${esc(message)}</div>`;
+      return;
+    }
+
     const baseFilteredCustomers = getBaseFilteredCustomers();
     const filtered = baseFilteredCustomers;
     const activeViews = [];
@@ -6212,7 +6222,8 @@
       document.getElementById("subtitle").textContent = `${filtered.length} av ${customers.length} butiker`;
     }
     filteredCustomers = filtered;
-    const unknownStatusCount = listWorkFilter === "all" ? 0 : customers.filter(c => getCustomerWorkState(c) === null).length;
+    const unknownStatusCount = listWorkFilter === "all" ? 0
+      : getFilteredCustomers({ includeStatus: false }).filter(c => getCustomerWorkState(c) === null).length;
     const statusNoticeHtml = unknownStatusCount
       ? `<div class="list-insights-error" role="status">${unknownStatusCount} ${unknownStatusCount === 1 ? "butik saknar" : "butiker saknar"} aktuell status och ingår inte i statusfiltret.</div>` : "";
     const insightsErrorHtml = (insightsLoadFailed

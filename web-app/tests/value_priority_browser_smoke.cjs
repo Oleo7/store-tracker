@@ -61,8 +61,11 @@ async function sellerFrontend(page,width){
  await status(page,'wait');assert.deepEqual(await cards.locator('.customer-name').allTextContents(),['Avvakta']);
  assert.match(await page.locator('#customer-list [role=status]').innerText(),/1 butik saknar aktuell status/);
  await page.evaluate(()=>{insightsLoaded=false;renderList();});assert.equal(await cards.count(),0);
- assert.match(await page.locator('#customer-list [role=status]').innerText(),/27 butiker saknar aktuell status/);
+ assert.match(await page.locator('#customer-list [role=status]').innerText(),/Laddar kundinsikter/);
+ assert.doesNotMatch(await page.locator('#customer-list').innerText(),/saknar aktuell status|Inga butiker matchar/);
  await page.evaluate(()=>{insightsLoaded=true;insightsLoadFailed=true;renderList();});assert.equal(await cards.count(),0);
+ assert.match(await page.locator('#customer-list [role=status]').innerText(),/kunde inte laddas/);
+ assert.doesNotMatch(await page.locator('#customer-list').innerText(),/saknar aktuell status|Inga butiker matchar/);
  await status(page,'all');assert.equal(await cards.count(),20);
  await page.evaluate(()=>{insightsLoadFailed=false;renderList();renderCustomerDecisionDetail(customers[1]);});
  assert.match(await page.locator('#d-customer-decision .customer-value-summary').innerText(),/Affärsvärde: 87[\s\S]*13 DFP/);

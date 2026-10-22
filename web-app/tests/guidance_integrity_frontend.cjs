@@ -17,7 +17,7 @@ const functions = ['getCustomerListGuidance', 'getFilterOptionValue', 'getCardDa
   'getFilteredCustomers', 'renderFilterOptions', 'getCustomerWorkState', 'getNextActionColorClass',
   'getBaseFilteredCustomers', 'contactPrioritySort', 'getWorkPriorityValue', 'sortedModelValue',
   'compareDescendingMissingLast', 'stableCustomerTieBreak', 'formatCustomerMetric', 'getPotentialHtml',
-  'getCustomerValueHtml', 'getPrioritySummaryHtml'];
+  'getCustomerValueHtml', 'getPrioritySummaryHtml', 'renderList', 'getListSignature'];
 const constants = html.slice(html.indexOf('  const FOCUS_KEYS_BY_LABEL ='),
   html.indexOf('  function getFilterOptionValue('));
 const context = vm.createContext({assert, console});
@@ -29,9 +29,14 @@ const getCustomerGuidance = c => c.customer_guidance || {};
 const filterState = Object.fromEntries(['segment','city','region','focus','risk','delivery','latestContact','emailProposal'].map(k=>[k,new Set()]));
 let customers = [], searchQuery = '', emailClickNoOrderActive = false, listWorkFilter='all';
 let insightsLoaded = true, insightsLoadFailed = false;
+let insightsLoadMessage = '', insightsListRenderPending = false, lastListSignature = '', visibleListCount = 20, filteredCustomers = [];
+const LIST_BATCH_SIZE = 20;
+const getRouteProposalStop = () => null, getPriorityCardClass = () => '', getCustomerCardAriaLabel = c => c.customer;
+const getCardPlanningButtonHtml = () => '', getNextActionHtml = () => '';
 let _sheetKey = 'focus';
 const filterBody = {innerHTML:'',querySelectorAll:()=>[]};
-const document = {getElementById:()=>filterBody};
+const listBody = {innerHTML:'',querySelectorAll:()=>[]}, subtitle = {textContent:''};
+const document = {getElementById:id=>id==='customer-list'?listBody:id==='subtitle'?subtitle:id==='load-more-btn'?null:filterBody};
 const getAvailableValues = key => key === 'status' ? Object.keys(STATUS_KEYS_BY_LABEL) : FOCUS_LABELS;
 ${constants}
 ${functions.map(source).join('\n')}
@@ -117,5 +122,36 @@ assert.match(getPotentialHtml({business_expected_dfp_per_delivery:12.6}),/<stron
 assert.match(getPotentialHtml({}),/<strong>—<\/strong>/);
 assert.doesNotMatch(getCustomerValueHtml({history_note:'private',data_warnings:[{text:'warning'}]}),/details|private|warning|ca |saknas/);
 assert.match(getPrioritySummaryHtml(store('A','act_now')),/>Prioritet <strong>75<\/strong>/);
+
+// Loading/failure must not masquerade as missing status or a completed empty search.
+listWorkFilter='act';insightsLoaded=false;renderList();
+assert.match(listBody.innerHTML,/Laddar kundinsikter/);
+assert.doesNotMatch(listBody.innerHTML,/saknar aktuell status|Inga butiker matchar/);
+assert.doesNotMatch(subtitle.textContent,/0 av/);
+insightsLoadFailed=true;renderList();
+assert.match(listBody.innerHTML,/kunde inte laddas/);
+assert.doesNotMatch(listBody.innerHTML,/saknar aktuell status|Inga butiker matchar/);
+insightsLoadFailed=false;insightsLoaded=true;renderList();
+assert.equal(subtitle.textContent,'2 av 6 butiker');
+assert.deepEqual(filteredCustomers.map(c=>c.customer),['Z high','A low']);
+assert.match(listBody.innerHTML,/1 butik saknar aktuell status/);
+console.log('Status loading, error and loaded transition PASS');
+
+// Missing-status count is scoped to search AND the other filters before status.
+customers=[store('Match active','act_now'),
+  {customer:'Match missing',city:'Göteborg',region_google:'Väst',customer_segment:'A'},
+  {customer:'Match other region',city:'Göteborg',region_google:'Öst',customer_segment:'A'},
+  {customer:'Unrelated missing',city:'Borås',region_google:'Väst',customer_segment:'A'}];
+searchQuery='Match';filterState.region.add('Väst');renderList();
+assert.equal(subtitle.textContent,'1 av 4 butiker');
+assert.deepEqual(filteredCustomers.map(c=>c.customer),['Match active']);
+assert.match(listBody.innerHTML,/1 butik saknar aktuell status/);
+searchQuery='Match active';renderList();
+assert.doesNotMatch(listBody.innerHTML,/saknar aktuell status/);
+filterState.region.clear();searchQuery='No match';renderList();
+assert.equal(subtitle.textContent,'0 av 4 butiker');
+assert.match(listBody.innerHTML,/Inga butiker matchar/);
+assert.doesNotMatch(listBody.innerHTML,/saknar aktuell status/);
+console.log('Missing status scoped to search and other filters PASS');
 console.log('Guidance/delivery frontend: date-volume pairs, missing data, planning context and stable focus filters PASS');
 `, context);
