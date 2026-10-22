@@ -1130,13 +1130,13 @@ class FrontendRouteProposalFlowTests(TestCase):
     def test_customer_cards_use_one_priority_guidance_layout(self):
         self.assertIn("getPrioritySummaryHtml(c)", self.html)
         self.assertIn("getNextActionHtml(c)", self.html)
-        self.assertIn("getPotentialHtml(c)", self.html)
+        self.assertNotIn("getPotentialHtml(c)", self.html)
         self.assertIn("getCardDatesHtml(c)", self.html)
         self.assertIn("getCustomerCardAriaLabel(c, routeStop)", self.html)
         self.assertIn('visit: "Besök"', self.html)
         self.assertIn('phone: "Telefon"', self.html)
-        self.assertIn("getCustomerValueHtml(c)", self.html)
-        self.assertIn("business_expected_dfp_per_delivery", self.html)
+        self.assertNotIn("getCustomerValueHtml(c)", self.html)
+        self.assertNotIn("Uppskattad leveransstorlek:", self.html)
         self.assertNotIn("Varför denna prioritet?", self.html)
         self.assertNotIn("Missad uppföljning</span>", self.html)
 

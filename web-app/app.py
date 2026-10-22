@@ -6848,6 +6848,71 @@ def select_next_customer_follow_up(customer, customers, contact_rows, activity_r
     return min(candidates, key=lambda pair: pair[0])[1] if candidates else None
 
 
+def build_latest_customer_order(order_rows, *, today):
+    """Read-only order detail; input is already scoped to one resolved customer.
+
+    Reference is the order identity. Repeated identical source lines count once;
+    differing lines for the same article remain additive. Unknown parts never
+    become an apparently complete total, and currencies are never combined.
+    """
+    groups = defaultdict(list)
+    seen = set()
+    fields = ("Reference", "Order date", "Delivery date", "SKU", "Product", "Total weight", "Total", "Currency")
+    for row in order_rows:
+        reference = str(row.get("Reference") or "").strip()
+        signature = tuple("" if row.get(field) is None else str(row[field]).strip() for field in fields)
+        if not reference or signature in seen:
+            continue
+        seen.add(signature)
+        groups[reference].append(row)
+
+    def amount(row):
+        value = parse_number_value(str(row.get("Total")) if row.get("Total") is not None else "", None)
+        return value if value is not None and math.isfinite(value) else None
+
+    def complete_sum(values):
+        if not values or any(value is None for value in values):
+            return None
+        total = sum(values)
+        return round(total, 2) if math.isfinite(total) else None
+
+    candidates = []
+    for reference, rows in groups.items():
+        delivery_dates = [d for row in rows if (d := parse_date_value(row.get("Delivery date")))]
+        if not delivery_dates:
+            continue  # No invented delivery date from Order date.
+        delivery_date = max(delivery_dates)
+        order_dates = [d for row in rows if (d := parse_date_value(row.get("Order date")))]
+        volumes, amounts = [order_volume(row) for row in rows], [amount(row) for row in rows]
+        known_volume = sum(v for v in volumes if v is not None) if any(v is not None for v in volumes) else None
+        known_value = sum(v for v in amounts if v is not None)
+        # A registered future order can precede pricing/volume enrichment.
+        # Explicit zero/negative sales or volume still follow commercial rules.
+        pending = (delivery_date > today and all(v is None for v in amounts)
+                   and (known_volume is None or known_volume > 0)
+                   and any(row.get("Product") or row.get("SKU") for row in rows))
+        if not commercial_order(known_value, known_volume) and not pending:
+            continue
+        currencies = {str(row.get("Currency") or "").strip().upper() for row in rows}
+        currency = next(iter(currencies)) if len(currencies) == 1 else ""
+        articles = defaultdict(list)
+        for row, volume in zip(rows, volumes):
+            sku = str(row.get("SKU") or "").strip()
+            article = str(row.get("Product") or sku or "—").strip()
+            articles[(sku, article)].append(volume)
+        candidates.append({
+            "reference": reference,
+            "order_date": max(order_dates).isoformat() if order_dates else None,
+            "delivery_date": delivery_date.isoformat(),
+            "currency": currency,
+            "total_dfp": complete_sum(volumes),
+            "order_value": complete_sum(amounts) if currency else None,
+            "lines": [{"sku": sku, "article": article, "dfp": complete_sum(values)}
+                      for (sku, article), values in sorted(articles.items())],
+        })
+    return max(candidates, key=lambda item: (item["delivery_date"], item["order_date"] or "", item["reference"]), default=None)
+
+
 @app.route("/customers/<path:customer_name>/stats", methods=["GET"])
 def get_customer_stats(customer_name):
     customer_name = customer_name.strip()
@@ -6857,6 +6922,7 @@ def get_customer_stats(customer_name):
     customer = resolve_accessible_customer(
         customers,
         current_user(),
+        customer_id=request.args.get("customer_id"),
         customer_name=customer_name,
         customer_lookup=customer_lookup,
     )
@@ -6948,6 +7014,7 @@ def get_customer_stats(customer_name):
         "contacts": contacts,
         "timeline": timeline,
         "next_follow_up": next_follow_up,
+        "latest_order": build_latest_customer_order(order_rows, today=stockholm_today()),
     })
 
 

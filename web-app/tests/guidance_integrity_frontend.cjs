@@ -16,8 +16,7 @@ const functions = ['getCustomerListGuidance', 'getFilterOptionValue', 'getCardDa
   'getCardDatesHtml','planningDateFromKey','planningDateKeyFromIso','planningTimeFromIso',
   'getFilteredCustomers', 'renderFilterOptions', 'getCustomerWorkState', 'getNextActionColorClass',
   'getBaseFilteredCustomers', 'contactPrioritySort', 'getWorkPriorityValue', 'sortedModelValue',
-  'compareDescendingMissingLast', 'stableCustomerTieBreak', 'formatCustomerMetric', 'getPotentialHtml',
-  'getCustomerValueHtml', 'getPrioritySummaryHtml', 'renderList', 'getListSignature'];
+  'compareDescendingMissingLast', 'stableCustomerTieBreak', 'getGuidanceStatusLabel', 'getPrioritySummaryHtml', 'renderList', 'getListSignature'];
 const constants = html.slice(html.indexOf('  const FOCUS_KEYS_BY_LABEL ='),
   html.indexOf('  function getFilterOptionValue('));
 const context = vm.createContext({assert, console});
@@ -113,14 +112,7 @@ _sheetKey='status';renderFilterOptions('');
 assert.equal((filterBody.innerHTML.match(/type="radio"/g)||[]).length,4);
 assert.match(filterBody.innerHTML,/value="planned" checked/);
 assert.doesNotMatch(filterBody.innerHTML,/checkbox/);
-for(const [value,expected] of [[12.6,'13'],[12.4,'12'],[12.5,'13'],[0,'0'],['87','87'],[1234,'1\u00a0234']]) {
-  assert.equal(formatCustomerMetric(value),expected);
-}
-for(const value of [undefined,null,'','  ','bad',NaN,Infinity,true,false])assert.equal(formatCustomerMetric(value),'—');
-assert.match(getCustomerValueHtml({business_value_score:86.6,business_expected_dfp_per_delivery:12.6}),/Affärsvärde: <strong>87<\/strong>/);
-assert.match(getPotentialHtml({business_expected_dfp_per_delivery:12.6}),/<strong>13 DFP<\/strong>/);
-assert.match(getPotentialHtml({}),/<strong>—<\/strong>/);
-assert.doesNotMatch(getCustomerValueHtml({history_note:'private',data_warnings:[{text:'warning'}]}),/details|private|warning|ca |saknas/);
+assert.equal(getGuidanceStatusLabel({status_key:'overdue_followup',status_label:'Att hantera'}),'Missad aktivitet');
 assert.match(getPrioritySummaryHtml(store('A','act_now')),/>Prioritet <strong>75<\/strong>/);
 
 // Loading/failure must not masquerade as missing status or a completed empty search.
@@ -133,6 +125,7 @@ assert.match(listBody.innerHTML,/kunde inte laddas/);
 assert.doesNotMatch(listBody.innerHTML,/saknar aktuell status|Inga butiker matchar/);
 insightsLoadFailed=false;insightsLoaded=true;renderList();
 assert.equal(subtitle.textContent,'2 av 6 butiker');
+assert.doesNotMatch(listBody.innerHTML,/Affärsvärde|Uppskattad leveransstorlek/);
 assert.deepEqual(filteredCustomers.map(c=>c.customer),['Z high','A low']);
 assert.match(listBody.innerHTML,/1 butik saknar aktuell status/);
 console.log('Status loading, error and loaded transition PASS');
