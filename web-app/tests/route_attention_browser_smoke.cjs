@@ -17,11 +17,7 @@ assert.ok(['127.0.0.1','localhost'].includes(new URL(base).hostname),'Only isola
    await page.waitForFunction(()=>planningAttention.loaded&&!planningAttentionLoading);
    assert.equal(await page.locator('#planning-backlog .planning-attention-item').count(),1);
    assert.match(await page.locator('#planning-backlog').innerText(),/2 äldre missade aktiviteter finns i historiken/);
-   await page.locator('#planning-attention-search').fill('hittas-inte');
-   await page.waitForFunction(()=>planningAttention.total===0&&!planningAttentionLoading);
-   await page.locator('#planning-attention-search').fill('Sydport');
-   await page.waitForFunction(()=>planningAttention.total===1&&!planningAttentionLoading);
-   await page.locator('#planning-attention-search').fill('');
+   assert.equal(await page.locator('#planning-attention-search').count(),0);
    await page.request.post(base+'/__test__/service');
    await page.evaluate(()=>loadPlanningAttention());
    await page.waitForFunction(()=>planningAttention.total===1&&!planningAttentionLoading);
@@ -72,7 +68,7 @@ assert.ok(['127.0.0.1','localhost'].includes(new URL(base).hostname),'Only isola
    await page.waitForFunction(()=>planningAttention.total===0&&!planningAttentionLoading);
    assert.equal(await page.locator('#planning-backlog .planning-attention-item').count(),0);
    assert.deepEqual(errors,[]);
-   console.log(`${width}px: grouping, historical notes, search, route preview/save/retry, source changes and skipped group PASS`);
+   console.log(`${width}px: grouping without search, historical notes, route preview/save/retry, source changes and skipped group PASS`);
    await context.close();
   }
  }finally{await browser.close();}

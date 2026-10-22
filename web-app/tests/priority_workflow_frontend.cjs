@@ -4,7 +4,7 @@ function source(name){const match=new RegExp(`  (?:async )?function ${name}\\(`)
 const context=vm.createContext({assert,URLSearchParams,console});
 vm.runInContext(`
 const PLANNING_TIME_ZONE='Europe/Stockholm';
-let owner='olle',planningAttentionRequestSerial=0,planningAttentionLoading=false,planningAttentionSearch='';
+let owner='olle',planningAttentionRequestSerial=0,planningAttentionLoading=false;
 let customers=[],insightsRequestSerial=0,insightsRevision=0;
 let planningAttention={items:[],total:0,nextOffset:0,owner:'olle',loaded:false,error:null,invalidCount:0};
 const planningTodayKey=()=> '2026-10-18',planningAttentionOwnerKey=()=>owner;

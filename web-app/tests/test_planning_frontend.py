@@ -276,7 +276,6 @@ const context = vm.createContext({assert, URLSearchParams, setImmediate});
 vm.runInContext(`
 const API = '/api', sharedJsonRequests = new Map(), requests = [], toasts = [];
 let planningLoadSerial = 0, planningAttentionRequestSerial = 0, insightsRequestSerial = 0;
-let planningAttentionSearch = "";
 let planningDragMutationSerial = 0;
 const planningDragOperations = new Map();
 const planningDragActivityVersions = new Map();
@@ -327,8 +326,7 @@ let lastListSignature = '', visibleListCount = 10, filteredCustomers = [];
 const LIST_BATCH_SIZE = 10, getListSignature = () => 'test-list';
 const getBaseFilteredCustomers = () => customers, getRouteProposalStop = () => null;
 const isCancelledCustomer = () => false, currentUserCanPlan = () => true;
-const listSortMode='contact', PLANNING_TIME_ZONE='Europe/Stockholm';
-const bindCustomerDecisionControls=()=>{}, getCustomerWorkflowButtonHtml=()=>'';
+const listWorkFilter='all', PLANNING_TIME_ZONE='Europe/Stockholm';
 let simulateListScrollJump = false;
 const scrollCalls = [], animationFrames = [];
 const window = {scrollX:0,scrollY:0,scrollTo:(x,y)=>{scrollCalls.push([x,y]);window.scrollX=x;window.scrollY=y;}};
@@ -364,7 +362,7 @@ ${['fetchJsonShared','loadInsights','loadPlanningAttention','loadPlanningWeek','
    'activeViewName','showView','renderList','esc','escAttr',
    'customerInsightKey','getCustomerInsight','getCustomerGuidance','getCustomerListGuidance','hasPriorityScore',
    'getGuidanceStatusClass','getNextActionColorClass','guidanceContactLabel','getNextActionHtml',
-   'getPrioritySummaryHtml','getPriorityWhyHtml','getWorkPriorityValue','sortedModelValue','getPotentialHtml','getCardDateHtml','getDeliveryVolumeText',
+   'getPrioritySummaryHtml','getCustomerValueHtml','formatCustomerMetric','getWorkPriorityValue','sortedModelValue','getPotentialHtml','getCardDateHtml','getDeliveryVolumeText',
    'getCustomerPlanningSeed','planningContactTypeKey','customerCanStartContact','planningDateFromKey','planningDateKeyFromIso','planningTimeFromIso',
    'getCardDatesHtml','getPriorityCardClass','getCustomerCardAriaLabel','getCardPlanningButtonHtml']
    .map(source).join('\n')}

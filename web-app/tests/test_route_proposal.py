@@ -1135,7 +1135,9 @@ class FrontendRouteProposalFlowTests(TestCase):
         self.assertIn("getCustomerCardAriaLabel(c, routeStop)", self.html)
         self.assertIn('visit: "Besök"', self.html)
         self.assertIn('phone: "Telefon"', self.html)
-        self.assertIn("Potential ej beräknad", self.html)
+        self.assertIn("getCustomerValueHtml(c)", self.html)
+        self.assertIn("business_expected_dfp_per_delivery", self.html)
+        self.assertNotIn("Varför denna prioritet?", self.html)
         self.assertNotIn("Missad uppföljning</span>", self.html)
 
     def test_route_candidates_ignore_recommended_channel(self):
