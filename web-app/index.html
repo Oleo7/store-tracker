@@ -1854,7 +1854,6 @@
     .planning-attention-type { font-size: .68rem; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; color: #9b4743; }
     .planning-attention-notice { margin-top: 7px; font-size: .75rem; color: var(--pb-muted); line-height: 1.5; }
     .detail-column { display: none; min-width: 0; }
-    .overview-guidance { margin: 8px 0 12px; font-size: .8rem; line-height: 1.5; color: var(--pb-muted); overflow-wrap: anywhere; }
     .latest-order { margin-top: 14px; border-top: 1px solid var(--pb-border); padding-top: 12px; font-size: .8rem; }
     .latest-order summary { cursor: pointer; font-weight: 750; padding: 4px 0; }
     .latest-order-body { margin-top: 10px; overflow-wrap: anywhere; }
@@ -4215,7 +4214,6 @@
     <div class="detail-section" id="d-overview-section">
       <div class="detail-section-title">Översikt</div>
       <div class="tags-row" id="d-tags"></div>
-      <p class="overview-guidance" id="d-guidance-description"></p>
       <div class="overview-meta">
         <div class="overview-meta-item">
           <div class="meta-label">PLANERAD UPPFÖLJNING</div>
@@ -6462,9 +6460,6 @@
     tags.push(`<span class="guidance-badge">${esc(guidance.focus_label || "Fokus saknas")}</span>`);
     tags.push(`<span class="guidance-badge ${getGuidanceStatusClass(guidance.status_key)}">${esc(getGuidanceStatusLabel(guidance))}</span>`);
     document.getElementById("d-tags").innerHTML = tags.join("");
-    // The list may clamp long guidance, so retain its full text here without
-    // duplicating the former coloured action panel.
-    document.getElementById("d-guidance-description").textContent = [guidance.action_label, guidance.reason_text].filter(Boolean).join(" · ");
   }
 
   // Reparent existing sections at the breakpoint: inputs/listeners survive and

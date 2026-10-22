@@ -1,6 +1,7 @@
 // Execute actual rendering and refresh helpers against a small isolated DOM.
 const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm'),assert=require('node:assert/strict');
 const html=fs.readFileSync(path.join(__dirname,'..','index.html'),'utf8');
+assert.doesNotMatch(html,/d-guidance-description|overview-guidance/);
 function source(name){const m=new RegExp(`  (?:async )?function ${name}\\(`).exec(html);assert.ok(m,name);return html.slice(m.index,html.indexOf('\n  }',m.index)+4);}
 const context=vm.createContext({assert,console,URLSearchParams});
 vm.runInContext(`
@@ -32,6 +33,7 @@ const a={customer_id:'a',customer:'Same name',customer_segment:'A',sales_person:
 const b={...a,customer_id:'b'};
 currentCustomer=a;renderCustomerDecisionDetail(a);
 assert.match(elements.get('d-tags').innerHTML,/A<\/span>[\s\S]*Ansvarig: Sofia[\s\S]*Återköp[\s\S]*Missad aktivitet/);
+assert.equal((elements.get('d-tags').innerHTML.match(/<span /g)||[]).length,4);
 assert.doesNotMatch(elements.get('d-tags').innerHTML,/Att hantera|Prioritet|Affärsvärde/);
 assert.equal(elements.get('d-call-btn').disabled,true);
 assert.equal(elements.get('update-contact-btn').disabled,false);

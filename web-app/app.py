@@ -6851,19 +6851,15 @@ def select_next_customer_follow_up(customer, customers, contact_rows, activity_r
 def build_latest_customer_order(order_rows, *, today):
     """Read-only order detail; input is already scoped to one resolved customer.
 
-    Reference is the order identity. Repeated identical source lines count once;
-    differing lines for the same article remain additive. Unknown parts never
-    become an apparently complete total, and currencies are never combined.
+    Reference is the order identity; every physical position remains additive.
+    Unknown parts never become an apparently complete total, and currencies
+    are never combined.
     """
     groups = defaultdict(list)
-    seen = set()
-    fields = ("Reference", "Order date", "Delivery date", "SKU", "Product", "Total weight", "Total", "Currency")
     for row in order_rows:
         reference = str(row.get("Reference") or "").strip()
-        signature = tuple("" if row.get(field) is None else str(row[field]).strip() for field in fields)
-        if not reference or signature in seen:
+        if not reference:
             continue
-        seen.add(signature)
         groups[reference].append(row)
 
     def amount(row):
@@ -6884,13 +6880,28 @@ def build_latest_customer_order(order_rows, *, today):
         delivery_date = max(delivery_dates)
         order_dates = [d for row in rows if (d := parse_date_value(row.get("Order date")))]
         volumes, amounts = [order_volume(row) for row in rows], [amount(row) for row in rows]
+        awaiting_delivery = False
+        if delivery_date > today:
+            for index, row in enumerate(rows):
+                ordered = parse_number_value(str(row.get("Quantity") or ""), None)
+                if (volumes[index] in (None, 0) and (amounts[index] is None or amounts[index] >= 0)
+                        and ordered is not None and math.isfinite(ordered) and ordered > 0
+                        and parse_date_value(row.get("Order date"))
+                        and (parse_date_value(row.get("Delivery date")) or date.min) > today
+                        and (str(row.get("SKU") or "").strip() or str(row.get("Product") or "").strip())):
+                    # Stockfiller writes delivered=0 as financial zeroes before
+                    # delivery. Ordered quantity proves a booking, never DFP.
+                    volumes[index] = None
+                    if amounts[index] == 0:
+                        amounts[index] = None
+                    awaiting_delivery = True
         known_volume = sum(v for v in volumes if v is not None) if any(v is not None for v in volumes) else None
         known_value = sum(v for v in amounts if v is not None)
-        # A registered future order can precede pricing/volume enrichment.
-        # Explicit zero/negative sales or volume still follow commercial rules.
-        pending = (delivery_date > today and all(v is None for v in amounts)
-                   and (known_volume is None or known_volume > 0)
-                   and any(row.get("Product") or row.get("SKU") for row in rows))
+        # Keep this display-only exception separate from commercial KPI rules.
+        pending = (delivery_date > today
+                   and any(row.get("Product") or row.get("SKU") for row in rows)
+                   and ((all(v is None for v in amounts) and (known_volume is None or known_volume > 0))
+                        or (awaiting_delivery and all(v is None or v >= 0 for v in amounts + volumes))))
         if not commercial_order(known_value, known_volume) and not pending:
             continue
         currencies = {str(row.get("Currency") or "").strip().upper() for row in rows}

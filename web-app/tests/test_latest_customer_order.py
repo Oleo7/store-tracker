@@ -4,6 +4,7 @@ from unittest import TestCase
 from unittest.mock import patch
 
 from test_planning import PlanningApiTestCase
+from stockfiller_orders.sync import flatten_order
 import app as application
 
 TODAY = date(2026, 10, 22)
@@ -21,17 +22,54 @@ class LatestCustomerOrderTests(TestCase):
     def latest(self, rows):
         return application.build_latest_customer_order(rows, today=TODAY)
 
-    def test_future_delivery_multi_sku_duplicate_and_unchanged_source(self):
+    def test_future_delivery_multi_sku_identical_positions_and_unchanged_source(self):
         rows = [line('past', **{'Delivery date': '2026-10-20'}), line(), line(),
                 line(Product='Blåbär', SKU='SKU2', **{'Total weight': '6', 'Total': '2160'})]
         original = [dict(row) for row in rows]
         result = self.latest(rows)
         self.assertEqual(result['reference'], 'future')
         self.assertEqual(result['delivery_date'], '2026-11-04')
-        self.assertEqual(result['total_dfp'], 18)
-        self.assertEqual(result['order_value'], 6480)
+        self.assertEqual(result['total_dfp'], 30)
+        self.assertEqual(result['order_value'], 10800)
+        self.assertEqual(result['total_dfp'], sum(application.order_volume(row) for row in rows[1:]))
+        self.assertEqual(result['order_value'], sum(application.parse_number_value(row['Total']) for row in rows[1:]))
         self.assertEqual(len(result['lines']), 2)
         self.assertEqual(rows, original)
+
+    def test_identical_physical_positions_are_both_counted(self):
+        row = line(**{'Total weight': '6', 'Total': '2160'})
+        result = self.latest([row, dict(row)])
+        self.assertEqual(result['total_dfp'], 12)
+        self.assertEqual(result['order_value'], 4320)
+        self.assertEqual(result['lines'], [{'article': 'Hallon', 'sku': 'SKU1', 'dfp': 12}])
+
+    def test_actual_stockfiller_pending_order_wins_without_invented_financial_values(self):
+        rows = flatten_order({
+            'reference': 'pending-stockfiller', 'buyerName': 'Butik A', 'buyerExternalId': 'C-1',
+            'createdAtDateTime': '2026-10-19T10:00:00Z', 'deliveryDate': '2026-11-04', 'currency': 'SEK',
+            'orderRows': [{'productSku': 'SKU1', 'productName': 'Hallon', 'unit': 'pieces',
+                           'ordered': 12, 'delivered': 0, 'price': 36000}],
+        })
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(application.parse_number_value(rows[0]['Quantity']), 12)
+        self.assertEqual(application.order_volume(rows[0]), 0)
+        self.assertEqual(application.parse_number_value(rows[0]['Total']), 0)
+        original = [dict(row) for row in rows]
+        result = self.latest([line('delivered', **{'Delivery date': '2026-10-20'}), *rows])
+        self.assertEqual(result['reference'], 'pending-stockfiller')
+        self.assertEqual(result['delivery_date'], '2026-11-04')
+        self.assertIsNone(result['total_dfp'])
+        self.assertIsNone(result['order_value'])
+        self.assertIsNone(result['lines'][0]['dfp'])
+        self.assertEqual(rows, original)
+
+    def test_future_zero_order_requires_positive_order_and_article_evidence(self):
+        base = line(**{'Quantity': '12', 'Total weight': '0', 'Total': '0'})
+        for changes in [{'Quantity': ''}, {'Quantity': '0'}, {'Quantity': '-12'}, {'Quantity': 'bad'},
+                        {'Order date': ''}, {'Delivery date': ''}, {'Reference': ''}, {'Product': '', 'SKU': ''},
+                        {'Delivery date': '2026-10-20'}]:
+            with self.subTest(changes=changes):
+                self.assertIsNone(self.latest([{**base, **changes}]))
 
     def test_delivery_then_order_date_then_reference_is_deterministic(self):
         rows = [line('A'), line('Z'), line('older', **{'Order date': '2026-10-18'})]
@@ -86,12 +124,12 @@ class LatestOrderStatsApiTests(PlanningApiTestCase):
         self.assertEqual(response.status_code, 200, response.get_json())
         data = response.get_json()
         self.assertEqual(read.call_count, 1)
-        self.assertEqual(data['total_sales'], 10800)  # Existing historical KPI includes its original source rows.
+        self.assertEqual(data['total_sales'], 10800)  # Existing historical KPI is unchanged.
         self.assertEqual(data['order_count'], 1)
         self.assertEqual(data['currency'], 'SEK')
         self.assertEqual(data['latest_order_date'], '2026-10-19')
-        self.assertEqual(data['latest_order']['order_value'], 6480)
-        self.assertEqual(data['latest_order']['total_dfp'], 18)
+        self.assertEqual(data['latest_order']['order_value'], data['total_sales'])
+        self.assertEqual(data['latest_order']['total_dfp'], 30)
         self.assertTrue({'contacts', 'timeline', 'next_follow_up'} <= data.keys())
 
     def test_same_name_and_reference_cannot_cross_customer_identity_or_access(self):
