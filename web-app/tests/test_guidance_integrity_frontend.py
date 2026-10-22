@@ -6,6 +6,14 @@ from unittest import TestCase, skipUnless
 
 class GuidanceIntegrityFrontendTests(TestCase):
     @skipUnless(shutil.which('node'), 'Node.js required for executing real frontend helpers')
+    def test_customer_detail_order_rendering_identity_and_contact_controls(self):
+        result = subprocess.run(
+            ['node', str(Path(__file__).with_name('customer_detail_frontend.cjs'))],
+            capture_output=True, text=True, timeout=20,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + '\n' + result.stderr)
+
+    @skipUnless(shutil.which('node'), 'Node.js required for executing real frontend helpers')
     def test_real_frontend_date_volume_and_filter_contracts(self):
         result = subprocess.run(
             ['node', str(Path(__file__).with_name('guidance_integrity_frontend.cjs'))],

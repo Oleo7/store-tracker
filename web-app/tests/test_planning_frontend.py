@@ -362,7 +362,7 @@ ${['fetchJsonShared','loadInsights','loadPlanningAttention','loadPlanningWeek','
    'activeViewName','showView','renderList','esc','escAttr',
    'customerInsightKey','getCustomerInsight','getCustomerGuidance','getCustomerListGuidance','hasPriorityScore',
    'getGuidanceStatusClass','getNextActionColorClass','guidanceContactLabel','getNextActionHtml',
-   'getPrioritySummaryHtml','getCustomerValueHtml','formatCustomerMetric','getWorkPriorityValue','sortedModelValue','getPotentialHtml','getCardDateHtml','getDeliveryVolumeText',
+   'getPrioritySummaryHtml','getGuidanceStatusLabel','getWorkPriorityValue','sortedModelValue','getCardDateHtml','getDeliveryVolumeText',
    'getCustomerPlanningSeed','planningContactTypeKey','customerCanStartContact','planningDateFromKey','planningDateKeyFromIso','planningTimeFromIso',
    'getCardDatesHtml','getPriorityCardClass','getCustomerCardAriaLabel','getCardPlanningButtonHtml']
    .map(source).join('\n')}
@@ -861,7 +861,7 @@ vm.runInContext(`(async () => {
         )
 
     def test_planning_attention_is_separate_from_commercial_ranking(self):
-        self.assertTrue("Att hantera" in self.html)
+        self.assertTrue("Missad aktivitet" in self.html)
         self.assertFalse('id="planning-recommendation"' in self.html)
         self.assertFalse("Fler nästa åtgärder" in self.html)
         self.assertFalse("/planning/suggestions" in self.html)
