@@ -1,14 +1,20 @@
 from copy import deepcopy
 from unittest import TestCase
+from unittest.mock import patch
+from uuid import UUID
 
 from gspread.exceptions import WorksheetNotFound
 
 from customer_master_sync.sync import (
     CUSTOMER_REQUIRED_COLUMNS,
+    GLN_COLUMN,
     REVIEW_SHEET_NAME,
+    REVIEW_COLUMNS,
     build_order_masters,
+    _result_payload,
     is_gln_like,
     is_organization_number_like,
+    normalize_gln,
     plan_customer_sync,
     run_customer_sync,
 )
@@ -50,6 +56,8 @@ def order(
     postal="11152",
     city="Stockholm",
     email="buyer@example.com",
+    gln="",
+    cid="",
 ):
     return {
         "Reference": reference,
@@ -61,6 +69,8 @@ def order(
         "Postal code": postal,
         "City": city,
         "buyerEmail": email,
+        "Buyer number": gln,
+        "customer_id": cid,
     }
 
 
@@ -74,6 +84,7 @@ def customer(
     postal="11152",
     city="Stockholm",
     sales_person="Sofia",
+    gln="",
 ):
     return {
         "customer": name,
@@ -89,6 +100,7 @@ def customer(
         "address_google": address,
         "address_number_google": number,
         "postal_code_google": postal,
+        GLN_COLUMN: gln,
     }
 
 
@@ -128,7 +140,7 @@ class CustomerMasterPlanningTests(TestCase):
         self.assertEqual(decisions[0].status, "safe_update_case_spacing")
         self.assertTrue(decisions[0].backfills_customer_number)
 
-    def test_gln_is_temporary_identity_and_never_backfills_customer_number(self):
+    def test_gln_is_external_identity_and_never_backfills_customer_number(self):
         gln = "7300120154304"
         decisions = plan_customer_sync(
             [order("NEW", "2026-05-01", "Stora Coop Tumba", gln)],
@@ -140,6 +152,7 @@ class CustomerMasterPlanningTests(TestCase):
         self.assertEqual(decisions[0].customer_number, "")
         self.assertEqual(decisions[0].source_customer_identifier, gln)
         self.assertFalse(decisions[0].backfills_customer_number)
+        self.assertTrue(decisions[0].backfills_gln)
 
     def test_organization_number_never_backfills_customer_number(self):
         organization_number = "559401-8045"
@@ -171,7 +184,7 @@ class CustomerMasterPlanningTests(TestCase):
                 "OLD",
                 "2026-01-01",
                 "ICA Kvantum Sjöbo",
-                "7301004000001",
+                "7301004000007",
                 address="Gamla Torg",
                 number="1",
                 postal="27530",
@@ -324,6 +337,281 @@ class CustomerMasterPlanningTests(TestCase):
         self.assertEqual(decisions[0].status, "ignored_internal")
 
 
+MASTHUGGET_GLN = "7300121361015"
+ANDRA_GLN = "7300121360346"
+MASTHUGGET_ID = "613ecf21-7e50-4c51-86d9-8f2d68aa59fc"
+
+
+def masthugget_order(**changes):
+    row = order("POR26AHGWQP8Q", "2026-10-20", "Coop Masthugget", "",
+                gln=MASTHUGGET_GLN, address="Första Långgatan", number="11C",
+                postal="", city="Göteborg")
+    if "cid" in changes:
+        changes["customer_id"] = changes.pop("cid")
+    row.update(changes)
+    return row
+
+
+def masthugget_customer(**changes):
+    row = customer("Coop Masthugget", address="Första Långgatan", number="11C",
+                   postal="", city="Göteborg")
+    row["customer_id"] = MASTHUGGET_ID
+    row.update(changes)
+    return row
+
+
+class GlnIdentityTests(TestCase):
+    def test_gln_format_checksum_and_external_number_exclusion(self):
+        for value in (MASTHUGGET_GLN, " 7300 1213 6101 5 ", "730012136101-5",
+                      int(MASTHUGGET_GLN), float(MASTHUGGET_GLN)):
+            with self.subTest(value=value):
+                self.assertEqual(normalize_gln(value), MASTHUGGET_GLN)
+        for value in ("7300121361014", "0000000000000", "730012136101", "uuid", True):
+            with self.subTest(value=value):
+                self.assertEqual(normalize_gln(value), "")
+        for row in (masthugget_order(**{"Buyer number": "7300121361014"}),
+                    masthugget_order(**{"Buyer number": "", "Customer number": "730012136101-4"}),
+                    masthugget_order(**{"Customer number": ANDRA_GLN})):
+            self.assertEqual(plan_customer_sync([row], [])[0].status, "needs_review")
+        for column in ("Buyer number", "Customer number"):
+            row = masthugget_order(**{"Buyer number": "", column: float(MASTHUGGET_GLN)})
+            decision = plan_customer_sync([row], [])[0]
+            self.assertEqual(decision.stockfiller_gln, MASTHUGGET_GLN)
+            self.assertEqual(decision.customer_number, "")
+
+    def test_distinct_coop_locations_do_not_block_registration_without_postcode(self):
+        other = customer("Coop Andra Långgatan", gln=ANDRA_GLN,
+                         address="Andra Långgatan", number="20", postal="", city="Göteborg")
+        decision = plan_customer_sync([masthugget_order()], [other])[0]
+        self.assertEqual(decision.status, "new_customer")
+        self.assertEqual(decision.stockfiller_gln, MASTHUGGET_GLN)
+        self.assertEqual(decision.customer_number, "")
+
+    def test_safe_complements_supply_distinct_gln_evidence_in_same_snapshot(self):
+        other = customer("Coop Andra Långgatan", address="Andra Långgatan", number="20",
+                         postal="", city="Göteborg")
+        other_order = masthugget_order(Reference="OTHER", Customer=other["customer"],
+                                      Address="Andra Långgatan", Number="20",
+                                      **{"Buyer number": ANDRA_GLN})
+        for rows in ([masthugget_order(), other_order], [other_order, masthugget_order()]):
+            decisions = plan_customer_sync(rows, [other])
+            self.assertEqual({d.master_customer: d.status for d in decisions},
+                             {"Coop Masthugget": "new_customer", "Coop Andra Långgatan": "exact_match"})
+
+    def test_manual_customer_matches_normalized_street_without_postcode(self):
+        row = masthugget_order(Address=" FÖRSTA   LÅNGGATAN 11 c ", Number="", City="GÖTEBORG")
+        decision = plan_customer_sync([row] * 3, [masthugget_customer()])[0]
+        self.assertEqual(decision.status, "exact_match")
+        self.assertEqual(decision.existing_customer_id, MASTHUGGET_ID)
+        self.assertTrue(decision.backfills_gln)
+        self.assertEqual(decision.order_row_numbers, (2, 3, 4))
+        conflicting = masthugget_order(Number="11-13")
+        self.assertEqual(plan_customer_sync([conflicting], [masthugget_customer()])[0].status, "needs_review")
+
+    def test_known_gln_handles_later_number_and_safe_rename_without_replacing_uuid(self):
+        existing = masthugget_customer(stockfiller_gln=MASTHUGGET_GLN)
+        rows = [masthugget_order(), masthugget_order(Reference="LATER", **{
+            "Order date": "2026-10-22", "Customer number": "1234", "Customer": "Coop Masthugget City"})]
+        decision = plan_customer_sync(rows, [existing])[0]
+        self.assertEqual(decision.matched_by, GLN_COLUMN)
+        self.assertEqual(decision.status, "safe_update_name")
+        self.assertTrue(decision.backfills_customer_number)
+        self.assertEqual(decision.existing_customer_id, MASTHUGGET_ID)
+        self.assertEqual(len(build_order_masters(rows)), 1)
+
+    def test_internal_identity_and_gln_conflicts_require_review(self):
+        first = masthugget_customer(stockfiller_gln=MASTHUGGET_GLN, customer_number="1")
+        second = customer("Other shop", "2", gln=ANDRA_GLN, address="Elsewhere", city="Malmö")
+        cases = [
+            ([masthugget_order(**{"Customer number": "2"})], [first, second]),
+            ([masthugget_order(cid=second["customer_id"])], [first, second]),
+            ([masthugget_order(cid="unknown-uuid")], [first]),
+            ([masthugget_order()], [first, {**second, GLN_COLUMN: MASTHUGGET_GLN}]),
+            ([masthugget_order()], [{**first, GLN_COLUMN: "invalid"}]),
+            ([masthugget_order()], [{**first, "customer_id": ""}]),
+            ([masthugget_order()], [{**first, GLN_COLUMN: ANDRA_GLN}]),
+            ([masthugget_order()], [first, {**second, "customer_id": MASTHUGGET_ID}]),
+        ]
+        for rows, customers in cases:
+            with self.subTest(rows=rows, customers=customers):
+                decisions = plan_customer_sync(rows, customers)
+                self.assertTrue(all(d.status == "needs_review" for d in decisions))
+                self.assertFalse(any(d.backfills_gln for d in decisions))
+
+    def test_shared_gln_or_multiple_glns_per_internal_identity_require_review(self):
+        cases = [
+            [masthugget_order(), masthugget_order(Reference="OTHER", Customer="Different shop",
+                                                 Address="Other street", Number="2")],
+            [masthugget_order(cid=MASTHUGGET_ID),
+             masthugget_order(Reference="OTHER", cid=MASTHUGGET_ID, **{"Buyer number": ANDRA_GLN})],
+            [masthugget_order(), masthugget_order(Customer="Other shop")],
+        ]
+        for rows in cases:
+            with self.subTest(rows=rows):
+                decisions = plan_customer_sync(rows, [masthugget_customer()])
+                self.assertTrue(all(d.status == "needs_review" for d in decisions))
+        reused = masthugget_order(Customer="Different shop", Address="Other street", Number="2")
+        self.assertEqual(plan_customer_sync([reused], [masthugget_customer(stockfiller_gln=MASTHUGGET_GLN)])[0].status,
+                         "needs_review")
+
+    def test_weak_evidence_never_coalesces_same_name_at_different_addresses(self):
+        rows = [masthugget_order(**{"Buyer number": ""}),
+                masthugget_order(Reference="OTHER", Address="Other street", **{"Buyer number": ""})]
+        self.assertEqual(len(build_order_masters(rows)), 2)
+        self.assertTrue(all(d.status == "needs_review" for d in plan_customer_sync(rows, [])))
+        partial = masthugget_order(Address="", Number="")
+        self.assertEqual(plan_customer_sync([partial], [])[0].status, "needs_review")
+
+    def test_strong_name_similarity_still_blocks_append_despite_different_glns(self):
+        other = customer("ICA Kvantum Malmborgs Limhamn", gln=ANDRA_GLN,
+                         address="Erikslustvägen", number="20", city="Malmö", postal="")
+        row = masthugget_order(Customer="Ica Malmborgs Limhamn", Address="Linnégatan", Number="5", City="Malmö")
+        decision = plan_customer_sync([row], [other])[0]
+        self.assertEqual(decision.status, "needs_review")
+        self.assertEqual(decision.matched_by, "possible_duplicate")
+
+    def test_real_solvedborg_stores_remain_separate_without_existing_gln_or_history(self):
+        # CRM_DATABASE regression: ICA has neither GLN nor Stockfiller history.
+        other = customer("ICA Supermarket Sölvesborg", address="Järnvägsgatan", number="1",
+                         city="Sölvesborg", postal="")
+        row = order("COOP-SOLVESBORG", "2026-10-23", "Coop Sölvesborg", "",
+                    gln="7300120952603", address="Järnvägsgatan", number="6", city="Sölvesborg", postal="")
+        decision = plan_customer_sync([row], [other])[0]
+        self.assertEqual(decision.status, "new_customer")
+        self.assertEqual(decision.stockfiller_gln, "7300120952603")
+        self.assertIsNone(decision.matched_row)
+
+    def test_distinct_chain_evidence_still_requires_known_separate_house_numbers(self):
+        row = order("COOP-SOLVESBORG", "2026-10-23", "Coop Sölvesborg", "",
+                    gln="7300120952603", address="Järnvägsgatan", number="6", city="Sölvesborg", postal="")
+        for changes in ({"number": "6"}, {"number": "6A"}, {"number": "1-6"}, {"number": ""},
+                        {"name": "Coop Supermarket Sölvesborg"}, {"name": "Supermarket Sölvesborg"}):
+            with self.subTest(changes=changes):
+                values = dict(name="ICA Supermarket Sölvesborg", address="Järnvägsgatan", number="1",
+                              city="Sölvesborg", postal="")
+                values.update(changes)
+                decision = plan_customer_sync([row], [customer(**values)])[0]
+                self.assertEqual(decision.status, "needs_review")
+
+    def test_name_only_cannot_assign_new_gln_to_incomplete_customer_address(self):
+        for missing in ("address_google", "address_number_google", "city_google"):
+            with self.subTest(missing=missing):
+                existing = masthugget_customer(**{missing: ""})
+                decision = plan_customer_sync([masthugget_order()], [existing])[0]
+                self.assertEqual(decision.status, "needs_review")
+                self.assertFalse(decision.backfills_gln)
+        existing = masthugget_customer(address_google="", address_number_google="", city_google="")
+        row = masthugget_order(**{"Customer number": "new-unmatched-number"})
+        self.assertEqual(plan_customer_sync([row], [existing])[0].status, "needs_review")
+
+    def test_established_masthugget_uuid_allows_gln_complement_with_incomplete_address(self):
+        existing = masthugget_customer(address_google="", address_number_google="", city_google="")
+        rows = [masthugget_order(cid=MASTHUGGET_ID)] * 3
+        decision = plan_customer_sync(rows, [existing])[0]
+        self.assertEqual(decision.status, "exact_match")
+        self.assertEqual(decision.matched_by, "customer_id")
+        self.assertEqual(decision.existing_customer_id, MASTHUGGET_ID)
+        self.assertTrue(decision.backfills_gln)
+        self.assertEqual(decision.order_row_numbers, (2, 3, 4))
+
+    def test_established_internal_number_allows_gln_complement_with_incomplete_address(self):
+        existing = masthugget_customer(customer_number="1234", address_google="", address_number_google="", city_google="")
+        row = masthugget_order(**{"Customer number": "1234"})
+        decision = plan_customer_sync([row], [existing])[0]
+        self.assertEqual(decision.status, "exact_match")
+        self.assertEqual(decision.matched_by, "customer_number")
+        self.assertTrue(decision.backfills_gln)
+
+    def test_apply_gln_append_schema_report_and_review_resolution_are_idempotent(self):
+        headers = CUSTOMER_HEADERS + ["manual_note", "lat", "lng"]
+        existing = masthugget_customer(manual_note="keep", lat="57.7", lng="11.9")
+        sheet = FakeWorksheet("customers_enriched", [headers, _row(headers, existing)])
+        legacy = FakeWorksheet("customers", [["customer"], ["legacy unchanged"]])
+        spreadsheet = FakeSpreadsheet({"customers_enriched": sheet, "customers": legacy,
+                                       REVIEW_SHEET_NAME: FakeWorksheet(REVIEW_SHEET_NAME, [["old"], ["resolved"]])})
+        review = spreadsheet.worksheet(REVIEW_SHEET_NAME)
+        review.col_count = len(REVIEW_COLUMNS) - 2
+        for title in ("sales_activities", "email_messages", "email_recipients"):
+            spreadsheet.sheets[title] = FakeWorksheet(title, [["customer"]])
+        rows = [masthugget_order()] * 3
+        before = deepcopy(sheet.values)
+        report = _result_payload(run_customer_sync(spreadsheet, mode="dry_run", order_rows=rows))
+        self.assertEqual(sheet.values, before)
+        self.assertEqual(report["backfilled_glns"], 1)
+        self.assertEqual(report["proposed_changes"][0]["existing_stockfiller_gln"], "")
+        self.assertEqual(report["proposed_changes"][0][GLN_COLUMN], MASTHUGGET_GLN)
+        first = run_customer_sync(spreadsheet, mode="apply", order_rows=rows)
+        self.assertEqual(first.appended_customers, 0)
+        self.assertEqual(sheet.values[0], headers + [GLN_COLUMN])
+        self.assertEqual(sheet.values[1][:-1], before[1][:headers.index("email_last_order")]
+                         + ["buyer@example.com"] + before[1][headers.index("email_last_order") + 1:])
+        self.assertEqual(sheet.values[1][-1], MASTHUGGET_GLN)
+        self.assertEqual(len(spreadsheet.worksheet(REVIEW_SHEET_NAME).values), 1)
+        self.assertEqual(review.col_count, len(REVIEW_COLUMNS))
+        snapshot = deepcopy(sheet.values)
+        again = run_customer_sync(spreadsheet, mode="apply", order_rows=rows)
+        self.assertEqual(again.backfilled_glns, 0)
+        self.assertEqual(sheet.values, snapshot)
+        self.assertEqual(legacy.values, [["customer"], ["legacy unchanged"]])
+
+    def test_retry_after_append_before_review_write_does_not_append_again(self):
+        sheet = FakeWorksheet("customers_enriched", [CUSTOMER_HEADERS])
+        review = FakeWorksheet(REVIEW_SHEET_NAME, [["status"]])
+        spreadsheet = FakeSpreadsheet({"customers_enriched": sheet, REVIEW_SHEET_NAME: review})
+        for title in ("sales_activities", "email_messages", "email_recipients"):
+            spreadsheet.sheets[title] = FakeWorksheet(title, [["customer"]])
+        with patch.object(review, "clear", side_effect=RuntimeError("review write failed")):
+            with self.assertRaisesRegex(RuntimeError, "review write failed"):
+                run_customer_sync(spreadsheet, mode="apply", order_rows=[masthugget_order()])
+        self.assertEqual(len(sheet.values), 2)
+        before = deepcopy(sheet.values)
+        result = run_customer_sync(spreadsheet, mode="apply", order_rows=[masthugget_order()])
+        self.assertEqual(result.appended_customers, 0)
+        self.assertEqual(sheet.values, before)
+
+    def test_new_gln_customer_has_uuid_raw_address_and_no_invented_enrichment(self):
+        headers = CUSTOMER_HEADERS + ["lat", "lng", "manual_note"]
+        sheet = FakeWorksheet("customers_enriched", [headers])
+        spreadsheet = FakeSpreadsheet({"customers_enriched": sheet})
+        for title in ("sales_activities", "email_messages", "email_recipients"):
+            spreadsheet.sheets[title] = FakeWorksheet(title, [["customer"]])
+        run_customer_sync(spreadsheet, mode="apply", order_rows=[masthugget_order()])
+        row = dict(zip(sheet.values[0], sheet.values[1]))
+        self.assertEqual(UUID(row["customer_id"]).version, 4)
+        self.assertEqual(row[GLN_COLUMN], MASTHUGGET_GLN)
+        self.assertEqual(row["address_google"], "Första Långgatan")
+        self.assertEqual(row["address_number_google"], "11C")
+        for column in ("customer_number", "postal_code_google", "lat", "lng", "sales_person", "manual_note"):
+            self.assertEqual(row[column], "")
+        second = run_customer_sync(spreadsheet, mode="apply", order_rows=[masthugget_order()])
+        self.assertEqual(second.appended_customers, 0)
+        self.assertEqual(len(sheet.values), 2)
+
+    def test_gln_rename_preserves_history_planning_owner_and_comments(self):
+        headers = CUSTOMER_HEADERS + [GLN_COLUMN, "comment"]
+        existing = masthugget_customer(stockfiller_gln=MASTHUGGET_GLN, customer_number="1234", comment="keep")
+        planning_headers = ["activity_id", "customer_id", "customer", "customer_number", "customer_key", "note", "sales_person"]
+        sheets = {
+            "customers_enriched": FakeWorksheet("customers_enriched", [headers, _row(headers, existing)]),
+            "planned_activities": FakeWorksheet("planned_activities", [planning_headers,
+                ["plan-1", MASTHUGGET_ID, existing["customer"], "1234", "1234", "call first", "Sofia"]]),
+        }
+        for title in ("sales_activities", "email_messages", "email_recipients"):
+            sheets[title] = FakeWorksheet(title, [["customer", "customer_id", "note", "sales_person"],
+                                                [existing["customer"], MASTHUGGET_ID, "keep", "Sofia"]])
+        spreadsheet = FakeSpreadsheet(sheets)
+        row = masthugget_order(Customer="Coop Masthugget City")
+        result = run_customer_sync(spreadsheet, mode="apply", order_rows=[row])
+        self.assertEqual(result.updated_names, 1)
+        for title in ("sales_activities", "email_messages", "email_recipients"):
+            self.assertEqual(sheets[title].values[1], ["Coop Masthugget City", MASTHUGGET_ID, "keep", "Sofia"])
+        self.assertEqual(sheets["planned_activities"].values[1],
+                         ["plan-1", MASTHUGGET_ID, "Coop Masthugget City", "1234", "1234", "call first", "Sofia"])
+        actual = dict(zip(headers, sheets["customers_enriched"].values[1]))
+        for key in ("customer_id", "customer_number", "comment", "sales_person"):
+            self.assertEqual(actual[key], existing[key])
+
+
 class CustomerMasterApplyTests(TestCase):
     def setUp(self):
         self.spreadsheet = FakeSpreadsheet(
@@ -352,7 +640,7 @@ class CustomerMasterApplyTests(TestCase):
                                 "ADDED",
                                 "2026-05-02",
                                 "Brand New Store",
-                                "7301004000001",
+                                "7301004000007",
                                 address="Nyvägen",
                                 number="9",
                                 postal="22222",
@@ -511,6 +799,10 @@ class FakeWorksheet:
         self.values = [list(row) for row in values]
         self.hidden = False
         self.fail_batch_once = False
+        self.col_count = max((len(row) for row in values), default=0)
+
+    def add_cols(self, count):
+        self.col_count += count
 
     def get_all_values(self, **kwargs):
         return [list(row) for row in self.values]
