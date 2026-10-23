@@ -49,6 +49,12 @@ to the affected customers. An unknown persisted order `customer_id` cannot be
 rebound by name. Incompatible strong identifiers, ambiguous matches, unclear
 GLN-based name changes and conflicting product-row metadata require review.
 
+An exact name alone cannot complement a blank GLN. Without an established
+matching internal UUID/number, the order and customer must also have the same
+complete street/house/city identity. Missing street, house number or city
+requires review. Already linked order rows can safely complement the GLN by
+their established UUID even when the customer address is incomplete.
+
 Street keys normalize case, extra spaces, Swedish diacritics and house suffixes
 such as `11 C`/`11C`. A house number embedded in the street can match the separate
 number column. Numeric ranges remain distinct (`11-13` is not `1113`). Known
@@ -60,6 +66,15 @@ Långgatan to remain separate. Strong name similarity still requires review,
 even with distinct GLNs and addresses. Safe GLN complements from the same
 snapshot can supply this distinction before any writes; conflicted proposals
 cannot supply it.
+
+When the existing card has no GLN or order history, explicit Coop/ICA chain
+prefixes plus the same street/city and different numeric house numbers can
+also establish separate locations. This covers Coop Sölvesborg (Järnvägsgatan
+6, GLN `7300120952603`) versus ICA Supermarket Sölvesborg (Järnvägsgatan 1, no
+saved GLN), both without postcodes. Unknown/matching chains, missing numbers,
+numeric ranges and suffix-only differences still require the ordinary
+conservative duplicate assessment. This rule only reduces duplicate warnings;
+it never authorizes merging or assigning an existing customer's identity.
 
 A new customer needs a trusted internal number, a full physical address, or a
 validated GLN together with name, street, house number and city. Plausible

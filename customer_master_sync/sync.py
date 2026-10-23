@@ -602,6 +602,14 @@ def _decision(
     )
 
 
+def _retail_chain(normalized_name: str) -> str:
+    # Only explicit, recognized chain prefixes count as negative evidence.
+    if normalized_name.startswith("stora coop "):
+        return "coop"
+    prefix = normalized_name.split(" ", 1)[0]
+    return prefix if prefix in {"coop", "ica"} else ""
+
+
 def _candidate_score(master: OrderMaster, customer: EnrichedCustomer) -> float:
     name_score = ratio(master.master_name_key, customer.name_key)
     if (
@@ -612,6 +620,19 @@ def _candidate_score(master: OrderMaster, customer: EnrichedCustomer) -> float:
         and master.master_name_key != customer.name_key and name_score < 0.78
     ):
         return 0.0  # Different external locations and addresses outweigh a shared chain/city name.
+    if master.stockfiller_gln and not customer.raw_gln and master.street_city and customer.street_city:
+        street, house, city = master.street_city
+        existing_street, existing_house, existing_city = customer.street_city
+        chain, existing_chain = _retail_chain(master.master_name_key), _retail_chain(customer.name_key)
+        # A new Coop location must not inherit an ICA duplicate warning merely
+        # from sharing a street/city. Missing numbers, ranges and suffix-only
+        # differences remain uncertain, as do unknown or matching chains.
+        if (chain and existing_chain and chain != existing_chain
+                and street == existing_street and city == existing_city
+                and re.fullmatch(r"[0-9]+[a-z]?", house)
+                and re.fullmatch(r"[0-9]+[a-z]?", existing_house)
+                and int(re.match(r"[0-9]+", house)[0]) != int(re.match(r"[0-9]+", existing_house)[0])):
+            return 0.0
     best = name_score * 0.55
     # Strong name similarity is sufficient to block an automatic append even
     # when address enrichment is missing or differs. Fuzzy matching remains
@@ -691,6 +712,10 @@ def _safe_match_decision(
         )
 
     if matched_by not in {"customer_id", "customer_number", "stockfiller_gln"}:
+        if (master.stockfiller_gln and not matched.stockfiller_gln
+                and (not master.street_city or master.street_city != matched.street_city)):
+            return _decision("needs_review", master, matched, matched_by=matched_by,
+                             reason="new GLN requires established internal identity or exact street/house/city evidence")
         if (master.street_city and matched.street_city and master.street_city != matched.street_city
                 and master.stockfiller_gln):
             return _decision("needs_review", master, matched, matched_by=matched_by,

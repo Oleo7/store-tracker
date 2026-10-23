@@ -563,7 +563,7 @@ class StockfillerSyncTests(TestCase):
         headers += ["email", "email_last_order", "city_google", "sales_person", "comment"]
         manual = dict.fromkeys(headers, "")
         manual.update(customer="Coop Masthugget", customer_id=cid, address_google="Första Långgatan",
-                      address_number_google="11C", city_google="Göteborg", sales_person="Sofia", comment="keep")
+                      address_number_google="", city_google="Göteborg", sales_person="Sofia", comment="keep")
         persisted = _sheet_row("POR26AHGWQP8Q", customer="Coop Masthugget")[:len(ORDER_COLUMNS)]
         persisted[ORDER_COLUMNS.index("customer_id")] = cid
         spreadsheet = FakeSpreadsheet({
@@ -597,6 +597,34 @@ class StockfillerSyncTests(TestCase):
         self.assertEqual(spreadsheet.worksheet("customers_enriched").values, before)
         _, rows = values_to_dicts(spreadsheet.worksheet("order_rows").values)
         self.assertEqual({r["customer_id"] for r in rows}, {cid})
+        self.assertEqual(len(spreadsheet.worksheet(REVIEW_SHEET_NAME).values), 2)
+
+    def test_name_only_with_partial_address_cannot_assign_gln_or_launder_order_uuid(self):
+        headers = [h for h in CUSTOMER_REQUIRED_COLUMNS if h not in {"email_last_order", "city_google"}]
+        headers += ["email", "email_last_order", "city_google", GLN_COLUMN]
+        existing = dict.fromkeys(headers, "")
+        existing.update(customer="Coop Masthugget", customer_id="existing-uuid",
+                        address_google="Första Långgatan", city_google="Göteborg",
+                        email_last_order="keep@example.com")
+        spreadsheet = FakeSpreadsheet({
+            "order_rows": [ORDER_COLUMNS],
+            "customers_enriched": [headers, [existing[h] for h in headers]],
+            "sales_activities": [["customer"]], "email_messages": [["customer"]], "email_recipients": [["customer"]],
+            STATE_SHEET_NAME: [["key", "value", "updated_at"]],
+        })
+        source = _api_order("UNLINKED")
+        source.update(buyerName=existing["customer"], buyerExternalId="", buyerGln="7300121361015",
+                      deliveryAddress="Första Långgatan 11C", deliveryZipCode="", deliveryCity="Göteborg")
+        before = deepcopy(spreadsheet.worksheet("customers_enriched").values)
+        window = SyncWindow(mode="incremental", params={}, stop_value="2026-10-23T12:00:00Z")
+        with patch("stockfiller_orders.sync.StockfillerClient", return_value=FakeClient([source])):
+            result = sync_orders(_config(), window, spreadsheet=spreadsheet, customer_sync_mode="apply")
+        self.assertEqual(result.customer_sync.needs_review, 1)
+        self.assertEqual(result.customer_sync.backfilled_glns, 0)
+        self.assertEqual(result.customer_sync.appended_customers, 0)
+        self.assertEqual(spreadsheet.worksheet("customers_enriched").values, before)
+        _, rows = values_to_dicts(spreadsheet.worksheet("order_rows").values)
+        self.assertEqual(rows[0]["customer_id"], "")
         self.assertEqual(len(spreadsheet.worksheet(REVIEW_SHEET_NAME).values), 2)
 
     def test_id_mapping_preserves_fallback_gln_when_internal_number_is_projected(self):

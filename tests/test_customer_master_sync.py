@@ -470,11 +470,57 @@ class GlnIdentityTests(TestCase):
         self.assertEqual(decision.status, "needs_review")
         self.assertEqual(decision.matched_by, "possible_duplicate")
 
-    def test_solvedborg_stores_with_distinct_glns_and_addresses_remain_separate(self):
-        other = customer("ICA Supermarket Sölvesborg", gln=ANDRA_GLN,
-                         address="Storgatan", number="10", city="Sölvesborg", postal="")
-        row = masthugget_order(Customer="Coop Sölvesborg", Address="Järnvägsgatan", Number="5", City="Sölvesborg")
-        self.assertEqual(plan_customer_sync([row], [other])[0].status, "new_customer")
+    def test_real_solvedborg_stores_remain_separate_without_existing_gln_or_history(self):
+        # CRM_DATABASE regression: ICA has neither GLN nor Stockfiller history.
+        other = customer("ICA Supermarket Sölvesborg", address="Järnvägsgatan", number="1",
+                         city="Sölvesborg", postal="")
+        row = order("COOP-SOLVESBORG", "2026-10-23", "Coop Sölvesborg", "",
+                    gln="7300120952603", address="Järnvägsgatan", number="6", city="Sölvesborg", postal="")
+        decision = plan_customer_sync([row], [other])[0]
+        self.assertEqual(decision.status, "new_customer")
+        self.assertEqual(decision.stockfiller_gln, "7300120952603")
+        self.assertIsNone(decision.matched_row)
+
+    def test_distinct_chain_evidence_still_requires_known_separate_house_numbers(self):
+        row = order("COOP-SOLVESBORG", "2026-10-23", "Coop Sölvesborg", "",
+                    gln="7300120952603", address="Järnvägsgatan", number="6", city="Sölvesborg", postal="")
+        for changes in ({"number": "6"}, {"number": "6A"}, {"number": "1-6"}, {"number": ""},
+                        {"name": "Coop Supermarket Sölvesborg"}, {"name": "Supermarket Sölvesborg"}):
+            with self.subTest(changes=changes):
+                values = dict(name="ICA Supermarket Sölvesborg", address="Järnvägsgatan", number="1",
+                              city="Sölvesborg", postal="")
+                values.update(changes)
+                decision = plan_customer_sync([row], [customer(**values)])[0]
+                self.assertEqual(decision.status, "needs_review")
+
+    def test_name_only_cannot_assign_new_gln_to_incomplete_customer_address(self):
+        for missing in ("address_google", "address_number_google", "city_google"):
+            with self.subTest(missing=missing):
+                existing = masthugget_customer(**{missing: ""})
+                decision = plan_customer_sync([masthugget_order()], [existing])[0]
+                self.assertEqual(decision.status, "needs_review")
+                self.assertFalse(decision.backfills_gln)
+        existing = masthugget_customer(address_google="", address_number_google="", city_google="")
+        row = masthugget_order(**{"Customer number": "new-unmatched-number"})
+        self.assertEqual(plan_customer_sync([row], [existing])[0].status, "needs_review")
+
+    def test_established_masthugget_uuid_allows_gln_complement_with_incomplete_address(self):
+        existing = masthugget_customer(address_google="", address_number_google="", city_google="")
+        rows = [masthugget_order(cid=MASTHUGGET_ID)] * 3
+        decision = plan_customer_sync(rows, [existing])[0]
+        self.assertEqual(decision.status, "exact_match")
+        self.assertEqual(decision.matched_by, "customer_id")
+        self.assertEqual(decision.existing_customer_id, MASTHUGGET_ID)
+        self.assertTrue(decision.backfills_gln)
+        self.assertEqual(decision.order_row_numbers, (2, 3, 4))
+
+    def test_established_internal_number_allows_gln_complement_with_incomplete_address(self):
+        existing = masthugget_customer(customer_number="1234", address_google="", address_number_google="", city_google="")
+        row = masthugget_order(**{"Customer number": "1234"})
+        decision = plan_customer_sync([row], [existing])[0]
+        self.assertEqual(decision.status, "exact_match")
+        self.assertEqual(decision.matched_by, "customer_number")
+        self.assertTrue(decision.backfills_gln)
 
     def test_apply_gln_append_schema_report_and_review_resolution_are_idempotent(self):
         headers = CUSTOMER_HEADERS + ["manual_note", "lat", "lng"]
