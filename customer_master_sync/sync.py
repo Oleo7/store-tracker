@@ -49,6 +49,7 @@ REVIEW_SHEET_NAME = "_customer_sync_review"
 STATE_SHEET_NAME = "_stockfiller_sync_state"
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 VALID_MODES = {"off", "dry_run", "apply"}
+GLN_COLUMN = "stockfiller_gln"
 
 REVIEW_COLUMNS = [
     "status",
@@ -62,6 +63,8 @@ REVIEW_COLUMNS = [
     "reason",
     "confidence",
     "last_seen_at",
+    GLN_COLUMN,
+    "existing_stockfiller_gln",
 ]
 
 
@@ -88,9 +91,37 @@ def number_key(value: object) -> str:
 
 
 def is_gln_like(value: object) -> bool:
-    """Return true for the 13-digit identifiers Stockfiller uses as GLNs."""
-    compact = re.sub(r"\s+", "", clean(value))
-    return bool(re.fullmatch(r"\d{13}", compact))
+    """Shape check only: even an invalid GLN must not become an internal number."""
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
+    compact = re.sub(r"[\s-]", "", clean(value))
+    return bool(re.fullmatch(r"[0-9]{13}", compact))
+
+
+def normalize_gln(value: object) -> str:
+    if isinstance(value, bool):
+        return ""
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
+    compact = re.sub(r"[\s-]", "", clean(value))
+    if not re.fullmatch(r"[0-9]{13}", compact) or not compact.strip("0"):
+        return ""
+    checksum = sum(int(digit) * (1 if index % 2 == 0 else 3) for index, digit in enumerate(compact[:12]))
+    return compact if (checksum + int(compact[-1])) % 10 == 0 else ""
+
+
+def order_gln(row: dict[str, Any]) -> tuple[str, str]:
+    buyer = clean(row.get("Buyer number"))
+    fallback = clean(row.get("Customer number"))
+    primary = normalize_gln(row.get("Buyer number"))
+    secondary = normalize_gln(row.get("Customer number"))
+    if primary and secondary and primary != secondary:
+        return primary, "Buyer number and Customer number contain conflicting GLNs"
+    if buyer and not primary:
+        return secondary, "invalid Buyer number GLN"
+    if is_gln_like(row.get("Customer number")) and not secondary:
+        return primary, "invalid Customer number GLN"
+    return primary or secondary, ""
 
 
 def is_organization_number_like(value: object) -> bool:
@@ -102,7 +133,7 @@ def is_organization_number_like(value: object) -> bool:
 def trusted_customer_number(value: object) -> str:
     """Return a CRM-safe number, excluding temporary external identities."""
     candidate = clean(value)
-    if is_gln_like(candidate) or is_organization_number_like(candidate):
+    if is_gln_like(value) or is_organization_number_like(candidate):
         return ""
     return candidate
 
@@ -112,7 +143,29 @@ def postal_key(value: object) -> str:
 
 
 def address_key(address: object, number: object) -> str:
-    return folded(" ".join(part for part in (clean(address), clean(number)) if part))
+    street, house = street_parts(address, number)
+    return " ".join(part for part in (street, house) if part)
+
+
+def house_key(value: object) -> str:
+    value = re.sub(r"\s+", "", clean(value).casefold()).replace("–", "-")
+    return re.sub(r"(?<=\d)-(?=[a-z])", "", value)
+
+
+def street_parts(address: object, number: object) -> tuple[str, str]:
+    street, house = clean(address), clean(number)
+    embedded = re.fullmatch(r"(.+?)[ ,]+(\d+\s*[a-zA-Z]?(?:\s*[-/]\s*\d+\s*[a-zA-Z]?)?)", street)
+    if embedded:
+        embedded_house = house_key(embedded[2])
+        if not house or house_key(house) == embedded_house:
+            street, house = embedded[1], embedded[2]
+    return folded(street), house_key(house)
+
+
+def street_city_key(address: object, number: object, city: object) -> tuple[str, str, str] | None:
+    street, house = street_parts(address, number)
+    normalized_city = city_key(city)
+    return (street, house, normalized_city) if street and house and normalized_city else None
 
 
 def city_key(value: object) -> str:
@@ -177,7 +230,7 @@ def _full_address_key(
     combined_address = address_key(address, number)
     normalized_postal = postal_key(postal)
     normalized_city = city_key(city)
-    if not combined_address or not normalized_postal or not normalized_city:
+    if not street_city_key(address, number, city) or not normalized_postal:
         return None
     return combined_address, normalized_postal, normalized_city
 
@@ -226,6 +279,11 @@ class OrderMaster:
     normalized_postal: str
     normalized_city: str
     full_address: tuple[str, str, str] | None
+    customer_id: str = ""
+    stockfiller_gln: str = ""
+    street_city: tuple[str, str, str] | None = None
+    identity_error: str = ""
+    order_row_numbers: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -242,6 +300,9 @@ class EnrichedCustomer:
     normalized_postal: str
     normalized_city: str
     full_address: tuple[str, str, str] | None
+    stockfiller_gln: str = ""
+    raw_gln: str = ""
+    street_city: tuple[str, str, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -263,6 +324,18 @@ class CustomerDecision:
     matched_by: str = ""
     reason: str = ""
     confidence: float = 1.0
+    stockfiller_gln: str = ""
+    existing_stockfiller_gln: str = ""
+    order_row_numbers: tuple[int, ...] = ()
+    source_address: str = ""
+    source_address_number: str = ""
+    source_postal: str = ""
+    source_city: str = ""
+
+    @property
+    def backfills_gln(self) -> bool:
+        return bool(self.matched_row and self.stockfiller_gln and not self.existing_stockfiller_gln
+                    and self.status not in {"needs_review", "ignored_internal"})
 
     @property
     def changes_name(self) -> bool:
@@ -305,6 +378,10 @@ class CustomerSyncResult:
     decisions: tuple[CustomerDecision, ...] = field(default_factory=tuple, repr=False)
 
     @property
+    def backfilled_glns(self) -> int:
+        return sum(decision.backfills_gln for decision in self.decisions)
+
+    @property
     def applied(self) -> bool:
         return self.mode == "apply"
 
@@ -318,6 +395,7 @@ class CustomerSyncResult:
             "customer_sync_backfilled_customer_numbers": str(self.backfilled_customer_numbers),
             "customer_sync_appended_customers": str(self.appended_customers),
             "customer_sync_updated_emails": str(self.updated_emails),
+            "customer_sync_backfilled_glns": str(self.backfilled_glns),
             "customer_sync_needs_review": str(self.needs_review),
             "customer_sync_ignored_internal": str(self.ignored_internal),
             "customer_sync_ignored_gln_identifiers": str(
@@ -333,197 +411,120 @@ class CustomerSyncResult:
 
 
 def build_order_masters(order_rows: list[dict[str, Any]]) -> list[OrderMaster]:
-    require_columns(order_rows[0].keys() if order_rows else [], ORDER_REQUIRED_COLUMNS, "order_rows")
+    """Join order identities without dropping conflicting product-row evidence.
 
-    logical_orders: dict[str, tuple[int, dict[str, Any]]] = {}
-    for row_number, row in enumerate(order_rows, start=2):
-        customer = clean(row.get("Customer"))
-        if not customer:
-            continue
-        reference = clean(row.get("Reference"))
-        logical_key = f"reference:{reference}" if reference else f"row:{row_number}"
-        # Product rows share the same order metadata. Keeping the final physical
-        # row gives deterministic tie-breaking for updated orders.
-        logical_orders[logical_key] = (row_number, row)
+    Strong identifiers connect history first; weaker name/address bridges need
+    consistent evidence. The complete resulting group is checked for conflicts
+    before it can authorize any write.
+    """
+    if not order_rows:
+        return []
+    require_columns(order_rows[0].keys(), ORDER_REQUIRED_COLUMNS, "order_rows")
+    logical = defaultdict(list)
+    for row_number, row in enumerate(order_rows, 2):
+        if clean(row.get("Customer")):
+            logical[clean(row.get("Reference")) or f"row:{row_number}"].append((row_number, row))
+    records = list(logical.values())
+    parents = list(range(len(records)))
 
-    order_records: list[
-        tuple[
-            int,
-            dict[str, Any],
-            str,
-            str,
-            str,
-            tuple[str, str, str] | None,
+    def root(index: int) -> int:
+        while parents[index] != index:
+            parents[index] = parents[parents[index]]
+            index = parents[index]
+        return index
+
+    def join(left: int, right: int) -> None:
+        parents[root(right)] = root(left)
+
+    strong = {}
+    weak = defaultdict(list)
+    for index, rows in enumerate(records):
+        for _position, row in rows:
+            if name_key(row.get("Customer")) in INTERNAL_CUSTOMER_KEYS:
+                continue
+            gln, _error = order_gln(row)
+            for kind, value in (("id", clean(row.get("customer_id"))),
+                                ("number", number_key(trusted_customer_number(row.get("Customer number")))),
+                                ("gln", gln)):
+                if value:
+                    identity = (kind, value)
+                    if identity in strong:
+                        join(index, strong[identity])
+                    strong[identity] = index
+        # A weak bridge needs BOTH the exact name and a complete physical
+        # street/house/city identity. Never bridge by name or city alone.
+        row = rows[-1][1]
+        address = street_city_key(row.get("Address"), row.get("Number"), row.get("City"))
+        if address:
+            weak[(name_key(row.get("Customer")), address)].append(index)
+
+    for indexes in weak.values():
+        rows = [row for index in indexes for _position, row in records[index]]
+        evidence = [
+            {clean(row.get("customer_id")) for row in rows} - {""},
+            {number_key(trusted_customer_number(row.get("Customer number"))) for row in rows} - {""},
+            {order_gln(row)[0] for row in rows} - {""},
+            {postal_key(row.get("Postal code")) for row in rows} - {""},
         ]
-    ] = []
-    ignored: dict[str, list[tuple[int, dict[str, Any]]]] = defaultdict(list)
-    trusted_by_name: dict[str, set[str]] = defaultdict(set)
-    trusted_by_name_address: dict[
-        tuple[str, tuple[str, str, str]],
-        set[str],
-    ] = defaultdict(set)
-    trusted_by_address: dict[tuple[str, str, str], set[str]] = defaultdict(set)
-    trusted_number_values: dict[str, str] = {}
+        if all(len(values) <= 1 for values in evidence):
+            for index in indexes[1:]:
+                join(indexes[0], index)
 
-    for row_number, row in logical_orders.values():
-        customer = clean(row.get("Customer"))
-        normalized_name = name_key(customer)
-        if normalized_name in INTERNAL_CUSTOMER_KEYS:
-            ignored[normalized_name].append((row_number, row))
-            continue
-        source_identifier = clean(row.get("Customer number"))
-        customer_number = trusted_customer_number(source_identifier)
-        full_address = _full_address_key(
-            row.get("Address"),
-            row.get("Number"),
-            row.get("Postal code"),
-            row.get("City"),
-        )
-        order_records.append(
-            (
-                row_number,
-                row,
-                source_identifier,
-                customer_number,
-                normalized_name,
-                full_address,
-            )
-        )
-        if customer_number:
-            trusted_key = number_key(customer_number)
-            trusted_number_values.setdefault(trusted_key, customer_number)
-            trusted_by_name[normalized_name].add(trusted_key)
-            if full_address:
-                trusted_by_name_address[
-                    (normalized_name, full_address)
-                ].add(trusted_key)
-                trusted_by_address[full_address].add(trusted_key)
-
-    grouped: dict[
-        str,
-        list[tuple[int, dict[str, Any], str]],
-    ] = defaultdict(list)
-    for (
-        row_number,
-        row,
-        source_identifier,
-        customer_number,
-        normalized_name,
-        full_address,
-    ) in order_records:
-        trusted_key = number_key(customer_number)
-        if not trusted_key:
-            candidate_sets = []
-            if full_address:
-                candidate_sets.append(
-                    trusted_by_name_address.get(
-                        (normalized_name, full_address),
-                        set(),
-                    )
-                )
-            candidate_sets.append(trusted_by_name.get(normalized_name, set()))
-            if full_address:
-                candidate_sets.append(
-                    trusted_by_address.get(full_address, set())
-                )
-            for candidates in candidate_sets:
-                if len(candidates) == 1:
-                    trusted_key = next(iter(candidates))
-                    break
-                if len(candidates) > 1:
-                    break
-
-        if trusted_key:
-            identity = f"number:{trusted_key}"
-        else:
-            address_identity = "|".join(full_address or ("", "", ""))
-            identity = f"fallback:{normalized_name}|{address_identity}"
-        grouped[identity].append((row_number, row, source_identifier))
-
+    grouped = defaultdict(list)
+    for index, rows in enumerate(records):
+        grouped[root(index)].extend(rows)
     masters = []
-    for identity, rows in grouped.items():
-        latest_row_number, latest, latest_source_identifier = max(
-            rows,
-            key=lambda item: (_order_date(item[1].get("Order date")), item[0]),
-        )
-        customer = clean(latest.get("Customer"))
-        trusted_key = (
-            identity.removeprefix("number:")
-            if identity.startswith("number:")
-            else ""
-        )
-        customer_number = trusted_number_values.get(trusted_key, "")
-        full_address = _full_address_key(
-            latest.get("Address"),
-            latest.get("Number"),
-            latest.get("Postal code"),
-            latest.get("City"),
-        )
-        masters.append(
-            OrderMaster(
-                identity_key=identity,
-                customer_number=customer_number,
-                source_customer_identifier=latest_source_identifier,
-                master_name=customer,
-                master_name_key=name_key(customer),
-                order_date=clean(latest.get("Order date")),
-                reference=clean(latest.get("Reference")),
-                row_number=latest_row_number,
-                order_count=len(rows),
-                address=clean(latest.get("Address")),
-                address_number=clean(latest.get("Number")),
-                postal=clean(latest.get("Postal code")),
-                city=clean(latest.get("City")),
-                email=clean(latest.get("buyerEmail")),
-                normalized_address=address_key(latest.get("Address"), latest.get("Number")),
-                normalized_postal=postal_key(latest.get("Postal code")),
-                normalized_city=city_key(latest.get("City")),
-                full_address=full_address,
-            )
-        )
-
-    for ignored_rows in ignored.values():
-        row_number, row = max(
-            ignored_rows,
-            key=lambda item: (_order_date(item[1].get("Order date")), item[0]),
-        )
+    for rows in grouped.values():
+        row_number, row = max(rows, key=lambda item: (_order_date(item[1].get("Order date")), item[0]))
+        glns = {order_gln(source)[0] for _position, source in rows} - {""}
+        ids = {clean(source.get("customer_id")) for _position, source in rows} - {""}
+        numbers = {number_key(trusted_customer_number(source.get("Customer number"))) for _position, source in rows} - {""}
+        errors = {order_gln(source)[1] for _position, source in rows} - {""}
+        for label, values in (("customer_id", ids), ("customer_number", numbers), ("GLN", glns)):
+            if len(values) > 1:
+                errors.add(f"conflicting {label} values in order history; manual identity mapping required")
+        # A shared GLN with different names AND physical stores is not a rename.
+        names = {name_key(source.get("Customer")) for _position, source in rows}
+        addresses = {street_city_key(source.get("Address"), source.get("Number"), source.get("City"))
+                     for _position, source in rows} - {None}
+        if glns and len(names) > 1 and len(addresses) > 1:
+            errors.add("GLN is shared by conflicting store names and addresses")
+        references = defaultdict(list)
+        for position, source in rows:
+            references[clean(source.get("Reference")) or f"row:{position}"].append(source)
+        for sources in references.values():
+            for field, normalize in (("Customer", name_key), ("Postal code", postal_key)):
+                if len({normalize(source.get(field)) for source in sources} - {""}) > 1:
+                    errors.add("order reference has conflicting customer metadata")
+            if len({street_city_key(source.get("Address"), source.get("Number"), source.get("City")) for source in sources} - {None}) > 1:
+                errors.add("order reference has conflicting address metadata")
+        gln = next(iter(glns)) if len(glns) == 1 else ""
+        cid = next(iter(ids)) if len(ids) == 1 else ""
+        number = next((trusted_customer_number(source.get("Customer number")) for _position, source in reversed(rows)
+                       if trusted_customer_number(source.get("Customer number"))), "")
         customer = clean(row.get("Customer"))
-        masters.append(
-            OrderMaster(
-                identity_key=f"internal:{name_key(customer)}",
-                customer_number=trusted_customer_number(
-                    row.get("Customer number")
-                ),
-                source_customer_identifier=clean(
-                    row.get("Customer number")
-                ),
-                master_name=customer,
-                master_name_key=name_key(customer),
-                order_date=clean(row.get("Order date")),
-                reference=clean(row.get("Reference")),
-                row_number=row_number,
-                order_count=len(ignored_rows),
-                address=clean(row.get("Address")),
-                address_number=clean(row.get("Number")),
-                postal=clean(row.get("Postal code")),
-                city=clean(row.get("City")),
-                email=clean(row.get("buyerEmail")),
-                normalized_address=address_key(row.get("Address"), row.get("Number")),
-                normalized_postal=postal_key(row.get("Postal code")),
-                normalized_city=city_key(row.get("City")),
-                full_address=_full_address_key(
-                    row.get("Address"),
-                    row.get("Number"),
-                    row.get("Postal code"),
-                    row.get("City"),
-                ),
-            )
-        )
-
+        address = street_city_key(row.get("Address"), row.get("Number"), row.get("City"))
+        identity = (f"id:{cid}" if cid else f"number:{number_key(number)}" if number else f"gln:{gln}" if gln
+                    else f"fallback:{name_key(customer)}|{'|'.join(address or ('', '', ''))}")
+        masters.append(OrderMaster(
+            identity_key=identity, customer_number=number,
+            source_customer_identifier=clean(row.get("Customer number")), master_name=customer,
+            master_name_key=name_key(customer), order_date=clean(row.get("Order date")),
+            reference=clean(row.get("Reference")), row_number=row_number, order_count=len(references),
+            address=clean(row.get("Address")), address_number=clean(row.get("Number")),
+            postal=clean(row.get("Postal code")), city=clean(row.get("City")), email=clean(row.get("buyerEmail")),
+            normalized_address=address_key(row.get("Address"), row.get("Number")),
+            normalized_postal=postal_key(row.get("Postal code")), normalized_city=city_key(row.get("City")),
+            full_address=_full_address_key(row.get("Address"), row.get("Number"), row.get("Postal code"), row.get("City")),
+            customer_id=cid, stockfiller_gln=gln, street_city=address,
+            identity_error="; ".join(sorted(errors)), order_row_numbers=tuple(sorted(position for position, _source in rows)),
+        ))
     return sorted(masters, key=lambda master: (master.master_name.casefold(), master.identity_key))
 
 
 def build_enriched_customers(customer_rows: list[dict[str, Any]]) -> list[EnrichedCustomer]:
+    if not customer_rows:
+        return []
     require_columns(
         customer_rows[0].keys() if customer_rows else [],
         CUSTOMER_REQUIRED_COLUMNS,
@@ -558,6 +559,9 @@ def build_enriched_customers(customer_rows: list[dict[str, Any]]) -> list[Enrich
                     row.get("postal_code_google"),
                     row.get("city_google"),
                 ),
+                stockfiller_gln=normalize_gln(row.get(GLN_COLUMN)),
+                raw_gln=clean(row.get(GLN_COLUMN)),
+                street_city=street_city_key(row.get("address_google"), row.get("address_number_google"), row.get("city_google")),
             )
         )
     return customers
@@ -590,11 +594,24 @@ def _decision(
         matched_by=matched_by,
         reason=reason,
         confidence=round(confidence, 4),
+        stockfiller_gln=master.stockfiller_gln,
+        existing_stockfiller_gln=matched.raw_gln if matched else "",
+        order_row_numbers=master.order_row_numbers,
+        source_address=master.address, source_address_number=master.address_number,
+        source_postal=master.postal, source_city=master.city,
     )
 
 
 def _candidate_score(master: OrderMaster, customer: EnrichedCustomer) -> float:
     name_score = ratio(master.master_name_key, customer.name_key)
+    if (
+        master.stockfiller_gln and customer.stockfiller_gln
+        and master.stockfiller_gln != customer.stockfiller_gln
+        and master.street_city and customer.street_city
+        and master.street_city != customer.street_city
+        and master.master_name_key != customer.name_key and name_score < 0.78
+    ):
+        return 0.0  # Different external locations and addresses outweigh a shared chain/city name.
     best = name_score * 0.55
     # Strong name similarity is sufficient to block an automatic append even
     # when address enrichment is missing or differs. Fuzzy matching remains
@@ -603,6 +620,8 @@ def _candidate_score(master: OrderMaster, customer: EnrichedCustomer) -> float:
         best = max(best, name_score)
     if master.full_address and master.full_address == customer.full_address:
         return 1.0
+    if master.street_city and master.street_city == customer.street_city:
+        return 1.0  # Without postcode this is review-only unless the name also agrees.
     if (
         master.normalized_address
         and master.normalized_postal
@@ -646,6 +665,18 @@ def _safe_match_decision(
     matched_by: str,
     names: dict[str, list[EnrichedCustomer]],
 ) -> CustomerDecision:
+    if not matched.customer_id:
+        return _decision("needs_review", master, matched, matched_by=matched_by,
+                         reason="matched customer is missing customer_id")
+    if matched.raw_gln and not matched.stockfiller_gln:
+        return _decision("needs_review", master, matched, matched_by=matched_by,
+                         reason="matched customer has invalid stockfiller_gln")
+    if master.stockfiller_gln and matched.stockfiller_gln and master.stockfiller_gln != matched.stockfiller_gln:
+        return _decision("needs_review", master, matched, matched_by=matched_by,
+                         reason="matched customer has a conflicting GLN; external mapping must be reviewed")
+    if matched_by == "stockfiller_gln" and ratio(master.master_name_key, matched.name_key) < 0.78:
+        return _decision("needs_review", master, matched, matched_by=matched_by,
+                         reason="GLN may be shared or the name change is unclear; manual review required")
     if (
         master.customer_number
         and matched.customer_number
@@ -659,6 +690,17 @@ def _safe_match_decision(
             reason="matched customer has a conflicting customer_number",
         )
 
+    if matched_by not in {"customer_id", "customer_number", "stockfiller_gln"}:
+        if (master.street_city and matched.street_city and master.street_city != matched.street_city
+                and master.stockfiller_gln):
+            return _decision("needs_review", master, matched, matched_by=matched_by,
+                             reason="name/address evidence conflicts with the proposed GLN assignment")
+        if master.normalized_postal and matched.normalized_postal and master.normalized_postal != matched.normalized_postal:
+            return _decision("needs_review", master, matched, matched_by=matched_by,
+                             reason="conflicting postcodes on a weak identity match")
+        if master.master_name_key != matched.name_key and ratio(master.master_name_key, matched.name_key) < 0.78:
+            return _decision("needs_review", master, matched, matched_by=matched_by,
+                             reason="address alone cannot authorize an unclear name change")
     changes_name = clean(matched.customer) != clean(master.master_name)
     if changes_name and len(names.get(matched.name_key, [])) != 1:
         return _decision(
@@ -707,6 +749,8 @@ def _classify(
     numbers: dict[str, list[EnrichedCustomer]],
     names: dict[str, list[EnrichedCustomer]],
     addresses: dict[tuple[str, str, str], list[EnrichedCustomer]],
+    ids: dict[str, list[EnrichedCustomer]],
+    glns: dict[str, list[EnrichedCustomer]],
 ) -> CustomerDecision:
     if master.master_name_key in INTERNAL_CUSTOMER_KEYS:
         return _decision(
@@ -715,23 +759,25 @@ def _classify(
             reason="internal customer ignored by rule",
         )
 
-    if master.customer_number:
-        number_matches = numbers.get(number_key(master.customer_number), [])
-        if len(number_matches) > 1:
-            return _decision(
-                "needs_review",
-                master,
-                number_matches[0],
-                matched_by="customer_number",
-                reason="customer_number exists on multiple customer rows",
-            )
-        if len(number_matches) == 1:
-            return _safe_match_decision(
-                master,
-                number_matches[0],
-                matched_by="customer_number",
-                names=names,
-            )
+    if master.identity_error:
+        return _decision("needs_review", master, reason=master.identity_error)
+    strong_matches = []
+    for label, value, index in (("customer_id", master.customer_id, ids),
+                                ("customer_number", number_key(master.customer_number), numbers),
+                                ("stockfiller_gln", master.stockfiller_gln, glns)):
+        matches = index.get(value, []) if value else []
+        if len(matches) > 1:
+            return _decision("needs_review", master, matches[0], matched_by=label,
+                             reason=f"{label} exists on multiple customer rows")
+        if matches:
+            strong_matches.append((label, matches[0]))
+        elif label == "customer_id" and value:
+            return _decision("needs_review", master, reason="order has an unknown customer_id; never rebind by name")
+    if len({customer.row_number for _label, customer in strong_matches}) > 1:
+        return _decision("needs_review", master, reason="internal identifiers and GLN resolve to conflicting customers")
+    if strong_matches:
+        label, matched = strong_matches[0]
+        return _safe_match_decision(master, matched, matched_by=label, names=names)
 
     name_matches = names.get(master.master_name_key, [])
     if len(name_matches) > 1:
@@ -788,11 +834,11 @@ def _classify(
             confidence=score,
         )
 
-    if not master.customer_number and not master.full_address:
+    if not master.customer_number and not master.full_address and not (master.stockfiller_gln and master.street_city):
         return _decision(
             "needs_review",
             master,
-            reason="missing customer_number and complete address; cannot safely append",
+            reason="missing trusted number or GLN with street/house/city, and no complete address; cannot safely append",
             confidence=0.0,
         )
 
@@ -842,30 +888,63 @@ def plan_customer_sync(
     numbers: dict[str, list[EnrichedCustomer]] = defaultdict(list)
     names: dict[str, list[EnrichedCustomer]] = defaultdict(list)
     addresses: dict[tuple[str, str, str], list[EnrichedCustomer]] = defaultdict(list)
+    glns: dict[str, list[EnrichedCustomer]] = defaultdict(list)
     for customer in customers:
         if customer.customer_id:
             customer_ids[customer.customer_id].append(customer)
         if customer.number_key:
             numbers[customer.number_key].append(customer)
+        if customer.stockfiller_gln:
+            glns[customer.stockfiller_gln].append(customer)
         names[customer.name_key].append(customer)
         if customer.full_address:
             addresses[customer.full_address].append(customer)
 
-    decisions = [
-        _classify(master, customers, numbers, names, addresses)
-        for master in masters
-    ]
     conflicted_rows = {
         customer.row_number
-        for matches in customer_ids.values()
+        for index in (customer_ids, numbers, glns) for matches in index.values()
         if len(matches) > 1
         for customer in matches
     }
+
+    decisions = [
+        _classify(master, customers, numbers, names, addresses, customer_ids, glns)
+        for master in masters
+    ]
+    # Safe GLN complements also supply negative evidence for other stores in
+    # this snapshot. Do not make the outcome depend on customer/order sorting.
+    proposals = defaultdict(set)
+    gln_targets = defaultdict(set)
+    for decision in _block_collisions(decisions):
+        if decision.backfills_gln and decision.matched_row not in conflicted_rows:
+            proposals[decision.matched_row].add(decision.stockfiller_gln)
+            gln_targets[decision.stockfiller_gln].add(decision.matched_row)
+    inferred = {row: next(iter(values)) for row, values in proposals.items()
+                if len(values) == 1 and len(gln_targets[next(iter(values))]) == 1}
+    if inferred:
+        customers = [replace(customer, stockfiller_gln=inferred.get(customer.row_number, customer.stockfiller_gln))
+                     for customer in customers]
+        by_row = {customer.row_number: customer for customer in customers}
+        names = {key: [by_row[c.row_number] for c in values] for key, values in names.items()}
+        numbers = {key: [by_row[c.row_number] for c in values] for key, values in numbers.items()}
+        customer_ids = {key: [by_row[c.row_number] for c in values] for key, values in customer_ids.items()}
+        addresses = {key: [by_row[c.row_number] for c in values] for key, values in addresses.items()}
+        glns = defaultdict(list)
+        for customer in customers:
+            if customer.stockfiller_gln:
+                glns[customer.stockfiller_gln].append(customer)
+        decisions = [_classify(master, customers, numbers, names, addresses, customer_ids, glns) for master in masters]
+    conflicted_rows.update({
+        customer.row_number
+        for index in (customer_ids, numbers, glns) for matches in index.values()
+        if len(matches) > 1
+        for customer in matches
+    })
     decisions = [
         replace(
             decision,
             status="needs_review",
-            reason="customer_id exists on multiple customer rows",
+            reason="customer_id, customer_number or GLN exists on multiple customer rows",
         )
         if decision.matched_row in conflicted_rows
         else decision
@@ -1019,11 +1098,12 @@ def _apply_planning_snapshots(
         decision = by_customer_id.get(customer_id)
         if not decision:
             continue
+        customer_number = decision.customer_number or decision.existing_customer_number
         snapshot = {
             "customer": decision.master_customer,
-            "customer_number": decision.customer_number,
+            "customer_number": customer_number,
             "customer_key": (
-                number_key(decision.customer_number)
+                number_key(customer_number)
                 or name_key(decision.master_customer)
             ),
         }
@@ -1078,6 +1158,8 @@ def _apply_customer_changes(
             )
         if decision.changes_email:
             updates.append((decision.matched_row, email_index, decision.latest_email))
+        if decision.backfills_gln:
+            updates.append((decision.matched_row, headers.index(GLN_COLUMN), decision.stockfiller_gln))
     _batch_cell_updates(worksheet, updates)
 
     append_values = []
@@ -1089,6 +1171,11 @@ def _apply_customer_changes(
         row[customer_id_index] = str(uuid.uuid4())
         row[number_index] = decision.customer_number
         row[email_index] = decision.latest_email
+        if decision.stockfiller_gln:
+            row[headers.index(GLN_COLUMN)] = decision.stockfiller_gln
+        for key, value in (("address_google", decision.source_address), ("address_number_google", decision.source_address_number),
+                           ("postal_code_google", decision.source_postal), ("city_google", decision.source_city)):
+            row[headers.index(key)] = value
         append_values.append(row)
     if append_values:
         worksheet.append_rows(append_values, value_input_option="RAW")
@@ -1116,7 +1203,9 @@ def _verify_customer_changes(
             for row in values[1:]:
                 customer = row[customer_index] if customer_index < len(row) else ""
                 number = row[number_index] if number_index < len(row) else ""
-                if decision.customer_number:
+                if decision.stockfiller_gln:
+                    matched = normalize_gln(row[headers.index(GLN_COLUMN)] if headers.index(GLN_COLUMN) < len(row) else "") == decision.stockfiller_gln
+                elif decision.customer_number:
                     matched = number_key(number) == number_key(decision.customer_number)
                 else:
                     matched = name_key(customer) == name_key(decision.master_customer)
@@ -1149,6 +1238,12 @@ def _verify_customer_changes(
             raise RuntimeError(
                 f"customer_id verification failed for {decision.master_customer!r}"
             )
+        if decision.existing_customer_id and clean(actual_customer_id) != decision.existing_customer_id:
+            raise RuntimeError(f"existing customer_id changed for {decision.master_customer!r}")
+        if decision.stockfiller_gln:
+            actual_gln = actual_row[headers.index(GLN_COLUMN)] if headers.index(GLN_COLUMN) < len(actual_row) else ""
+            if normalize_gln(actual_gln) != decision.stockfiller_gln:
+                raise RuntimeError(f"GLN verification failed for {decision.master_customer!r}")
         actual_email = (
             actual_row[email_index] if email_index < len(actual_row) else ""
         )
@@ -1177,6 +1272,9 @@ def _get_or_create_review_sheet(spreadsheet, rows: int):
             rows=max(rows, 100),
             cols=len(REVIEW_COLUMNS),
         )
+    column_count = getattr(worksheet, "col_count", len(REVIEW_COLUMNS))
+    if column_count < len(REVIEW_COLUMNS):
+        worksheet.add_cols(len(REVIEW_COLUMNS) - column_count)
     hide = getattr(worksheet, "hide", None)
     if callable(hide):
         hide()
@@ -1222,6 +1320,8 @@ def run_customer_sync(
     customer_values = customer_sheet.get_all_values()
     customer_headers, customer_rows = values_to_dicts(customer_values)
     require_columns(customer_headers, CUSTOMER_REQUIRED_COLUMNS, "customers_enriched")
+    if len(customer_headers) != len(set(customer_headers)):
+        raise ValueError("customers_enriched has duplicate column headers")
 
     decisions = plan_customer_sync(order_rows, customer_rows)
     result = build_result(mode, decisions)
@@ -1233,6 +1333,15 @@ def run_customer_sync(
     history_verification.extend(
         _apply_planning_snapshots(spreadsheet, decisions)
     )
+    if GLN_COLUMN not in customer_headers and any(
+        decision.backfills_gln
+        or (decision.status == "new_customer" and decision.stockfiller_gln)
+        for decision in decisions
+    ):
+        if getattr(customer_sheet, "col_count", len(customer_headers) + 1) < len(customer_headers) + 1:
+            customer_sheet.add_cols(1)
+        _batch_cell_updates(customer_sheet, [(1, len(customer_headers), GLN_COLUMN)])
+        customer_headers.append(GLN_COLUMN)
     _apply_customer_changes(
         customer_sheet,
         customer_headers,
@@ -1323,11 +1432,19 @@ def _result_payload(result: CustomerSyncResult) -> dict[str, Any]:
             "source_customer_identifier": (
                 decision.source_customer_identifier
             ),
+            "stockfiller_gln": decision.stockfiller_gln,
+            "existing_stockfiller_gln": decision.existing_stockfiller_gln,
+            "backfills_gln": decision.backfills_gln,
             "order_date": decision.order_date,
             "order_reference": decision.order_reference,
             "matched_row": decision.matched_row,
             "existing_customer": decision.existing_customer,
+            "existing_customer_id": decision.existing_customer_id,
             "existing_customer_number": decision.existing_customer_number,
+            "source_address": decision.source_address,
+            "source_address_number": decision.source_address_number,
+            "source_postal": decision.source_postal,
+            "source_city": decision.source_city,
             "existing_cancelled_flag": decision.existing_cancelled_flag,
             "matched_by": decision.matched_by,
             "reason": decision.reason,
@@ -1344,6 +1461,7 @@ def _result_payload(result: CustomerSyncResult) -> dict[str, Any]:
         "backfilled_customer_numbers": result.backfilled_customer_numbers,
         "appended_customers": result.appended_customers,
         "updated_emails": result.updated_emails,
+        "backfilled_glns": result.backfilled_glns,
         "needs_review": result.needs_review,
         "ignored_internal": result.ignored_internal,
         "ignored_gln_identifiers": result.ignored_gln_identifiers,
@@ -1360,6 +1478,7 @@ def _result_payload(result: CustomerSyncResult) -> dict[str, Any]:
                 decision.changes_name
                 or decision.backfills_customer_number
                 or decision.changes_email
+                or decision.backfills_gln
                 or decision.status == "new_customer"
             )
         ],

@@ -1,8 +1,12 @@
 from argparse import Namespace
+from copy import deepcopy
 from datetime import datetime, timezone
 import re
 from unittest import TestCase
 from unittest.mock import patch
+from gspread.exceptions import WorksheetNotFound
+
+from customer_master_sync.sync import CUSTOMER_REQUIRED_COLUMNS, GLN_COLUMN, REVIEW_SHEET_NAME
 
 from stockfiller_orders.sync import (
     ORDER_COLUMNS,
@@ -11,6 +15,7 @@ from stockfiller_orders.sync import (
     SyncConfig,
     SyncWindow,
     apply_crm_customer_numbers,
+    apply_crm_customer_ids,
     build_sync_window,
     dedupe_orders_by_reference,
     ensure_customer_email_column,
@@ -339,8 +344,8 @@ class StockfillerSyncTests(TestCase):
                     _sheet_row("REF-REPLACE", customer="Old Store", manual_note="replace me"),
                 ],
                 "customers_enriched": [
-                    ["customer", "customer_number", "email", "city_google"],
-                    ["Store A", "CRM-1001", "contact@example.com", "Stockholm"],
+                    ["customer", "customer_number", "email", "city_google", "customer_id"],
+                    ["Store A", "CRM-1001", "contact@example.com", "Stockholm", "store-a-uuid"],
                 ],
                 STATE_SHEET_NAME: [
                     ["key", "value", "updated_at"],
@@ -378,7 +383,7 @@ class StockfillerSyncTests(TestCase):
         customer_values = spreadsheet.worksheet("customers_enriched").get_all_values()
         self.assertEqual(
             customer_values[0],
-            ["customer", "customer_number", "email", "email_last_order", "city_google"],
+            ["customer", "customer_number", "email", "email_last_order", "city_google", "customer_id"],
         )
         self.assertEqual(customer_values[1][3], "latest@example.com")
         self.assertIn(["last_successful_updated_stop", "2026-05-28T12:00:00Z", state_rows[1][2]], state_rows)
@@ -410,8 +415,8 @@ class StockfillerSyncTests(TestCase):
             {
                 "order_rows": [ORDER_COLUMNS, existing],
                 "customers_enriched": [
-                    ["customer", "customer_number", "email", "city_google"],
-                    ["Existing Store", "1001", "", "Stockholm"],
+                    ["customer", "customer_number", "email", "city_google", "customer_id", GLN_COLUMN],
+                    ["Existing Store", "1001", "", "Stockholm", "existing-uuid", "7300120154304"],
                 ],
                 STATE_SHEET_NAME: [["key", "value", "updated_at"]],
             }
@@ -519,6 +524,105 @@ class StockfillerSyncTests(TestCase):
         customer_values = spreadsheet.worksheet("customers_enriched").get_all_values()
         self.assertEqual(customer_values[1][0], "Store A")
 
+    def test_gln_registration_links_all_product_rows_and_repeated_sync_is_idempotent(self):
+        gln = "7300121361015"
+        headers = [h for h in CUSTOMER_REQUIRED_COLUMNS if h not in {"email_last_order", "city_google"}]
+        headers += ["email", "email_last_order", "city_google", GLN_COLUMN]
+        spreadsheet = FakeSpreadsheet({
+            "order_rows": [ORDER_COLUMNS], "customers_enriched": [headers],
+            "sales_activities": [["customer"]], "email_messages": [["customer"]], "email_recipients": [["customer"]],
+            STATE_SHEET_NAME: [["key", "value", "updated_at"]],
+        })
+        source = _api_order("POR26AHGWQP8Q")
+        source.update(buyerName="Coop Masthugget", buyerExternalId="", buyerGln=gln,
+                      deliveryAddress="Första Långgatan 11C", deliveryZipCode="", deliveryCity="Göteborg")
+        source["orderRows"] *= 3
+        window = SyncWindow(mode="incremental", params={}, stop_value="2026-10-22T12:00:00Z")
+        with patch("stockfiller_orders.sync.StockfillerClient", return_value=FakeClient([source])):
+            first = sync_orders(_config(), window, spreadsheet=spreadsheet, customer_sync_mode="apply")
+            customers = spreadsheet.worksheet("customers_enriched").values
+            cid = customers[1][headers.index("customer_id")]
+            self.assertEqual(first.customer_sync.appended_customers, 1)
+            self.assertTrue(cid)
+            self.assertEqual(customers[1][headers.index(GLN_COLUMN)], gln)
+            order_headers, rows = values_to_dicts(spreadsheet.worksheet("order_rows").values)
+            self.assertEqual(len(rows), 3)
+            self.assertEqual({r["customer_id"] for r in rows}, {cid})
+            self.assertEqual({r["Customer number"] for r in rows}, {gln})
+            self.assertEqual(customers[1][headers.index("customer_number")], "")
+            snapshot = deepcopy(customers)
+            second = sync_orders(_config(), window, spreadsheet=spreadsheet, customer_sync_mode="apply")
+        self.assertEqual(second.customer_sync.appended_customers, 0)
+        self.assertEqual(spreadsheet.worksheet("customers_enriched").values, snapshot)
+        self.assertEqual(len(spreadsheet.worksheet("order_rows").values), 4)
+        self.assertEqual(len(spreadsheet.worksheet(REVIEW_SHEET_NAME).values), 1)
+
+    def test_manual_registration_resolves_review_and_refresh_preserves_uuid(self):
+        cid, gln = "613ecf21-7e50-4c51-86d9-8f2d68aa59fc", "7300121361015"
+        headers = [h for h in CUSTOMER_REQUIRED_COLUMNS if h not in {"email_last_order", "city_google"}]
+        headers += ["email", "email_last_order", "city_google", "sales_person", "comment"]
+        manual = dict.fromkeys(headers, "")
+        manual.update(customer="Coop Masthugget", customer_id=cid, address_google="Första Långgatan",
+                      address_number_google="11C", city_google="Göteborg", sales_person="Sofia", comment="keep")
+        persisted = _sheet_row("POR26AHGWQP8Q", customer="Coop Masthugget")[:len(ORDER_COLUMNS)]
+        persisted[ORDER_COLUMNS.index("customer_id")] = cid
+        spreadsheet = FakeSpreadsheet({
+            "order_rows": [ORDER_COLUMNS] + [list(persisted) for _ in range(3)],
+            "customers_enriched": [headers, [manual[h] for h in headers]],
+            "sales_activities": [["customer"]], "email_messages": [["customer"]], "email_recipients": [["customer"]],
+            REVIEW_SHEET_NAME: [["status"], ["needs_review"]],
+            STATE_SHEET_NAME: [["key", "value", "updated_at"]],
+        })
+        source = _api_order("POR26AHGWQP8Q")
+        source.update(buyerName=manual["customer"], buyerExternalId="", buyerGln=gln,
+                      deliveryAddress="Första Långgatan 11C", deliveryZipCode="", deliveryCity="Göteborg")
+        source["orderRows"] *= 3
+        window = SyncWindow(mode="incremental", params={}, stop_value="2026-10-22T12:00:00Z")
+        with patch("stockfiller_orders.sync.StockfillerClient", return_value=FakeClient([source])):
+            result = sync_orders(_config(), window, spreadsheet=spreadsheet, customer_sync_mode="apply")
+        self.assertEqual(result.customer_sync.appended_customers, 0)
+        self.assertEqual(result.customer_sync.backfilled_glns, 1)
+        self.assertEqual(len(spreadsheet.worksheet("customers_enriched").values), 2)
+        self.assertEqual(len(spreadsheet.worksheet(REVIEW_SHEET_NAME).values), 1)
+        _, rows = values_to_dicts(spreadsheet.worksheet("order_rows").values)
+        self.assertEqual({r["customer_id"] for r in rows}, {cid})
+
+        # A later conflicting GLN must neither rebind the saved rows nor change
+        # the stored external identity/email or create another customer.
+        before = deepcopy(spreadsheet.worksheet("customers_enriched").values)
+        source.update(buyerGln="7300121360346", buyerEmail="wrong@example.com")
+        with patch("stockfiller_orders.sync.StockfillerClient", return_value=FakeClient([source])):
+            conflict = sync_orders(_config(), window, spreadsheet=spreadsheet, customer_sync_mode="apply")
+        self.assertEqual(conflict.customer_sync.needs_review, 1)
+        self.assertEqual(spreadsheet.worksheet("customers_enriched").values, before)
+        _, rows = values_to_dicts(spreadsheet.worksheet("order_rows").values)
+        self.assertEqual({r["customer_id"] for r in rows}, {cid})
+        self.assertEqual(len(spreadsheet.worksheet(REVIEW_SHEET_NAME).values), 2)
+
+    def test_id_mapping_preserves_fallback_gln_when_internal_number_is_projected(self):
+        row = {h: "" for h in ORDER_COLUMNS}
+        row.update(Reference="REF", Customer="Shop", **{"Customer number": "7300121361015"})
+        master = dict.fromkeys(CUSTOMER_REQUIRED_COLUMNS, "")
+        master.update(customer="Shop", customer_number="1234", customer_id="saved-uuid",
+                      stockfiller_gln="7300121361015")
+        apply_crm_customer_ids([row], [master])
+        self.assertEqual(row["customer_id"], "saved-uuid")
+        self.assertEqual(row["Customer number"], "1234")
+        self.assertEqual(row["Buyer number"], "7300121361015")
+
+    def test_id_mapping_never_rebinds_conflicting_or_unknown_persisted_ids(self):
+        master = dict.fromkeys(CUSTOMER_REQUIRED_COLUMNS, "")
+        master.update(customer="Shop", customer_id="saved-uuid", customer_number="1234",
+                      stockfiller_gln="7300121361015")
+        for cid in ("", "unknown-uuid"):
+            row = {h: "" for h in ORDER_COLUMNS}
+            row.update(Reference="REF", Customer="Shop", customer_id=cid,
+                       **{"Customer number": "9999", "Buyer number": "7300121361015"})
+            before = deepcopy(row)
+            decisions = apply_crm_customer_ids([row], [master])
+            self.assertEqual(decisions[0].status, "needs_review")
+            self.assertEqual(row, before)
+
     def test_build_incremental_window_uses_state_with_overlap(self):
         args = Namespace(
             mode="incremental",
@@ -589,6 +693,16 @@ class FakeWorksheet:
     def clear(self):
         self.values = []
 
+    def batch_update(self, data, value_input_option=None):
+        for item in data:
+            self.update(item["values"], range_name=item["range"])
+
+    def append_rows(self, rows, value_input_option=None):
+        self.values.extend(deepcopy(rows))
+
+    def hide(self):
+        pass
+
     def update(self, values, range_name="A1", raw=True):
         if range_name == "A1":
             self.values = values
@@ -620,7 +734,15 @@ class FakeSpreadsheet:
         self.worksheets = {name: FakeWorksheet(values) for name, values in worksheets.items()}
 
     def worksheet(self, name):
-        return self.worksheets[name]
+        try:
+            return self.worksheets[name]
+        except KeyError as exc:
+            raise WorksheetNotFound(name) from exc
+
+    def add_worksheet(self, title, rows, cols):
+        worksheet = FakeWorksheet([])
+        self.worksheets[title] = worksheet
+        return worksheet
 
 
 def _config():
@@ -659,7 +781,7 @@ def _api_order(reference):
         "placedBy": "Anna Andersson",
         "buyerEmail": "latest@example.com",
         "placedAs": "buyer",
-        "buyerExternalId": "stockfiller-customer-id",
+        "buyerExternalId": "CRM-1001",
         "deliveryAddress": "Hantverkargatan 1",
         "deliveryZipCode": "11152",
         "deliveryCity": "Stockholm",

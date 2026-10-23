@@ -19,9 +19,14 @@ from google.oauth2.service_account import Credentials
 from gspread.exceptions import WorksheetNotFound
 
 from customer_master_sync.sync import (
+    CUSTOMER_REQUIRED_COLUMNS,
+    ORDER_REQUIRED_COLUMNS,
     CustomerSyncResult,
     normalize_mode as normalize_customer_sync_mode,
+    order_gln,
+    plan_customer_sync,
     run_customer_sync,
+    trusted_customer_number,
 )
 
 
@@ -290,13 +295,24 @@ def _sync_fetched_orders(
     replace_references = {text(order.get("reference")) for order in orders if text(order.get("reference"))}
     output_rows = flatten_orders(orders)
 
+    # An API refresh must retain an established internal relationship, including
+    # when new external metadata conflicts and consequently needs review.
+    existing_ids = {}
+    for row in existing_rows:
+        if text(row.get("customer_id")):
+            existing_ids.setdefault(text(row.get("Reference")), set()).add(text(row["customer_id"]))
+    for row in output_rows:
+        ids = existing_ids.get(text(row.get("Reference")), set())
+        if len(ids) > 1:
+            raise ValueError("refreshed order reference has conflicting persisted customer_id values")
+        if ids:
+            row["customer_id"] = next(iter(ids))
+
     merged_headers = merge_headers(headers)
     kept_existing_rows = [row for row in existing_rows if text(row.get("Reference")) not in replace_references]
     final_rows = kept_existing_rows + output_rows
-    # Reapply the current CRM number map to every retained order row as well as
-    # newly fetched rows. This makes a delayed customer-number assignment
-    # converge without requiring a full historical backfill.
-    apply_crm_customer_numbers(final_rows, load_crm_customer_numbers(spreadsheet))
+    # Resolve both retained and new rows with the same conservative rules used
+    # by customer registration, before projecting internal numbers or IDs.
     apply_crm_customer_ids(final_rows, load_crm_customer_ids(spreadsheet))
 
     customer_sync_result = None
@@ -309,12 +325,12 @@ def _sync_fetched_orders(
                 mode=mode,
                 order_rows=final_rows,
             )
-            apply_crm_customer_ids(
+            identity_decisions = apply_crm_customer_ids(
                 final_rows,
                 load_crm_customer_ids(spreadsheet),
             )
             write_rows(order_sheet, merged_headers, final_rows)
-            sync_latest_order_emails(spreadsheet, final_rows)
+            sync_latest_order_emails(spreadsheet, final_rows, resolved_decisions=identity_decisions)
         if update_state:
             state = read_sync_state(spreadsheet)
             state.update(
@@ -544,55 +560,45 @@ def apply_crm_customer_numbers(order_rows: list[dict[str, str]], customer_number
             row["Customer number"] = crm_customer_number
 
 
-def load_crm_customer_ids(spreadsheet) -> dict[tuple[str, str], str]:
+def load_crm_customer_ids(spreadsheet) -> list[dict[str, Any]]:
+    """Read identity evidence, retaining conflicts for fail-closed resolution."""
     try:
         values = spreadsheet.worksheet("customers_enriched").get_all_values()
     except WorksheetNotFound:
-        return {}
+        return []
     if not values:
-        return {}
-    headers = [text(header) for header in values[0]]
-    required = {"customer", "customer_number", "customer_id"}
-    if not required.issubset(headers):
-        return {}
-    indexes = {column: headers.index(column) for column in required}
-    identities: dict[tuple[str, str], set[str]] = {}
-    for row in values[1:]:
-        customer_id = text(
-            row[indexes["customer_id"]]
-            if indexes["customer_id"] < len(row) else ""
-        )
-        if not customer_id:
+        return []
+    headers, rows = values_to_dicts(values)
+    if not {"customer", "customer_number", "customer_id"}.issubset(headers):
+        return []
+    if len(headers) != len(set(headers)):
+        raise ValueError("customers_enriched has duplicate column headers")
+    return [{**dict.fromkeys(CUSTOMER_REQUIRED_COLUMNS, ""), **row} for row in rows]
+
+
+def apply_crm_customer_ids(order_rows: list[dict[str, Any]], customer_rows: list[dict[str, Any]]):
+    """Use the same read-only identity plan as customer registration.
+
+    A review case never changes a persisted ID or assigns a new one. Source
+    GLNs survive later internal-number assignment in the existing Buyer column.
+    """
+    source_rows = [{**dict.fromkeys(ORDER_REQUIRED_COLUMNS, ""), **row} for row in order_rows]
+    decisions = plan_customer_sync(source_rows, customer_rows)
+    by_id = {row["customer_id"]: row for row in customer_rows if row.get("customer_id")}
+    for decision in decisions:
+        if decision.status in {"needs_review", "ignored_internal", "new_customer"} or not decision.existing_customer_id:
             continue
-        name = normalize_key(
-            row[indexes["customer"]]
-            if indexes["customer"] < len(row) else ""
-        )
-        number = normalize_key(
-            row[indexes["customer_number"]]
-            if indexes["customer_number"] < len(row) else ""
-        )
-        for identity in ((name, ""), ("", number)):
-            if any(identity):
-                identities.setdefault(identity, set()).add(customer_id)
-    return {
-        identity: next(iter(customer_ids))
-        for identity, customer_ids in identities.items()
-        if len(customer_ids) == 1
-    }
-
-
-def apply_crm_customer_ids(
-    order_rows: list[dict[str, str]],
-    customer_ids_by_identity: dict[tuple[str, str], str],
-) -> None:
-    for row in order_rows:
-        customer_id = customer_ids_by_identity.get(
-            ("", normalize_key(row.get("Customer number")))
-        ) or customer_ids_by_identity.get(
-            (normalize_key(row.get("Customer")), "")
-        )
-        row["customer_id"] = customer_id or ""
+        customer = by_id[decision.existing_customer_id]
+        number = trusted_customer_number(customer.get("customer_number"))
+        for position in decision.order_row_numbers:
+            row = order_rows[position - 2]
+            gln, error = order_gln(row)
+            if not error and gln and not text(row.get("Buyer number")):
+                row["Buyer number"] = gln
+            row["customer_id"] = decision.existing_customer_id
+            if number:
+                row["Customer number"] = number
+    return decisions
 
 
 def latest_order_emails_by_customer(order_rows: Iterable[dict[str, Any]]) -> dict[str, str]:
@@ -622,7 +628,7 @@ def latest_order_emails_by_identity(
     return by_number, by_name
 
 
-def sync_latest_order_emails(spreadsheet, order_rows: Iterable[dict[str, Any]]) -> None:
+def sync_latest_order_emails(spreadsheet, order_rows: Iterable[dict[str, Any]], *, resolved_decisions=None) -> None:
     worksheet = spreadsheet.worksheet("customers_enriched")
     values = worksheet.get_all_values()
     if not values:
@@ -639,6 +645,8 @@ def sync_latest_order_emails(spreadsheet, order_rows: Iterable[dict[str, Any]]) 
     email_index = required_header_index(headers, CUSTOMER_EMAIL_COLUMN, "customers_enriched")
     emails_by_number, emails_by_name = latest_order_emails_by_identity(order_rows)
 
+    safe_emails = {decision.existing_customer_id: decision.latest_email for decision in resolved_decisions or ()
+                   if decision.existing_customer_id and decision.status not in {"needs_review", "ignored_internal", "new_customer"}}
     email_values = []
     for row in values[1:]:
         customer = row[customer_index] if customer_index < len(row) else ""
@@ -654,6 +662,10 @@ def sync_latest_order_emails(spreadsheet, order_rows: Iterable[dict[str, Any]]) 
         )
         if email is None:
             email = emails_by_name.get(normalize_key(customer), "")
+        if resolved_decisions is not None:
+            cid_index = headers.index("customer_id") if "customer_id" in headers else None
+            cid = text(row[cid_index]) if cid_index is not None and cid_index < len(row) else ""
+            email = safe_emails.get(cid, row[email_index] if email_index < len(row) else "")
         email_values.append([email])
 
     if email_values:
