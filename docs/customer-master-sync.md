@@ -37,8 +37,9 @@ match. Priority is:
 
 1. Unique internal `customer_id`, then internal `customer_number`.
 2. Unique validated `stockfiller_gln`.
-3. Unique exact normalized customer name, without conflicting known addresses
-   for a proposed GLN assignment or conflicting known postcodes.
+3. Unique exact normalized customer name. A new GLN can be complemented when
+   the normalized city is present and agrees; street/house/postcode enrichment
+   need not agree. Without a GLN, conflicting known postcodes still require review.
 4. Unique exact street, house number, postcode and city, with compatible names.
 5. Exact name plus street, house number and city can join order history even
    without a postcode. Street/city alone is review evidence, not a safe rename.
@@ -50,10 +51,23 @@ rebound by name. Incompatible strong identifiers, ambiguous matches, unclear
 GLN-based name changes and conflicting product-row metadata require review.
 
 An exact name alone cannot complement a blank GLN. Without an established
-matching internal UUID/number, the order and customer must also have the same
-complete street/house/city identity. Missing street, house number or city
-requires review. Already linked order rows can safely complement the GLN by
-their established UUID even when the customer address is incomplete.
+matching internal UUID/number, a unique normalized name plus the same known
+normalized city is sufficient. Missing or different cities require review;
+missing or different streets and house numbers do not block this match.
+Compatible names with an exact physical address retain the existing matching
+path. Already linked order rows can safely complement the GLN by their
+established UUID even when the customer address is incomplete. All identifier,
+GLN ownership, duplicate-name and multiple-proposal conflict checks still apply.
+
+`confidence` is a heuristic identity score, not a calibrated probability or a
+write threshold. An established unique internal identity or stored GLN scores
+1.0; exact name/city evidence scores 0.95, or 0.98 with matching street/house/city.
+An inferred GLN from the current plan does not upgrade that evidence to 1.0.
+Name-only evidence scores 0.75. Fuzzy review candidates combine name similarity
+(60%), known matching city (25%) and complete matching street/house/city (15%).
+Identity conflicts, ambiguous register identities and competing proposals score
+0.0. Review decisions no longer inherit a default 1.0, and the conservative
+duplicate-screening score remains separate from match confidence.
 
 Street keys normalize case, extra spaces, Swedish diacritics and house suffixes
 such as `11 C`/`11C`. A house number embedded in the street can match the separate

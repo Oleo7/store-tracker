@@ -599,12 +599,52 @@ class StockfillerSyncTests(TestCase):
         self.assertEqual({r["customer_id"] for r in rows}, {cid})
         self.assertEqual(len(spreadsheet.worksheet(REVIEW_SHEET_NAME).values), 2)
 
-    def test_name_only_with_partial_address_cannot_assign_gln_or_launder_order_uuid(self):
+    def test_name_city_gln_complements_link_existing_store_on_all_product_rows(self):
+        cases = (("Hemköp Solna Frösunda Boulevard", "7381040468214", "Solna", ""),
+                 ("ICA Maxi Västra hamnen", "7301004119815", "Malmö", "Annan gata"))
+        for name, gln, city, address in cases:
+            with self.subTest(name=name):
+                headers = [h for h in CUSTOMER_REQUIRED_COLUMNS if h not in {"email_last_order", "city_google"}]
+                headers += ["email", "email_last_order", "city_google", GLN_COLUMN]
+                existing = dict.fromkeys(headers, "")
+                existing.update(customer=name, customer_id="saved-uuid", city_google=city,
+                                address_google=address, address_number_google="99" if address else "")
+                spreadsheet = FakeSpreadsheet({
+                    "order_rows": [ORDER_COLUMNS],
+                    "customers_enriched": [headers, [existing[h] for h in headers]],
+                    "sales_activities": [["customer"]], "email_messages": [["customer"]],
+                    "email_recipients": [["customer"]], STATE_SHEET_NAME: [["key", "value", "updated_at"]],
+                })
+                source = _api_order("UNLINKED")
+                source.update(buyerName=name, buyerExternalId="", buyerGln=gln,
+                              deliveryAddress="Leveransgatan 2", deliveryZipCode="", deliveryCity=city)
+                source["orderRows"] *= 3
+                window = SyncWindow(mode="incremental", params={}, stop_value="2026-11-16T12:00:00Z")
+                with patch("stockfiller_orders.sync.StockfillerClient", return_value=FakeClient([source])):
+                    first = sync_orders(_config(), window, spreadsheet=spreadsheet, customer_sync_mode="apply")
+                    self.assertEqual(first.customer_sync.needs_review, 0)
+                    self.assertEqual(first.customer_sync.appended_customers, 0)
+                    self.assertEqual(first.customer_sync.backfilled_glns, 1)
+                    customers = spreadsheet.worksheet("customers_enriched").values
+                    snapshot = deepcopy(customers)
+                    self.assertEqual(len(customers), 2)
+                    self.assertEqual(customers[1][headers.index(GLN_COLUMN)], gln)
+                    self.assertEqual(customers[1][headers.index("customer_id")], "saved-uuid")
+                    _, rows = values_to_dicts(spreadsheet.worksheet("order_rows").values)
+                    self.assertEqual(len(rows), 3)
+                    self.assertEqual({r["customer_id"] for r in rows}, {"saved-uuid"})
+                    second = sync_orders(_config(), window, spreadsheet=spreadsheet, customer_sync_mode="apply")
+                self.assertEqual(second.customer_sync.appended_customers, 0)
+                self.assertEqual(second.customer_sync.backfilled_glns, 0)
+                self.assertEqual(spreadsheet.worksheet("customers_enriched").values, snapshot)
+                self.assertEqual(len(spreadsheet.worksheet("order_rows").values), 4)
+
+    def test_name_only_without_city_cannot_assign_gln_or_launder_order_uuid(self):
         headers = [h for h in CUSTOMER_REQUIRED_COLUMNS if h not in {"email_last_order", "city_google"}]
         headers += ["email", "email_last_order", "city_google", GLN_COLUMN]
         existing = dict.fromkeys(headers, "")
         existing.update(customer="Coop Masthugget", customer_id="existing-uuid",
-                        address_google="Första Långgatan", city_google="Göteborg",
+                        address_google="Första Långgatan", city_google="",
                         email_last_order="keep@example.com")
         spreadsheet = FakeSpreadsheet({
             "order_rows": [ORDER_COLUMNS],
