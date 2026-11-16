@@ -154,6 +154,7 @@ async function customerDetailUi(page,width){
  await page.locator('#contact-edit-btn').click();await page.locator('#edit-phone').fill('0709999999');
  if(width===1280){
   await page.setViewportSize({width:390,height:900});
+  await page.waitForFunction(()=>document.getElementById('d-order-section').parentElement.className==='detail-body');
   assert.equal(await page.locator('#d-order-section').evaluate(e=>e.parentElement.className),'detail-body');
   assert.equal(await page.locator('#edit-phone').inputValue(),'0709999999');
   await page.setViewportSize({width,height:900});
