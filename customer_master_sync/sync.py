@@ -574,8 +574,12 @@ def _decision(
     *,
     matched_by: str = "",
     reason: str,
-    confidence: float = 1.0,
+    confidence: float | None = None,
 ) -> CustomerDecision:
+    if confidence is None:
+        confidence = _match_confidence(master, matched, matched_by) if matched else (
+            0.0 if status == "needs_review" else 1.0
+        )
     return CustomerDecision(
         status=status,
         identity_key=master.identity_key,
@@ -679,6 +683,36 @@ def _candidate_score(master: OrderMaster, customer: EnrichedCustomer) -> float:
     return best
 
 
+def _match_confidence(
+    master: OrderMaster,
+    matched: EnrichedCustomer,
+    matched_by: str,
+) -> float:
+    """Heuristic identity certainty, separate from duplicate-screening scores."""
+    strong = matched_by in {"customer_id", "customer_number", "stockfiller_gln"}
+    if (master.identity_error or not matched.customer_id
+            or (matched.raw_gln and not matched.stockfiller_gln)
+            or (master.customer_id and master.customer_id != matched.customer_id)
+            or (master.customer_number and matched.customer_number
+                and number_key(master.customer_number) != matched.number_key)
+            or (master.stockfiller_gln and matched.stockfiller_gln
+                and master.stockfiller_gln != matched.stockfiller_gln)):
+        return 0.0
+    name_score = ratio(master.master_name_key, matched.name_key)
+    if matched_by == "stockfiller_gln" and name_score < 0.78:
+        return 0.0
+    if strong and (matched_by != "stockfiller_gln" or normalize_gln(matched.raw_gln)):
+        return 1.0
+    if (master.normalized_city and matched.normalized_city
+            and master.normalized_city != matched.normalized_city):
+        return 0.0
+    same_city = bool(master.normalized_city and master.normalized_city == matched.normalized_city)
+    same_street = bool(master.street_city and master.street_city == matched.street_city)
+    if master.master_name_key == matched.name_key:
+        return 0.98 if same_street else (0.95 if same_city else 0.75)
+    return 0.60 * name_score + 0.25 * same_city + 0.15 * same_street
+
+
 def _safe_match_decision(
     master: OrderMaster,
     matched: EnrichedCustomer,
@@ -712,15 +746,26 @@ def _safe_match_decision(
         )
 
     if matched_by not in {"customer_id", "customer_number", "stockfiller_gln"}:
+        # A unique exact name plus a known matching city can complement a GLN
+        # even when Google enrichment and Stockfiller use different addresses.
+        name_city_gln = bool(
+            master.stockfiller_gln
+            and master.master_name_key == matched.name_key
+            and len(names.get(master.master_name_key, [])) == 1
+            and master.normalized_city
+            and master.normalized_city == matched.normalized_city
+        )
         if (master.stockfiller_gln and not matched.stockfiller_gln
+                and not name_city_gln
                 and (not master.street_city or master.street_city != matched.street_city)):
             return _decision("needs_review", master, matched, matched_by=matched_by,
-                             reason="new GLN requires established internal identity or exact street/house/city evidence")
+                             reason="new GLN requires established internal identity or unique exact name and matching city")
         if (master.street_city and matched.street_city and master.street_city != matched.street_city
-                and master.stockfiller_gln):
+                and master.stockfiller_gln and not name_city_gln):
             return _decision("needs_review", master, matched, matched_by=matched_by,
                              reason="name/address evidence conflicts with the proposed GLN assignment")
-        if master.normalized_postal and matched.normalized_postal and master.normalized_postal != matched.normalized_postal:
+        if (not name_city_gln and master.normalized_postal and matched.normalized_postal
+                and master.normalized_postal != matched.normalized_postal):
             return _decision("needs_review", master, matched, matched_by=matched_by,
                              reason="conflicting postcodes on a weak identity match")
         if master.master_name_key != matched.name_key and ratio(master.master_name_key, matched.name_key) < 0.78:
@@ -734,6 +779,7 @@ def _safe_match_decision(
             matched,
             matched_by=matched_by,
             reason="existing customer name is not unique; history rename would be ambiguous",
+            confidence=0.0,
         )
     target_name_matches = [
         customer
@@ -747,6 +793,7 @@ def _safe_match_decision(
             matched,
             matched_by=matched_by,
             reason="proposed master name already belongs to another customer row",
+            confidence=0.0,
         )
 
     if matched.name_key == master.master_name_key:
@@ -793,7 +840,7 @@ def _classify(
         matches = index.get(value, []) if value else []
         if len(matches) > 1:
             return _decision("needs_review", master, matches[0], matched_by=label,
-                             reason=f"{label} exists on multiple customer rows")
+                             reason=f"{label} exists on multiple customer rows", confidence=0.0)
         if matches:
             strong_matches.append((label, matches[0]))
         elif label == "customer_id" and value:
@@ -812,6 +859,7 @@ def _classify(
             name_matches[0],
             matched_by="normalized_name",
             reason="normalized customer name exists on multiple customer rows",
+            confidence=0.0,
         )
     if len(name_matches) == 1:
         return _safe_match_decision(
@@ -830,6 +878,7 @@ def _classify(
                 address_matches[0],
                 matched_by="full_address",
                 reason="full order address exists on multiple customer rows",
+                confidence=0.0,
             )
         if len(address_matches) == 1:
             return _safe_match_decision(
@@ -849,14 +898,13 @@ def _classify(
     )
     plausible = [(score, customer) for score, customer in scored if score >= 0.62]
     if plausible:
-        score, candidate = plausible[0]
+        _score, candidate = plausible[0]
         return _decision(
             "needs_review",
             master,
             candidate,
             matched_by="possible_duplicate",
             reason="possible duplicate; fuzzy matching never writes automatically",
-            confidence=score,
         )
 
     if not master.customer_number and not master.full_address and not (master.stockfiller_gln and master.street_city):
@@ -899,6 +947,7 @@ def _block_collisions(decisions: list[CustomerDecision]) -> list[CustomerDecisio
             output[index],
             status="needs_review",
             reason="multiple order identities resolve to the same customer",
+            confidence=0.0,
         )
     return output
 
@@ -970,6 +1019,7 @@ def plan_customer_sync(
             decision,
             status="needs_review",
             reason="customer_id, customer_number or GLN exists on multiple customer rows",
+            confidence=0.0,
         )
         if decision.matched_row in conflicted_rows
         else decision

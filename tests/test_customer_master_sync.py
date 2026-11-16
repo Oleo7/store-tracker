@@ -405,8 +405,8 @@ class GlnIdentityTests(TestCase):
         self.assertEqual(decision.existing_customer_id, MASTHUGGET_ID)
         self.assertTrue(decision.backfills_gln)
         self.assertEqual(decision.order_row_numbers, (2, 3, 4))
-        conflicting = masthugget_order(Number="11-13")
-        self.assertEqual(plan_customer_sync([conflicting], [masthugget_customer()])[0].status, "needs_review")
+        different_number = masthugget_order(Number="11-13")
+        self.assertTrue(plan_customer_sync([different_number], [masthugget_customer()])[0].backfills_gln)
 
     def test_known_gln_handles_later_number_and_safe_rename_without_replacing_uuid(self):
         existing = masthugget_customer(stockfiller_gln=MASTHUGGET_GLN)
@@ -493,13 +493,13 @@ class GlnIdentityTests(TestCase):
                 decision = plan_customer_sync([row], [customer(**values)])[0]
                 self.assertEqual(decision.status, "needs_review")
 
-    def test_name_only_cannot_assign_new_gln_to_incomplete_customer_address(self):
-        for missing in ("address_google", "address_number_google", "city_google"):
+    def test_new_gln_with_exact_name_requires_city_but_not_street_or_number(self):
+        for missing in ("address_google", "address_number_google"):
             with self.subTest(missing=missing):
                 existing = masthugget_customer(**{missing: ""})
                 decision = plan_customer_sync([masthugget_order()], [existing])[0]
-                self.assertEqual(decision.status, "needs_review")
-                self.assertFalse(decision.backfills_gln)
+                self.assertEqual(decision.status, "exact_match")
+                self.assertTrue(decision.backfills_gln)
         existing = masthugget_customer(address_google="", address_number_google="", city_google="")
         row = masthugget_order(**{"Customer number": "new-unmatched-number"})
         self.assertEqual(plan_customer_sync([row], [existing])[0].status, "needs_review")
@@ -610,6 +610,135 @@ class GlnIdentityTests(TestCase):
         actual = dict(zip(headers, sheets["customers_enriched"].values[1]))
         for key in ("customer_id", "customer_number", "comment", "sales_person"):
             self.assertEqual(actual[key], existing[key])
+
+
+NAME_CITY_CASES = (
+    ("Hemköp Solna Frösunda Boulevard", "7381040468214", "Solna"),
+    ("ICA Maxi Västra hamnen", "7301004119815", "Malmö"),
+)
+
+
+class NameCityGlnRegressionTests(TestCase):
+    def test_requested_stores_match_with_missing_or_different_street_evidence(self):
+        for name, gln, city in NAME_CITY_CASES:
+            for crm_address, crm_number in (("", ""), ("Annan gata", "99")):
+                for source_address, source_number in (("", ""), ("Leveransgatan", "2")):
+                    with self.subTest(name=name, crm_address=crm_address, source_address=source_address):
+                        existing = customer(name, city=city, address=crm_address, number=crm_number)
+                        row = order("NEW", "2026-11-16", name, "", gln=gln, city=city,
+                                    address=source_address, number=source_number, postal="99999")
+                        decision = plan_customer_sync([row] * 3, [existing])[0]
+                        self.assertEqual(decision.status, "exact_match")
+                        self.assertTrue(decision.backfills_gln)
+                        self.assertEqual(decision.existing_customer_id, existing["customer_id"])
+                        self.assertEqual(decision.stockfiller_gln, gln)
+                        self.assertEqual(decision.order_row_numbers, (2, 3, 4))
+                        self.assertEqual(decision.confidence, 0.95)
+
+    def test_name_and_city_are_normalized_and_fallback_gln_is_supported(self):
+        name, gln, city = NAME_CITY_CASES[1]
+        existing = customer(name, city=city, address="", number="")
+        row = order("NEW", "2026-11-16", "  ica MAXI vastra  HAMNEN ", gln,
+                    city=" MALMO ", address="", number="")
+        decision = plan_customer_sync([row], [existing])[0]
+        self.assertEqual(decision.status, "safe_update_case_spacing")
+        self.assertTrue(decision.backfills_gln)
+
+    def test_ambiguous_names_missing_or_different_cities_and_identifiers_block_writes(self):
+        for name, gln, city in NAME_CITY_CASES:
+            existing = customer(name, "1001", city=city, address="", number="")
+            row = order("NEW", "2026-11-16", name, "", gln=gln, city=city)
+            other = customer(name + " City", "2002", city=city, address="", number="")
+            cases = [
+                (row, [existing, {**other, "customer": name.upper()}]),
+                (row, [{**existing, "city_google": "Annan stad"}]),
+                (row, [{**existing, "city_google": ""}]),
+                ({**row, "City": ""}, [existing]),
+                ({**row, "City": "Annan stad"}, [existing]),
+                (row, [{**existing, GLN_COLUMN: MASTHUGGET_GLN}]),
+                (row, [{**existing, GLN_COLUMN: "invalid"}]),
+                (row, [existing, {**other, GLN_COLUMN: gln}]),
+                (row, [{**existing, GLN_COLUMN: gln}, {**other, GLN_COLUMN: gln}]),
+                ({**row, "Customer number": "different-number"}, [existing]),
+                ({**row, "customer_id": "unknown-uuid"}, [existing]),
+                ({**row, "customer_id": other["customer_id"]}, [existing, other]),
+                (row, [{**existing, "customer_id": ""}]),
+                (row, [existing, {**other, "customer_id": existing["customer_id"]}]),
+                (row, [existing, {**other, "customer_number": "1001"}]),
+            ]
+            for source, customers in cases:
+                with self.subTest(name=name, source=source, customers=customers):
+                    decisions = plan_customer_sync([source], customers)
+                    self.assertEqual(len(decisions), 1)
+                    self.assertEqual(decisions[0].status, "needs_review")
+                    self.assertFalse(decisions[0].backfills_gln)
+                    self.assertLess(decisions[0].confidence, 1.0)
+                    headers = CUSTOMER_HEADERS + [GLN_COLUMN]
+                    sheet = FakeWorksheet("customers_enriched", [headers] + [_row(headers, c) for c in customers])
+                    before = deepcopy(sheet.values)
+                    spreadsheet = FakeSpreadsheet({"customers_enriched": sheet, **{
+                        title: FakeWorksheet(title, [["customer"]])
+                        for title in ("sales_activities", "email_messages", "email_recipients")
+                    }})
+                    result = run_customer_sync(spreadsheet,
+                                               mode="apply", order_rows=[source])
+                    self.assertEqual(result.appended_customers, 0)
+                    self.assertEqual(sheet.values, before)
+
+    def test_multiple_new_glns_targeting_same_customer_still_require_review(self):
+        name, gln, city = NAME_CITY_CASES[0]
+        rows = [order("ONE", "2026-11-15", name, "", gln=gln, city=city, address="", number=""),
+                order("TWO", "2026-11-16", name, "", gln=MASTHUGGET_GLN, city=city, address="", number="")]
+        for sources in (rows, list(reversed(rows))):
+            decisions = plan_customer_sync(sources, [customer(name, city=city, address="", number="")])
+            self.assertEqual(len(decisions), 2)
+            self.assertTrue(all(d.status == "needs_review" and d.confidence == 0.0 for d in decisions))
+            self.assertFalse(any(d.backfills_gln for d in decisions))
+
+    def test_confidence_distinguishes_evidence_from_duplicate_screening(self):
+        row = masthugget_order()
+        street = plan_customer_sync([row], [masthugget_customer()])[0]
+        linked = plan_customer_sync([row], [masthugget_customer(stockfiller_gln=MASTHUGGET_GLN)])[0]
+        fuzzy = plan_customer_sync([row], [masthugget_customer(customer="Coop Masthugget City")])[0]
+        ambiguous = plan_customer_sync([row], [masthugget_customer(),
+                    masthugget_customer(customer_id="another-uuid")])[0]
+        self.assertEqual(linked.confidence, 1.0)
+        self.assertEqual(street.confidence, 0.98)
+        self.assertEqual(fuzzy.status, "needs_review")
+        self.assertGreater(fuzzy.confidence, 0.0)
+        self.assertLess(fuzzy.confidence, street.confidence)
+        self.assertEqual(ambiguous.confidence, 0.0)
+        conflict = plan_customer_sync([row], [masthugget_customer(stockfiller_gln=ANDRA_GLN)])[0]
+        self.assertEqual(conflict.confidence, 0.0)
+
+    def test_dry_run_apply_and_retry_preserve_customer_and_manual_fields(self):
+        for name, gln, city in NAME_CITY_CASES:
+            with self.subTest(name=name):
+                headers = CUSTOMER_HEADERS + [GLN_COLUMN, "comment", "lat", "lng"]
+                existing = customer(name, "1001", city=city, address="", number="")
+                existing.update(comment="keep", lat="55.5", lng="13.0", cancelled_flag="yes")
+                sheet = FakeWorksheet("customers_enriched", [headers, _row(headers, existing)])
+                spreadsheet = FakeSpreadsheet({"customers_enriched": sheet, **{
+                    title: FakeWorksheet(title, [["customer"]])
+                    for title in ("sales_activities", "email_messages", "email_recipients")
+                }})
+                rows = [order("NEW", "2026-11-16", name, "", gln=gln, city=city)] * 3
+                before = deepcopy(sheet.values)
+                preview = run_customer_sync(spreadsheet, mode="dry_run", order_rows=rows)
+                self.assertEqual(preview.backfilled_glns, 1)
+                self.assertEqual(sheet.values, before)
+                first = run_customer_sync(spreadsheet, mode="apply", order_rows=rows)
+                self.assertEqual(first.appended_customers, 0)
+                self.assertEqual(first.needs_review, 0)
+                self.assertEqual(first.backfilled_glns, 1)
+                actual = dict(zip(headers, sheet.values[1]))
+                self.assertEqual(actual, {**existing, GLN_COLUMN: gln, "email_last_order": "buyer@example.com"})
+                self.assertEqual(len(spreadsheet.worksheet(REVIEW_SHEET_NAME).values), 1)
+                snapshot = deepcopy(sheet.values)
+                again = run_customer_sync(spreadsheet, mode="apply", order_rows=rows)
+                self.assertEqual(again.appended_customers, 0)
+                self.assertEqual(again.backfilled_glns, 0)
+                self.assertEqual(sheet.values, snapshot)
 
 
 class CustomerMasterApplyTests(TestCase):
